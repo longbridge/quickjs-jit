@@ -676,3 +676,186 @@ Review-fix commits:
 - Nested QuickJS: unchanged at
   `85aaac8 fix(jit): support ABI info prefixes`
 - This report is committed separately.
+
+---
+
+## Review fix round 3 (2026-08-30)
+
+Status: **DONE**
+
+Root review-fix commit:
+`263b4c8 fix(jit): hoist baseline retry guards`
+
+Nested QuickJS change: none; the nested repository remains clean at
+`85aaac8 fix(jit): support ABI info prefixes`.
+
+This section supersedes the round-2 statements that operational dynamic guards
+already ran before polling and that a failed frame-state marker invariant could
+take the shared retry edge. All interpreter retries are now decided in the
+pre-poll entry prologue. A marker invariant failure traps instead of returning
+`RETRY_INTERPRETER`.
+
+### RED/GREEN evidence
+
+1. **Deep retry atomicity.** The new undefined-unary-plus fixture was RED with
+   an otherwise identical deep snapshot except for `PollState.poll_count`,
+   which changed from zero to one. Null arithmetic and an uninitialized
+   `get_loc_check` reproduced the same post-poll retry class. After guard
+   hoisting, undefined plus becomes a no-read entry retry stub, while dynamic
+   null arithmetic and entry-local initialization checks fail in the prologue.
+   An explicit `set_loc_uninitialized` followed by `get_loc_check` is detected
+   statically and also becomes an entry stub. Every fixture now preserves the
+   frame bytes, argument/local/stack buffers, poll counter, interrupt threshold,
+   and backtrace-capture state byte for byte.
+2. **Structural retry audit.** The initial CLIF audit was RED because a
+   source-tagged marker after two polls still branched to the shared retry
+   block. Generated CLIF now has one retry-result block, and every branch to it
+   appears in the entry-validation region before the first `call_indirect`.
+   Static entry stubs contain no load, poll, or frame state. Marker branches use
+   a separate `trap user1` block. The audit covers frame/refcount/stack guards,
+   numeric domain guards, and unconditional entry stubs.
+3. **Immediate truthiness.** A short-bigint branch was RED with exit kind
+   `RETRY_INTERPRETER`. The entry domain now accepts the complete supported
+   non-owning immediate set: int, bool, null, undefined, short bigint, and
+   float. Native truthiness tests cover zero/nonzero integers and booleans,
+   null, undefined, zero/nonzero short bigints, positive and negative float
+   zero, NaN, and a nonzero float. All return `DONE` with exact QuickJS boolean
+   behavior.
+4. **Native numeric loops retained.** The existing integer loop, overflowing
+   add, floating arithmetic, bit-coercion, and captured QuickJS loop fixtures
+   remained GREEN throughout. In particular, both loop fixtures still execute
+   natively and return 4,950; this round does not replace arithmetic or branch
+   functions with blanket retry stubs.
+5. **Unsupported tables/properties.** A captured property-read function is
+   rejected as `UnsupportedOpcode` before publication. Object, string, symbol,
+   and bigint entry values exercise the refcount guard and deep-retry unchanged
+   before the first poll.
+6. **Exhaustive IR handling.** A compiler unit test constructs every `IrOp`
+   variant, every `StackOp`, every `UnaryOp`, and every `BinaryOp`, then runs the
+   entry-domain analysis. Its variant classifier has no wildcard arm, so adding
+   an `IrOp` without explicitly extending the audit is a compile error. Modulo
+   is the sole supported-IR case expected to request an unconditional entry
+   retry in those otherwise valid synthetic functions.
+
+### Provenance and entry-domain proof
+
+The compiler runs a monotone CFG worklist before Cranelift lowering. Each
+abstract value is a set of alternatives drawn from:
+
+- immutable entry roots (`Argument(index)` and `Local(index)`); and
+- statically produced kinds (`Number`, `Boolean`, `Null`, `Undefined`,
+  `ShortBigInt`, `Uninitialized`, or `Other`).
+
+Arguments, locals, and the abstract operand stack are propagated through every
+IR operation. CFG joins union their alternatives; loop backedges are iterated
+to a fixpoint. Constants have a known kind, numeric operations produce a known
+number, and comparisons/logical-not produce a known boolean. Consequently,
+numeric values derived from guarded entry roots and constants stay native
+without repeated runtime checks.
+
+Each consuming operation asks for an exact domain:
+
+- numeric unary/binary/local operations require `int | float`;
+- branch/logical-not/return require the supported immediate whitelist;
+- checked local reads and non-initializing writes require initialized; and
+- initializing checked writes require uninitialized.
+
+A requirement on an entry root is accumulated and emitted once in the entry
+prologue. Numeric implies initialized and is a subset of immediate. Conflicting
+initialized/uninitialized requirements, or a statically known incompatible
+alternative on any reachable path, select the no-read entry retry stub. Thus a
+checked entry local receives an initialized guard, while control flow that can
+explicitly make that local uninitialized before the check cannot enter native
+execution until the exact Task 8 throw helper exists.
+
+The existing non-refcount guards still cover every entry argument/local and
+the validated bounded live-stack scan. The new domain guards execute after
+those loads but before the first poll and before any C-visible frame mutation.
+Operational lowering contains no retry guard. Return stores occur only after
+the analysis has proved or hoisted the immediate domain.
+
+### Retry, marker, and lowering invariants
+
+There are exactly two source-level emissions of the retry result: the
+unconditional entry stub and the shared entry-validation target. Every call to
+the shared `guard` helper occurs before the IR lowering loop, while the first
+possible poll is inside that loop. The CLIF test independently enumerates all
+generated retry predecessors in representative normal/stub functions and
+requires them to precede the first indirect poll.
+
+Modulo and statically incompatible functions write only the hidden sret exit;
+they do not load the execution frame, call the poll helper, or retain frame
+states. Dynamic domain/refcount/stack failures may read validated entry data but
+cannot mutate it and cannot reach a poll. Interrupt exits remain separate and
+are not interpreter retries.
+
+Frame-state markers no longer target retry. Their source-tagged non-null-frame
+branch targets a dedicated trap on invariant failure, preserving the exact
+non-call native range without falsely presenting an ABI violation as an atomic
+interpreter fallback. If lowering ever reaches the end of the final IR block
+without a terminator, compilation returns `InvalidArtifact` instead of
+manufacturing a retry exit.
+
+### Verification
+
+```text
+$ cargo test -p rquickjs-jit --features compiler,test-support --test baseline
+25 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --release \
+    --features compiler,test-support --test baseline
+25 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --all-targets \
+    --features compiler,test-support
+166 passed; 0 failed (Windows ARM64 target test cfg-disabled locally)
+
+$ cargo test --workspace --all-targets
+All workspace tests passed
+
+$ cargo clippy -p rquickjs-jit --all-targets \
+    --features compiler,test-support -- -D warnings
+Finished successfully
+
+$ cargo fmt --all -- --check
+Finished successfully
+
+$ git diff --check
+Finished successfully in root and nested QuickJS repositories
+```
+
+The release build still emits QuickJS's pre-existing `buf2` GCC warning. The
+workspace build still emits the pre-existing unused `Command` import warning
+from `sys/build.rs`. Neither warning originates in this round.
+
+### Cross-target limitations and final self-review
+
+No target, toolchain, runtime helper, QuickJS header, ABI field, or bundled
+binding changed in this round. Cranelift cross-target AArch64 generation and
+host-publication rejection remain covered locally; native AArch64, macOS, and
+Windows behavior remains assigned to the existing platform CI runners.
+
+Final self-review confirmed:
+
+- all interpreter-retry decisions precede the first poll and visible frame
+  mutation;
+- the full deep snapshot stays unchanged for undefined plus, null arithmetic,
+  checked-local failures, modulo, malformed stack bounds, and refcounted entry
+  values;
+- refcounted or unsupported immediate values cannot reach raw SSA
+  drop/dup/overwrite/return paths;
+- numeric provenance across CFG joins and loop backedges keeps the Task 7
+  arithmetic/branch loop deliverable native;
+- supported immediate truthiness is exact, including short bigint, NaN, and
+  negative zero;
+- property/table bytecode remains rejected before publication;
+- marker invariant failure traps and unterminated lowering rejects; and
+- exact hidden sret, 16-byte `JSValue` copies, interrupt-safe points,
+  relocation flow, unwind ownership, and target feature gating are unchanged.
+
+Review-fix commits:
+
+- Root implementation: `263b4c8 fix(jit): hoist baseline retry guards`
+- Nested QuickJS: unchanged at
+  `85aaac8 fix(jit): support ABI info prefixes`
+- This appended report is committed separately.
