@@ -79,6 +79,84 @@ fn abi_minor_additions_are_appended_after_the_v1_0_tail() {
     );
 }
 
+#[repr(C)]
+struct AbiInfoV1_0 {
+    struct_size: u32,
+    major: u16,
+    minor: u16,
+    pointer_width: u8,
+    little_endian: u8,
+    value_size: u16,
+    source_revision: u64,
+    opcode_fingerprint: u64,
+    value_layout_fingerprint: u64,
+    build_feature_flags: u64,
+    build_fingerprint: u64,
+    abi_info_layout_fingerprint: u64,
+    function_id_layout_fingerprint: u64,
+    hot_event_layout_fingerprint: u64,
+    function_snapshot_layout_fingerprint: u64,
+    entry_handle_layout_fingerprint: u64,
+    backend_vtable_layout_fingerprint: u64,
+}
+
+#[repr(C)]
+struct AbiInfoV1_1 {
+    prefix: AbiInfoV1_0,
+    exec_frame_layout_fingerprint: u64,
+    exit_layout_fingerprint: u64,
+}
+
+#[repr(C)]
+struct Guarded<T> {
+    prefix: T,
+    canary: [u8; 16],
+}
+
+#[test]
+fn linked_abi_query_fills_v1_0_and_v1_1_prefixes_without_touching_canaries() {
+    use rquickjs_core::qjs;
+
+    assert_eq!(
+        std::mem::size_of::<AbiInfoV1_0>(),
+        std::mem::offset_of!(qjs::JSJitABIInfo, exec_frame_layout_fingerprint)
+    );
+    assert_eq!(
+        std::mem::size_of::<AbiInfoV1_1>(),
+        std::mem::offset_of!(qjs::JSJitABIInfo, runtime_api_layout_fingerprint)
+    );
+
+    let mut v1_0: Guarded<AbiInfoV1_0> = unsafe { std::mem::zeroed() };
+    v1_0.prefix.struct_size = std::mem::size_of::<AbiInfoV1_0>() as u32;
+    v1_0.canary = [0xa5; 16];
+    let status = unsafe {
+        qjs::JS_GetJitABIInfo((&mut v1_0.prefix as *mut AbiInfoV1_0).cast::<qjs::JSJitABIInfo>())
+    };
+    assert_eq!(status, qjs::JS_JIT_BACKEND_OK);
+    assert_eq!(
+        v1_0.prefix.struct_size as usize,
+        std::mem::size_of::<qjs::JSJitABIInfo>()
+    );
+    assert_eq!(v1_0.prefix.major, ABI_MAJOR);
+    assert_eq!(v1_0.prefix.minor, ABI_MINOR);
+    assert_eq!(v1_0.canary, [0xa5; 16]);
+
+    let mut v1_1: Guarded<AbiInfoV1_1> = unsafe { std::mem::zeroed() };
+    v1_1.prefix.prefix.struct_size = std::mem::size_of::<AbiInfoV1_1>() as u32;
+    v1_1.canary = [0x5a; 16];
+    let status = unsafe {
+        qjs::JS_GetJitABIInfo((&mut v1_1.prefix as *mut AbiInfoV1_1).cast::<qjs::JSJitABIInfo>())
+    };
+    assert_eq!(status, qjs::JS_JIT_BACKEND_OK);
+    assert_eq!(
+        v1_1.prefix.prefix.struct_size as usize,
+        std::mem::size_of::<qjs::JSJitABIInfo>()
+    );
+    assert_eq!(v1_1.prefix.prefix.major, ABI_MAJOR);
+    assert_eq!(v1_1.prefix.prefix.minor, ABI_MINOR);
+    assert_eq!(v1_1.canary, [0x5a; 16]);
+}
+
 #[test]
 fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
     use rquickjs_core::qjs;

@@ -276,7 +276,7 @@ impl JSValueRepr {
         unsafe { mem::transmute(self) }
     }
 
-    fn from_raw(value: rquickjs_core::qjs::JSValue) -> Self {
+    pub fn from_raw(value: rquickjs_core::qjs::JSValue) -> Self {
         unsafe { mem::transmute(value) }
     }
 }
@@ -313,6 +313,17 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
 pub struct SyntheticOutcome {
     pub exit: rquickjs_core::qjs::JSJitExit,
     pub result: JSValueRepr,
+}
+
+/// Deep copy of every byte a generated entry can mutate through a synthetic
+/// execution frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntheticFrameSnapshot {
+    frame: Vec<u8>,
+    arguments: Vec<JSValueRepr>,
+    locals: Vec<JSValueRepr>,
+    stack: Vec<JSValueRepr>,
+    bytecode: Vec<u8>,
 }
 
 /// Owns all buffers referenced by one synthetic `JSJitExecFrame`.
@@ -386,21 +397,39 @@ impl SyntheticFrame {
         self.poll.count.load(Ordering::Acquire)
     }
 
-    pub fn frame_bytes(&self) -> Vec<u8> {
-        unsafe {
+    pub fn snapshot(&self) -> SyntheticFrameSnapshot {
+        let frame = unsafe {
             std::slice::from_raw_parts(
                 ptr::addr_of!(self.frame).cast::<u8>(),
                 mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
             )
         }
-        .to_vec()
+        .to_vec();
+        SyntheticFrameSnapshot {
+            frame,
+            arguments: self.arguments.clone(),
+            locals: self.locals.clone(),
+            stack: self.stack.clone(),
+            bytecode: self.bytecode.clone(),
+        }
+    }
+
+    pub fn set_local(&mut self, index: usize, value: JSValueRepr) {
+        self.locals[index] = value;
+    }
+
+    pub fn set_stack(&mut self, values: &[JSValueRepr]) {
+        assert!(values.len() <= self.stack.len());
+        self.stack[..values.len()].copy_from_slice(values);
+        self.frame.stack_top = unsafe { self.frame.stack_base.add(values.len()) };
     }
 
     /// Invokes an entry whose Cranelift signature has an sret pointer followed
     /// by the execution-frame pointer and no ordinary return values.
+    #[cfg(feature = "compiler")]
     pub unsafe fn call(
         &mut self,
-        executable: &crate::platform::ExecutableCode,
+        executable: &crate::compiler::baseline::PublishedBaselineCode,
     ) -> SyntheticOutcome {
         type Entry = unsafe extern "C" fn(
             *mut rquickjs_core::qjs::JSJitExecFrame,

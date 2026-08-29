@@ -5,6 +5,11 @@
 pub struct FrameStateId(pub(crate) u32);
 
 impl FrameStateId {
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        let id = u32::try_from(index).ok()?;
+        (id != u32::MAX).then_some(Self(id))
+    }
+
     pub const fn index(self) -> usize {
         self.0 as usize
     }

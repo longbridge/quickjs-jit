@@ -30,6 +30,7 @@ cranelift-frontend = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 cranelift-object = { version = "0.116", optional = true }
 cranelift-native = { version = "0.116", optional = true }
+gimli = { version = "0.31", optional = true, default-features = false, features = ["write", "std"] }
 postcard = { version = "1", optional = true, default-features = false, features = ["alloc"] }
 target-lexicon = { version = "0.13", optional = true }
 
@@ -48,6 +49,7 @@ compiler = [
   "dep:cranelift-module",
   "dep:cranelift-object",
   "dep:cranelift-native",
+  "dep:gimli",
   "dep:postcard",
   "dep:target-lexicon",
 ]

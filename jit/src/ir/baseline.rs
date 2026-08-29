@@ -51,6 +51,21 @@ impl BaselineIr {
                 .get(&block.start_pc())
                 .ok_or(CompileFailure::InvalidArtifact)?;
             let mut instructions = Vec::new();
+            if block_index != 0 {
+                let state = record_state(
+                    &mut states,
+                    snapshot.arg_count(),
+                    snapshot.local_count(),
+                    depth,
+                    block.start_pc(),
+                )?;
+                instructions.push(IrInstruction {
+                    pc: block.start_pc(),
+                    frame_state: Some(state),
+                    op: IrOp::Poll { state },
+                });
+                emitted_since_poll = 0;
+            }
             if function
                 .control_flow_graph()
                 .is_loop_header(block.start_pc())
@@ -61,7 +76,7 @@ impl BaselineIr {
                     snapshot.local_count(),
                     depth,
                     block.start_pc(),
-                );
+                )?;
                 instructions.push(IrInstruction {
                     pc: block.start_pc(),
                     frame_state: Some(state),
@@ -81,7 +96,7 @@ impl BaselineIr {
                         snapshot.local_count(),
                         depth,
                         pc,
-                    );
+                    )?;
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
@@ -96,7 +111,7 @@ impl BaselineIr {
                         snapshot.local_count(),
                         depth,
                         pc,
-                    );
+                    )?;
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
@@ -111,7 +126,7 @@ impl BaselineIr {
                         snapshot.local_count(),
                         depth,
                         pc,
-                    );
+                    )?;
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
@@ -122,15 +137,17 @@ impl BaselineIr {
 
                 let op = translate_instruction(instruction)?;
                 let depth_before = depth;
-                let frame_state = operation_may_exit(&op).then(|| {
-                    record_state(
+                let frame_state = if operation_may_exit(&op) {
+                    Some(record_state(
                         &mut states,
                         snapshot.arg_count(),
                         snapshot.local_count(),
                         depth,
                         pc,
-                    )
-                });
+                    )?)
+                } else {
+                    None
+                };
                 let pop = effective_pop(instruction);
                 if depth < pop {
                     return Err(CompileFailure::InvalidArtifact);
@@ -153,7 +170,7 @@ impl BaselineIr {
                             snapshot.local_count(),
                             depth_before,
                             pc,
-                        );
+                        )?;
                         let insert_at = instructions.len() - 1;
                         instructions.insert(
                             insert_at,
@@ -209,15 +226,21 @@ fn record_state(
     locals: u16,
     stack_depth: usize,
     pc: u32,
-) -> FrameStateId {
-    let mut slots = Vec::with_capacity(arguments as usize + locals as usize + stack_depth);
+) -> Result<FrameStateId, CompileFailure> {
+    let slot_count = usize::from(arguments)
+        .checked_add(usize::from(locals))
+        .and_then(|count| count.checked_add(stack_depth))
+        .filter(|count| *count <= usize::from(u16::MAX))
+        .ok_or(CompileFailure::ResourceLimit)?;
+    let stack_depth = u16::try_from(stack_depth).map_err(|_| CompileFailure::ResourceLimit)?;
+    let mut slots = Vec::with_capacity(slot_count);
     slots.extend((0..arguments).map(FrameSlot::Argument));
     slots.extend((0..locals).map(FrameSlot::Local));
-    slots.extend((0..stack_depth as u16).map(FrameSlot::Stack));
-    table.push(FrameState {
+    slots.extend((0..stack_depth).map(FrameSlot::Stack));
+    Ok(table.push(FrameState {
         pc,
         slots: slots.into_boxed_slice(),
-    })
+    }))
 }
 
 fn effective_pop(instruction: &Instruction) -> usize {

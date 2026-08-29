@@ -6,6 +6,8 @@ use super::CompileFailure;
 pub(super) struct FrameLayout {
     pub arg_buf: i32,
     pub var_buf: i32,
+    pub stack_base: i32,
+    pub stack_top: i32,
     pub bytecode_start: i32,
     pub result: i32,
     pub runtime_api: i32,
@@ -27,6 +29,8 @@ impl FrameLayout {
         Ok(Self {
             arg_buf: offset(core::mem::offset_of!(qjs::JSJitExecFrame, arg_buf))?,
             var_buf: offset(core::mem::offset_of!(qjs::JSJitExecFrame, var_buf))?,
+            stack_base: offset(core::mem::offset_of!(qjs::JSJitExecFrame, stack_base))?,
+            stack_top: offset(core::mem::offset_of!(qjs::JSJitExecFrame, stack_top))?,
             bytecode_start: offset(core::mem::offset_of!(qjs::JSJitExecFrame, bytecode_start))?,
             result: offset(core::mem::offset_of!(qjs::JSJitExecFrame, result))?,
             runtime_api: offset(core::mem::offset_of!(qjs::JSJitExecFrame, runtime_api))?,

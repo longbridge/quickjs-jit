@@ -1,6 +1,12 @@
 //! Cranelift lowering and W^X publication for Tier 1 pure frame operations.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+#[cfg(feature = "test-support")]
+use std::sync::Mutex;
 
 use cranelift_codegen::{
     binemit::Reloc as CraneliftReloc,
@@ -24,7 +30,7 @@ use crate::{
         CodeAllocation, CompiledArtifact, FrameState as ArtifactFrameState, Relocation,
         RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
-    ir::{BaselineIr, BinaryOp, FrameSlot, IrOp, StackOp, TaggedValue, UnaryOp},
+    ir::{BaselineIr, BinaryOp, FrameSlot, FrameStateId, IrOp, StackOp, TaggedValue, UnaryOp},
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
 };
@@ -113,15 +119,16 @@ impl BaselineCompiler {
         let compiled = context
             .compile(&*self.isa, &mut ControlPlane::default())
             .map_err(|_| CompileFailure::InvalidArtifact)?;
-        let unwind_metadata = compiled
+        let unwind_info = compiled
             .create_unwind_info(&*self.isa)
             .map_err(|_| CompileFailure::InvalidArtifact)?
-            .map(|unwind| retain_unwind_metadata(unwind, compiled.frame_size))
-            .transpose()?;
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let unwind_metadata = Some(retain_unwind_metadata(&unwind_info, compiled.frame_size)?);
+        let native_unwind = NativeUnwindPlan::new(unwind_info, &*self.isa)?;
         let bytes = compiled.code_buffer().to_vec();
         let mut code_offsets = BTreeMap::new();
         for location in compiled.buffer.get_srclocs_sorted() {
-            if !location.loc.is_default() {
+            if !location.loc.is_default() && location.start < location.end {
                 code_offsets
                     .entry(location.loc.bits())
                     .or_insert(location.start);
@@ -148,29 +155,43 @@ impl BaselineCompiler {
                 )
             })
             .collect();
+        let mut distinct_state_offsets = BTreeSet::new();
         let frame_states: Vec<_> = ir
             .frame_states
             .iter()
+            .enumerate()
             .map(|state| {
+                let (state_index, state) = state;
                 let slots = state
                     .slots
                     .iter()
                     .map(|slot| match *slot {
-                        FrameSlot::Argument(index) => index,
-                        FrameSlot::Local(index) => ir.argument_count.saturating_add(index),
+                        FrameSlot::Argument(index) => Ok(index),
+                        FrameSlot::Local(index) => ir
+                            .argument_count
+                            .checked_add(index)
+                            .ok_or(CompileFailure::ResourceLimit),
                         FrameSlot::Stack(index) => ir
                             .argument_count
-                            .saturating_add(ir.local_count)
-                            .saturating_add(index),
+                            .checked_add(ir.local_count)
+                            .and_then(|base| base.checked_add(index))
+                            .ok_or(CompileFailure::ResourceLimit),
                     })
-                    .collect();
-                ArtifactFrameState::new(
-                    code_offsets.get(&state.pc).copied().unwrap_or(0),
-                    state.pc,
-                    slots,
-                )
+                    .collect::<Result<_, _>>()?;
+                let state_id =
+                    FrameStateId::from_index(state_index).ok_or(CompileFailure::ResourceLimit)?;
+                let code_offset = code_offsets
+                    .get(&frame_state_source_loc(state_id)?.bits())
+                    .copied()
+                    .ok_or(CompileFailure::InvalidArtifact)?;
+                if code_offset as usize >= bytes.len()
+                    || !distinct_state_offsets.insert(code_offset)
+                {
+                    return Err(CompileFailure::InvalidArtifact);
+                }
+                Ok(ArtifactFrameState::new(code_offset, state.pc, slots))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let stack_maps = frame_states
             .iter()
             .map(|state| StackMap::new(state.code_offset, state.slots.to_vec()))
@@ -179,6 +200,7 @@ impl BaselineCompiler {
             bytes,
             relocations,
             unwind_metadata,
+            native_unwind,
             stack_maps,
             frame_states,
             target: self.isa.triple().clone(),
@@ -209,6 +231,7 @@ pub struct RelocatableCode {
     bytes: Vec<u8>,
     relocations: Vec<Relocation>,
     unwind_metadata: Option<UnwindMetadata>,
+    native_unwind: NativeUnwindPlan,
     stack_maps: Vec<StackMap>,
     frame_states: Vec<ArtifactFrameState>,
     target: Triple,
@@ -246,13 +269,15 @@ impl RelocatableCode {
         &self.target
     }
 
-    pub fn publish(self) -> Result<ExecutableCode, CodeMemoryError> {
+    pub fn publish(self) -> Result<PublishedBaselineCode, CodeMemoryError> {
         if !self.host_publishable || self.target != Triple::host() {
             return Err(CodeMemoryError::TargetIsaMismatch);
         }
+        let mut bytes = self.bytes;
+        let native_unwind = self.native_unwind.prepare(&mut bytes)?;
         let allocator = CodeAllocator::for_host()?;
-        let mut writable = allocator.allocate(self.bytes.len())?;
-        writable.write(0, &self.bytes)?;
+        let mut writable = allocator.allocate(bytes.len())?;
+        writable.write(0, &bytes)?;
         let base = writable.as_ptr() as usize as u64;
         let mut resolved = Vec::with_capacity(self.relocations.len());
         for relocation in &self.relocations {
@@ -269,12 +294,138 @@ impl RelocatableCode {
         }
         writable.apply_relocations(&resolved)?;
         writable.declare_indirect_targets(&[0])?;
-        writable.publish()
+        let executable = writable.publish()?;
+        let unwind_registration = native_unwind.register(&executable)?;
+        Ok(PublishedBaselineCode::new(
+            executable,
+            unwind_registration,
+            self.unwind_metadata,
+            self.stack_maps,
+            self.frame_states,
+        ))
+    }
+}
+
+/// Published Tier 1 code together with metadata pinned for its full RX lifetime.
+#[derive(Clone, Debug)]
+pub struct PublishedBaselineCode {
+    allocation: Arc<PublishedBaselineAllocation>,
+}
+
+#[derive(Debug)]
+struct PublishedBaselineAllocation {
+    unwind_registration: Option<NativeUnwindRegistration>,
+    executable: Option<ExecutableCode>,
+    unwind_metadata: Option<UnwindMetadata>,
+    stack_maps: Box<[StackMap]>,
+    frame_states: Box<[ArtifactFrameState]>,
+    #[cfg(feature = "test-support")]
+    lifetime_events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl PublishedBaselineCode {
+    fn new(
+        executable: ExecutableCode,
+        unwind_registration: NativeUnwindRegistration,
+        unwind_metadata: Option<UnwindMetadata>,
+        stack_maps: Vec<StackMap>,
+        frame_states: Vec<ArtifactFrameState>,
+    ) -> Self {
+        Self {
+            allocation: Arc::new(PublishedBaselineAllocation {
+                unwind_registration: Some(unwind_registration),
+                executable: Some(executable),
+                unwind_metadata,
+                stack_maps: stack_maps.into_boxed_slice(),
+                frame_states: frame_states.into_boxed_slice(),
+                #[cfg(feature = "test-support")]
+                lifetime_events: Arc::new(Mutex::new(Vec::new())),
+            }),
+        }
+    }
+
+    pub fn unwind_metadata(&self) -> Option<&UnwindMetadata> {
+        self.allocation.unwind_metadata.as_ref()
+    }
+
+    pub fn len(&self) -> usize {
+        self.allocation
+            .executable
+            .as_ref()
+            .expect("published executable remains live while pinned")
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.allocation
+            .executable
+            .as_ref()
+            .expect("published executable remains live while pinned")
+            .as_ptr()
+    }
+
+    pub const fn is_writable(&self) -> bool {
+        false
+    }
+
+    pub fn stack_maps(&self) -> &[StackMap] {
+        &self.allocation.stack_maps
+    }
+
+    pub fn frame_states(&self) -> &[ArtifactFrameState] {
+        &self.allocation.frame_states
+    }
+
+    pub fn unwind_is_registered(&self) -> bool {
+        self.allocation.unwind_registration.is_some()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn lifetime_probe(&self) -> PublishedLifetimeProbe {
+        PublishedLifetimeProbe(Arc::clone(&self.allocation.lifetime_events))
+    }
+}
+
+impl Drop for PublishedBaselineAllocation {
+    fn drop(&mut self) {
+        drop(self.unwind_registration.take());
+        #[cfg(feature = "test-support")]
+        self.lifetime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push("unwind_deregistered");
+
+        drop(self.executable.take());
+        #[cfg(feature = "test-support")]
+        self.lifetime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push("executable_released");
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct PublishedLifetimeProbe(Arc<Mutex<Vec<&'static str>>>);
+
+#[cfg(feature = "test-support")]
+impl PublishedLifetimeProbe {
+    pub fn events(&self) -> Vec<&'static str> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
 fn retain_unwind_metadata(
-    unwind: CraneliftUnwindInfo,
+    unwind: &CraneliftUnwindInfo,
     frame_size: u32,
 ) -> Result<UnwindMetadata, CompileFailure> {
     let kind = match &unwind {
@@ -283,8 +434,276 @@ fn retain_unwind_metadata(
         CraneliftUnwindInfo::WindowsArm64(_) => UnwindKind::WindowsArm64,
         _ => return Err(CompileFailure::InvalidArtifact),
     };
-    let encoding = postcard::to_allocvec(&unwind).map_err(|_| CompileFailure::InvalidArtifact)?;
+    let encoding = postcard::to_allocvec(unwind).map_err(|_| CompileFailure::InvalidArtifact)?;
     Ok(UnwindMetadata::new(kind, frame_size, encoding))
+}
+
+#[derive(Clone, Debug)]
+struct NativeUnwindPlan {
+    info: CraneliftUnwindInfo,
+    systemv_cie: Option<gimli::write::CommonInformationEntry>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    windows_function_len: Option<u32>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    windows_unwind_offset: Option<u32>,
+}
+
+impl NativeUnwindPlan {
+    fn new(info: CraneliftUnwindInfo, isa: &dyn TargetIsa) -> Result<Self, CompileFailure> {
+        let systemv_cie = if matches!(info, CraneliftUnwindInfo::SystemV(_)) {
+            Some(
+                isa.create_systemv_cie()
+                    .ok_or(CompileFailure::InvalidArtifact)?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            info,
+            systemv_cie,
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            windows_function_len: None,
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            windows_unwind_offset: None,
+        })
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    fn prepare(mut self, bytes: &mut Vec<u8>) -> Result<Self, CodeMemoryError> {
+        let CraneliftUnwindInfo::WindowsX64(info) = &self.info else {
+            return Err(CodeMemoryError::UnwindRegistrationUnsupported);
+        };
+        let function_len = u32::try_from(bytes.len()).map_err(|_| CodeMemoryError::SizeOverflow)?;
+        let aligned_len = bytes
+            .len()
+            .checked_add(3)
+            .map(|len| len & !3)
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        bytes.resize(aligned_len, 0);
+        let unwind_offset =
+            u32::try_from(aligned_len).map_err(|_| CodeMemoryError::SizeOverflow)?;
+        let unwind_end = aligned_len
+            .checked_add(info.emit_size())
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        bytes.resize(unwind_end, 0);
+        info.emit(&mut bytes[aligned_len..unwind_end]);
+        self.windows_function_len = Some(function_len);
+        self.windows_unwind_offset = Some(unwind_offset);
+        Ok(self)
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    fn prepare(self, _bytes: &mut Vec<u8>) -> Result<Self, CodeMemoryError> {
+        Err(CodeMemoryError::UnwindRegistrationUnsupported)
+    }
+
+    #[cfg(not(all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    fn prepare(self, _bytes: &mut Vec<u8>) -> Result<Self, CodeMemoryError> {
+        Ok(self)
+    }
+
+    fn register(
+        self,
+        executable: &ExecutableCode,
+    ) -> Result<NativeUnwindRegistration, CodeMemoryError> {
+        #[cfg(all(
+            any(target_os = "linux", target_os = "macos"),
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        if let CraneliftUnwindInfo::SystemV(info) = self.info {
+            use gimli::{
+                write::{Address, EhFrame, EndianVec, FrameTable},
+                LittleEndian,
+            };
+
+            let cie = self
+                .systemv_cie
+                .ok_or(CodeMemoryError::UnwindRegistrationUnsupported)?;
+            let mut table = FrameTable::default();
+            let cie = table.add_cie(cie);
+            table.add_fde(
+                cie,
+                info.to_fde(Address::Constant(executable.as_ptr() as usize as u64)),
+            );
+            let mut eh_frame = EhFrame::from(EndianVec::new(LittleEndian));
+            table.write_eh_frame(&mut eh_frame).map_err(|_| {
+                CodeMemoryError::UnwindRegistrationFailed {
+                    operation: "encode System V .eh_frame",
+                }
+            })?;
+            let mut bytes = eh_frame.0.into_vec();
+            bytes.extend_from_slice(&0_u32.to_ne_bytes());
+            let bytes = bytes.into_boxed_slice();
+            let registration_offset = systemv_registration_offset(&bytes)?;
+            unsafe {
+                systemv_register_frame(bytes.as_ptr().add(registration_offset).cast());
+            }
+            return Ok(NativeUnwindRegistration {
+                systemv_eh_frame: Some(bytes),
+                systemv_registration_offset: registration_offset,
+            });
+        }
+
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        if matches!(&self.info, CraneliftUnwindInfo::WindowsX64(_)) {
+            use windows_sys::Win32::System::Diagnostics::Debug::{
+                RtlAddFunctionTable, IMAGE_RUNTIME_FUNCTION_ENTRY, IMAGE_RUNTIME_FUNCTION_ENTRY_0,
+            };
+
+            let mut function_table = Box::new(IMAGE_RUNTIME_FUNCTION_ENTRY {
+                BeginAddress: 0,
+                EndAddress: self
+                    .windows_function_len
+                    .ok_or(CodeMemoryError::UnwindRegistrationUnsupported)?,
+                Anonymous: IMAGE_RUNTIME_FUNCTION_ENTRY_0 {
+                    UnwindInfoAddress: self
+                        .windows_unwind_offset
+                        .ok_or(CodeMemoryError::UnwindRegistrationUnsupported)?,
+                },
+            });
+            let registered = unsafe {
+                RtlAddFunctionTable(
+                    function_table.as_mut(),
+                    1,
+                    executable.as_ptr() as usize as u64,
+                )
+            };
+            if !registered {
+                return Err(CodeMemoryError::UnwindRegistrationFailed {
+                    operation: "register Windows x64 function table",
+                });
+            }
+            return Ok(NativeUnwindRegistration {
+                systemv_eh_frame: None,
+                systemv_registration_offset: 0,
+                windows_function_table: Some(function_table),
+            });
+        }
+
+        let _ = executable;
+        Err(CodeMemoryError::UnwindRegistrationUnsupported)
+    }
+}
+
+struct NativeUnwindRegistration {
+    systemv_eh_frame: Option<Box<[u8]>>,
+    systemv_registration_offset: usize,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    windows_function_table:
+        Option<Box<windows_sys::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY>>,
+}
+
+impl std::fmt::Debug for NativeUnwindRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeUnwindRegistration")
+            .field(
+                "systemv_eh_frame_len",
+                &self.systemv_eh_frame.as_ref().map(|bytes| bytes.len()),
+            )
+            .field(
+                "systemv_registration_offset",
+                &self.systemv_registration_offset,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for NativeUnwindRegistration {
+    fn drop(&mut self) {
+        #[cfg(all(
+            any(target_os = "linux", target_os = "macos"),
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        if let Some(bytes) = self.systemv_eh_frame.as_ref() {
+            unsafe {
+                systemv_deregister_frame(
+                    bytes.as_ptr().add(self.systemv_registration_offset).cast(),
+                );
+            }
+        }
+
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        if let Some(function_table) = self.windows_function_table.as_ref() {
+            use windows_sys::Win32::System::Diagnostics::Debug::RtlDeleteFunctionTable;
+
+            unsafe {
+                let _ = RtlDeleteFunctionTable(function_table.as_ref());
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn systemv_registration_offset(_eh_frame: &[u8]) -> Result<usize, CodeMemoryError> {
+    // GCC's frame API consumes a complete, zero-terminated .eh_frame section.
+    Ok(0)
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn systemv_registration_offset(eh_frame: &[u8]) -> Result<usize, CodeMemoryError> {
+    // Apple's libunwind frame API consumes one FDE rather than the section's CIE.
+    let cie_length = eh_frame
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or(CodeMemoryError::UnwindRegistrationFailed {
+            operation: "locate the System V FDE",
+        })?;
+    let fde_offset =
+        4_usize
+            .checked_add(cie_length)
+            .ok_or(CodeMemoryError::UnwindRegistrationFailed {
+                operation: "locate the System V FDE",
+            })?;
+    if fde_offset
+        .checked_add(4)
+        .is_none_or(|end| end > eh_frame.len())
+    {
+        return Err(CodeMemoryError::UnwindRegistrationFailed {
+            operation: "locate the System V FDE",
+        });
+    }
+    Ok(fde_offset)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[link(name = "gcc_s")]
+unsafe extern "C" {
+    #[link_name = "__register_frame"]
+    fn systemv_register_frame(begin: *const std::ffi::c_void);
+    #[link_name = "__deregister_frame"]
+    fn systemv_deregister_frame(begin: *const std::ffi::c_void);
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+unsafe extern "C" {
+    #[link_name = "__register_frame"]
+    fn systemv_register_frame(begin: *const std::ffi::c_void);
+    #[link_name = "__deregister_frame"]
+    fn systemv_deregister_frame(begin: *const std::ffi::c_void);
 }
 
 fn isa_is_host_compatible(target: &dyn TargetIsa) -> bool {
@@ -350,6 +769,15 @@ fn relocation_kind(kind: CraneliftReloc) -> RelocationKind {
     }
 }
 
+fn frame_state_source_loc(state: FrameStateId) -> Result<SourceLoc, CompileFailure> {
+    let bits = u32::try_from(state.index())
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .filter(|bits| *bits != u32::MAX)
+        .ok_or(CompileFailure::ResourceLimit)?;
+    Ok(SourceLoc::new(bits))
+}
+
 fn lower_function(
     builder: &mut FunctionBuilder<'_>,
     ir: &BaselineIr,
@@ -404,6 +832,11 @@ fn lower_function(
         let value = load_jsvalue(builder, var_buf, index, layout);
         define_pair(builder, pair, value);
     }
+    for pair in arguments.iter().chain(&locals).copied() {
+        let value = use_pair(builder, pair);
+        guard_non_refcounted(builder, value, retry);
+    }
+    guard_live_stack_non_refcounted(builder, frame, retry, pointer_type, layout);
     for pair in stack.iter().copied() {
         let value = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
         define_pair(builder, pair, value);
@@ -422,7 +855,13 @@ fn lower_function(
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
         for instruction in &block.instructions {
-            builder.set_srcloc(SourceLoc::new(instruction.pc));
+            builder.set_srcloc(
+                instruction
+                    .frame_state
+                    .map(frame_state_source_loc)
+                    .transpose()?
+                    .unwrap_or_default(),
+            );
             match instruction.op {
                 IrOp::Poll { .. } => emit_poll(
                     builder,
@@ -433,7 +872,16 @@ fn lower_function(
                     pointer_type,
                     layout,
                 ),
-                IrOp::OsrLabel { .. } => {}
+                IrOp::OsrLabel { .. } => {
+                    // A trapping-capable frame load is an observable native marker that
+                    // survives lowering, giving this OSR state its own exact code range.
+                    let _ = builder.ins().load(
+                        pointer_type,
+                        MemFlags::new(),
+                        frame,
+                        layout.bytecode_start,
+                    );
+                }
                 IrOp::Nop => {}
                 IrOp::Push(value) => {
                     let value = constant_pair(builder, value);
@@ -605,6 +1053,7 @@ fn lower_function(
         }
     }
 
+    builder.set_srcloc(SourceLoc::default());
     builder.switch_to_block(retry);
     emit_exit(
         builder,
@@ -668,6 +1117,72 @@ fn use_pair(builder: &mut FunctionBuilder<'_>, variables: PairVars) -> Pair {
         payload: builder.use_var(variables.payload),
         tag: builder.use_var(variables.tag),
     }
+}
+
+fn guard_non_refcounted(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) {
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
+    let at_or_after_first = builder.ins().icmp_imm(
+        IntCC::SignedGreaterThanOrEqual,
+        value.tag,
+        i64::from(qjs::JS_TAG_FIRST),
+    );
+    let refcounted = builder.ins().band(negative, at_or_after_first);
+    let immediate = builder.ins().bxor_imm(refcounted, 1);
+    guard(builder, immediate, retry);
+}
+
+fn guard_live_stack_non_refcounted(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    retry: Block,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) {
+    let flags = MemFlags::new();
+    let stack_base = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.stack_base);
+    let stack_top = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.stack_top);
+    let scan = builder.create_block();
+    let inspect = builder.create_block();
+    let continuation = builder.create_block();
+    builder.append_block_param(scan, pointer_type);
+    builder.ins().jump(scan, &[stack_base]);
+
+    builder.switch_to_block(scan);
+    let cursor = builder.block_params(scan)[0];
+    let complete = builder.ins().icmp(IntCC::Equal, cursor, stack_top);
+    builder
+        .ins()
+        .brif(complete, continuation, &[], inspect, &[cursor]);
+
+    builder.append_block_param(inspect, pointer_type);
+    builder.switch_to_block(inspect);
+    let cursor = builder.block_params(inspect)[0];
+    let tag = builder
+        .ins()
+        .load(types::I64, flags, cursor, layout.value_tag);
+    let value = Pair {
+        payload: builder.ins().iconst(types::I64, 0),
+        tag,
+    };
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
+    let at_or_after_first = builder.ins().icmp_imm(
+        IntCC::SignedGreaterThanOrEqual,
+        value.tag,
+        i64::from(qjs::JS_TAG_FIRST),
+    );
+    let refcounted = builder.ins().band(negative, at_or_after_first);
+    let immediate = builder.ins().bxor_imm(refcounted, 1);
+    let next = builder.ins().iadd_imm(cursor, 16);
+    builder.ins().brif(immediate, scan, &[next], retry, &[]);
+
+    builder.seal_block(inspect);
+    builder.seal_block(scan);
+    builder.seal_block(continuation);
+    builder.switch_to_block(continuation);
 }
 
 fn emit_exit(
@@ -945,19 +1460,17 @@ fn emit_arithmetic(
     operation: BinaryOp,
     retry: Block,
 ) -> Pair {
+    if operation == BinaryOp::Mod {
+        let unsupported = builder.ins().iconst(types::I8, 0);
+        guard(builder, unsupported, retry);
+        return constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    }
     let (left_int, left_float) = emit_numeric(builder, left, retry);
     let (right_int, right_float) = emit_numeric(builder, right, retry);
     let left_i32 = builder.ins().ireduce(types::I32, left.payload);
     let right_i32 = builder.ins().ireduce(types::I32, right.payload);
-    if matches!(operation, BinaryOp::Div | BinaryOp::Mod) {
-        let result = if operation == BinaryOp::Div {
-            builder.ins().fdiv(left_float, right_float)
-        } else {
-            let quotient = builder.ins().fdiv(left_float, right_float);
-            let quotient = builder.ins().trunc(quotient);
-            let product = builder.ins().fmul(quotient, right_float);
-            builder.ins().fsub(left_float, product)
-        };
+    if operation == BinaryOp::Div {
+        let result = builder.ins().fdiv(left_float, right_float);
         return pair_from_number(builder, result);
     }
     let (int_result, overflow) = match operation {

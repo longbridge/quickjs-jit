@@ -7,14 +7,17 @@
 ))]
 
 use cranelift_codegen::{isa, settings};
+use rquickjs::{Context, Runtime, Value};
 use rquickjs_core::qjs;
 use rquickjs_jit::{
     bytecode::{linked_opcode_table, opcode, VerifyLimits},
     code_cache::RelocationTarget,
-    compiler::baseline::BaselineCompiler,
+    compiler::{baseline::BaselineCompiler, CompileFailure},
+    ir::BaselineIr,
     platform::CodeMemoryError,
     test_support::{verified_bytecode, JSValueRepr, SnapshotFixture, SyntheticFrame},
 };
+use std::collections::BTreeSet;
 
 fn named_opcode(name: &str) -> u8 {
     linked_opcode_table()
@@ -74,6 +77,64 @@ fn cranelift_output_retains_unwind_stack_and_frame_metadata() {
 }
 
 #[test]
+fn published_clone_pins_metadata_and_deregisters_unwind_before_releasing_code() {
+    let published = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
+    let expected_states = published.frame_states().to_vec();
+    let expected_maps = published.stack_maps().to_vec();
+    let probe = published.lifetime_probe();
+    let pin = published.clone();
+
+    assert!(published.unwind_is_registered());
+    drop(published);
+    assert_eq!(pin.frame_states(), expected_states);
+    assert_eq!(pin.stack_maps(), expected_maps);
+    assert!(pin.unwind_metadata().is_some());
+    assert!(probe.events().is_empty());
+
+    let mut frame = SyntheticFrame::new(&[], 0, 0);
+    assert_eq!(
+        unsafe { frame.call(&pin) }.exit.kind,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DONE
+    );
+    drop(pin);
+
+    assert_eq!(
+        probe.events(),
+        ["unwind_deregistered", "executable_released"]
+    );
+}
+
+#[test]
+fn every_frame_state_has_a_distinct_exact_native_offset() {
+    let code = compile(vec![opcode::RETURN_UNDEF], 0, 0);
+    let states = code.frame_states();
+    let same_pc_states: Vec<_> = states
+        .iter()
+        .filter(|state| state.bytecode_pc == 0)
+        .collect();
+    let distinct_offsets: BTreeSet<_> = states.iter().map(|state| state.code_offset).collect();
+
+    assert!(
+        same_pc_states.len() >= 3,
+        "entry poll, return poll, and return state"
+    );
+    assert_eq!(distinct_offsets.len(), states.len(), "{states:?}");
+    assert!(states
+        .iter()
+        .all(|state| (state.code_offset as usize) < code.bytes().len()));
+}
+
+#[test]
+fn flattened_frame_slot_count_above_u16_max_is_rejected() {
+    let function = verified_bytecode(vec![named_opcode("push_0"), opcode::RETURN], u16::MAX, 0);
+
+    assert_eq!(
+        BaselineIr::translate(&function),
+        Err(CompileFailure::ResourceLimit)
+    );
+}
+
+#[test]
 fn result_copy_preserves_all_sixteen_jsvalue_bytes() {
     let mut bytecode = vec![opcode::GET_ARG];
     bytecode.extend_from_slice(&0_u16.to_le_bytes());
@@ -99,7 +160,7 @@ fn unsupported_dynamic_add_retries_before_mutating_the_frame() {
     let left = JSValueRepr::new(0x1111_2222_3333_4444, qjs::JS_TAG_OBJECT as i64);
     let right = JSValueRepr::new(0xaaaa_bbbb_cccc_dddd, qjs::JS_TAG_STRING as i64);
     let mut frame = SyntheticFrame::new(&[left, right], 0, 2);
-    let before = frame.frame_bytes();
+    let before = frame.snapshot();
 
     let outcome = unsafe { frame.call(&executable) };
 
@@ -107,7 +168,7 @@ fn unsupported_dynamic_add_retries_before_mutating_the_frame() {
         outcome.exit.kind,
         qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
     );
-    assert_eq!(frame.frame_bytes(), before);
+    assert_eq!(frame.snapshot(), before);
 }
 
 #[test]
@@ -118,7 +179,7 @@ fn returning_a_borrowed_refcounted_value_retries_without_mutating_the_frame() {
     let executable = compile(bytecode, 1, 0).publish().unwrap();
     let object = JSValueRepr::new(0x1111_2222_3333_4444, qjs::JS_TAG_OBJECT as i64);
     let mut frame = SyntheticFrame::new(&[object], 0, 1);
-    let before = frame.frame_bytes();
+    let before = frame.snapshot();
 
     let outcome = unsafe { frame.call(&executable) };
 
@@ -126,7 +187,144 @@ fn returning_a_borrowed_refcounted_value_retries_without_mutating_the_frame() {
         outcome.exit.kind,
         qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
     );
-    assert_eq!(frame.frame_bytes(), before);
+    assert_eq!(frame.snapshot(), before);
+}
+
+#[test]
+fn refcounted_overwrite_drop_dup_local_and_stack_retry_with_live_object_unchanged() {
+    let overwrite = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("push_1"),
+            named_opcode("put_arg0"),
+            opcode::RETURN_UNDEF,
+        ],
+        1,
+        0,
+    )
+    .publish()
+    .unwrap();
+    let drop_value = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("drop"),
+            opcode::RETURN_UNDEF,
+        ],
+        1,
+        0,
+    )
+    .publish()
+    .unwrap();
+    let duplicate = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("dup"),
+            named_opcode("drop"),
+            named_opcode("drop"),
+            opcode::RETURN_UNDEF,
+        ],
+        1,
+        0,
+    )
+    .publish()
+    .unwrap();
+    let local = compile(vec![opcode::RETURN_UNDEF], 0, 1).publish().unwrap();
+    let stack = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
+
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let object: Value<'_> = ctx.eval("({ marker: 42 })").unwrap();
+        let owned_raw = unsafe { qjs::JS_DupValue(ctx.as_raw().as_ptr(), object.as_raw()) };
+        let owned_value = unsafe { Value::from_raw(ctx.clone(), owned_raw) };
+        let owned = owned_value.as_raw();
+        let object_repr = JSValueRepr::from_raw(owned);
+        let runtime_raw = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
+        let ref_count = || unsafe { *(object_repr.payload as *const i32) };
+        let before_ref_count = ref_count();
+
+        for (executable, mut frame) in [
+            (&overwrite, SyntheticFrame::new(&[object_repr], 0, 2)),
+            (&drop_value, SyntheticFrame::new(&[object_repr], 0, 2)),
+            (&duplicate, SyntheticFrame::new(&[object_repr], 0, 3)),
+        ] {
+            let before = frame.snapshot();
+            let outcome = unsafe { frame.call(executable) };
+            assert_eq!(
+                outcome.exit.kind,
+                qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+            );
+            assert_eq!(frame.snapshot(), before);
+            assert_eq!(ref_count(), before_ref_count);
+            assert!(unsafe { qjs::JS_IsLiveObject(runtime_raw, owned) });
+        }
+
+        let mut local_frame = SyntheticFrame::new(&[], 1, 0);
+        local_frame.set_local(0, object_repr);
+        let before = local_frame.snapshot();
+        let outcome = unsafe { local_frame.call(&local) };
+        assert_eq!(
+            outcome.exit.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        );
+        assert_eq!(local_frame.snapshot(), before);
+
+        let mut stack_frame = SyntheticFrame::new(&[], 0, 1);
+        stack_frame.set_stack(&[object_repr]);
+        let before = stack_frame.snapshot();
+        let outcome = unsafe { stack_frame.call(&stack) };
+        assert_eq!(
+            outcome.exit.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        );
+        assert_eq!(stack_frame.snapshot(), before);
+
+        assert_eq!(ref_count(), before_ref_count);
+        assert!(unsafe { qjs::JS_IsLiveObject(runtime_raw, owned) });
+    });
+}
+
+#[test]
+fn modulo_edge_cases_retry_until_an_exact_runtime_helper_exists() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let finite_over_infinity: f64 = ctx.eval("5 % Infinity").unwrap();
+        let signed_zero: f64 = ctx.eval("-4 % 2").unwrap();
+        let extreme_scale: f64 = ctx.eval("1e308 % 1e-308").unwrap();
+        assert_eq!(finite_over_infinity.to_bits(), 5_f64.to_bits());
+        assert_eq!(signed_zero.to_bits(), (-0_f64).to_bits());
+        assert_eq!(extreme_scale.to_bits(), 0x0002_8401_cf53_d610);
+    });
+
+    let executable = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("get_arg1"),
+            named_opcode("mod"),
+            opcode::RETURN,
+        ],
+        2,
+        0,
+    )
+    .publish()
+    .unwrap();
+    for operands in [
+        [JSValueRepr::int32(5), JSValueRepr::float64(f64::INFINITY)],
+        [JSValueRepr::int32(-4), JSValueRepr::int32(2)],
+        [JSValueRepr::float64(1e308), JSValueRepr::float64(1e-308)],
+    ] {
+        let mut frame = SyntheticFrame::new(&operands, 0, 2);
+        let before = frame.snapshot();
+
+        let outcome = unsafe { frame.call(&executable) };
+
+        assert_eq!(
+            outcome.exit.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        );
+        assert_eq!(frame.snapshot(), before);
+    }
 }
 
 #[test]
@@ -159,6 +357,48 @@ fn straight_line_code_polls_within_four_thousand_ninety_six_operations() {
     assert!(
         (0..=4_096).contains(&resume_offset),
         "second poll resumed at bytecode offset {resume_offset}"
+    );
+}
+
+#[test]
+fn forward_diamond_path_cannot_skip_lexically_inserted_polls() {
+    let push_true = named_opcode("push_true");
+    let push_false = named_opcode("push_false");
+    let if_true8 = named_opcode("if_true8");
+    let mut bytecode = Vec::new();
+    for _ in 0..2_050 {
+        bytecode.push(push_true);
+        bytecode.push(if_true8);
+        let forward_operand = bytecode.len();
+        bytecode.push(0);
+
+        let filler_start = bytecode.len();
+        bytecode.push(opcode::NOP);
+        bytecode.push(push_false);
+        bytecode.push(if_true8);
+        let backward_operand = bytecode.len();
+        let backward = i8::try_from(filler_start as isize - backward_operand as isize).unwrap();
+        bytecode.push(backward as u8);
+
+        let next_diamond = bytecode.len();
+        let forward = i8::try_from(next_diamond - forward_operand).unwrap();
+        bytecode[forward_operand] = forward as u8;
+    }
+    bytecode.push(opcode::RETURN_UNDEF);
+
+    let executable = compile(bytecode.clone(), 0, 0).publish().unwrap();
+    let mut frame = SyntheticFrame::new(&[], 0, 0);
+    frame.set_bytecode(&bytecode);
+    let bytecode_start = frame.bytecode_start();
+    frame.interrupt_on_poll(2);
+
+    let outcome = unsafe { frame.call(&executable) };
+
+    assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT);
+    let resume_offset = unsafe { outcome.exit.resume_pc.offset_from(bytecode_start) };
+    assert!(
+        (0..4_096).contains(&resume_offset),
+        "second poll was delayed until bytecode offset {resume_offset}"
     );
 }
 

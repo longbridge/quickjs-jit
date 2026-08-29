@@ -82,6 +82,26 @@ fn relocations_are_validated_as_a_batch_before_writes() {
 }
 
 #[test]
+fn section_relative_relocation_without_section_base_is_rejected_atomically() {
+    let allocator = CodeAllocator::for_host().unwrap();
+    let mut writable = allocator.allocate(32).unwrap();
+    writable.write(0, &[0xaa; 16]).unwrap();
+    let before = writable.bytes().to_vec();
+    let relocations = [
+        ResolvedRelocation::new(0, RelocationKind::Abs8, 0x1020, -0x20),
+        ResolvedRelocation::new(8, RelocationKind::X86SecRel, 0x2000, 0),
+    ];
+
+    assert_eq!(
+        writable.apply_relocations(&relocations),
+        Err(CodeMemoryError::UnsupportedRelocationKind {
+            kind: RelocationKind::X86SecRel,
+        })
+    );
+    assert_eq!(writable.bytes(), before);
+}
+
+#[test]
 fn symbolic_relocation_preserves_kind_and_symbol_through_publication() {
     let relocation = Relocation::with_target(
         8,

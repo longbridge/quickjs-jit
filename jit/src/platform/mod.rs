@@ -279,6 +279,10 @@ pub enum CodeMemoryError {
     },
     TargetIsaMismatch,
     UnresolvedRelocationTarget,
+    UnwindRegistrationUnsupported,
+    UnwindRegistrationFailed {
+        operation: &'static str,
+    },
     InvalidIndirectTarget {
         offset: usize,
         alignment: usize,
@@ -376,6 +380,12 @@ impl fmt::Display for CodeMemoryError {
             }
             Self::UnresolvedRelocationTarget => {
                 f.write_str("compiled relocation target was not resolved before publication")
+            }
+            Self::UnwindRegistrationUnsupported => {
+                f.write_str("native unwind registration is unsupported for this emitted format")
+            }
+            Self::UnwindRegistrationFailed { operation } => {
+                write!(f, "native unwind registration failed while attempting to {operation}")
             }
             Self::InvalidIndirectTarget {
                 offset,
@@ -754,7 +764,6 @@ impl WritableCode {
                 | RelocationKind::X86CallPCRel4
                 | RelocationKind::X86CallPLTRel4
                 | RelocationKind::X86GOTPCRel4
-                | RelocationKind::X86SecRel
                 | RelocationKind::Arm64Call => 4,
                 kind => return Err(CodeMemoryError::UnsupportedRelocationKind { kind }),
             };
@@ -783,7 +792,7 @@ impl WritableCode {
                     let value = u64::try_from(absolute).map_err(|_| out_of_range())?;
                     (value.to_le_bytes(), 8)
                 }
-                RelocationKind::Abs4 | RelocationKind::X86SecRel => {
+                RelocationKind::Abs4 => {
                     let value = u32::try_from(absolute).map_err(|_| out_of_range())?;
                     let mut bytes = [0; 8];
                     bytes[..4].copy_from_slice(&value.to_le_bytes());
