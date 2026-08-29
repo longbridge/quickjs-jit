@@ -228,19 +228,56 @@ impl UnwindMetadata {
     }
 }
 
+/// Exact native location represented by a retained logical frame state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameStateLocationKind {
+    /// The code offset is the return address of one machine call site.
+    CallReturn,
+    /// The code offset is the start of one emitted non-call marker range.
+    Marker,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrameState {
     pub code_offset: u32,
     pub bytecode_pc: u32,
     pub slots: Box<[u16]>,
+    pub location_kind: FrameStateLocationKind,
+    pub source_location: u32,
+    pub source_start: u32,
+    pub source_end: u32,
 }
 
 impl FrameState {
     pub fn new(code_offset: u32, bytecode_pc: u32, slots: Vec<u16>) -> Self {
+        Self::with_location(
+            code_offset,
+            bytecode_pc,
+            slots,
+            FrameStateLocationKind::Marker,
+            0,
+            code_offset,
+            code_offset.saturating_add(1),
+        )
+    }
+
+    pub fn with_location(
+        code_offset: u32,
+        bytecode_pc: u32,
+        slots: Vec<u16>,
+        location_kind: FrameStateLocationKind,
+        source_location: u32,
+        source_start: u32,
+        source_end: u32,
+    ) -> Self {
         Self {
             code_offset,
             bytecode_pc,
             slots: slots.into_boxed_slice(),
+            location_kind,
+            source_location,
+            source_start,
+            source_end,
         }
     }
 }

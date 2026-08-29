@@ -3,7 +3,8 @@
     feature = "test-support",
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64"),
-    any(target_os = "linux", target_os = "macos", target_os = "windows")
+    any(target_os = "linux", target_os = "macos", target_os = "windows"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
 use cranelift_codegen::{isa, settings};
@@ -11,7 +12,7 @@ use rquickjs::{Context, Runtime, Value};
 use rquickjs_core::qjs;
 use rquickjs_jit::{
     bytecode::{linked_opcode_table, opcode, VerifyLimits},
-    code_cache::RelocationTarget,
+    code_cache::{FrameStateLocationKind, RelocationTarget},
     compiler::{baseline::BaselineCompiler, CompileFailure},
     ir::BaselineIr,
     platform::CodeMemoryError,
@@ -39,6 +40,7 @@ fn compile(
 fn machine_entry_executes_the_exact_aggregate_return_abi() {
     let executable = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
     let mut frame = SyntheticFrame::new(&[], 0, 0);
+    assert_eq!(frame.stack_storage_address() & 15, 0);
 
     let outcome = unsafe { frame.call(&executable) };
 
@@ -104,8 +106,58 @@ fn published_clone_pins_metadata_and_deregisters_unwind_before_releasing_code() 
     );
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[inline(never)]
+fn invoke_with_unwind_probe(
+    frame: &mut SyntheticFrame,
+    executable: &rquickjs_jit::compiler::baseline::PublishedBaselineCode,
+) -> rquickjs_jit::test_support::SyntheticOutcome {
+    let outcome = unsafe { frame.call(executable) };
+    std::hint::black_box(outcome.exit.kind);
+    outcome
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
-fn every_frame_state_has_a_distinct_exact_native_offset() {
+fn registered_eh_frame_unwinds_through_an_exact_generated_poll_pc() {
+    let code = compile(vec![opcode::RETURN_UNDEF], 0, 0);
+    let poll_offsets: BTreeSet<_> = code
+        .frame_states()
+        .iter()
+        .filter(|state| state.location_kind == FrameStateLocationKind::CallReturn)
+        .map(|state| state.code_offset as usize)
+        .collect();
+    let executable = code.publish().unwrap();
+    let expected_poll_pcs: BTreeSet<_> = poll_offsets
+        .iter()
+        .map(|offset| executable.as_ptr() as usize + offset)
+        .collect();
+    let mut frame = SyntheticFrame::new(&[], 0, 0);
+    frame.capture_backtrace_on_next_poll();
+
+    let outcome = invoke_with_unwind_probe(&mut frame, &executable);
+
+    assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+    let backtrace = frame.captured_backtrace();
+    let jit_index = backtrace
+        .iter()
+        .position(|pc| expected_poll_pcs.contains(pc))
+        .unwrap_or_else(|| {
+            panic!(
+                "backtrace did not contain an exact generated poll return PC; expected {expected_poll_pcs:x?}, got {backtrace:x?}"
+            )
+        });
+    let rust_caller = invoke_with_unwind_probe as *const () as usize;
+    assert!(
+        backtrace[jit_index + 1..]
+            .iter()
+            .any(|pc| pc.abs_diff(rust_caller) < 4_096),
+        "unwinding stopped at generated code; caller {rust_caller:#x}, backtrace {backtrace:x?}"
+    );
+}
+
+#[test]
+fn poll_states_use_exact_call_returns_and_non_call_states_use_exact_markers() {
     let code = compile(vec![opcode::RETURN_UNDEF], 0, 0);
     let states = code.frame_states();
     let same_pc_states: Vec<_> = states
@@ -122,6 +174,51 @@ fn every_frame_state_has_a_distinct_exact_native_offset() {
     assert!(states
         .iter()
         .all(|state| (state.code_offset as usize) < code.bytes().len()));
+
+    let call_returns: BTreeSet<_> = code.call_return_offsets().iter().copied().collect();
+    let mut poll_count = 0;
+    let mut marker_count = 0;
+    for state in states {
+        let source_loc = format!("@{:04x}", state.source_location);
+        let source_lines: Vec<_> = code
+            .clif()
+            .lines()
+            .filter(|line| line.contains(&source_loc))
+            .collect();
+        match state.location_kind {
+            FrameStateLocationKind::CallReturn => {
+                poll_count += 1;
+                assert!(call_returns.contains(&state.code_offset), "{state:?}");
+                assert!(state.source_start < state.code_offset, "{state:?}");
+                assert!(state.code_offset <= state.source_end, "{state:?}");
+                assert!(
+                    source_lines
+                        .iter()
+                        .any(|line| line.contains("call_indirect")),
+                    "{source_lines:?}"
+                );
+                assert!(
+                    source_lines.iter().all(|line| !line.contains(" load")),
+                    "poll source location leaked onto API loads: {source_lines:?}"
+                );
+            }
+            FrameStateLocationKind::Marker => {
+                marker_count += 1;
+                assert_eq!(state.code_offset, state.source_start, "{state:?}");
+                assert!(state.source_start < state.source_end, "{state:?}");
+                assert!(
+                    !call_returns.contains(&state.code_offset),
+                    "marker aliased a call return: {state:?}"
+                );
+                assert!(
+                    source_lines.iter().any(|line| line.contains("brif")),
+                    "marker is not an emitted non-null frame branch: {source_lines:?}"
+                );
+            }
+        }
+    }
+    assert!(poll_count >= 2, "entry and return polls");
+    assert!(marker_count >= 1, "return exit marker");
 }
 
 #[test]
@@ -282,6 +379,37 @@ fn refcounted_overwrite_drop_dup_local_and_stack_retry_with_live_object_unchange
         assert_eq!(ref_count(), before_ref_count);
         assert!(unsafe { qjs::JS_IsLiveObject(runtime_raw, owned) });
     });
+}
+
+#[test]
+fn malformed_stack_ranges_retry_before_poll_or_dereference() {
+    let executable = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
+
+    for malformed in ["misaligned", "null", "oversize", "reversed", "wrapped"] {
+        let mut frame = SyntheticFrame::new(&[], 0, 1);
+        let base = frame.stack_storage_address();
+        let (stack_base, stack_top) = match malformed {
+            // This safe first case was the RED reproducer: the old equality-only
+            // scan accepted it without dereferencing and reached the entry poll.
+            "misaligned" => (base + 1, base + 1),
+            "null" => (0, 0),
+            "oversize" => (base, base + 16),
+            "reversed" => (base + 16, base),
+            "wrapped" => (usize::MAX & !15, 16),
+            _ => unreachable!(),
+        };
+        frame.set_stack_bounds_raw(stack_base, stack_top);
+        let before = frame.snapshot();
+
+        let outcome = unsafe { frame.call(&executable) };
+
+        assert_eq!(
+            outcome.exit.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            "{malformed} stack range"
+        );
+        assert_eq!(frame.snapshot(), before, "{malformed} stack range");
+    }
 }
 
 #[test]

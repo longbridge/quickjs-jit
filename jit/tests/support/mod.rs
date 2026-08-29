@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     mem, ptr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -286,10 +286,19 @@ const _: () =
 const _: () =
     assert!(mem::offset_of!(JSValueRepr, tag) == mem::offset_of!(rquickjs_core::qjs::JSValue, tag));
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AlignedStackSlot(JSValueRepr);
+
+const _: () = assert!(mem::size_of::<AlignedStackSlot>() == 16);
+const _: () = assert!(mem::align_of::<AlignedStackSlot>() == 16);
+
 #[derive(Debug)]
 struct PollState {
     count: AtomicUsize,
     interrupt_at: AtomicUsize,
+    capture_backtrace: AtomicBool,
+    backtrace: Mutex<Vec<usize>>,
 }
 
 unsafe extern "C" fn synthetic_interrupt_poll(
@@ -297,6 +306,22 @@ unsafe extern "C" fn synthetic_interrupt_poll(
 ) -> i32 {
     let state = unsafe { &*((*frame).rt.cast::<PollState>()) };
     let count = state.count.fetch_add(1, Ordering::AcqRel) + 1;
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if state.capture_backtrace.swap(false, Ordering::AcqRel) {
+        let mut frames = [ptr::null_mut(); 64];
+        let frame_count = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as i32) };
+        let frame_count = usize::try_from(frame_count.max(0)).unwrap_or(0);
+        let mut backtrace = state
+            .backtrace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        backtrace.clear();
+        backtrace.extend(
+            frames[..frame_count]
+                .iter()
+                .map(|address| *address as usize),
+        );
+    }
     usize::from(count == state.interrupt_at.load(Ordering::Acquire)) as i32
 }
 
@@ -324,6 +349,10 @@ pub struct SyntheticFrameSnapshot {
     locals: Vec<JSValueRepr>,
     stack: Vec<JSValueRepr>,
     bytecode: Vec<u8>,
+    poll_count: usize,
+    poll_interrupt_at: usize,
+    poll_capture_backtrace: bool,
+    poll_backtrace: Vec<usize>,
 }
 
 /// Owns all buffers referenced by one synthetic `JSJitExecFrame`.
@@ -331,7 +360,7 @@ pub struct SyntheticFrame {
     frame: rquickjs_core::qjs::JSJitExecFrame,
     arguments: Vec<JSValueRepr>,
     locals: Vec<JSValueRepr>,
-    stack: Vec<JSValueRepr>,
+    stack: Vec<AlignedStackSlot>,
     bytecode: Vec<u8>,
     poll: Box<PollState>,
 }
@@ -340,11 +369,18 @@ impl SyntheticFrame {
     pub fn new(arguments: &[JSValueRepr], local_count: usize, stack_size: usize) -> Self {
         let mut arguments = arguments.to_vec();
         let mut locals = vec![JSValueRepr::undefined(); local_count];
-        let mut stack = vec![JSValueRepr::undefined(); stack_size];
+        // A real QuickJS value stack has allocated, suitably aligned backing
+        // storage even when the live depth is zero.  Rust's empty `Vec`
+        // sentinel is only aligned to `JSValueRepr`'s declared alignment and
+        // is therefore not a valid synthetic `JSValue *` for the JIT's
+        // stricter 16-byte slot-range contract.
+        let mut stack = vec![AlignedStackSlot(JSValueRepr::undefined()); stack_size.max(1)];
         let bytecode = vec![0_u8];
         let poll = Box::new(PollState {
             count: AtomicUsize::new(0),
             interrupt_at: AtomicUsize::new(usize::MAX),
+            capture_backtrace: AtomicBool::new(false),
+            backtrace: Mutex::new(Vec::new()),
         });
         let frame = rquickjs_core::qjs::JSJitExecFrame {
             struct_size: mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>() as u32,
@@ -397,6 +433,20 @@ impl SyntheticFrame {
         self.poll.count.load(Ordering::Acquire)
     }
 
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn capture_backtrace_on_next_poll(&mut self) {
+        self.poll.capture_backtrace.store(true, Ordering::Release);
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn captured_backtrace(&self) -> Vec<usize> {
+        self.poll
+            .backtrace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub fn snapshot(&self) -> SyntheticFrameSnapshot {
         let frame = unsafe {
             std::slice::from_raw_parts(
@@ -409,8 +459,17 @@ impl SyntheticFrame {
             frame,
             arguments: self.arguments.clone(),
             locals: self.locals.clone(),
-            stack: self.stack.clone(),
+            stack: self.stack.iter().map(|slot| slot.0).collect(),
             bytecode: self.bytecode.clone(),
+            poll_count: self.poll.count.load(Ordering::Acquire),
+            poll_interrupt_at: self.poll.interrupt_at.load(Ordering::Acquire),
+            poll_capture_backtrace: self.poll.capture_backtrace.load(Ordering::Acquire),
+            poll_backtrace: self
+                .poll
+                .backtrace
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }
     }
 
@@ -420,8 +479,19 @@ impl SyntheticFrame {
 
     pub fn set_stack(&mut self, values: &[JSValueRepr]) {
         assert!(values.len() <= self.stack.len());
-        self.stack[..values.len()].copy_from_slice(values);
+        for (slot, value) in self.stack.iter_mut().zip(values) {
+            slot.0 = *value;
+        }
         self.frame.stack_top = unsafe { self.frame.stack_base.add(values.len()) };
+    }
+
+    pub fn stack_storage_address(&self) -> usize {
+        self.stack.as_ptr() as usize
+    }
+
+    pub fn set_stack_bounds_raw(&mut self, base: usize, top: usize) {
+        self.frame.stack_base = base as *mut rquickjs_core::qjs::JSValue;
+        self.frame.stack_top = top as *mut rquickjs_core::qjs::JSValue;
     }
 
     /// Invokes an entry whose Cranelift signature has an sret pointer followed

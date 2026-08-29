@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::{
-    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateTable, IrOp, StackOp, TaggedValue,
-    UnaryOp,
+    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, StackOp,
+    TaggedValue, UnaryOp,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -57,6 +57,7 @@ impl BaselineIr {
                     snapshot.arg_count(),
                     snapshot.local_count(),
                     depth,
+                    FrameStateKind::Poll,
                     block.start_pc(),
                 )?;
                 instructions.push(IrInstruction {
@@ -75,6 +76,7 @@ impl BaselineIr {
                     snapshot.arg_count(),
                     snapshot.local_count(),
                     depth,
+                    FrameStateKind::Marker,
                     block.start_pc(),
                 )?;
                 instructions.push(IrInstruction {
@@ -95,6 +97,7 @@ impl BaselineIr {
                         snapshot.arg_count(),
                         snapshot.local_count(),
                         depth,
+                        FrameStateKind::Poll,
                         pc,
                     )?;
                     instructions.push(IrInstruction {
@@ -110,6 +113,7 @@ impl BaselineIr {
                         snapshot.arg_count(),
                         snapshot.local_count(),
                         depth,
+                        FrameStateKind::Poll,
                         pc,
                     )?;
                     instructions.push(IrInstruction {
@@ -125,6 +129,7 @@ impl BaselineIr {
                         snapshot.arg_count(),
                         snapshot.local_count(),
                         depth,
+                        FrameStateKind::Poll,
                         pc,
                     )?;
                     instructions.push(IrInstruction {
@@ -143,6 +148,7 @@ impl BaselineIr {
                         snapshot.arg_count(),
                         snapshot.local_count(),
                         depth,
+                        FrameStateKind::Marker,
                         pc,
                     )?)
                 } else {
@@ -169,6 +175,7 @@ impl BaselineIr {
                             snapshot.arg_count(),
                             snapshot.local_count(),
                             depth_before,
+                            FrameStateKind::Poll,
                             pc,
                         )?;
                         let insert_at = instructions.len() - 1;
@@ -225,6 +232,7 @@ fn record_state(
     arguments: u16,
     locals: u16,
     stack_depth: usize,
+    kind: FrameStateKind,
     pc: u32,
 ) -> Result<FrameStateId, CompileFailure> {
     let slot_count = usize::from(arguments)
@@ -240,6 +248,7 @@ fn record_state(
     Ok(table.push(FrameState {
         pc,
         slots: slots.into_boxed_slice(),
+        kind,
     }))
 }
 

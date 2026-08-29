@@ -5,5 +5,6 @@ mod frame_state;
 mod types;
 
 pub use baseline::{BaselineIr, IrBlock, IrInstruction};
+pub(crate) use frame_state::FrameStateKind;
 pub use frame_state::{FrameSlot, FrameState, FrameStateId, FrameStateTable};
 pub use types::{BinaryOp, IrOp, StackOp, TaggedValue, UnaryOp};

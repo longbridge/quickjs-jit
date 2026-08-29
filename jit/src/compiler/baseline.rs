@@ -27,10 +27,13 @@ use target_lexicon::{Endianness, Triple};
 use crate::{
     bytecode::VerifiedFunction,
     code_cache::{
-        CodeAllocation, CompiledArtifact, FrameState as ArtifactFrameState, Relocation,
-        RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
+        CodeAllocation, CompiledArtifact, FrameState as ArtifactFrameState, FrameStateLocationKind,
+        Relocation, RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
-    ir::{BaselineIr, BinaryOp, FrameSlot, FrameStateId, IrOp, StackOp, TaggedValue, UnaryOp},
+    ir::{
+        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, StackOp, TaggedValue,
+        UnaryOp,
+    },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
 };
@@ -47,6 +50,12 @@ struct Pair {
 struct PairVars {
     payload: Variable,
     tag: Variable,
+}
+
+#[derive(Clone, Copy)]
+struct PollLocation {
+    bytecode_pc: u32,
+    source_location: SourceLoc,
 }
 
 /// Cranelift compiler configured for one explicit target ISA.
@@ -97,6 +106,12 @@ impl BaselineCompiler {
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
         let ir = BaselineIr::translate(function)?;
+        let retry_before_entry = ir.blocks.iter().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction.op, IrOp::Binary(BinaryOp::Mod)))
+        });
         let mut signature = Signature::new(self.isa.default_call_conv());
         signature.params.push(AbiParam::special(
             pointer_type,
@@ -108,7 +123,7 @@ impl BaselineCompiler {
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut clif, &mut builder_context);
-            lower_function(&mut builder, &ir, &*self.isa, layout)?;
+            lower_function(&mut builder, &ir, &*self.isa, layout, retry_before_entry)?;
             builder.seal_all_blocks();
             builder.finalize();
         }
@@ -126,14 +141,13 @@ impl BaselineCompiler {
         let unwind_metadata = Some(retain_unwind_metadata(&unwind_info, compiled.frame_size)?);
         let native_unwind = NativeUnwindPlan::new(unwind_info, &*self.isa)?;
         let bytes = compiled.code_buffer().to_vec();
-        let mut code_offsets = BTreeMap::new();
-        for location in compiled.buffer.get_srclocs_sorted() {
-            if !location.loc.is_default() && location.start < location.end {
-                code_offsets
-                    .entry(location.loc.bits())
-                    .or_insert(location.start);
-            }
-        }
+        let source_ranges = compiled.buffer.get_srclocs_sorted();
+        let call_return_offsets: Vec<_> = compiled
+            .buffer
+            .call_sites()
+            .iter()
+            .map(|site| site.ret_addr)
+            .collect();
         let relocations = compiled
             .buffer
             .relocs()
@@ -156,42 +170,82 @@ impl BaselineCompiler {
             })
             .collect();
         let mut distinct_state_offsets = BTreeSet::new();
-        let frame_states: Vec<_> = ir
-            .frame_states
-            .iter()
-            .enumerate()
-            .map(|state| {
-                let (state_index, state) = state;
-                let slots = state
-                    .slots
-                    .iter()
-                    .map(|slot| match *slot {
-                        FrameSlot::Argument(index) => Ok(index),
-                        FrameSlot::Local(index) => ir
-                            .argument_count
-                            .checked_add(index)
-                            .ok_or(CompileFailure::ResourceLimit),
-                        FrameSlot::Stack(index) => ir
-                            .argument_count
-                            .checked_add(ir.local_count)
-                            .and_then(|base| base.checked_add(index))
-                            .ok_or(CompileFailure::ResourceLimit),
-                    })
-                    .collect::<Result<_, _>>()?;
-                let state_id =
-                    FrameStateId::from_index(state_index).ok_or(CompileFailure::ResourceLimit)?;
-                let code_offset = code_offsets
-                    .get(&frame_state_source_loc(state_id)?.bits())
-                    .copied()
-                    .ok_or(CompileFailure::InvalidArtifact)?;
-                if code_offset as usize >= bytes.len()
-                    || !distinct_state_offsets.insert(code_offset)
-                {
-                    return Err(CompileFailure::InvalidArtifact);
-                }
-                Ok(ArtifactFrameState::new(code_offset, state.pc, slots))
-            })
-            .collect::<Result<_, _>>()?;
+        let frame_states: Vec<_> = if retry_before_entry {
+            Vec::new()
+        } else {
+            ir.frame_states
+                .iter()
+                .enumerate()
+                .map(|state| {
+                    let (state_index, state) = state;
+                    let slots = state
+                        .slots
+                        .iter()
+                        .map(|slot| match *slot {
+                            FrameSlot::Argument(index) => Ok(index),
+                            FrameSlot::Local(index) => ir
+                                .argument_count
+                                .checked_add(index)
+                                .ok_or(CompileFailure::ResourceLimit),
+                            FrameSlot::Stack(index) => ir
+                                .argument_count
+                                .checked_add(ir.local_count)
+                                .and_then(|base| base.checked_add(index))
+                                .ok_or(CompileFailure::ResourceLimit),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let state_id = FrameStateId::from_index(state_index)
+                        .ok_or(CompileFailure::ResourceLimit)?;
+                    let source_location = frame_state_source_loc(state_id)?.bits();
+                    let matching_ranges: Vec<_> = source_ranges
+                        .iter()
+                        .filter(|range| range.loc.bits() == source_location)
+                        .collect();
+                    let [source_range] = matching_ranges.as_slice() else {
+                        return Err(CompileFailure::InvalidArtifact);
+                    };
+                    let (location_kind, code_offset) = match state.kind {
+                        FrameStateKind::Poll => {
+                            let matching_calls: Vec<_> = call_return_offsets
+                                .iter()
+                                .copied()
+                                .filter(|return_address| {
+                                    source_range.start < *return_address
+                                        && *return_address <= source_range.end
+                                })
+                                .collect();
+                            let [return_address] = matching_calls.as_slice() else {
+                                return Err(CompileFailure::InvalidArtifact);
+                            };
+                            (FrameStateLocationKind::CallReturn, *return_address)
+                        }
+                        FrameStateKind::Marker => {
+                            if call_return_offsets.iter().any(|return_address| {
+                                source_range.start < *return_address
+                                    && *return_address <= source_range.end
+                            }) {
+                                return Err(CompileFailure::InvalidArtifact);
+                            }
+                            (FrameStateLocationKind::Marker, source_range.start)
+                        }
+                    };
+                    if code_offset as usize >= bytes.len()
+                        || !distinct_state_offsets.insert(code_offset)
+                    {
+                        return Err(CompileFailure::InvalidArtifact);
+                    }
+                    Ok(ArtifactFrameState::with_location(
+                        code_offset,
+                        state.pc,
+                        slots,
+                        location_kind,
+                        source_location,
+                        source_range.start,
+                        source_range.end,
+                    ))
+                })
+                .collect::<Result<_, _>>()?
+        };
         let stack_maps = frame_states
             .iter()
             .map(|state| StackMap::new(state.code_offset, state.slots.to_vec()))
@@ -203,6 +257,7 @@ impl BaselineCompiler {
             native_unwind,
             stack_maps,
             frame_states,
+            call_return_offsets,
             target: self.isa.triple().clone(),
             host_publishable: self.host_publishable,
             clif: clif_text,
@@ -234,6 +289,7 @@ pub struct RelocatableCode {
     native_unwind: NativeUnwindPlan,
     stack_maps: Vec<StackMap>,
     frame_states: Vec<ArtifactFrameState>,
+    call_return_offsets: Vec<u32>,
     target: Triple,
     host_publishable: bool,
     clif: String,
@@ -258,6 +314,10 @@ impl RelocatableCode {
 
     pub fn frame_states(&self) -> &[ArtifactFrameState] {
         &self.frame_states
+    }
+
+    pub fn call_return_offsets(&self) -> &[u32] {
+        &self.call_return_offsets
     }
 
     /// Textual CLIF retained for ABI and safe-point audits.
@@ -772,7 +832,6 @@ fn relocation_kind(kind: CraneliftReloc) -> RelocationKind {
 fn frame_state_source_loc(state: FrameStateId) -> Result<SourceLoc, CompileFailure> {
     let bits = u32::try_from(state.index())
         .ok()
-        .and_then(|index| index.checked_add(1))
         .filter(|bits| *bits != u32::MAX)
         .ok_or(CompileFailure::ResourceLimit)?;
     Ok(SourceLoc::new(bits))
@@ -783,6 +842,7 @@ fn lower_function(
     ir: &BaselineIr,
     isa: &dyn TargetIsa,
     layout: FrameLayout,
+    retry_before_entry: bool,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -800,6 +860,17 @@ fn lower_function(
     }
     let sret = params[0];
     let frame = params[1];
+
+    if retry_before_entry {
+        emit_exit(
+            builder,
+            sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            None,
+            pointer_type,
+        );
+        return Ok(());
+    }
 
     let mut next_variable = 0_u32;
     let mut allocate_pair = || {
@@ -836,7 +907,14 @@ fn lower_function(
         let value = use_pair(builder, pair);
         guard_non_refcounted(builder, value, retry);
     }
-    guard_live_stack_non_refcounted(builder, frame, retry, pointer_type, layout);
+    guard_live_stack_non_refcounted(
+        builder,
+        frame,
+        retry,
+        pointer_type,
+        layout,
+        ir.max_stack_depth,
+    );
     for pair in stack.iter().copied() {
         let value = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
         define_pair(builder, pair, value);
@@ -855,33 +933,26 @@ fn lower_function(
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
         for instruction in &block.instructions {
-            builder.set_srcloc(
-                instruction
-                    .frame_state
-                    .map(frame_state_source_loc)
-                    .transpose()?
-                    .unwrap_or_default(),
-            );
+            builder.set_srcloc(SourceLoc::default());
+            if !matches!(&instruction.op, IrOp::Poll { .. }) {
+                if let Some(state) = instruction.frame_state {
+                    emit_frame_state_marker(builder, frame, retry, state)?;
+                }
+            }
             match instruction.op {
-                IrOp::Poll { .. } => emit_poll(
+                IrOp::Poll { state } => emit_poll(
                     builder,
                     frame,
                     sret,
                     poll_signature,
-                    instruction.pc,
+                    PollLocation {
+                        bytecode_pc: instruction.pc,
+                        source_location: frame_state_source_loc(state)?,
+                    },
                     pointer_type,
                     layout,
                 ),
-                IrOp::OsrLabel { .. } => {
-                    // A trapping-capable frame load is an observable native marker that
-                    // survives lowering, giving this OSR state its own exact code range.
-                    let _ = builder.ins().load(
-                        pointer_type,
-                        MemFlags::new(),
-                        frame,
-                        layout.bytecode_start,
-                    );
-                }
+                IrOp::OsrLabel { .. } => {}
                 IrOp::Nop => {}
                 IrOp::Push(value) => {
                     let value = constant_pair(builder, value);
@@ -1137,6 +1208,7 @@ fn guard_live_stack_non_refcounted(
     retry: Block,
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    max_stack_slots: u16,
 ) {
     let flags = MemFlags::new();
     let stack_base = builder
@@ -1145,22 +1217,56 @@ fn guard_live_stack_non_refcounted(
     let stack_top = builder
         .ins()
         .load(pointer_type, flags, frame, layout.stack_top);
+
+    let base_non_null = builder.ins().icmp_imm(IntCC::NotEqual, stack_base, 0);
+    let top_non_null = builder.ins().icmp_imm(IntCC::NotEqual, stack_top, 0);
+    let non_null = builder.ins().band(base_non_null, top_non_null);
+    guard(builder, non_null, retry);
+
+    let combined = builder.ins().bor(stack_base, stack_top);
+    let low_bits = builder.ins().band_imm(combined, 15);
+    let aligned = builder.ins().icmp_imm(IntCC::Equal, low_bits, 0);
+    guard(builder, aligned, retry);
+
+    let ordered = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, stack_top, stack_base);
+    guard(builder, ordered, retry);
+
+    let byte_len = builder.ins().isub(stack_top, stack_base);
+    let trailing = builder.ins().band_imm(byte_len, 15);
+    let whole_values = builder.ins().icmp_imm(IntCC::Equal, trailing, 0);
+    guard(builder, whole_values, retry);
+
+    let slot_count = builder.ins().ushr_imm(byte_len, 4);
+    let slot_limit = builder
+        .ins()
+        .iconst(pointer_type, i64::from(max_stack_slots));
+    let bounded = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, slot_count, slot_limit);
+    guard(builder, bounded, retry);
+
     let scan = builder.create_block();
     let inspect = builder.create_block();
     let continuation = builder.create_block();
     builder.append_block_param(scan, pointer_type);
-    builder.ins().jump(scan, &[stack_base]);
+    builder.append_block_param(scan, pointer_type);
+    builder.ins().jump(scan, &[stack_base, slot_count]);
 
     builder.switch_to_block(scan);
     let cursor = builder.block_params(scan)[0];
-    let complete = builder.ins().icmp(IntCC::Equal, cursor, stack_top);
+    let remaining = builder.block_params(scan)[1];
+    let complete = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
     builder
         .ins()
-        .brif(complete, continuation, &[], inspect, &[cursor]);
+        .brif(complete, continuation, &[], inspect, &[cursor, remaining]);
 
+    builder.append_block_param(inspect, pointer_type);
     builder.append_block_param(inspect, pointer_type);
     builder.switch_to_block(inspect);
     let cursor = builder.block_params(inspect)[0];
+    let remaining = builder.block_params(inspect)[1];
     let tag = builder
         .ins()
         .load(types::I64, flags, cursor, layout.value_tag);
@@ -1177,7 +1283,10 @@ fn guard_live_stack_non_refcounted(
     let refcounted = builder.ins().band(negative, at_or_after_first);
     let immediate = builder.ins().bxor_imm(refcounted, 1);
     let next = builder.ins().iadd_imm(cursor, 16);
-    builder.ins().brif(immediate, scan, &[next], retry, &[]);
+    let next_remaining = builder.ins().iadd_imm(remaining, -1);
+    builder
+        .ins()
+        .brif(immediate, scan, &[next, next_remaining], retry, &[]);
 
     builder.seal_block(inspect);
     builder.seal_block(scan);
@@ -1205,12 +1314,34 @@ fn emit_exit(
     builder.ins().return_(&[]);
 }
 
+fn emit_frame_state_marker(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    retry: Block,
+    state: FrameStateId,
+) -> Result<(), CompileFailure> {
+    let frame_is_non_null = builder.ins().icmp_imm(IntCC::NotEqual, frame, 0);
+    let continuation = builder.create_block();
+    builder.set_srcloc(frame_state_source_loc(state)?);
+    // The entry ABI requires a non-null frame. Reasserting that invariant as
+    // a control-flow edge is semantically inert for valid entries, cannot be
+    // removed as a dead value, and gives each non-call state one exact machine
+    // range without mutating the execution frame.
+    builder
+        .ins()
+        .brif(frame_is_non_null, continuation, &[], retry, &[]);
+    builder.set_srcloc(SourceLoc::default());
+    builder.seal_block(continuation);
+    builder.switch_to_block(continuation);
+    Ok(())
+}
+
 fn emit_poll(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
     sret: Value,
     signature: cranelift_codegen::ir::SigRef,
-    pc: u32,
+    location: PollLocation,
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
 ) {
@@ -1219,7 +1350,9 @@ fn emit_poll(
         .ins()
         .load(pointer_type, flags, frame, layout.runtime_api);
     let poll = builder.ins().load(pointer_type, flags, api, layout.poll);
+    builder.set_srcloc(location.source_location);
     let call = builder.ins().call_indirect(signature, poll, &[frame]);
+    builder.set_srcloc(SourceLoc::default());
     let interrupted = builder.inst_results(call)[0];
     let interrupted = builder.ins().icmp_imm(IntCC::NotEqual, interrupted, 0);
     let interrupt = builder.create_block();
@@ -1233,7 +1366,9 @@ fn emit_poll(
     let bytecode = builder
         .ins()
         .load(pointer_type, flags, frame, layout.bytecode_start);
-    let resume = builder.ins().iadd_imm(bytecode, i64::from(pc));
+    let resume = builder
+        .ins()
+        .iadd_imm(bytecode, i64::from(location.bytecode_pc));
     emit_exit(
         builder,
         sret,

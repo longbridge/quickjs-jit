@@ -23,11 +23,18 @@ pub enum FrameSlot {
     Stack(u16),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrameStateKind {
+    Poll,
+    Marker,
+}
+
 /// The bytecode position and complete live logical frame at one safe point.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrameState {
     pub pc: u32,
     pub slots: Box<[FrameSlot]>,
+    pub(crate) kind: FrameStateKind,
 }
 
 /// Interned frame states owned by a baseline IR function.
