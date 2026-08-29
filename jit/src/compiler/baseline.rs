@@ -1,7 +1,7 @@
 //! Cranelift lowering and W^X publication for Tier 1 pure frame operations.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 
@@ -14,7 +14,7 @@ use cranelift_codegen::{
     ir::{
         condcodes::{FloatCC, IntCC},
         types, AbiParam, ArgumentPurpose, Block, Function, InstBuilder, MemFlags, Signature,
-        SourceLoc, Value,
+        SourceLoc, TrapCode, Value,
     },
     isa::{unwind::UnwindInfo as CraneliftUnwindInfo, OwnedTargetIsa, TargetIsa},
     settings::{self, Configurable},
@@ -106,12 +106,7 @@ impl BaselineCompiler {
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
         let ir = BaselineIr::translate(function)?;
-        let retry_before_entry = ir.blocks.iter().any(|block| {
-            block
-                .instructions
-                .iter()
-                .any(|instruction| matches!(instruction.op, IrOp::Binary(BinaryOp::Mod)))
-        });
+        let entry_analysis = analyze_entry_domains(&ir)?;
         let mut signature = Signature::new(self.isa.default_call_conv());
         signature.params.push(AbiParam::special(
             pointer_type,
@@ -123,7 +118,7 @@ impl BaselineCompiler {
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut clif, &mut builder_context);
-            lower_function(&mut builder, &ir, &*self.isa, layout, retry_before_entry)?;
+            lower_function(&mut builder, &ir, &*self.isa, layout, &entry_analysis)?;
             builder.seal_all_blocks();
             builder.finalize();
         }
@@ -170,7 +165,7 @@ impl BaselineCompiler {
             })
             .collect();
         let mut distinct_state_offsets = BTreeSet::new();
-        let frame_states: Vec<_> = if retry_before_entry {
+        let frame_states: Vec<_> = if entry_analysis.retry_before_entry {
             Vec::new()
         } else {
             ir.frame_states
@@ -837,12 +832,500 @@ fn frame_state_source_loc(state: FrameStateId) -> Result<SourceLoc, CompileFailu
     Ok(SourceLoc::new(bits))
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EntryRoot {
+    Argument(u16),
+    Local(u16),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum KnownKind {
+    Number,
+    Boolean,
+    Null,
+    Undefined,
+    ShortBigInt,
+    Uninitialized,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequiredDomain {
+    Numeric,
+    Immediate,
+    Initialized,
+    Uninitialized,
+}
+
+impl KnownKind {
+    fn satisfies(self, required: RequiredDomain) -> bool {
+        match required {
+            RequiredDomain::Numeric => self == Self::Number,
+            RequiredDomain::Immediate => matches!(
+                self,
+                Self::Number | Self::Boolean | Self::Null | Self::Undefined | Self::ShortBigInt
+            ),
+            RequiredDomain::Initialized => self != Self::Uninitialized,
+            RequiredDomain::Uninitialized => self == Self::Uninitialized,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AbstractValue {
+    roots: BTreeSet<EntryRoot>,
+    known: BTreeSet<KnownKind>,
+}
+
+impl AbstractValue {
+    fn root(root: EntryRoot) -> Self {
+        Self {
+            roots: BTreeSet::from([root]),
+            known: BTreeSet::new(),
+        }
+    }
+
+    fn known(kind: KnownKind) -> Self {
+        Self {
+            roots: BTreeSet::new(),
+            known: BTreeSet::from([kind]),
+        }
+    }
+
+    fn from_tagged(value: TaggedValue) -> Self {
+        let tag = value.tag;
+        let kind = if tag == i64::from(qjs::JS_TAG_INT) || tag == i64::from(qjs::JS_TAG_FLOAT64) {
+            KnownKind::Number
+        } else if tag == i64::from(qjs::JS_TAG_BOOL) {
+            KnownKind::Boolean
+        } else if tag == i64::from(qjs::JS_TAG_NULL) {
+            KnownKind::Null
+        } else if tag == i64::from(qjs::JS_TAG_UNDEFINED) {
+            KnownKind::Undefined
+        } else if tag == i64::from(qjs::JS_TAG_SHORT_BIG_INT) {
+            KnownKind::ShortBigInt
+        } else if tag == i64::from(qjs::JS_TAG_UNINITIALIZED) {
+            KnownKind::Uninitialized
+        } else {
+            KnownKind::Other
+        };
+        Self::known(kind)
+    }
+
+    fn merge_from(&mut self, other: &Self) -> bool {
+        let old_roots = self.roots.len();
+        let old_known = self.known.len();
+        self.roots.extend(other.roots.iter().copied());
+        self.known.extend(other.known.iter().copied());
+        old_roots != self.roots.len() || old_known != self.known.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RootRequirements {
+    numeric: bool,
+    immediate: bool,
+    initialized: bool,
+    uninitialized: bool,
+}
+
+impl RootRequirements {
+    fn add(&mut self, required: RequiredDomain) -> bool {
+        match required {
+            RequiredDomain::Numeric => {
+                self.numeric = true;
+                self.initialized = true;
+            }
+            RequiredDomain::Immediate => {
+                self.immediate = true;
+                self.initialized = true;
+            }
+            RequiredDomain::Initialized => self.initialized = true,
+            RequiredDomain::Uninitialized => self.uninitialized = true,
+        }
+        self.uninitialized && (self.numeric || self.immediate || self.initialized)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AbstractFrame {
+    arguments: Vec<AbstractValue>,
+    locals: Vec<AbstractValue>,
+    stack: Vec<AbstractValue>,
+}
+
+impl AbstractFrame {
+    fn merge_from(&mut self, other: &Self) -> Result<bool, CompileFailure> {
+        if self.arguments.len() != other.arguments.len()
+            || self.locals.len() != other.locals.len()
+            || self.stack.len() != other.stack.len()
+        {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+        let mut changed = false;
+        for (current, incoming) in self
+            .arguments
+            .iter_mut()
+            .zip(&other.arguments)
+            .chain(self.locals.iter_mut().zip(&other.locals))
+            .chain(self.stack.iter_mut().zip(&other.stack))
+        {
+            changed |= current.merge_from(incoming);
+        }
+        Ok(changed)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EntryAnalysis {
+    retry_before_entry: bool,
+    requirements: BTreeMap<EntryRoot, RootRequirements>,
+}
+
+impl EntryAnalysis {
+    fn require(&mut self, value: &AbstractValue, required: RequiredDomain) -> bool {
+        if value
+            .known
+            .iter()
+            .copied()
+            .any(|kind| !kind.satisfies(required))
+        {
+            self.retry_before_entry = true;
+            return false;
+        }
+        for root in &value.roots {
+            if self.requirements.entry(*root).or_default().add(required) {
+                self.retry_before_entry = true;
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailure> {
+    let block_indices: BTreeMap<_, _> = ir
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.start_pc, index))
+        .collect();
+    let Some(&entry_index) = block_indices.get(&0) else {
+        return Err(CompileFailure::InvalidArtifact);
+    };
+    let entry = AbstractFrame {
+        arguments: (0..ir.argument_count)
+            .map(|index| AbstractValue::root(EntryRoot::Argument(index)))
+            .collect(),
+        locals: (0..ir.local_count)
+            .map(|index| AbstractValue::root(EntryRoot::Local(index)))
+            .collect(),
+        stack: Vec::new(),
+    };
+    let mut block_inputs = vec![None; ir.blocks.len()];
+    block_inputs[entry_index] = Some(entry);
+    let mut queue = VecDeque::from([entry_index]);
+    let mut queued = BTreeSet::from([entry_index]);
+    let mut analysis = EntryAnalysis::default();
+
+    while let Some(block_index) = queue.pop_front() {
+        queued.remove(&block_index);
+        let block = &ir.blocks[block_index];
+        let mut frame = block_inputs[block_index]
+            .clone()
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        if frame.stack.len() != usize::from(block.stack_depth) {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+        let mut successors = Vec::new();
+        let mut terminated = false;
+
+        for instruction in &block.instructions {
+            match &instruction.op {
+                IrOp::Poll { state: _ } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
+                IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
+                IrOp::GetArgument(index) => frame.stack.push(
+                    frame
+                        .arguments
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?,
+                ),
+                IrOp::GetLocal(index) => frame.stack.push(
+                    frame
+                        .locals
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?,
+                ),
+                IrOp::GetLocalChecked(index) => {
+                    let value = frame
+                        .locals
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    if !analysis.require(&value, RequiredDomain::Initialized) {
+                        return Ok(analysis);
+                    }
+                    frame.stack.push(value);
+                }
+                IrOp::GetLocalPair => {
+                    frame.stack.push(
+                        frame
+                            .locals
+                            .first()
+                            .cloned()
+                            .ok_or(CompileFailure::InvalidArtifact)?,
+                    );
+                    frame.stack.push(
+                        frame
+                            .locals
+                            .get(1)
+                            .cloned()
+                            .ok_or(CompileFailure::InvalidArtifact)?,
+                    );
+                }
+                IrOp::PutArgument { index, keep } => {
+                    let source = frame
+                        .stack
+                        .last()
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    *frame
+                        .arguments
+                        .get_mut(usize::from(*index))
+                        .ok_or(CompileFailure::InvalidArtifact)? = source;
+                    if !keep {
+                        frame.stack.pop();
+                    }
+                }
+                IrOp::PutLocal { index, keep } => {
+                    let source = frame
+                        .stack
+                        .last()
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    *frame
+                        .locals
+                        .get_mut(usize::from(*index))
+                        .ok_or(CompileFailure::InvalidArtifact)? = source;
+                    if !keep {
+                        frame.stack.pop();
+                    }
+                }
+                IrOp::PutLocalChecked { index, initialize } => {
+                    let current = frame
+                        .locals
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let required = if *initialize {
+                        RequiredDomain::Uninitialized
+                    } else {
+                        RequiredDomain::Initialized
+                    };
+                    if !analysis.require(&current, required) {
+                        return Ok(analysis);
+                    }
+                    let source = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.locals[usize::from(*index)] = source;
+                }
+                IrOp::SetLocalUninitialized(index) => {
+                    *frame
+                        .locals
+                        .get_mut(usize::from(*index))
+                        .ok_or(CompileFailure::InvalidArtifact)? =
+                        AbstractValue::known(KnownKind::Uninitialized);
+                }
+                IrOp::Drop => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                }
+                IrOp::Stack(operation) => {
+                    apply_abstract_stack_operation(&mut frame.stack, *operation)?;
+                }
+                IrOp::Unary(operation) => {
+                    let value = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    let result = analyze_unary(&mut analysis, value, *operation)?;
+                    if analysis.retry_before_entry {
+                        return Ok(analysis);
+                    }
+                    frame.stack.push(result);
+                }
+                IrOp::PostUnary(operation) => {
+                    let value = frame
+                        .stack
+                        .last()
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let result = analyze_unary(&mut analysis, value, *operation)?;
+                    if analysis.retry_before_entry {
+                        return Ok(analysis);
+                    }
+                    frame.stack.push(result);
+                }
+                IrOp::LocalUnary { index, op } => {
+                    let value = frame
+                        .locals
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let result = analyze_unary(&mut analysis, value, *op)?;
+                    if analysis.retry_before_entry {
+                        return Ok(analysis);
+                    }
+                    frame.locals[usize::from(*index)] = result;
+                }
+                IrOp::AddLocal(index) => {
+                    let right = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    let left = frame
+                        .locals
+                        .get(usize::from(*index))
+                        .cloned()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    if !analysis.require(&left, RequiredDomain::Numeric)
+                        || !analysis.require(&right, RequiredDomain::Numeric)
+                    {
+                        return Ok(analysis);
+                    }
+                    frame.locals[usize::from(*index)] = AbstractValue::known(KnownKind::Number);
+                }
+                IrOp::Binary(operation) => {
+                    if *operation == BinaryOp::Mod {
+                        analysis.retry_before_entry = true;
+                        return Ok(analysis);
+                    }
+                    let right = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    let left = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    if !analysis.require(&left, RequiredDomain::Numeric)
+                        || !analysis.require(&right, RequiredDomain::Numeric)
+                    {
+                        return Ok(analysis);
+                    }
+                    frame.stack.push(AbstractValue::known(
+                        if binary_returns_boolean(*operation) {
+                            KnownKind::Boolean
+                        } else {
+                            KnownKind::Number
+                        },
+                    ));
+                }
+                IrOp::Jump(target) => {
+                    successors.push((*target, frame.clone()));
+                    terminated = true;
+                }
+                IrOp::Branch {
+                    target,
+                    when_true: _,
+                } => {
+                    let condition = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    if !analysis.require(&condition, RequiredDomain::Immediate) {
+                        return Ok(analysis);
+                    }
+                    let fallthrough = ir
+                        .blocks
+                        .get(block_index + 1)
+                        .ok_or(CompileFailure::InvalidArtifact)?
+                        .start_pc;
+                    successors.push((*target, frame.clone()));
+                    successors.push((fallthrough, frame.clone()));
+                    terminated = true;
+                }
+                IrOp::Return => {
+                    let result = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    if !analysis.require(&result, RequiredDomain::Immediate) {
+                        return Ok(analysis);
+                    }
+                    terminated = true;
+                }
+                IrOp::ReturnUndefined => terminated = true,
+            }
+            if terminated {
+                break;
+            }
+        }
+
+        if !terminated {
+            let next = ir
+                .blocks
+                .get(block_index + 1)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            successors.push((next.start_pc, frame));
+        }
+
+        for (successor_pc, incoming) in successors {
+            let successor_index = *block_indices
+                .get(&successor_pc)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            if incoming.stack.len() != usize::from(ir.blocks[successor_index].stack_depth) {
+                return Err(CompileFailure::InvalidArtifact);
+            }
+            let changed = if let Some(existing) = &mut block_inputs[successor_index] {
+                existing.merge_from(&incoming)?
+            } else {
+                block_inputs[successor_index] = Some(incoming);
+                true
+            };
+            if changed && queued.insert(successor_index) {
+                queue.push_back(successor_index);
+            }
+        }
+    }
+
+    Ok(analysis)
+}
+
+fn analyze_unary(
+    analysis: &mut EntryAnalysis,
+    value: AbstractValue,
+    operation: UnaryOp,
+) -> Result<AbstractValue, CompileFailure> {
+    let (required, result) = match operation {
+        UnaryOp::LogicalNot => (RequiredDomain::Immediate, KnownKind::Boolean),
+        UnaryOp::Plus
+        | UnaryOp::Neg
+        | UnaryOp::Increment
+        | UnaryOp::Decrement
+        | UnaryOp::BitNot => (RequiredDomain::Numeric, KnownKind::Number),
+    };
+    let _ = analysis.require(&value, required);
+    Ok(AbstractValue::known(result))
+}
+
+fn binary_returns_boolean(operation: BinaryOp) -> bool {
+    matches!(
+        operation,
+        BinaryOp::LessThan
+            | BinaryOp::LessThanOrEqual
+            | BinaryOp::GreaterThan
+            | BinaryOp::GreaterThanOrEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::StrictEqual
+            | BinaryOp::StrictNotEqual
+    )
+}
+
+fn apply_abstract_stack_operation(
+    stack: &mut Vec<AbstractValue>,
+    operation: StackOp,
+) -> Result<(), CompileFailure> {
+    let (take, order): (usize, &[usize]) = stack_operation_order(operation);
+    let start = stack
+        .len()
+        .checked_sub(take)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let values = stack[start..].to_vec();
+    stack.truncate(start);
+    stack.extend(order.iter().map(|source| values[*source].clone()));
+    Ok(())
+}
+
 fn lower_function(
     builder: &mut FunctionBuilder<'_>,
     ir: &BaselineIr,
     isa: &dyn TargetIsa,
     layout: FrameLayout,
-    retry_before_entry: bool,
+    analysis: &EntryAnalysis,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -861,7 +1344,7 @@ fn lower_function(
     let sret = params[0];
     let frame = params[1];
 
-    if retry_before_entry {
+    if analysis.retry_before_entry {
         emit_exit(
             builder,
             sret,
@@ -871,6 +1354,7 @@ fn lower_function(
         );
         return Ok(());
     }
+    let invariant_trap = builder.create_block();
 
     let mut next_variable = 0_u32;
     let mut allocate_pair = || {
@@ -907,6 +1391,7 @@ fn lower_function(
         let value = use_pair(builder, pair);
         guard_non_refcounted(builder, value, retry);
     }
+    emit_entry_domain_guards(builder, &arguments, &locals, analysis, retry);
     guard_live_stack_non_refcounted(
         builder,
         frame,
@@ -936,7 +1421,7 @@ fn lower_function(
             builder.set_srcloc(SourceLoc::default());
             if !matches!(&instruction.op, IrOp::Poll { .. }) {
                 if let Some(state) = instruction.frame_state {
-                    emit_frame_state_marker(builder, frame, retry, state)?;
+                    emit_frame_state_marker(builder, frame, invariant_trap, state)?;
                 }
             }
             match instruction.op {
@@ -969,12 +1454,6 @@ fn lower_function(
                 }
                 IrOp::GetLocalChecked(index) => {
                     let value = use_pair(builder, locals[index as usize]);
-                    let initialized = builder.ins().icmp_imm(
-                        IntCC::NotEqual,
-                        value.tag,
-                        i64::from(qjs::JS_TAG_UNINITIALIZED),
-                    );
-                    guard(builder, initialized, retry);
                     define_pair(builder, stack[depth], value);
                     depth += 1;
                 }
@@ -998,17 +1477,7 @@ fn lower_function(
                     }
                 }
                 IrOp::PutLocalChecked { index, initialize } => {
-                    let current = use_pair(builder, locals[index as usize]);
-                    let condition = builder.ins().icmp_imm(
-                        if initialize {
-                            IntCC::Equal
-                        } else {
-                            IntCC::NotEqual
-                        },
-                        current.tag,
-                        i64::from(qjs::JS_TAG_UNINITIALIZED),
-                    );
-                    guard(builder, condition, retry);
+                    let _ = initialize;
                     let source = stack[depth - 1];
                     copy_pair(builder, locals[index as usize], source);
                     depth -= 1;
@@ -1026,31 +1495,34 @@ fn lower_function(
                 }
                 IrOp::Unary(operation) => {
                     let value = use_pair(builder, stack[depth - 1]);
-                    let result = emit_unary(builder, value, operation, retry);
+                    let result = emit_unary(builder, value, operation);
                     define_pair(builder, stack[depth - 1], result);
                 }
                 IrOp::PostUnary(operation) => {
                     let value = use_pair(builder, stack[depth - 1]);
-                    let result = emit_unary(builder, value, operation, retry);
+                    let result = emit_unary(builder, value, operation);
                     define_pair(builder, stack[depth], result);
                     depth += 1;
                 }
                 IrOp::LocalUnary { index, op } => {
                     let value = use_pair(builder, locals[index as usize]);
-                    let result = emit_unary(builder, value, op, retry);
+                    let result = emit_unary(builder, value, op);
                     define_pair(builder, locals[index as usize], result);
                 }
                 IrOp::AddLocal(index) => {
                     let left = use_pair(builder, locals[index as usize]);
                     let right = use_pair(builder, stack[depth - 1]);
-                    let result = emit_binary(builder, left, right, BinaryOp::Add, retry);
+                    let result = emit_binary(builder, left, right, BinaryOp::Add);
                     define_pair(builder, locals[index as usize], result);
                     depth -= 1;
                 }
                 IrOp::Binary(operation) => {
+                    if operation == BinaryOp::Mod {
+                        return Err(CompileFailure::InvalidArtifact);
+                    }
                     let left = use_pair(builder, stack[depth - 2]);
                     let right = use_pair(builder, stack[depth - 1]);
-                    let result = emit_binary(builder, left, right, operation, retry);
+                    let result = emit_binary(builder, left, right, operation);
                     depth -= 1;
                     define_pair(builder, stack[depth - 1], result);
                 }
@@ -1061,7 +1533,7 @@ fn lower_function(
                 IrOp::Branch { target, when_true } => {
                     let condition = use_pair(builder, stack[depth - 1]);
                     depth -= 1;
-                    let truthy = emit_truthy(builder, condition, retry);
+                    let truthy = emit_truthy(builder, condition);
                     let taken = if when_true {
                         truthy
                     } else {
@@ -1079,8 +1551,6 @@ fn lower_function(
                 }
                 IrOp::Return => {
                     let result = use_pair(builder, stack[depth - 1]);
-                    let returnable = emit_returnable_tag(builder, result.tag);
-                    guard(builder, returnable, retry);
                     store_jsvalue(builder, frame, layout.result, result, layout);
                     emit_exit(
                         builder,
@@ -1113,13 +1583,7 @@ fn lower_function(
             if let Some(next) = ir.blocks.get(block_index + 1) {
                 builder.ins().jump(blocks[&next.start_pc], &[]);
             } else {
-                emit_exit(
-                    builder,
-                    sret,
-                    qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
-                    None,
-                    pointer_type,
-                );
+                return Err(CompileFailure::InvalidArtifact);
             }
         }
     }
@@ -1133,6 +1597,8 @@ fn lower_function(
         None,
         pointer_type,
     );
+    builder.switch_to_block(invariant_trap);
+    builder.ins().trap(TrapCode::unwrap_user(1));
     Ok(())
 }
 
@@ -1200,6 +1666,42 @@ fn guard_non_refcounted(builder: &mut FunctionBuilder<'_>, value: Pair, retry: B
     let refcounted = builder.ins().band(negative, at_or_after_first);
     let immediate = builder.ins().bxor_imm(refcounted, 1);
     guard(builder, immediate, retry);
+}
+
+fn emit_entry_domain_guards(
+    builder: &mut FunctionBuilder<'_>,
+    arguments: &[PairVars],
+    locals: &[PairVars],
+    analysis: &EntryAnalysis,
+    retry: Block,
+) {
+    for (root, requirements) in &analysis.requirements {
+        debug_assert!(
+            !requirements.uninitialized
+                || !(requirements.numeric || requirements.immediate || requirements.initialized),
+            "entry-domain analysis rejected conflicting requirements"
+        );
+        let variables = match *root {
+            EntryRoot::Argument(index) => arguments[usize::from(index)],
+            EntryRoot::Local(index) => locals[usize::from(index)],
+        };
+        let value = use_pair(builder, variables);
+        let condition = if requirements.uninitialized {
+            tag_is(builder, value.tag, qjs::JS_TAG_UNINITIALIZED)
+        } else if requirements.numeric {
+            emit_numeric_tag(builder, value.tag)
+        } else if requirements.immediate {
+            emit_returnable_tag(builder, value.tag)
+        } else {
+            debug_assert!(requirements.initialized);
+            builder.ins().icmp_imm(
+                IntCC::NotEqual,
+                value.tag,
+                i64::from(qjs::JS_TAG_UNINITIALIZED),
+            )
+        };
+        guard(builder, condition, retry);
+    }
 }
 
 fn guard_live_stack_non_refcounted(
@@ -1317,7 +1819,7 @@ fn emit_exit(
 fn emit_frame_state_marker(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
-    retry: Block,
+    invariant_trap: Block,
     state: FrameStateId,
 ) -> Result<(), CompileFailure> {
     let frame_is_non_null = builder.ins().icmp_imm(IntCC::NotEqual, frame, 0);
@@ -1329,7 +1831,7 @@ fn emit_frame_state_marker(
     // range without mutating the execution frame.
     builder
         .ins()
-        .brif(frame_is_non_null, continuation, &[], retry, &[]);
+        .brif(frame_is_non_null, continuation, &[], invariant_trap, &[]);
     builder.set_srcloc(SourceLoc::default());
     builder.seal_block(continuation);
     builder.switch_to_block(continuation);
@@ -1406,11 +1908,14 @@ fn emit_returnable_tag(builder: &mut FunctionBuilder<'_>, tag: Value) -> Value {
     builder.ins().bor(result, float)
 }
 
-fn emit_numeric(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) -> (Value, Value) {
+fn emit_numeric_tag(builder: &mut FunctionBuilder<'_>, tag: Value) -> Value {
+    let is_int = tag_is(builder, tag, qjs::JS_TAG_INT);
+    let is_float = tag_is(builder, tag, qjs::JS_TAG_FLOAT64);
+    builder.ins().bor(is_int, is_float)
+}
+
+fn emit_numeric(builder: &mut FunctionBuilder<'_>, value: Pair) -> (Value, Value) {
     let is_int = tag_is(builder, value.tag, qjs::JS_TAG_INT);
-    let is_float = tag_is(builder, value.tag, qjs::JS_TAG_FLOAT64);
-    let supported = builder.ins().bor(is_int, is_float);
-    guard(builder, supported, retry);
     let int = builder.ins().ireduce(types::I32, value.payload);
     let int_float = builder.ins().fcvt_from_sint(types::F64, int);
     let raw_float = builder
@@ -1429,17 +1934,11 @@ fn pair_from_bool(builder: &mut FunctionBuilder<'_>, value: Value) -> Pair {
     }
 }
 
-fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) -> Value {
-    let is_int = tag_is(builder, value.tag, qjs::JS_TAG_INT);
-    let is_bool = tag_is(builder, value.tag, qjs::JS_TAG_BOOL);
+fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair) -> Value {
     let is_null = tag_is(builder, value.tag, qjs::JS_TAG_NULL);
     let is_undefined = tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
     let is_float = tag_is(builder, value.tag, qjs::JS_TAG_FLOAT64);
-    let scalar = builder.ins().bor(is_int, is_bool);
     let empty = builder.ins().bor(is_null, is_undefined);
-    let supported = builder.ins().bor(scalar, empty);
-    let supported = builder.ins().bor(supported, is_float);
-    guard(builder, supported, retry);
     let integer_truthy = builder.ins().icmp_imm(IntCC::NotEqual, value.payload, 0);
     let float = builder
         .ins()
@@ -1451,20 +1950,15 @@ fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) -> 
     builder.ins().select(empty, false_value, scalar_truthy)
 }
 
-fn emit_unary(
-    builder: &mut FunctionBuilder<'_>,
-    value: Pair,
-    operation: UnaryOp,
-    retry: Block,
-) -> Pair {
+fn emit_unary(builder: &mut FunctionBuilder<'_>, value: Pair, operation: UnaryOp) -> Pair {
     match operation {
         UnaryOp::LogicalNot => {
-            let truthy = emit_truthy(builder, value, retry);
+            let truthy = emit_truthy(builder, value);
             let inverse = builder.ins().bxor_imm(truthy, 1);
             pair_from_bool(builder, inverse)
         }
         UnaryOp::BitNot => {
-            let int = emit_to_i32(builder, value, retry);
+            let int = emit_to_i32(builder, value);
             let int = builder.ins().bnot(int);
             Pair {
                 payload: builder.ins().sextend(types::I64, int),
@@ -1472,11 +1966,11 @@ fn emit_unary(
             }
         }
         UnaryOp::Plus => {
-            let _ = emit_numeric(builder, value, retry);
+            let _ = emit_numeric(builder, value);
             value
         }
         UnaryOp::Neg | UnaryOp::Increment | UnaryOp::Decrement => {
-            let (is_int, number) = emit_numeric(builder, value, retry);
+            let (is_int, number) = emit_numeric(builder, value);
             let int = builder.ins().ireduce(types::I32, value.payload);
             let (int_result, overflow) = match operation {
                 UnaryOp::Neg => {
@@ -1521,7 +2015,6 @@ fn emit_binary(
     left: Pair,
     right: Pair,
     operation: BinaryOp,
-    retry: Block,
 ) -> Pair {
     match operation {
         BinaryOp::BitAnd
@@ -1529,9 +2022,7 @@ fn emit_binary(
         | BinaryOp::BitXor
         | BinaryOp::ShiftLeft
         | BinaryOp::ShiftRight
-        | BinaryOp::ShiftRightUnsigned => {
-            emit_integer_binary(builder, left, right, operation, retry)
-        }
+        | BinaryOp::ShiftRightUnsigned => emit_integer_binary(builder, left, right, operation),
         BinaryOp::LessThan
         | BinaryOp::LessThanOrEqual
         | BinaryOp::GreaterThan
@@ -1539,8 +2030,8 @@ fn emit_binary(
         | BinaryOp::Equal
         | BinaryOp::NotEqual
         | BinaryOp::StrictEqual
-        | BinaryOp::StrictNotEqual => emit_comparison(builder, left, right, operation, retry),
-        _ => emit_arithmetic(builder, left, right, operation, retry),
+        | BinaryOp::StrictNotEqual => emit_comparison(builder, left, right, operation),
+        _ => emit_arithmetic(builder, left, right, operation),
     }
 }
 
@@ -1549,10 +2040,9 @@ fn emit_integer_binary(
     left: Pair,
     right: Pair,
     operation: BinaryOp,
-    retry: Block,
 ) -> Pair {
-    let left = emit_to_i32(builder, left, retry);
-    let right = emit_to_i32(builder, right, retry);
+    let left = emit_to_i32(builder, left);
+    let right = emit_to_i32(builder, right);
     let shift = builder.ins().band_imm(right, 31);
     let result = match operation {
         BinaryOp::BitAnd => builder.ins().band(left, right),
@@ -1593,15 +2083,10 @@ fn emit_arithmetic(
     left: Pair,
     right: Pair,
     operation: BinaryOp,
-    retry: Block,
 ) -> Pair {
-    if operation == BinaryOp::Mod {
-        let unsupported = builder.ins().iconst(types::I8, 0);
-        guard(builder, unsupported, retry);
-        return constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
-    }
-    let (left_int, left_float) = emit_numeric(builder, left, retry);
-    let (right_int, right_float) = emit_numeric(builder, right, retry);
+    debug_assert_ne!(operation, BinaryOp::Mod);
+    let (left_int, left_float) = emit_numeric(builder, left);
+    let (right_int, right_float) = emit_numeric(builder, right);
     let left_i32 = builder.ins().ireduce(types::I32, left.payload);
     let right_i32 = builder.ins().ireduce(types::I32, right.payload);
     if operation == BinaryOp::Div {
@@ -1669,8 +2154,8 @@ fn pair_from_number(builder: &mut FunctionBuilder<'_>, value: Value) -> Pair {
     }
 }
 
-fn emit_to_i32(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) -> Value {
-    let (is_int, number) = emit_numeric(builder, value, retry);
+fn emit_to_i32(builder: &mut FunctionBuilder<'_>, value: Pair) -> Value {
+    let (is_int, number) = emit_numeric(builder, value);
     let direct = builder.ins().ireduce(types::I32, value.payload);
     let modulus = builder.ins().f64const(4_294_967_296.0);
     let quotient = builder.ins().fdiv(number, modulus);
@@ -1687,10 +2172,9 @@ fn emit_comparison(
     left: Pair,
     right: Pair,
     operation: BinaryOp,
-    retry: Block,
 ) -> Pair {
-    let (_, left) = emit_numeric(builder, left, retry);
-    let (_, right) = emit_numeric(builder, right, retry);
+    let (_, left) = emit_numeric(builder, left);
+    let (_, right) = emit_numeric(builder, right);
     let condition = match operation {
         BinaryOp::LessThan => builder.ins().fcmp(FloatCC::LessThan, left, right),
         BinaryOp::LessThanOrEqual => builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right),
@@ -1713,7 +2197,19 @@ fn apply_stack_operation(
     depth: &mut usize,
     operation: StackOp,
 ) {
-    let (take, order): (usize, &[usize]) = match operation {
+    let (take, order) = stack_operation_order(operation);
+    let start = *depth - take;
+    let values: Vec<Pair> = (0..take)
+        .map(|index| use_pair(builder, stack[start + index]))
+        .collect();
+    for (destination, &source) in order.iter().enumerate() {
+        define_pair(builder, stack[start + destination], values[source]);
+    }
+    *depth = start + order.len();
+}
+
+fn stack_operation_order(operation: StackOp) -> (usize, &'static [usize]) {
+    match operation {
         StackOp::Nip => (2, &[1]),
         StackOp::Nip1 => (3, &[1, 2]),
         StackOp::Dup => (1, &[0, 0]),
@@ -1732,13 +2228,259 @@ fn apply_stack_operation(
         StackOp::Rot3Right => (3, &[2, 0, 1]),
         StackOp::Rot4Left => (4, &[1, 2, 3, 0]),
         StackOp::Rot5Left => (5, &[1, 2, 3, 4, 0]),
-    };
-    let start = *depth - take;
-    let values: Vec<Pair> = (0..take)
-        .map(|index| use_pair(builder, stack[start + index]))
-        .collect();
-    for (destination, &source) in order.iter().enumerate() {
-        define_pair(builder, stack[start + destination], values[source]);
     }
-    *depth = start + order.len();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{FrameStateTable, IrBlock, IrInstruction};
+
+    fn instruction(pc: u32, op: IrOp) -> IrInstruction {
+        IrInstruction {
+            pc,
+            frame_state: None,
+            op,
+        }
+    }
+
+    fn numeric_push() -> IrInstruction {
+        instruction(0, IrOp::Push(TaggedValue::new(1, qjs::JS_TAG_INT as i64)))
+    }
+
+    fn linear_ir(mut prefix: Vec<IrInstruction>, operation: IrOp) -> BaselineIr {
+        prefix.push(instruction(0, operation));
+        if !matches!(prefix.last().map(|item| &item.op), Some(IrOp::Return)) {
+            prefix.push(instruction(1, IrOp::ReturnUndefined));
+        }
+        BaselineIr {
+            blocks: vec![IrBlock {
+                start_pc: 0,
+                stack_depth: 0,
+                instructions: prefix,
+            }],
+            frame_states: FrameStateTable::default(),
+            max_stack_depth: 16,
+            argument_count: 4,
+            local_count: 4,
+        }
+    }
+
+    fn ir_op_variant(operation: &IrOp) -> &'static str {
+        match operation {
+            IrOp::Poll { .. } => "poll",
+            IrOp::OsrLabel { .. } => "osr_label",
+            IrOp::Nop => "nop",
+            IrOp::Push(_) => "push",
+            IrOp::GetArgument(_) => "get_argument",
+            IrOp::GetLocal(_) => "get_local",
+            IrOp::GetLocalChecked(_) => "get_local_checked",
+            IrOp::GetLocalPair => "get_local_pair",
+            IrOp::PutArgument { .. } => "put_argument",
+            IrOp::PutLocal { .. } => "put_local",
+            IrOp::PutLocalChecked { .. } => "put_local_checked",
+            IrOp::SetLocalUninitialized(_) => "set_local_uninitialized",
+            IrOp::Drop => "drop",
+            IrOp::Stack(_) => "stack",
+            IrOp::Unary(_) => "unary",
+            IrOp::PostUnary(_) => "post_unary",
+            IrOp::LocalUnary { .. } => "local_unary",
+            IrOp::AddLocal(_) => "add_local",
+            IrOp::Binary(_) => "binary",
+            IrOp::Jump(_) => "jump",
+            IrOp::Branch { .. } => "branch",
+            IrOp::Return => "return",
+            IrOp::ReturnUndefined => "return_undefined",
+        }
+    }
+
+    #[test]
+    fn entry_domain_analysis_exhaustively_handles_every_ir_op_variant() {
+        let state = FrameStateId::from_index(0).unwrap();
+        let mut cases = vec![
+            linear_ir(Vec::new(), IrOp::Poll { state }),
+            linear_ir(Vec::new(), IrOp::OsrLabel { state }),
+            linear_ir(Vec::new(), IrOp::Nop),
+            linear_ir(
+                Vec::new(),
+                IrOp::Push(TaggedValue::new(1, qjs::JS_TAG_INT as i64)),
+            ),
+            linear_ir(Vec::new(), IrOp::GetArgument(0)),
+            linear_ir(Vec::new(), IrOp::GetLocal(0)),
+            linear_ir(Vec::new(), IrOp::GetLocalChecked(0)),
+            linear_ir(Vec::new(), IrOp::GetLocalPair),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutArgument {
+                    index: 0,
+                    keep: false,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutLocal {
+                    index: 0,
+                    keep: false,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutLocalChecked {
+                    index: 0,
+                    initialize: true,
+                },
+            ),
+            linear_ir(Vec::new(), IrOp::SetLocalUninitialized(0)),
+            linear_ir(vec![numeric_push()], IrOp::Drop),
+            linear_ir(vec![numeric_push()], IrOp::Unary(UnaryOp::Plus)),
+            linear_ir(vec![numeric_push()], IrOp::PostUnary(UnaryOp::Increment)),
+            linear_ir(
+                Vec::new(),
+                IrOp::LocalUnary {
+                    index: 0,
+                    op: UnaryOp::Increment,
+                },
+            ),
+            linear_ir(vec![numeric_push()], IrOp::AddLocal(0)),
+            linear_ir(vec![numeric_push()], IrOp::Return),
+            linear_ir(Vec::new(), IrOp::ReturnUndefined),
+        ];
+        for operation in [
+            StackOp::Nip,
+            StackOp::Nip1,
+            StackOp::Dup,
+            StackOp::Dup1,
+            StackOp::Dup2,
+            StackOp::Dup3,
+            StackOp::Insert2,
+            StackOp::Insert3,
+            StackOp::Insert4,
+            StackOp::Perm3,
+            StackOp::Perm4,
+            StackOp::Perm5,
+            StackOp::Swap,
+            StackOp::Swap2,
+            StackOp::Rot3Left,
+            StackOp::Rot3Right,
+            StackOp::Rot4Left,
+            StackOp::Rot5Left,
+        ] {
+            let (take, _) = stack_operation_order(operation);
+            cases.push(linear_ir(
+                (0..take).map(|_| numeric_push()).collect(),
+                IrOp::Stack(operation),
+            ));
+        }
+        for operation in [
+            UnaryOp::Plus,
+            UnaryOp::Neg,
+            UnaryOp::Increment,
+            UnaryOp::Decrement,
+            UnaryOp::BitNot,
+            UnaryOp::LogicalNot,
+        ] {
+            cases.push(linear_ir(vec![numeric_push()], IrOp::Unary(operation)));
+        }
+        for operation in [
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::Div,
+            BinaryOp::Mod,
+            BinaryOp::BitAnd,
+            BinaryOp::BitOr,
+            BinaryOp::BitXor,
+            BinaryOp::ShiftLeft,
+            BinaryOp::ShiftRight,
+            BinaryOp::ShiftRightUnsigned,
+            BinaryOp::LessThan,
+            BinaryOp::LessThanOrEqual,
+            BinaryOp::GreaterThan,
+            BinaryOp::GreaterThanOrEqual,
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::StrictEqual,
+            BinaryOp::StrictNotEqual,
+        ] {
+            cases.push(linear_ir(
+                vec![numeric_push(), numeric_push()],
+                IrOp::Binary(operation),
+            ));
+        }
+        cases.push(BaselineIr {
+            blocks: vec![
+                IrBlock {
+                    start_pc: 0,
+                    stack_depth: 0,
+                    instructions: vec![instruction(0, IrOp::Jump(1))],
+                },
+                IrBlock {
+                    start_pc: 1,
+                    stack_depth: 0,
+                    instructions: vec![instruction(1, IrOp::ReturnUndefined)],
+                },
+            ],
+            frame_states: FrameStateTable::default(),
+            max_stack_depth: 0,
+            argument_count: 0,
+            local_count: 0,
+        });
+        cases.push(BaselineIr {
+            blocks: vec![
+                IrBlock {
+                    start_pc: 0,
+                    stack_depth: 0,
+                    instructions: vec![
+                        numeric_push(),
+                        instruction(
+                            0,
+                            IrOp::Branch {
+                                target: 2,
+                                when_true: true,
+                            },
+                        ),
+                    ],
+                },
+                IrBlock {
+                    start_pc: 1,
+                    stack_depth: 0,
+                    instructions: vec![instruction(1, IrOp::ReturnUndefined)],
+                },
+                IrBlock {
+                    start_pc: 2,
+                    stack_depth: 0,
+                    instructions: vec![instruction(2, IrOp::ReturnUndefined)],
+                },
+            ],
+            frame_states: FrameStateTable::default(),
+            max_stack_depth: 1,
+            argument_count: 0,
+            local_count: 0,
+        });
+
+        let mut seen = BTreeSet::new();
+        for ir in cases {
+            for operation in ir
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .map(|instruction| &instruction.op)
+            {
+                seen.insert(ir_op_variant(operation));
+            }
+            let analysis = analyze_entry_domains(&ir).expect("synthetic IR is structurally valid");
+            let contains_mod = ir.blocks.iter().any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| matches!(instruction.op, IrOp::Binary(BinaryOp::Mod)))
+            });
+            assert_eq!(analysis.retry_before_entry, contains_mod, "{ir:?}");
+        }
+        assert_eq!(
+            seen.len(),
+            23,
+            "every IrOp variant is represented: {seen:?}"
+        );
+    }
 }

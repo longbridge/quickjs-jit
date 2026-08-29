@@ -36,6 +36,78 @@ fn compile(
     BaselineCompiler::host().compile(&function).unwrap()
 }
 
+fn assert_deep_retry(
+    label: &str,
+    executable: &rquickjs_jit::compiler::baseline::PublishedBaselineCode,
+    mut frame: SyntheticFrame,
+) {
+    let before = frame.snapshot();
+
+    let outcome = unsafe { frame.call(executable) };
+
+    assert_eq!(
+        outcome.exit.kind,
+        qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+        "{label}"
+    );
+    assert_eq!(frame.snapshot(), before, "{label}");
+}
+
+fn assert_retry_predecessors_precede_the_first_poll(
+    label: &str,
+    code: &rquickjs_jit::compiler::baseline::RelocatableCode,
+) {
+    let lines: Vec<_> = code.clif().lines().collect();
+    let mut current_block = None;
+    let mut retry_blocks = BTreeSet::new();
+    let mut first_poll = None;
+
+    for (line_index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("block") && trimmed.ends_with(':') {
+            current_block = trimmed.split(['(', ':']).next().map(str::to_owned);
+        }
+        if trimmed.contains("call_indirect") && first_poll.is_none() {
+            first_poll = Some(line_index);
+        }
+        if trimmed.contains(&format!(
+            "iconst.i32 {}",
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        )) {
+            retry_blocks.insert(
+                current_block
+                    .clone()
+                    .unwrap_or_else(|| panic!("{label}: RETRY outside a block: {trimmed}")),
+            );
+        }
+    }
+
+    assert_eq!(retry_blocks.len(), 1, "{label}: {}", code.clif());
+    let retry_block = retry_blocks.first().unwrap();
+    if let Some(first_poll) = first_poll {
+        for (line_index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let targets_retry = trimmed
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|token| token == retry_block);
+            if trimmed.starts_with("brif") && targets_retry {
+                assert!(
+                    line_index < first_poll,
+                    "{label}: RETRY predecessor after first poll\n{}",
+                    code.clif()
+                );
+            }
+        }
+    } else {
+        assert!(code.frame_states().is_empty(), "{label}: entry RETRY stub");
+        assert!(
+            !code.clif().lines().any(|line| line.contains(" load")),
+            "{label}: entry RETRY stub read the frame\n{}",
+            code.clif()
+        );
+    }
+}
+
 #[test]
 fn machine_entry_executes_the_exact_aggregate_return_abi() {
     let executable = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
@@ -266,6 +338,167 @@ fn unsupported_dynamic_add_retries_before_mutating_the_frame() {
         qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
     );
     assert_eq!(frame.snapshot(), before);
+}
+
+#[test]
+fn every_runtime_domain_failure_retries_before_poll_state_or_buffers_change() {
+    let undefined_plus = compile(
+        vec![
+            named_opcode("undefined"),
+            named_opcode("plus"),
+            opcode::RETURN,
+        ],
+        0,
+        0,
+    )
+    .publish()
+    .unwrap();
+    assert_deep_retry(
+        "undefined unary plus",
+        &undefined_plus,
+        SyntheticFrame::new(&[], 0, 1),
+    );
+
+    let null_add = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("push_1"),
+            opcode::ADD,
+            opcode::RETURN,
+        ],
+        1,
+        0,
+    )
+    .publish()
+    .unwrap();
+    assert_deep_retry(
+        "null arithmetic",
+        &null_add,
+        SyntheticFrame::new(&[JSValueRepr::new(0, qjs::JS_TAG_NULL as i64)], 0, 2),
+    );
+
+    let mut checked_local_bytecode = vec![named_opcode("get_loc_check")];
+    checked_local_bytecode.extend_from_slice(&0_u16.to_le_bytes());
+    checked_local_bytecode.push(opcode::RETURN);
+    let checked_local = compile(checked_local_bytecode, 0, 1).publish().unwrap();
+    let mut uninitialized = SyntheticFrame::new(&[], 1, 1);
+    uninitialized.set_local(
+        0,
+        JSValueRepr::new(0xfeed_face_cafe_beef, qjs::JS_TAG_UNINITIALIZED as i64),
+    );
+    assert_deep_retry("uninitialized checked local", &checked_local, uninitialized);
+
+    let mut explicitly_uninitialized_bytecode = vec![named_opcode("set_loc_uninitialized")];
+    explicitly_uninitialized_bytecode.extend_from_slice(&0_u16.to_le_bytes());
+    explicitly_uninitialized_bytecode.push(named_opcode("get_loc_check"));
+    explicitly_uninitialized_bytecode.extend_from_slice(&0_u16.to_le_bytes());
+    explicitly_uninitialized_bytecode.push(opcode::RETURN);
+    let explicitly_uninitialized = compile(explicitly_uninitialized_bytecode, 0, 1)
+        .publish()
+        .unwrap();
+    assert_deep_retry(
+        "local explicitly becomes uninitialized",
+        &explicitly_uninitialized,
+        SyntheticFrame::new(&[], 1, 1),
+    );
+
+    let refcount_guard = compile(vec![opcode::RETURN_UNDEF], 1, 0).publish().unwrap();
+    for (name, tag) in [
+        ("object table input", qjs::JS_TAG_OBJECT),
+        ("string input", qjs::JS_TAG_STRING),
+        ("symbol input", qjs::JS_TAG_SYMBOL),
+        ("bigint input", qjs::JS_TAG_BIG_INT),
+    ] {
+        assert_deep_retry(
+            name,
+            &refcount_guard,
+            SyntheticFrame::new(&[JSValueRepr::new(0x1000, tag as i64)], 0, 0),
+        );
+    }
+}
+
+#[test]
+fn every_generated_retry_predecessor_dominates_the_first_poll() {
+    let return_undefined = compile(vec![opcode::RETURN_UNDEF], 1, 1);
+    assert_retry_predecessors_precede_the_first_poll("frame guards", &return_undefined);
+
+    let numeric = compile(
+        vec![
+            named_opcode("get_arg0"),
+            named_opcode("push_1"),
+            opcode::ADD,
+            opcode::RETURN,
+        ],
+        1,
+        0,
+    );
+    assert_retry_predecessors_precede_the_first_poll("numeric guards", &numeric);
+
+    let static_failure = compile(
+        vec![
+            named_opcode("undefined"),
+            named_opcode("plus"),
+            opcode::RETURN,
+        ],
+        0,
+        0,
+    );
+    assert_retry_predecessors_precede_the_first_poll("entry retry stub", &static_failure);
+}
+
+#[test]
+fn supported_immediate_truthiness_stays_native_and_exact() {
+    let fixture =
+        SnapshotFixture::compile("(function truthy(value) { if (value) return 1; return 0; })");
+    let verified = fixture
+        .snapshot()
+        .verify(VerifyLimits::default())
+        .expect("captured truthiness function verifies");
+    let executable = BaselineCompiler::host()
+        .compile(&verified)
+        .expect("supported immediate truthiness compiles")
+        .publish()
+        .unwrap();
+
+    for (value, expected) in [
+        (JSValueRepr::int32(0), 0),
+        (JSValueRepr::int32(-7), 1),
+        (JSValueRepr::new(0, qjs::JS_TAG_BOOL as i64), 0),
+        (JSValueRepr::new(1, qjs::JS_TAG_BOOL as i64), 1),
+        (JSValueRepr::new(0, qjs::JS_TAG_NULL as i64), 0),
+        (JSValueRepr::undefined(), 0),
+        (JSValueRepr::new(0, qjs::JS_TAG_SHORT_BIG_INT as i64), 0),
+        (JSValueRepr::new(7, qjs::JS_TAG_SHORT_BIG_INT as i64), 1),
+        (JSValueRepr::float64(0.0), 0),
+        (JSValueRepr::float64(-0.0), 0),
+        (JSValueRepr::float64(f64::NAN), 0),
+        (JSValueRepr::float64(1.5), 1),
+    ] {
+        let mut frame = SyntheticFrame::new(
+            &[value],
+            verified.snapshot().local_count() as usize,
+            verified.snapshot().stack_size() as usize,
+        );
+
+        let outcome = unsafe { frame.call(&executable) };
+
+        assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        assert_eq!(outcome.result, JSValueRepr::int32(expected));
+    }
+}
+
+#[test]
+fn property_bytecode_is_rejected_before_publication() {
+    let fixture = SnapshotFixture::compile("(function read(object) { return object.value; })");
+    let verified = fixture
+        .snapshot()
+        .verify(VerifyLimits::default())
+        .expect("captured property function verifies");
+
+    assert!(matches!(
+        BaselineCompiler::host().compile(&verified),
+        Err(CompileFailure::UnsupportedOpcode)
+    ));
 }
 
 #[test]
