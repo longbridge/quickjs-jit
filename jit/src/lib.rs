@@ -10,6 +10,7 @@ pub mod compiler;
 mod config;
 mod error;
 mod metrics;
+pub mod platform;
 pub mod runtime;
 
 #[cfg(feature = "test-support")]
