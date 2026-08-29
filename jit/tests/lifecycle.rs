@@ -307,6 +307,69 @@ fn active_optimizing_code_retains_baseline_after_invalidation() {
     assert!(!cache.contains(baseline));
 }
 
+#[test]
+fn bounded_reclamation_revisits_tier1_after_removing_tier2() {
+    let mut cache = CodeCache::new(2);
+    let function = FunctionKey::new(1, 1);
+    let baseline = artifact_key(function.id, function.generation, Tier::Baseline);
+    let optimizing = baseline.with_tier(Tier::Optimizing);
+    cache.insert(artifact_with_code(baseline, 1)).unwrap();
+    cache.insert(artifact_with_code(optimizing, 1)).unwrap();
+    let pin = cache.pin(optimizing).unwrap();
+    assert_eq!(cache.invalidate(function), 0);
+    drop(pin);
+
+    let first = cache.poll_reclamation_with_budget(1);
+    assert_eq!(first.reclaimed(), 1);
+    assert!(first.may_have_remaining());
+    assert!(!cache.contains(optimizing));
+    assert!(cache.contains(baseline));
+
+    let second = cache.poll_reclamation_with_budget(1);
+    assert_eq!(second.reclaimed(), 1);
+    assert!(!second.may_have_remaining());
+    assert!(!cache.contains(baseline));
+}
+
+#[test]
+fn dependency_release_is_reconsidered_during_transactional_multi_eviction() {
+    let mut cache = CodeCache::new(2);
+    let baseline = artifact_key(1, 1, Tier::Baseline);
+    let optimizing = baseline.with_tier(Tier::Optimizing);
+    let unrelated = artifact_key(2, 1, Tier::Baseline);
+    cache.insert(artifact_with_code(baseline, 1)).unwrap();
+    cache.insert(artifact_with_code(optimizing, 1)).unwrap();
+
+    let insertion = cache.insert(artifact_with_code(unrelated, 2)).unwrap();
+
+    assert_eq!(insertion.evictions(), &[optimizing, baseline]);
+    assert!(!cache.contains(baseline));
+    assert!(!cache.contains(optimizing));
+    assert!(cache.contains(unrelated));
+    assert_eq!(cache.charged_bytes(), 2);
+}
+
+#[test]
+fn failed_dependency_aware_eviction_plan_is_transactional() {
+    let mut cache = CodeCache::new(2);
+    let baseline = artifact_key(1, 1, Tier::Baseline);
+    let optimizing = baseline.with_tier(Tier::Optimizing);
+    let unrelated = artifact_key(2, 1, Tier::Baseline);
+    cache.insert(artifact_with_code(baseline, 1)).unwrap();
+    cache.insert(artifact_with_code(optimizing, 1)).unwrap();
+    let baseline_pin = cache.pin(baseline).unwrap();
+
+    assert_eq!(
+        cache.insert(artifact_with_code(unrelated, 2)).unwrap_err(),
+        rquickjs_jit::code_cache::CacheError::AllArtifactsPinned
+    );
+    assert!(cache.contains(baseline));
+    assert!(cache.contains(optimizing));
+    assert!(!cache.contains(unrelated));
+    assert_eq!(cache.charged_bytes(), 2);
+    assert_eq!(baseline_pin.key(), baseline);
+}
+
 fn successful_completion(request: &rquickjs_jit::runtime::CompileRequest) -> CompileCompletion {
     CompileCompletion {
         key: request.key(),
@@ -362,7 +425,9 @@ fn completion_channel_is_bounded_and_drained_only_by_coordinator() {
         coordinator.state(first.key()),
         CompileState::Compiling(Tier::Baseline)
     );
-    assert_eq!(coordinator.drain_completions().drained(), 1);
+    let poll = coordinator.drain_completions();
+    assert_eq!(poll.drained(), 1);
+    assert!(!poll.may_have_remaining());
     assert_eq!(
         coordinator.state(first.key()),
         CompileState::Installed(Tier::Baseline)
@@ -391,7 +456,7 @@ fn completion_drain_obeys_exact_budget_and_reports_remaining_work() {
 
     let first_poll = coordinator.drain_completions_with_budget(2);
     assert_eq!(first_poll.drained(), 2);
-    assert_eq!(first_poll.remaining(), 1);
+    assert!(first_poll.may_have_remaining());
     assert_eq!(
         coordinator.state(requests[2].key()),
         CompileState::Compiling(Tier::Baseline)
@@ -399,11 +464,49 @@ fn completion_drain_obeys_exact_budget_and_reports_remaining_work() {
 
     let second_poll = coordinator.drain_completions_with_budget(2);
     assert_eq!(second_poll.drained(), 1);
-    assert_eq!(second_poll.remaining(), 0);
+    assert!(!second_poll.may_have_remaining());
     assert_eq!(
         coordinator.state(requests[2].key()),
         CompileState::Installed(Tier::Baseline)
     );
+}
+
+#[test]
+fn runtime_poll_shares_budget_between_completions_and_reclamation() {
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 4);
+    for id in 1..=3 {
+        let key = FunctionKey::new(id, 1);
+        coordinator
+            .queue(key, Tier::Baseline, coordinator_snapshot())
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        coordinator.complete(successful_completion(&request));
+        coordinator.retire(key);
+    }
+    assert_eq!(coordinator.cache_len(), 3);
+
+    let live = FunctionKey::new(4, 1);
+    coordinator
+        .queue(live, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    coordinator
+        .completion_sender()
+        .try_send(successful_completion(&request))
+        .unwrap();
+
+    let first_poll = coordinator.drain_completions_with_budget(2);
+    assert_eq!(first_poll.drained(), 0);
+    assert_eq!(first_poll.reclaimed(), 2);
+    assert!(first_poll.may_have_remaining());
+    assert_eq!(coordinator.cache_len(), 1);
+
+    let second_poll = coordinator.drain_completions_with_budget(2);
+    assert_eq!(second_poll.drained(), 1);
+    assert_eq!(second_poll.reclaimed(), 1);
+    assert!(!second_poll.may_have_remaining());
+    assert_eq!(coordinator.cache_len(), 1);
+    assert!(coordinator.pin(live, Tier::Baseline).is_some());
 }
 
 #[test]
@@ -576,6 +679,32 @@ fn advancing_retirement_watermark_unpublishes_every_lower_generation() {
 
     assert_eq!(coordinator.state(installed), CompileState::Retired);
     assert!(coordinator.pin(installed, Tier::Baseline).is_none());
+}
+
+#[test]
+fn full_new_generation_admission_still_retires_older_in_flight_work() {
+    let mut coordinator = Coordinator::with_limits(1, 1, 4, 4);
+    let old = FunctionKey::new(1, 1);
+    let new = FunctionKey::new(1, 2);
+    let blocker = FunctionKey::new(2, 1);
+    coordinator
+        .queue(old, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let old_request = coordinator.begin_next().unwrap();
+    coordinator
+        .queue(blocker, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+
+    assert_eq!(
+        coordinator.queue(new, Tier::Baseline, coordinator_snapshot()),
+        Err(QueueError::Full)
+    );
+    assert_eq!(coordinator.state(old), CompileState::Retired);
+
+    coordinator.complete(successful_completion(&old_request));
+    assert!(coordinator.pin(old, Tier::Baseline).is_none());
+    assert_eq!(coordinator.metrics().stale_results, 1);
+    assert_eq!(coordinator.metrics().installed, 0);
 }
 
 #[test]
@@ -910,20 +1039,14 @@ fn released_invalidated_artifact_is_reclaimed_before_live_eviction() {
     let retired = artifact_key(1, 1, Tier::Baseline);
     let live = artifact_key(2, 1, Tier::Baseline);
     let newcomer = artifact_key(3, 1, Tier::Baseline);
-    cache.insert(CompiledArtifact::empty(retired)).unwrap();
-    cache.insert(CompiledArtifact::empty(live)).unwrap();
+    cache.insert(artifact_with_code(retired, 1)).unwrap();
+    cache.insert(artifact_with_code(live, 1)).unwrap();
     cache.record_benefit(retired, 100).unwrap();
     let pin = cache.pin(retired).unwrap();
     assert_eq!(cache.invalidate(FunctionKey::new(1, 1)), 0);
 
     drop(pin);
-    assert_eq!(
-        cache
-            .insert(CompiledArtifact::empty(newcomer))
-            .unwrap()
-            .evicted(),
-        None
-    );
+    cache.insert(artifact_with_code(newcomer, 1)).unwrap();
     assert!(!cache.contains(retired));
     assert!(cache.contains(live));
     assert!(cache.contains(newcomer));

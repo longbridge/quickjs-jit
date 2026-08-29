@@ -217,7 +217,8 @@ pub const DEFAULT_COMPLETION_DRAIN_BUDGET: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompletionDrain {
     drained: usize,
-    remaining: usize,
+    reclaimed: usize,
+    may_have_remaining: bool,
 }
 
 impl CompletionDrain {
@@ -225,8 +226,13 @@ impl CompletionDrain {
         self.drained
     }
 
-    pub const fn remaining(self) -> usize {
-        self.remaining
+    pub const fn reclaimed(self) -> usize {
+        self.reclaimed
+    }
+
+    /// Conservatively reports whether completion or reclamation work may remain.
+    pub const fn may_have_remaining(self) -> bool {
+        self.may_have_remaining
     }
 }
 
@@ -436,10 +442,6 @@ impl Coordinator {
             CompileState::Blacklisted => return Err(QueueError::Blacklisted),
             _ => return Err(QueueError::NotReady),
         }
-        if self.queue.len() >= self.max_queue_len {
-            self.metrics.queue_saturated = self.metrics.queue_saturated.saturating_add(1);
-            return Err(QueueError::Full);
-        }
         let source = snapshot.snapshot();
         if (source.function_id() != 0 && source.function_id() != key.id)
             || (source.generation() != 0 && source.generation() != key.generation)
@@ -465,6 +467,10 @@ impl Coordinator {
         {
             self.retire_older_generations(key);
             self.current_generations.insert(key.id, key.generation);
+        }
+        if self.queue.len() >= self.max_queue_len {
+            self.metrics.queue_saturated = self.metrics.queue_saturated.saturating_add(1);
+            return Err(QueueError::Full);
         }
         let Some(next_attempt_id) = self.next_attempt_id.checked_add(1) else {
             return Err(QueueError::AttemptIdsExhausted);
@@ -608,7 +614,7 @@ impl Coordinator {
         }
         self.installed_keys
             .retain(|(installed_key, _), _| *installed_key != key);
-        self.cache.invalidate(key);
+        self.cache.invalidate_deferred(key);
     }
 
     fn record_eviction(&mut self, evicted: ArtifactKey) {
@@ -698,8 +704,11 @@ impl Coordinator {
 
     /// Applies at most `budget` worker completions without allocating an intermediate queue.
     pub fn drain_completions_with_budget(&mut self, budget: usize) -> CompletionDrain {
+        let reclamation = self.cache.poll_reclamation_with_budget(budget);
+        let reclaimed = reclamation.reclaimed();
+        let completion_budget = budget.saturating_sub(reclaimed);
         let mut drained = 0;
-        while drained < budget {
+        while drained < completion_budget {
             let completion = self
                 .completion_receiver
                 .as_ref()
@@ -711,10 +720,12 @@ impl Coordinator {
             self.complete(completion);
             drained += 1;
         }
-        self.poll_cache_reclamation();
         CompletionDrain {
             drained,
-            remaining: self.completion_signals.pending.load(Ordering::Acquire),
+            reclaimed,
+            may_have_remaining: reclamation.may_have_remaining()
+                || self.cache.reclamation_requested()
+                || self.completion_signals.pending.load(Ordering::Acquire) != 0,
         }
     }
 
@@ -732,6 +743,7 @@ impl Coordinator {
         for key in functions {
             self.retire_state(key);
         }
+        self.cache.collect_invalidated();
     }
 }
 

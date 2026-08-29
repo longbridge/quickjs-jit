@@ -59,6 +59,26 @@ impl CachedArtifact {
             self.artifact.key(),
         )
     }
+
+    pub(super) fn eviction_plan_order(&self) -> (u8, u64, u64, ArtifactKey) {
+        let key = self.artifact.key();
+        if self.invalidated.load(Ordering::Acquire) {
+            let tier_order = match key.tier {
+                Tier::Optimizing => 0,
+                Tier::Baseline => 1,
+            };
+            (0, tier_order, 0, key)
+        } else {
+            let (benefit, last_used, key) = self.eviction_order();
+            (1, benefit, last_used, key)
+        }
+    }
+
+    pub(super) fn deopt_target_key(&self) -> Option<ArtifactKey> {
+        self._deopt_target
+            .as_ref()
+            .map(|pin| pin.target.artifact.key())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +95,22 @@ pub enum CacheError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheInsert {
     evicted: Box<[ArtifactKey]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReclamationPoll {
+    reclaimed: usize,
+    may_have_remaining: bool,
+}
+
+impl ReclamationPoll {
+    pub const fn reclaimed(self) -> usize {
+        self.reclaimed
+    }
+
+    pub const fn may_have_remaining(self) -> bool {
+        self.may_have_remaining
+    }
 }
 
 impl CacheInsert {
@@ -120,7 +156,6 @@ impl CodeCache {
         if charge_bytes > self.max_bytes {
             return Err(CacheError::ArtifactTooLarge);
         }
-        self.collect_invalidated();
         let key = artifact.key();
         let deopt_target = if key.tier == Tier::Optimizing {
             let baseline = self
@@ -150,20 +185,7 @@ impl CodeCache {
             .checked_add(charge_bytes)
             .ok_or(CacheError::ChargeOverflow)?;
         let needed_bytes = desired_bytes.saturating_sub(self.max_bytes);
-        let mut selected = Vec::new();
-        let mut freed_bytes = 0usize;
-        for (candidate, candidate_bytes) in evict::candidates(&self.artifacts, key) {
-            if freed_bytes >= needed_bytes {
-                break;
-            }
-            freed_bytes = freed_bytes
-                .checked_add(candidate_bytes)
-                .ok_or(CacheError::ChargeOverflow)?;
-            selected.push(candidate);
-        }
-        if freed_bytes < needed_bytes {
-            return Err(CacheError::AllArtifactsPinned);
-        }
+        let selected = evict::plan(&self.artifacts, key, needed_bytes)?;
         if existing_charge != 0 || self.artifacts.contains_key(&key) {
             self.remove(key);
         }
@@ -252,46 +274,84 @@ impl CodeCache {
     }
 
     pub fn invalidate(&mut self, function: FunctionKey) -> usize {
-        for (key, artifact) in &self.artifacts {
-            if key.function_id == function.id && key.generation == function.generation {
-                artifact.invalidated.store(true, Ordering::Release);
-            }
-        }
+        self.invalidate_deferred(function);
         self.collect_invalidated()
     }
 
+    pub(crate) fn invalidate_deferred(&mut self, function: FunctionKey) {
+        let mut matched = false;
+        for (key, artifact) in &self.artifacts {
+            if key.function_id == function.id && key.generation == function.generation {
+                artifact.invalidated.store(true, Ordering::Release);
+                matched = true;
+            }
+        }
+        if matched {
+            self.reclaim_needed.store(true, Ordering::Release);
+        }
+    }
+
     pub fn collect_invalidated(&mut self) -> usize {
-        let mut removed = 0usize;
-        loop {
-            let candidate = self
-                .artifacts
-                .iter()
-                .filter(|(_, artifact)| {
-                    artifact.invalidated.load(Ordering::Acquire) && artifact.is_evictable()
-                })
-                .min_by_key(|(key, _)| {
-                    let tier_order = match key.tier {
-                        Tier::Optimizing => 0,
-                        Tier::Baseline => 1,
-                    };
-                    (tier_order, **key)
-                })
-                .map(|(key, _)| *key);
-            let Some(candidate) = candidate else {
+        self.reclaim_needed.store(false, Ordering::Release);
+        let poll = self.collect_invalidated_with_budget(usize::MAX);
+        if poll.may_have_remaining {
+            self.reclaim_needed.store(true, Ordering::Release);
+        }
+        poll.reclaimed
+    }
+
+    pub fn collect_invalidated_with_budget(&mut self, budget: usize) -> ReclamationPoll {
+        let mut reclaimed = 0usize;
+        while reclaimed < budget {
+            let Some(candidate) = self.next_invalidated_candidate() else {
                 break;
             };
             self.remove(candidate);
-            removed = removed.saturating_add(1);
+            reclaimed += 1;
         }
-        removed
+        ReclamationPoll {
+            reclaimed,
+            may_have_remaining: self.next_invalidated_candidate().is_some(),
+        }
     }
 
     /// Reclaims invalidated artifacts after a pin release has made progress possible.
     pub fn poll_reclamation(&mut self) -> usize {
+        self.poll_reclamation_with_budget(usize::MAX).reclaimed
+    }
+
+    pub fn poll_reclamation_with_budget(&mut self, budget: usize) -> ReclamationPoll {
         if !self.reclaim_needed.swap(false, Ordering::AcqRel) {
-            return 0;
+            return ReclamationPoll {
+                reclaimed: 0,
+                may_have_remaining: false,
+            };
         }
-        self.collect_invalidated()
+        let poll = self.collect_invalidated_with_budget(budget);
+        if poll.may_have_remaining {
+            self.reclaim_needed.store(true, Ordering::Release);
+        }
+        poll
+    }
+
+    pub(crate) fn reclamation_requested(&self) -> bool {
+        self.reclaim_needed.load(Ordering::Acquire)
+    }
+
+    fn next_invalidated_candidate(&self) -> Option<ArtifactKey> {
+        self.artifacts
+            .iter()
+            .filter(|(_, artifact)| {
+                artifact.invalidated.load(Ordering::Acquire) && artifact.is_evictable()
+            })
+            .min_by_key(|(key, _)| {
+                let tier_order = match key.tier {
+                    Tier::Optimizing => 0,
+                    Tier::Baseline => 1,
+                };
+                (tier_order, **key)
+            })
+            .map(|(key, _)| *key)
     }
 }
 
