@@ -268,3 +268,233 @@ Remaining concerns are intentionally bounded:
 - Root implementation: `e909718 feat(jit): compile baseline QuickJS control flow`
 - This report is committed separately so it can record the implementation
   commit IDs.
+
+---
+
+## Review fix round 1 (2026-08-30)
+
+Status: **DONE**
+
+Root review-fix commit: `d7da0de fix(jit): harden pure baseline publication`
+
+Nested QuickJS review-fix commit:
+`85aaac8 fix(jit): support ABI info prefixes`
+
+This section supersedes the earlier claims that modulo was native, that a
+shallow frame-struct comparison proved retry atomicity, and that merely
+retaining serialized unwind bytes was sufficient publication ownership.
+
+### Review findings resolved with RED/GREEN evidence
+
+1. **Exact remainder semantics.** The new `5 % Infinity`, `-4 % 2`, and
+   `1e308 % 1e-308` differential fixture initially returned `DONE` through the
+   inexact `trunc(a / b)` lowering. `%` now unconditionally reaches the common
+   retry exit before frame mutation. It is not part of the native subset until
+   Task 8 provides the exact runtime helper.
+2. **QuickJS ownership timing.** Object argument overwrite, drop, duplicate,
+   local, and live-stack fixtures initially executed natively. Tier 1 now
+   rejects every entry argument, local, or active stack value whose tag lies
+   in QuickJS's refcounted range before the first poll or store. The test
+   observes unchanged object refcount and `JS_IsLiveObject` liveness.
+3. **CFG-sound polling.** A 2,050-diamond forward-control-flow fixture initially
+   reached its second poll at bytecode offset 14,350. Every non-entry CFG block
+   now begins with a poll, while the 1,024-operation straight-line bound and
+   backedge/return polls remain. The same skipped path now interrupts below
+   offset 4,096.
+4. **Published ownership and unwind lifetime.** The publication-lifetime test
+   was RED at compile time because the returned executable exposed no frame
+   states, stack maps, unwind metadata, or lifetime pin. `PublishedBaselineCode`
+   now uses one `Arc` allocation to own the RX mapping, immutable metadata, and
+   native registration. A cloned execution pin retains all metadata. Final
+   drop deregisters unwind information before releasing the executable mapping.
+5. **Exact safe-point offsets.** Entry poll, return poll, and return state at PC
+   zero initially all mapped to native offset 81. Each `FrameStateId` now gets
+   a unique non-default Cranelift `SourceLoc`; compilation requires a native
+   range for every state and rejects missing, out-of-range, or duplicate native
+   offsets. The same-PC states now have distinct in-range offsets with no zero
+   substitution.
+6. **Section-relative relocations.** `X86SecRel` initially applied as an
+   absolute 32-bit relocation despite having no section base. It is now
+   unsupported until `ResolvedRelocation` can carry that base. Batch validation
+   rejects it before changing any byte, including preceding otherwise-valid
+   relocations.
+7. **Flattened slot width.** A state with 65,536 flattened slots initially
+   translated successfully through saturating `u16` arithmetic. State creation
+   now uses checked `usize` arithmetic and returns `ResourceLimit` before
+   metadata creation when the total exceeds `u16::MAX`.
+8. **Deep retry atomicity.** The synthetic snapshot now copies the complete
+   `JSJitExecFrame` and every pointed argument, local, active-stack backing, and
+   bytecode buffer. All unsupported coercion, modulo, and refcount retry tests
+   compare this deep snapshot rather than only the frame struct.
+9. **Older ABI-info callers.** Rust and C 1.0/1.1 prefix queries initially
+   returned `JS_JIT_BACKEND_INVALID_ARGUMENT`. `JS_GetJitABIInfo` now reads the
+   caller size with `memcpy`, accepts the minimum known 1.0 prefix, constructs
+   the full current 1.2 record, and copies only `min(caller_size, current_size)`.
+   The prefix receives the current full size/version while adjacent canaries
+   remain unchanged.
+
+### Corrected pure Tier 1 boundary and atomicity proof
+
+The native subset accepts only immediate, non-owning values at entry. Before
+the generated function can poll, write `frame.result`, or otherwise make a
+C-visible change, it:
+
+- validates every argument and local tag;
+- walks `[stack_base, stack_top)` in 16-byte `JSValue` increments and validates
+  every active stack tag;
+- branches directly to the shared retry exit if any tag is refcounted.
+
+Local and operand-stack transformations remain SSA-only. Unsupported dynamic
+`+`, `%`, refcount-requiring return, or ownership-sensitive frame operations
+therefore retry with the frame and all pointed buffers byte-for-byte unchanged.
+Task 8 remains responsible for duplication/free/coercion helpers and exact
+remainder semantics.
+
+### Exact safe-point and poll proof
+
+`FrameStateId(n)` is encoded as Cranelift source location `n + 1`; zero stays
+reserved for “no source location,” and the all-ones sentinel is rejected.
+Polls, exits, and OSR states therefore cannot collapse merely because they
+share a bytecode PC. OSR labels emit a trapping-capable frame load so their
+state has an observable machine range. After code generation, compilation
+requires each required source location to exist and requires every selected
+offset to be both in the machine-code range and distinct.
+
+Polling is conservative at every non-entry basic-block entry in addition to
+function entry, backward branches, immediately before returns, and each 1,024
+straight-line source operations. Thus a forward branch cannot jump around a
+lexically placed poll; every runtime path remains below the required 4,096
+operation ceiling.
+
+### Publication, relocation, and native unwind proof
+
+The corrected direct publication path is:
+
+```text
+host triple + feature validation
+  -> prepare native unwind record
+  -> allocate RW memory
+  -> write code and any in-allocation unwind bytes
+  -> resolve all symbolic/function-relative targets
+  -> validate the complete relocation batch
+  -> apply only validated relocations
+  -> declare entry target
+  -> transition RW to RX
+  -> register native unwind information
+  -> return one metadata-owning execution pin
+```
+
+Relocation kind and symbolic target preservation remain unchanged. The added
+`X86SecRel` test proves that a section-relative relocation without a section
+base is rejected atomically and never mutates writable bytes.
+
+On Linux x86-64/AArch64, the owner retains a complete zero-terminated
+`.eh_frame` section registered with `__register_frame`. On macOS x86-64/AArch64,
+the registration pointer is advanced past the CIE to the individual FDE, as
+required by LLVM libunwind's `__register_frame` implementation. On Windows
+x86-64, Cranelift's `UNWIND_INFO` is DWORD-aligned and appended to the code
+allocation, and a pinned `RUNTIME_FUNCTION` is registered with
+`RtlAddFunctionTable`; final drop calls `RtlDeleteFunctionTable` before unmap.
+The platform contracts are documented by
+[LLVM libunwind](https://github.com/llvm/llvm-project/blob/main/libunwind/src/libunwind.cpp),
+[Microsoft's x64 exception-handling guide](https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64),
+and the
+[dynamic function-table API](https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtladdfunctiontable).
+
+Windows ARM64 publication explicitly returns
+`UnwindRegistrationUnsupported`: this round does not synthesize the complete
+ARM64 `.pdata`/`.xdata` record from Cranelift's unwind-code bytes, so it does
+not claim registration. Cross-target compilation remains allowed; only native
+publication falls back. The required format is described by
+[Microsoft's ARM64 exception-handling guide](https://learn.microsoft.com/en-us/cpp/build/arm64-exception-handling).
+
+### ABI compatibility and binding proof
+
+The ABI remains version 1.2; no header layout changed in this review round.
+The minimum accepted legacy prefix ends immediately before the 1.1 execution
+frame/exit fingerprint tail. Both C `_Static_assert`s and Rust `offset_of!`
+assertions prove the 1.0 and 1.1 prefix sizes. Each language surrounds the
+prefix with a 16-byte canary and verifies that the current full struct size,
+major, and minor are reported without an out-of-prefix write.
+
+Fresh bindgen parity and `update-bindings` both passed without changing any of
+the nine bundled target bindings, which is the expected result for a behavior-
+only C implementation fix.
+
+### Final verification
+
+```text
+$ cargo test -p rquickjs-jit --features compiler,test-support --test baseline
+19 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --test baseline --release \
+    --features compiler,test-support
+19 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --features compiler,test-support \
+    --test platform --test abi
+25 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --test abi --features test-support,bindgen
+11 passed; 0 failed (including fresh-bindgen parity)
+
+$ cargo check -p rquickjs-sys --features jit-abi,update-bindings
+Finished successfully; no bundled-binding diff
+
+$ cc -std=c11 -D_GNU_SOURCE -DCONFIG_JIT_ABI=1 \
+    -I target/debug/build/rquickjs-sys-a74c8fe3324e0b1d/out \
+    -I sys/quickjs sys/quickjs/api-test.c \
+    target/debug/build/rquickjs-sys-a74c8fe3324e0b1d/out/libquickjs.a \
+    -lm -ldl -lpthread -o /tmp/rquickjs-task7-api-test
+$ /tmp/rquickjs-task7-api-test
+Exited successfully
+
+$ cargo test -p rquickjs-jit --all-targets \
+    --features compiler,test-support
+159 passed; 0 failed
+
+$ cargo test --workspace --all-targets
+All workspace tests passed
+
+$ cargo clippy -p rquickjs-jit --all-targets \
+    --features compiler,test-support -- -D warnings
+Finished successfully
+
+$ cargo fmt --all -- --check
+Finished successfully
+
+$ git diff --check
+Finished successfully in root and nested QuickJS repositories
+```
+
+The release build still reports QuickJS's pre-existing `buf2` GCC warning, and
+the workspace build still reports the pre-existing unused `Command` import in
+`sys/build.rs`. Neither warning is introduced by this round.
+
+### Cross-target limitations and final self-review
+
+Local native execution and unwind registration were verified only on Linux
+x86-64. AArch64 Linux and macOS System V registration paths, macOS FDE pointer
+selection, and Windows x86-64 dynamic function-table registration require their
+native CI runners. No additional target or toolchain was installed. Windows
+ARM64 is an intentional publication fallback as described above.
+
+Final self-review confirmed:
+
+- no `ExecutableCode` clone can escape the metadata-owning
+  `PublishedBaselineCode` pin;
+- registration is created only after successful RX publication, and failed
+  registration drops/unmaps the executable rather than returning unregistered
+  code;
+- registration is destroyed before the mapping on final pin drop;
+- state offsets cannot use a missing-location zero fallback or alias another
+  required state;
+- all retry assertions use deep snapshots;
+- `%` is absent from the claimed native semantics; and
+- no general Task 8 runtime helper was introduced.
+
+Review-fix commits:
+
+- Nested QuickJS: `85aaac8 fix(jit): support ABI info prefixes`
+- Root implementation: `d7da0de fix(jit): harden pure baseline publication`
+- This appended report is committed separately.
