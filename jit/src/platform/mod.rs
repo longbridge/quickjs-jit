@@ -2,33 +2,39 @@
 
 #[cfg(all(
     target_os = "linux",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod linux;
 #[cfg(all(
     target_os = "linux",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 use linux as backend;
 
 #[cfg(all(
     target_os = "macos",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod macos;
 #[cfg(all(
     target_os = "macos",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 use macos as backend;
 
 #[cfg(all(
     target_os = "windows",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod windows;
 #[cfg(all(
     target_os = "windows",
+    target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 use windows as backend;
@@ -36,14 +42,17 @@ use windows as backend;
 #[cfg(not(any(
     all(
         target_os = "linux",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "macos",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "windows",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 )))]
@@ -51,25 +60,30 @@ mod unsupported;
 #[cfg(not(any(
     all(
         target_os = "linux",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "macos",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "windows",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 )))]
 use unsupported as backend;
 
 use std::{
+    collections::BTreeMap,
     ffi::c_void,
     fmt,
+    ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
     },
 };
 
@@ -79,6 +93,7 @@ use crate::code_cache::Relocation;
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultInjection {
+    PageSize,
     Mapping,
     Protection,
     InstructionCache,
@@ -86,9 +101,9 @@ pub enum FaultInjection {
     MacWriteProtection,
 }
 
-/// The embedder-selected policy for writing to the macOS process JIT heap.
+/// The process-wide policy for writing to the macOS JIT heap.
 #[derive(Clone, Copy, Debug, Default)]
-pub enum MacJitMode {
+pub enum MacJitPolicy {
     /// Toggle the calling thread with `pthread_jit_write_protect_np`.
     #[default]
     ThreadWriteProtect,
@@ -96,8 +111,95 @@ pub enum MacJitMode {
     ///
     /// The callback receives a pointer to [`MacJitWriteContext`]. It must
     /// validate the context and perform the copy, returning zero on success.
+    /// This policy must first be installed through
+    /// [`CodeAllocator::bootstrap_mac_jit_policy`].
     AllowListCallback(unsafe extern "C" fn(*mut c_void) -> i32),
 }
+
+impl MacJitPolicy {
+    fn is_same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::ThreadWriteProtect, Self::ThreadWriteProtect) => true,
+            (Self::AllowListCallback(left), Self::AllowListCallback(right)) => {
+                left as usize == right as usize
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "macos",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[derive(Debug)]
+struct MacJitPolicySlot {
+    active: OnceLock<MacJitPolicy>,
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "macos",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+impl MacJitPolicySlot {
+    const fn new() -> Self {
+        Self {
+            active: OnceLock::new(),
+        }
+    }
+
+    fn establish<F>(
+        &self,
+        requested: MacJitPolicy,
+        unsafe_bootstrap: bool,
+        check_write_protection: F,
+    ) -> Result<(), CodeMemoryError>
+    where
+        F: FnOnce() -> Result<(), CodeMemoryError>,
+    {
+        if let Some(active) = self.active.get().copied() {
+            return if active.is_same(requested) {
+                Ok(())
+            } else {
+                Err(CodeMemoryError::IncompatibleMacJitPolicy)
+            };
+        }
+        if matches!(requested, MacJitPolicy::AllowListCallback(_)) && !unsafe_bootstrap {
+            return Err(CodeMemoryError::MacJitPolicyNotBootstrapped);
+        }
+        check_write_protection()?;
+        match self.active.set(requested) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let active = self
+                    .active
+                    .get()
+                    .copied()
+                    .expect("macOS JIT policy was concurrently initialized");
+                if active.is_same(requested) {
+                    Ok(())
+                } else {
+                    Err(CodeMemoryError::IncompatibleMacJitPolicy)
+                }
+            }
+        }
+    }
+
+    fn active(&self) -> Option<MacJitPolicy> {
+        self.active.get().copied()
+    }
+}
+
+/// Backwards-compatible name for [`MacJitPolicy`].
+pub type MacJitMode = MacJitPolicy;
 
 /// Copy request passed to a macOS JIT write-allowlist callback.
 #[repr(C)]
@@ -127,6 +229,10 @@ pub enum CodeMemoryError {
         operation: &'static str,
         raw_code: i64,
     },
+    PageSizeFailed {
+        operation: &'static str,
+        raw_code: i64,
+    },
     ProtectionFailed {
         operation: &'static str,
         raw_code: i64,
@@ -151,6 +257,12 @@ pub enum CodeMemoryError {
         operation: &'static str,
         raw_code: i64,
     },
+    UnsupportedWriteProtection {
+        operation: &'static str,
+        raw_code: i64,
+    },
+    MacJitPolicyNotBootstrapped,
+    IncompatibleMacJitPolicy,
     RelocationOutOfBounds {
         offset: usize,
         width: usize,
@@ -168,6 +280,9 @@ pub enum CodeMemoryError {
     },
     UndeclaredIndirectTarget {
         offset: usize,
+    },
+    OwnerConfigurationMismatch {
+        owner_id: u64,
     },
     NativeDisabled,
 }
@@ -190,6 +305,10 @@ impl fmt::Display for CodeMemoryError {
                 "code write at {offset} with length {len} exceeds allocation length {allocation_len}"
             ),
             Self::MappingFailed {
+                operation,
+                raw_code,
+            }
+            | Self::PageSizeFailed {
                 operation,
                 raw_code,
             }
@@ -216,7 +335,17 @@ impl fmt::Display for CodeMemoryError {
             | Self::WriteCallbackRejected {
                 operation,
                 raw_code,
+            }
+            | Self::UnsupportedWriteProtection {
+                operation,
+                raw_code,
             } => write!(f, "{operation} failed with OS error {raw_code}"),
+            Self::MacJitPolicyNotBootstrapped => f.write_str(
+                "the macOS JIT callback policy requires unsafe process bootstrap before allocator construction",
+            ),
+            Self::IncompatibleMacJitPolicy => {
+                f.write_str("a different macOS JIT policy is already active in this process")
+            }
             Self::RelocationOutOfBounds {
                 offset,
                 width,
@@ -244,6 +373,10 @@ impl fmt::Display for CodeMemoryError {
             Self::UndeclaredIndirectTarget { offset } => {
                 write!(f, "indirect target {offset} was not declared")
             }
+            Self::OwnerConfigurationMismatch { owner_id } => write!(
+                f,
+                "runtime owner {owner_id} already has a different executable-memory configuration"
+            ),
             Self::NativeDisabled => {
                 f.write_str("native installation is disabled for this allocator owner")
             }
@@ -257,10 +390,38 @@ impl std::error::Error for CodeMemoryError {}
 struct AllocatorState {
     limit: usize,
     reserved: AtomicUsize,
-    native_enabled: AtomicBool,
+    native: Mutex<NativeState>,
     fault: Option<FaultInjection>,
     owner_id: u64,
-    mac_jit_mode: MacJitMode,
+    mac_jit_policy: MacJitPolicy,
+}
+
+#[derive(Debug)]
+struct NativeState {
+    enabled: bool,
+    epoch: u64,
+}
+
+impl AllocatorState {
+    fn lock_native(&self) -> MutexGuard<'_, NativeState> {
+        self.native
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn disable_native(&self, native: &mut NativeState) {
+        native.enabled = false;
+        native.epoch = native.epoch.wrapping_add(1);
+    }
+
+    fn configuration_matches(
+        &self,
+        limit: usize,
+        mac_jit_policy: MacJitPolicy,
+        fault: Option<FaultInjection>,
+    ) -> bool {
+        self.limit == limit && self.fault == fault && self.mac_jit_policy.is_same(mac_jit_policy)
+    }
 }
 
 /// A logical executable-memory owner with an independent quota.
@@ -272,17 +433,17 @@ pub struct CodeAllocator {
 impl CodeAllocator {
     /// Creates an allocator for the current supported host.
     pub fn for_host() -> Result<Self, CodeMemoryError> {
-        Self::new(next_owner_id(), usize::MAX, MacJitMode::default(), None)
+        Self::new_unregistered(next_owner_id(), usize::MAX, MacJitPolicy::default(), None)
     }
 
     /// Creates an allocator whose live mappings may use at most `limit` bytes.
     pub fn with_limit(limit: usize) -> Result<Self, CodeMemoryError> {
-        Self::new(next_owner_id(), limit, MacJitMode::default(), None)
+        Self::new_unregistered(next_owner_id(), limit, MacJitPolicy::default(), None)
     }
 
     /// Creates an allocator for one runtime owner with the default macOS mode.
     pub fn for_runtime(owner_id: u64, limit: usize) -> Result<Self, CodeMemoryError> {
-        Self::new(owner_id, limit, MacJitMode::default(), None)
+        Self::new_registered(owner_id, limit, MacJitPolicy::default(), None)
     }
 
     /// Creates an allocator for one runtime and an explicit macOS write mode.
@@ -291,7 +452,37 @@ impl CodeAllocator {
         limit: usize,
         mac_jit_mode: MacJitMode,
     ) -> Result<Self, CodeMemoryError> {
-        Self::new(owner_id, limit, mac_jit_mode, None)
+        Self::for_runtime_with_mac_policy(owner_id, limit, mac_jit_mode)
+    }
+
+    /// Creates an allocator for one runtime and the already-established
+    /// process-wide macOS JIT policy.
+    pub fn for_runtime_with_mac_policy(
+        owner_id: u64,
+        limit: usize,
+        mac_jit_policy: MacJitPolicy,
+    ) -> Result<Self, CodeMemoryError> {
+        Self::new_registered(owner_id, limit, mac_jit_policy, None)
+    }
+
+    /// Establishes the immutable process-wide macOS JIT policy.
+    ///
+    /// This must be called before any macOS code allocator creates the process
+    /// JIT heap. Repeating it with a different policy is rejected.
+    ///
+    /// # Safety
+    ///
+    /// For [`MacJitPolicy::AllowListCallback`], the embedder must arrange for
+    /// the exact callback to be registered in Apple's signed JIT callback
+    /// allowlist, must preserve its code and ABI for the process lifetime, and
+    /// must ensure that it neither unwinds nor re-enters this allocator.
+    /// Apple may terminate the process when an unregistered callback is used;
+    /// that precondition cannot be detected or recovered by this crate.
+    pub unsafe fn bootstrap_mac_jit_policy(policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
+        if !backend::SUPPORTED {
+            return Err(CodeMemoryError::UnsupportedPlatform);
+        }
+        backend::bootstrap_mac_jit_policy(policy)
     }
 
     /// Creates an allocator that fails one platform operation deterministically.
@@ -300,42 +491,96 @@ impl CodeAllocator {
         limit: usize,
         fault: FaultInjection,
     ) -> Result<Self, CodeMemoryError> {
-        Self::new(next_owner_id(), limit, MacJitMode::default(), Some(fault))
+        Self::new_unregistered(next_owner_id(), limit, MacJitPolicy::default(), Some(fault))
     }
 
-    fn new(
+    /// Creates or reuses a fault-injected state for one runtime owner.
+    #[doc(hidden)]
+    pub fn for_runtime_with_fault_injection(
         owner_id: u64,
         limit: usize,
-        mac_jit_mode: MacJitMode,
+        fault: FaultInjection,
+    ) -> Result<Self, CodeMemoryError> {
+        Self::new_registered(owner_id, limit, MacJitPolicy::default(), Some(fault))
+    }
+
+    fn new_unregistered(
+        owner_id: u64,
+        limit: usize,
+        mac_jit_policy: MacJitPolicy,
         fault: Option<FaultInjection>,
     ) -> Result<Self, CodeMemoryError> {
         if !backend::SUPPORTED {
             return Err(CodeMemoryError::UnsupportedPlatform);
         }
+        backend::prepare_mac_jit_policy(mac_jit_policy)?;
         Ok(Self {
             state: Arc::new(AllocatorState {
                 limit,
                 reserved: AtomicUsize::new(0),
-                native_enabled: AtomicBool::new(true),
+                native: Mutex::new(NativeState {
+                    enabled: true,
+                    epoch: 0,
+                }),
                 fault,
                 owner_id,
-                mac_jit_mode,
+                mac_jit_policy,
             }),
         })
     }
 
+    fn new_registered(
+        owner_id: u64,
+        limit: usize,
+        mac_jit_policy: MacJitPolicy,
+        fault: Option<FaultInjection>,
+    ) -> Result<Self, CodeMemoryError> {
+        if !backend::SUPPORTED {
+            return Err(CodeMemoryError::UnsupportedPlatform);
+        }
+        let mut owners = owner_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        owners.retain(|_, state| state.strong_count() != 0);
+        if let Some(state) = owners.get(&owner_id).and_then(Weak::upgrade) {
+            if !state.configuration_matches(limit, mac_jit_policy, fault) {
+                return Err(CodeMemoryError::OwnerConfigurationMismatch { owner_id });
+            }
+            return Ok(Self { state });
+        }
+        backend::prepare_mac_jit_policy(mac_jit_policy)?;
+        let allocator = Self::new_unregistered(owner_id, limit, mac_jit_policy, fault)?;
+        owners.insert(owner_id, Arc::downgrade(&allocator.state));
+        Ok(allocator)
+    }
+
     /// Allocates writable, non-executable storage.
     pub fn allocate(&self, len: usize) -> Result<WritableCode, CodeMemoryError> {
-        if !self.native_enabled() {
+        let mut native = self.state.lock_native();
+        if !native.enabled {
             return Err(CodeMemoryError::NativeDisabled);
         }
         if len == 0 {
             return Err(CodeMemoryError::InvalidSize);
         }
-        let mapped_len = backend::round_to_page(len)?;
+        if self.state.fault == Some(FaultInjection::PageSize) {
+            self.state.disable_native(&mut native);
+            return Err(CodeMemoryError::PageSizeFailed {
+                operation: "fault injection before querying executable-memory page size",
+                raw_code: INJECTED_RAW_CODE,
+            });
+        }
+        let mapped_len = match backend::round_to_page(len) {
+            Ok(mapped_len) => mapped_len,
+            Err(error @ CodeMemoryError::PageSizeFailed { .. }) => {
+                self.state.disable_native(&mut native);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let reservation = Reservation::acquire(Arc::clone(&self.state), mapped_len)?;
         if self.state.fault == Some(FaultInjection::Mapping) {
-            self.state.native_enabled.store(false, Ordering::Release);
+            self.state.disable_native(&mut native);
             return Err(CodeMemoryError::MappingFailed {
                 operation: "fault injection before executable-memory mapping",
                 raw_code: INJECTED_RAW_CODE,
@@ -344,19 +589,22 @@ impl CodeAllocator {
         let mapping = match backend::Mapping::allocate(
             mapped_len,
             self.state.owner_id,
-            self.state.mac_jit_mode,
+            self.state.mac_jit_policy,
         ) {
             Ok(mapping) => mapping,
             Err(error) => {
-                self.state.native_enabled.store(false, Ordering::Release);
+                self.state.disable_native(&mut native);
                 return Err(error);
             }
         };
+        let allocation_epoch = native.epoch;
+        drop(native);
         Ok(WritableCode {
             mapping: Some(mapping),
             bytes: vec![0; len],
             reservation: Some(reservation),
             state: Arc::clone(&self.state),
+            allocation_epoch,
             indirect_targets: vec![0],
         })
     }
@@ -366,7 +614,7 @@ impl CodeAllocator {
     }
 
     pub fn native_enabled(&self) -> bool {
-        self.state.native_enabled.load(Ordering::Acquire)
+        self.state.lock_native().enabled
     }
 
     pub fn owner_id(&self) -> u64 {
@@ -416,6 +664,7 @@ pub struct WritableCode {
     bytes: Vec<u8>,
     reservation: Option<Reservation>,
     state: Arc<AllocatorState>,
+    allocation_epoch: u64,
     indirect_targets: Vec<usize>,
 }
 
@@ -511,12 +760,19 @@ impl WritableCode {
         for &offset in &self.indirect_targets {
             validate_indirect_target(offset, self.bytes.len())?;
         }
+        let mut native = self.state.lock_native();
+        if !native.enabled || native.epoch != self.allocation_epoch {
+            return Err(CodeMemoryError::NativeDisabled);
+        }
         if let Err(error) = mapping.publish(&self.bytes, &self.indirect_targets, self.state.fault) {
-            self.state.native_enabled.store(false, Ordering::Release);
+            self.state.disable_native(&mut native);
             return Err(error);
         }
+        if !native.enabled || native.epoch != self.allocation_epoch {
+            return Err(CodeMemoryError::NativeDisabled);
+        }
         let reservation = self.reservation.take().expect("live reservation");
-        Ok(ExecutableCode {
+        let executable = ExecutableCode {
             allocation: Arc::new(ExecutableAllocation {
                 mapping,
                 logical_len: self.bytes.len(),
@@ -524,7 +780,9 @@ impl WritableCode {
                 _reservation: reservation,
             }),
             entry_offset: 0,
-        })
+        };
+        drop(native);
+        Ok(executable)
     }
 }
 
@@ -610,4 +868,148 @@ fn validate_indirect_target(offset: usize, allocation_len: usize) -> Result<(), 
 fn next_owner_id() -> u64 {
     static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+unsafe fn nonnull_mmap_address_or_cleanup(
+    address: *mut c_void,
+    len: usize,
+    zero_address_operation: &'static str,
+    cleanup: unsafe fn(*mut c_void, usize),
+) -> Result<NonNull<u8>, CodeMemoryError> {
+    if address.is_null() {
+        unsafe {
+            cleanup(address, len);
+        }
+        return Err(CodeMemoryError::MappingFailed {
+            operation: zero_address_operation,
+            raw_code: 0,
+        });
+    }
+    Ok(unsafe { NonNull::new_unchecked(address.cast()) })
+}
+
+fn owner_registry() -> &'static Mutex<BTreeMap<u64, Weak<AllocatorState>>> {
+    static OWNERS: OnceLock<Mutex<BTreeMap<u64, Weak<AllocatorState>>>> = OnceLock::new();
+    OWNERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+mod mac_jit_policy_tests {
+    use super::{CodeMemoryError, MacJitPolicy, MacJitPolicySlot};
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    unsafe extern "C" fn first_callback(_context: *mut c_void) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn second_callback(_context: *mut c_void) -> i32 {
+        1
+    }
+
+    #[test]
+    fn safe_callback_policy_requires_prior_unsafe_bootstrap() {
+        let slot = MacJitPolicySlot::new();
+        let support_checks = AtomicUsize::new(0);
+        let result = slot.establish(
+            MacJitPolicy::AllowListCallback(first_callback),
+            false,
+            || {
+                support_checks.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(CodeMemoryError::MacJitPolicyNotBootstrapped)
+        ));
+        assert_eq!(support_checks.load(Ordering::Relaxed), 0);
+        assert!(slot.active().is_none());
+    }
+
+    #[test]
+    fn policy_is_immutable_and_mismatch_avoids_platform_calls() {
+        let slot = MacJitPolicySlot::new();
+        slot.establish(
+            MacJitPolicy::AllowListCallback(first_callback),
+            true,
+            || Ok(()),
+        )
+        .unwrap();
+
+        slot.establish(
+            MacJitPolicy::AllowListCallback(first_callback),
+            false,
+            || panic!("an established compatible policy needs no platform call"),
+        )
+        .unwrap();
+        assert!(matches!(
+            slot.establish(
+                MacJitPolicy::AllowListCallback(second_callback),
+                true,
+                || panic!("an incompatible policy must be rejected first"),
+            ),
+            Err(CodeMemoryError::IncompatibleMacJitPolicy)
+        ));
+        assert!(matches!(
+            slot.establish(MacJitPolicy::ThreadWriteProtect, true, || panic!(
+                "an incompatible mode must be rejected first"
+            )),
+            Err(CodeMemoryError::IncompatibleMacJitPolicy)
+        ));
+    }
+
+    #[test]
+    fn unsupported_write_protection_does_not_initialize_policy() {
+        let slot = MacJitPolicySlot::new();
+        let unsupported = CodeMemoryError::UnsupportedWriteProtection {
+            operation: "test support query",
+            raw_code: 0,
+        };
+
+        assert_eq!(
+            slot.establish(MacJitPolicy::ThreadWriteProtect, false, || {
+                Err(unsupported.clone())
+            }),
+            Err(unsupported)
+        );
+        assert!(slot.active().is_none());
+    }
+}
+
+#[cfg(test)]
+mod mmap_result_tests {
+    use super::{nonnull_mmap_address_or_cleanup, CodeMemoryError};
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static CLEANED: AtomicBool = AtomicBool::new(false);
+
+    unsafe fn record_cleanup(_address: *mut c_void, _len: usize) {
+        CLEANED.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn address_zero_is_categorized_and_cleaned_up() {
+        CLEANED.store(false, Ordering::Release);
+        let error = unsafe {
+            nonnull_mmap_address_or_cleanup(
+                std::ptr::null_mut(),
+                4096,
+                "test mmap returned address zero",
+                record_cleanup,
+            )
+        }
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CodeMemoryError::MappingFailed {
+                operation: "test mmap returned address zero",
+                raw_code: 0,
+            }
+        ));
+        assert!(CLEANED.load(Ordering::Acquire));
+    }
 }

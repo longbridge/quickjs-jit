@@ -1,11 +1,36 @@
+#![cfg(all(
+    target_endian = "little",
+    any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+
 #[path = "support/host_asm.rs"]
 mod host_asm;
 
 use rquickjs::{Context, Runtime};
 use rquickjs_jit::{
     code_cache::Relocation,
-    platform::{CodeAllocator, CodeMemoryError, FaultInjection, MacJitMode},
+    platform::{CodeAllocator, CodeMemoryError, FaultInjection, MacJitPolicy},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+
+fn unique_runtime_owner() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0x4000_0000_0000_0000);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 #[test]
 fn publish_is_one_way_and_code_executes() {
@@ -90,6 +115,7 @@ fn executable_clones_pin_the_mapping_and_quota() {
 #[test]
 fn platform_faults_disable_native_code_without_breaking_interpretation() {
     for fault in [
+        FaultInjection::PageSize,
         FaultInjection::Mapping,
         FaultInjection::Protection,
         FaultInjection::InstructionCache,
@@ -108,6 +134,9 @@ fn platform_faults_disable_native_code_without_breaking_interpretation() {
         assert!(matches!(
             (fault, error),
             (
+                FaultInjection::PageSize,
+                CodeMemoryError::PageSizeFailed { .. }
+            ) | (
                 FaultInjection::Mapping,
                 CodeMemoryError::MappingFailed { .. }
             ) | (
@@ -141,16 +170,127 @@ fn platform_faults_disable_native_code_without_breaking_interpretation() {
 #[test]
 fn runtime_owners_have_explicit_mac_policy_and_independent_quotas() {
     assert!(matches!(
-        MacJitMode::default(),
-        MacJitMode::ThreadWriteProtect
+        MacJitPolicy::default(),
+        MacJitPolicy::ThreadWriteProtect
     ));
-    let first =
-        CodeAllocator::for_runtime_with_mac_mode(11, 4096, MacJitMode::ThreadWriteProtect).unwrap();
-    let second = CodeAllocator::for_runtime(12, 4096).unwrap();
-    assert_eq!(first.owner_id(), 11);
-    assert_eq!(second.owner_id(), 12);
+    let first_owner = unique_runtime_owner();
+    let second_owner = unique_runtime_owner();
+    let first = CodeAllocator::for_runtime_with_mac_policy(
+        first_owner,
+        4096,
+        MacJitPolicy::ThreadWriteProtect,
+    )
+    .unwrap();
+    let second = CodeAllocator::for_runtime(second_owner, 4096).unwrap();
+    assert_eq!(first.owner_id(), first_owner);
+    assert_eq!(second.owner_id(), second_owner);
     let _first_mapping = first.allocate(4096).unwrap();
     let _second_mapping = second.allocate(4096).unwrap();
+}
+
+#[test]
+fn duplicate_runtime_allocators_share_quota_and_configuration() {
+    let owner = unique_runtime_owner();
+    let first = CodeAllocator::for_runtime(owner, 4096).unwrap();
+    let second = CodeAllocator::for_runtime(owner, 4096).unwrap();
+    let _mapping = first.allocate(4096).unwrap();
+
+    assert_eq!(second.reserved_bytes(), 4096);
+    assert!(matches!(
+        second.allocate(1),
+        Err(CodeMemoryError::LimitExceeded)
+    ));
+    assert!(matches!(
+        CodeAllocator::for_runtime(owner, 8192),
+        Err(CodeMemoryError::OwnerConfigurationMismatch { owner_id }) if owner_id == owner
+    ));
+}
+
+#[test]
+fn disabling_failure_rejects_writable_code_from_the_previous_epoch() {
+    let owner = unique_runtime_owner();
+    let first = CodeAllocator::for_runtime_with_fault_injection(
+        owner,
+        4096 * 2,
+        FaultInjection::Protection,
+    )
+    .unwrap();
+    let second = CodeAllocator::for_runtime_with_fault_injection(
+        owner,
+        4096 * 2,
+        FaultInjection::Protection,
+    )
+    .unwrap();
+    let mut failing = first.allocate(32).unwrap();
+    let mut stale = second.allocate(32).unwrap();
+    host_asm::write_return_42(&mut failing).unwrap();
+    host_asm::write_return_42(&mut stale).unwrap();
+
+    assert!(matches!(
+        failing.publish(),
+        Err(CodeMemoryError::ProtectionFailed { .. })
+    ));
+    assert!(matches!(
+        stale.publish(),
+        Err(CodeMemoryError::NativeDisabled)
+    ));
+    assert!(!first.native_enabled());
+    assert!(!second.native_enabled());
+    assert_eq!(first.reserved_bytes(), 0);
+}
+
+#[test]
+fn disabling_failure_wins_against_a_concurrent_publish() {
+    let owner = unique_runtime_owner();
+    let allocator = CodeAllocator::for_runtime_with_fault_injection(
+        owner,
+        4096 * 2,
+        FaultInjection::Protection,
+    )
+    .unwrap();
+    let mut first = allocator.allocate(32).unwrap();
+    let mut second = allocator.allocate(32).unwrap();
+    host_asm::write_return_42(&mut first).unwrap();
+    host_asm::write_return_42(&mut second).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let first_barrier = Arc::clone(&barrier);
+    let first_publish = std::thread::spawn(move || {
+        first_barrier.wait();
+        first.publish().unwrap_err()
+    });
+    let second_publish = std::thread::spawn(move || {
+        barrier.wait();
+        second.publish().unwrap_err()
+    });
+    let errors = [
+        first_publish.join().unwrap(),
+        second_publish.join().unwrap(),
+    ];
+
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| matches!(error, CodeMemoryError::ProtectionFailed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| matches!(error, CodeMemoryError::NativeDisabled))
+            .count(),
+        1
+    );
+    assert!(!allocator.native_enabled());
+    assert_eq!(allocator.reserved_bytes(), 0);
+}
+
+#[test]
+fn mac_jit_allowlist_policy_has_an_explicit_unsafe_bootstrap_boundary() {
+    let bootstrap: unsafe fn(MacJitPolicy) -> Result<(), CodeMemoryError> =
+        CodeAllocator::bootstrap_mac_jit_policy;
+    let _ = bootstrap;
 }
 
 #[test]
@@ -173,7 +313,7 @@ fn separately_published_versions_execute_across_threads() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_endian = "little", target_os = "linux"))]
 #[test]
 fn linux_mapping_transitions_from_rw_to_rx_without_rwx() {
     fn permissions(address: *const u8) -> String {
@@ -201,7 +341,7 @@ fn linux_mapping_transitions_from_rw_to_rx_without_rwx() {
     assert_eq!(permissions(executable.as_ptr()), "r-xp");
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_endian = "little", target_os = "windows"))]
 #[test]
 fn windows_mapping_transitions_from_rw_to_rx_without_rwx() {
     use windows_sys::Win32::System::Memory::{

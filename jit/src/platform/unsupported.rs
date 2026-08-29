@@ -7,6 +7,16 @@ pub(super) fn round_to_page(_len: usize) -> Result<usize, CodeMemoryError> {
     Err(CodeMemoryError::UnsupportedPlatform)
 }
 
+pub(super) fn prepare_mac_jit_policy(_policy: super::MacJitPolicy) -> Result<(), CodeMemoryError> {
+    Err(CodeMemoryError::UnsupportedPlatform)
+}
+
+pub(super) fn bootstrap_mac_jit_policy(
+    _policy: super::MacJitPolicy,
+) -> Result<(), CodeMemoryError> {
+    Err(CodeMemoryError::UnsupportedPlatform)
+}
+
 #[derive(Debug)]
 pub(super) struct Mapping;
 
@@ -14,7 +24,7 @@ impl Mapping {
     pub(super) fn allocate(
         _len: usize,
         _owner_id: u64,
-        _mac_jit_mode: super::MacJitMode,
+        _mac_jit_policy: super::MacJitPolicy,
     ) -> Result<Self, CodeMemoryError> {
         Err(CodeMemoryError::UnsupportedPlatform)
     }

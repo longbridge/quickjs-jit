@@ -1,16 +1,16 @@
 use rquickjs_jit::platform::{CodeMemoryError, WritableCode};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_endian = "little", target_arch = "x86_64"))]
 const RETURN_42: &[u8] = &[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3];
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_endian = "little", target_arch = "aarch64"))]
 const RETURN_42: &[u8] = &[0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6];
 
 pub fn write_return_42(writable: &mut WritableCode) -> Result<(), CodeMemoryError> {
     writable.write(0, RETURN_42)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_endian = "little", target_arch = "x86_64"))]
 pub fn write_return(
     writable: &mut WritableCode,
     offset: usize,
@@ -23,7 +23,7 @@ pub fn write_return(
     writable.write(offset, &code)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_endian = "little", target_arch = "aarch64"))]
 pub fn write_return(
     writable: &mut WritableCode,
     offset: usize,

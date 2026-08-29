@@ -56,14 +56,17 @@ fn configuration_accepts_structured_diagnostic_and_metrics_callbacks() {
 #[cfg(any(
     all(
         target_os = "macos",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "windows",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "linux",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
 ))]
@@ -76,14 +79,17 @@ fn native_execution_is_available_on_supported_targets() {
 #[cfg(not(any(
     all(
         target_os = "macos",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "windows",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
         target_os = "linux",
+        target_endian = "little",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
 )))]

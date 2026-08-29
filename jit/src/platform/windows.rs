@@ -15,7 +15,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{CodeMemoryError, FaultInjection, MacJitMode, INJECTED_RAW_CODE};
+use super::{CodeMemoryError, FaultInjection, MacJitPolicy, INJECTED_RAW_CODE};
 
 pub(super) const SUPPORTED: bool = true;
 pub(super) const INDIRECT_TARGET_ALIGNMENT: usize = 16;
@@ -27,7 +27,7 @@ pub(super) fn round_to_page(len: usize) -> Result<usize, CodeMemoryError> {
     }
     let page_size = system_info.dwPageSize as usize;
     if page_size == 0 {
-        return Err(CodeMemoryError::MappingFailed {
+        return Err(CodeMemoryError::PageSizeFailed {
             operation: "GetSystemInfo",
             raw_code: raw_os_error(),
         });
@@ -35,6 +35,14 @@ pub(super) fn round_to_page(len: usize) -> Result<usize, CodeMemoryError> {
     len.checked_add(page_size - 1)
         .map(|rounded| rounded / page_size * page_size)
         .ok_or(CodeMemoryError::SizeOverflow)
+}
+
+pub(super) fn prepare_mac_jit_policy(_policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
+    Ok(())
+}
+
+pub(super) fn bootstrap_mac_jit_policy(_policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -50,7 +58,7 @@ impl Mapping {
     pub(super) fn allocate(
         len: usize,
         _owner_id: u64,
-        _mac_jit_mode: MacJitMode,
+        _mac_jit_policy: MacJitPolicy,
     ) -> Result<Self, CodeMemoryError> {
         // Reserving with PAGE_TARGETS_INVALID records an all-invalid CFG bitmap
         // without creating an accessible executable page. The separate commit

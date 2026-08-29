@@ -6,7 +6,10 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
-use super::{CodeMemoryError, FaultInjection, MacJitMode, MacJitWriteContext, INJECTED_RAW_CODE};
+use super::{
+    nonnull_mmap_address_or_cleanup, CodeMemoryError, FaultInjection, MacJitPolicy,
+    MacJitPolicySlot, MacJitWriteContext, INJECTED_RAW_CODE,
+};
 
 pub(super) const SUPPORTED: bool = true;
 pub(super) const INDIRECT_TARGET_ALIGNMENT: usize = 16;
@@ -20,13 +23,20 @@ pub(super) fn round_to_page(len: usize) -> Result<usize, CodeMemoryError> {
         .ok_or(CodeMemoryError::SizeOverflow)
 }
 
+pub(super) fn prepare_mac_jit_policy(policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
+    establish_policy(policy, false)
+}
+
+pub(super) fn bootstrap_mac_jit_policy(policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
+    establish_policy(policy, true)
+}
+
 #[derive(Debug)]
 pub(super) struct Mapping {
     ptr: NonNull<u8>,
     offset: usize,
     len: usize,
     owner_id: u64,
-    mode: MacJitMode,
 }
 
 unsafe impl Send for Mapping {}
@@ -36,9 +46,9 @@ impl Mapping {
     pub(super) fn allocate(
         len: usize,
         owner_id: u64,
-        mode: MacJitMode,
+        policy: MacJitPolicy,
     ) -> Result<Self, CodeMemoryError> {
-        let mut heap = heap()?;
+        let mut heap = heap(policy)?;
         let offset = heap.allocate(len, owner_id)?;
         let ptr = NonNull::new((heap.base + offset) as *mut u8).ok_or(
             CodeMemoryError::MappingFailed {
@@ -51,7 +61,6 @@ impl Mapping {
             offset,
             len,
             owner_id,
-            mode,
         })
     }
 
@@ -78,13 +87,12 @@ impl Mapping {
             });
         }
 
-        match self.mode {
-            MacJitMode::ThreadWriteProtect => unsafe {
-                libc::pthread_jit_write_protect_np(0);
+        match active_policy()? {
+            MacJitPolicy::ThreadWriteProtect => unsafe {
+                let _write_scope = ThreadWriteScope::enter();
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.as_ptr(), bytes.len());
-                libc::pthread_jit_write_protect_np(1);
             },
-            MacJitMode::AllowListCallback(callback) => {
+            MacJitPolicy::AllowListCallback(callback) => {
                 let mut context = MacJitWriteContext {
                     destination: self.ptr.as_ptr(),
                     source: bytes.as_ptr(),
@@ -126,8 +134,28 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        if let Ok(mut heap) = heap() {
+        if let Some(Ok(heap)) = process_heap().get() {
+            let mut heap = heap.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             heap.release(self.offset, self.len, self.owner_id);
+        }
+    }
+}
+
+struct ThreadWriteScope;
+
+impl ThreadWriteScope {
+    unsafe fn enter() -> Self {
+        unsafe {
+            libc::pthread_jit_write_protect_np(0);
+        }
+        Self
+    }
+}
+
+impl Drop for ThreadWriteScope {
+    fn drop(&mut self) {
+        unsafe {
+            libc::pthread_jit_write_protect_np(1);
         }
     }
 }
@@ -147,7 +175,11 @@ struct ProcessHeap {
 }
 
 impl ProcessHeap {
-    fn create() -> Result<Mutex<Self>, CodeMemoryError> {
+    fn create(policy: MacJitPolicy) -> Result<Mutex<Self>, CodeMemoryError> {
+        require_write_protection_support()?;
+        if !active_policy()?.is_same(policy) {
+            return Err(CodeMemoryError::IncompatibleMacJitPolicy);
+        }
         let len = round_to_page(PROCESS_HEAP_BYTES)?;
         let ptr = unsafe {
             libc::mmap(
@@ -172,12 +204,9 @@ impl ProcessHeap {
                 raw_code,
             });
         }
-        let Some(base) = NonNull::<u8>::new(ptr.cast()) else {
-            return Err(CodeMemoryError::MappingFailed {
-                operation: "mmap(MAP_JIT)",
-                raw_code: 0,
-            });
-        };
+        let base = unsafe {
+            nonnull_mmap_address_or_cleanup(ptr, len, "mmap(MAP_JIT) returned address zero", unmap)
+        }?;
         let mut free = BTreeMap::new();
         free.insert(0, len);
         Ok(Mutex::new(Self {
@@ -237,19 +266,49 @@ impl ProcessHeap {
     }
 }
 
-fn heap() -> Result<MutexGuard<'static, ProcessHeap>, CodeMemoryError> {
-    static HEAP: OnceLock<Result<Mutex<ProcessHeap>, CodeMemoryError>> = OnceLock::new();
-    let heap = HEAP
-        .get_or_init(ProcessHeap::create)
+fn heap(policy: MacJitPolicy) -> Result<MutexGuard<'static, ProcessHeap>, CodeMemoryError> {
+    prepare_mac_jit_policy(policy)?;
+    let heap = process_heap()
+        .get_or_init(|| ProcessHeap::create(policy))
         .as_ref()
         .map_err(Clone::clone)?;
     Ok(heap.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
+fn process_heap() -> &'static OnceLock<Result<Mutex<ProcessHeap>, CodeMemoryError>> {
+    static HEAP: OnceLock<Result<Mutex<ProcessHeap>, CodeMemoryError>> = OnceLock::new();
+    &HEAP
+}
+
+fn establish_policy(policy: MacJitPolicy, unsafe_bootstrap: bool) -> Result<(), CodeMemoryError> {
+    process_policy().establish(policy, unsafe_bootstrap, require_write_protection_support)
+}
+
+fn active_policy() -> Result<MacJitPolicy, CodeMemoryError> {
+    process_policy()
+        .active()
+        .ok_or(CodeMemoryError::MacJitPolicyNotBootstrapped)
+}
+
+fn process_policy() -> &'static MacJitPolicySlot {
+    static POLICY: MacJitPolicySlot = MacJitPolicySlot::new();
+    &POLICY
+}
+
+fn require_write_protection_support() -> Result<(), CodeMemoryError> {
+    if unsafe { libc::pthread_jit_write_protect_supported_np() } == 0 {
+        return Err(CodeMemoryError::UnsupportedWriteProtection {
+            operation: "pthread_jit_write_protect_supported_np",
+            raw_code: 0,
+        });
+    }
+    Ok(())
+}
+
 fn page_size() -> Result<usize, CodeMemoryError> {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size <= 0 {
-        return Err(CodeMemoryError::MappingFailed {
+        return Err(CodeMemoryError::PageSizeFailed {
             operation: "sysconf(_SC_PAGESIZE)",
             raw_code: raw_os_error(),
         });
@@ -259,6 +318,10 @@ fn page_size() -> Result<usize, CodeMemoryError> {
 
 fn raw_os_error() -> i64 {
     i64::from(io::Error::last_os_error().raw_os_error().unwrap_or(-1))
+}
+
+unsafe fn unmap(address: *mut c_void, len: usize) {
+    let _ = unsafe { libc::munmap(address, len) };
 }
 
 unsafe extern "C" {
