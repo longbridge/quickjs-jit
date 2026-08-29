@@ -2,13 +2,150 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::{self},
+    process::{self, Command},
 };
 
 // WASI logic lifted from https://github.com/bytecodealliance/javy/blob/61616e1507d2bf896f46dc8d72687273438b58b2/crates/quickjs-wasm-sys/build.rs#L18
 
 const WASI_SDK_VERSION_MAJOR: usize = 24;
 const WASI_SDK_VERSION_MINOR: usize = 0;
+
+#[cfg(feature = "jit-abi")]
+#[derive(Debug)]
+struct JitOpcode {
+    name: String,
+    size: u8,
+    n_pop: u8,
+    n_push: u8,
+    format: u8,
+}
+
+#[cfg(feature = "jit-abi")]
+fn macro_invocations<'a>(source: &'a str, marker: &'a str) -> impl Iterator<Item = &'a str> {
+    source.split(marker).skip(1).filter_map(|tail| {
+        let tail = tail.strip_prefix('(')?;
+        Some(tail.split_once(')')?.0)
+    })
+}
+
+#[cfg(feature = "jit-abi")]
+fn hash_u64(mut hash: u64, mut value: u64) -> u64 {
+    for _ in 0..8 {
+        hash ^= value & 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+        value >>= 8;
+    }
+    hash
+}
+
+#[cfg(feature = "jit-abi")]
+fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
+    let expansion_source = out_dir.join("quickjs-jit-opcode-expand.c");
+    fs::write(
+        &expansion_source,
+        r#"
+#define FMT(format) QJSJIT_FORMAT(format)
+#define DEF(id, size, n_pop, n_push, format) QJSJIT_OPCODE(id, size, n_pop, n_push, format)
+#define def(id, size, n_pop, n_push, format) QJSJIT_TEMP_OPCODE(id, size, n_pop, n_push, format)
+#include "quickjs-opcode.h"
+"#,
+    )
+    .expect("write QuickJS opcode expansion source");
+
+    let compiler = cc::Build::new().get_compiler();
+    let mut command = Command::new(compiler.path());
+    command.args(compiler.args());
+    if compiler.is_like_msvc() {
+        command
+            .arg("/nologo")
+            .arg("/EP")
+            .arg(format!("/I{}", src_dir.display()))
+            .arg(&expansion_source);
+    } else {
+        command
+            .arg("-E")
+            .arg("-P")
+            .arg(format!("-I{}", src_dir.display()))
+            .arg(&expansion_source);
+    }
+    let output = command
+        .output()
+        .expect("run C preprocessor for QuickJS opcodes");
+    if !output.status.success() {
+        panic!(
+            "QuickJS opcode macro expansion failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let expanded = String::from_utf8(output.stdout).expect("opcode expansion is UTF-8");
+
+    let formats: Vec<String> = macro_invocations(&expanded, "QJSJIT_FORMAT")
+        .map(|format| format.trim().to_owned())
+        .collect();
+    assert!(!formats.is_empty(), "QuickJS exported no operand formats");
+
+    let mut opcodes = Vec::new();
+    for invocation in macro_invocations(&expanded, "QJSJIT_OPCODE") {
+        let fields: Vec<_> = invocation.split(',').map(str::trim).collect();
+        assert_eq!(fields.len(), 5, "malformed opcode expansion: {invocation}");
+        let format = formats
+            .iter()
+            .position(|candidate| candidate == fields[4])
+            .unwrap_or_else(|| panic!("unknown opcode format: {}", fields[4]));
+        opcodes.push(JitOpcode {
+            name: fields[0].to_owned(),
+            size: fields[1].parse().expect("opcode size"),
+            n_pop: fields[2].parse().expect("opcode pop count"),
+            n_push: fields[3].parse().expect("opcode push count"),
+            format: format.try_into().expect("operand format fits u8"),
+        });
+    }
+    assert!(!opcodes.is_empty(), "QuickJS exported no opcodes");
+    assert!(
+        opcodes.len() <= 256,
+        "QuickJS opcode IDs must fit in one byte"
+    );
+
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for (opcode, info) in opcodes.iter().enumerate() {
+        fingerprint = hash_u64(fingerprint, opcode as u64);
+        fingerprint = hash_u64(fingerprint, info.size.into());
+        fingerprint = hash_u64(fingerprint, info.n_pop.into());
+        fingerprint = hash_u64(fingerprint, info.n_push.into());
+        fingerprint = hash_u64(fingerprint, info.format.into());
+    }
+
+    fs::write(
+        out_dir.join("quickjs-jit-opcodes.generated.h"),
+        format!(
+            "#define QJSJIT_GENERATED_OPCODE_COUNT {}u\n#define QJSJIT_GENERATED_OPCODE_FINGERPRINT UINT64_C(0x{fingerprint:016x})\n",
+            opcodes.len()
+        ),
+    )
+    .expect("write generated QuickJS opcode C metadata");
+
+    let mut constants = String::new();
+    let mut rust = format!(
+        "pub const QJSJIT_GENERATED_OPCODE_COUNT: usize = {};\n\
+         pub const QJSJIT_GENERATED_OPCODE_FINGERPRINT: u64 = 0x{fingerprint:016x};\n\
+         pub static QJSJIT_GENERATED_OPCODES: &[JitGeneratedOpcode] = &[\n",
+        opcodes.len()
+    );
+    for (opcode, info) in opcodes.iter().enumerate() {
+        rust.push_str(&format!(
+            "    JitGeneratedOpcode {{ opcode: {opcode}, size: {}, n_pop: {}, n_push: {}, format: {}, format_name: {:?}, name: {:?} }},\n",
+            info.size, info.n_pop, info.n_push, info.format, formats[info.format as usize], info.name
+        ));
+        constants.push_str(&format!(
+            "pub const QJS_JIT_OP_{}: u8 = {opcode};\n",
+            info.name.to_ascii_uppercase()
+        ));
+    }
+    rust.push_str("];\n");
+    rust.push_str(&constants);
+    fs::write(out_dir.join("quickjs-jit-opcodes.rs"), rust)
+        .expect("write generated QuickJS opcode Rust metadata");
+}
 
 fn download_wasi_sdk() -> PathBuf {
     let mut wasi_sdk_dir: PathBuf = env::var("OUT_DIR").unwrap().into();
@@ -123,6 +260,9 @@ fn main() {
 
     let out_dir = env::var("OUT_DIR").expect("No OUT_DIR env var is set by cargo");
     let out_dir = Path::new(&out_dir);
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_opcode_metadata(src_dir, out_dir);
 
     let header_files = [
         "builtin-array-fromasync.h",

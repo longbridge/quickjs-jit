@@ -2135,6 +2135,362 @@ const _: () = {
     ["Offset of field: JSJitHotEvent::count"]
         [::core::mem::offset_of!(JSJitHotEvent, count) - 36usize];
 };
+pub const JSJitOperandFormat_JS_JIT_FMT_none: JSJitOperandFormat = 0;
+pub const JSJitOperandFormat_JS_JIT_FMT_none_int: JSJitOperandFormat = 1;
+pub const JSJitOperandFormat_JS_JIT_FMT_none_loc: JSJitOperandFormat = 2;
+pub const JSJitOperandFormat_JS_JIT_FMT_none_arg: JSJitOperandFormat = 3;
+pub const JSJitOperandFormat_JS_JIT_FMT_none_var_ref: JSJitOperandFormat = 4;
+pub const JSJitOperandFormat_JS_JIT_FMT_u8: JSJitOperandFormat = 5;
+pub const JSJitOperandFormat_JS_JIT_FMT_i8: JSJitOperandFormat = 6;
+pub const JSJitOperandFormat_JS_JIT_FMT_loc8: JSJitOperandFormat = 7;
+pub const JSJitOperandFormat_JS_JIT_FMT_const8: JSJitOperandFormat = 8;
+pub const JSJitOperandFormat_JS_JIT_FMT_label8: JSJitOperandFormat = 9;
+pub const JSJitOperandFormat_JS_JIT_FMT_u16: JSJitOperandFormat = 10;
+pub const JSJitOperandFormat_JS_JIT_FMT_i16: JSJitOperandFormat = 11;
+pub const JSJitOperandFormat_JS_JIT_FMT_label16: JSJitOperandFormat = 12;
+pub const JSJitOperandFormat_JS_JIT_FMT_npop: JSJitOperandFormat = 13;
+pub const JSJitOperandFormat_JS_JIT_FMT_npopx: JSJitOperandFormat = 14;
+pub const JSJitOperandFormat_JS_JIT_FMT_npop_u16: JSJitOperandFormat = 15;
+pub const JSJitOperandFormat_JS_JIT_FMT_loc: JSJitOperandFormat = 16;
+pub const JSJitOperandFormat_JS_JIT_FMT_arg: JSJitOperandFormat = 17;
+pub const JSJitOperandFormat_JS_JIT_FMT_var_ref: JSJitOperandFormat = 18;
+pub const JSJitOperandFormat_JS_JIT_FMT_u32: JSJitOperandFormat = 19;
+pub const JSJitOperandFormat_JS_JIT_FMT_u32x2: JSJitOperandFormat = 20;
+pub const JSJitOperandFormat_JS_JIT_FMT_i32: JSJitOperandFormat = 21;
+pub const JSJitOperandFormat_JS_JIT_FMT_const: JSJitOperandFormat = 22;
+pub const JSJitOperandFormat_JS_JIT_FMT_label: JSJitOperandFormat = 23;
+pub const JSJitOperandFormat_JS_JIT_FMT_atom: JSJitOperandFormat = 24;
+pub const JSJitOperandFormat_JS_JIT_FMT_atom_u8: JSJitOperandFormat = 25;
+pub const JSJitOperandFormat_JS_JIT_FMT_atom_u16: JSJitOperandFormat = 26;
+pub const JSJitOperandFormat_JS_JIT_FMT_atom_label_u8: JSJitOperandFormat = 27;
+pub const JSJitOperandFormat_JS_JIT_FMT_atom_label_u16: JSJitOperandFormat = 28;
+pub const JSJitOperandFormat_JS_JIT_FMT_label_u16: JSJitOperandFormat = 29;
+pub const JSJitOperandFormat_JS_JIT_FMT_COUNT: JSJitOperandFormat = 30;
+pub type JSJitOperandFormat = ::core::ffi::c_uint;
+pub const JSJitOpcode_JS_JIT_OP_invalid: JSJitOpcode = 0;
+pub const JSJitOpcode_JS_JIT_OP_push_i32: JSJitOpcode = 1;
+pub const JSJitOpcode_JS_JIT_OP_push_const: JSJitOpcode = 2;
+pub const JSJitOpcode_JS_JIT_OP_fclosure: JSJitOpcode = 3;
+pub const JSJitOpcode_JS_JIT_OP_push_atom_value: JSJitOpcode = 4;
+pub const JSJitOpcode_JS_JIT_OP_private_symbol: JSJitOpcode = 5;
+pub const JSJitOpcode_JS_JIT_OP_undefined: JSJitOpcode = 6;
+pub const JSJitOpcode_JS_JIT_OP_null: JSJitOpcode = 7;
+pub const JSJitOpcode_JS_JIT_OP_push_this: JSJitOpcode = 8;
+pub const JSJitOpcode_JS_JIT_OP_push_false: JSJitOpcode = 9;
+pub const JSJitOpcode_JS_JIT_OP_push_true: JSJitOpcode = 10;
+pub const JSJitOpcode_JS_JIT_OP_object: JSJitOpcode = 11;
+pub const JSJitOpcode_JS_JIT_OP_special_object: JSJitOpcode = 12;
+pub const JSJitOpcode_JS_JIT_OP_rest: JSJitOpcode = 13;
+pub const JSJitOpcode_JS_JIT_OP_drop: JSJitOpcode = 14;
+pub const JSJitOpcode_JS_JIT_OP_nip: JSJitOpcode = 15;
+pub const JSJitOpcode_JS_JIT_OP_nip1: JSJitOpcode = 16;
+pub const JSJitOpcode_JS_JIT_OP_dup: JSJitOpcode = 17;
+pub const JSJitOpcode_JS_JIT_OP_dup1: JSJitOpcode = 18;
+pub const JSJitOpcode_JS_JIT_OP_dup2: JSJitOpcode = 19;
+pub const JSJitOpcode_JS_JIT_OP_dup3: JSJitOpcode = 20;
+pub const JSJitOpcode_JS_JIT_OP_insert2: JSJitOpcode = 21;
+pub const JSJitOpcode_JS_JIT_OP_insert3: JSJitOpcode = 22;
+pub const JSJitOpcode_JS_JIT_OP_insert4: JSJitOpcode = 23;
+pub const JSJitOpcode_JS_JIT_OP_perm3: JSJitOpcode = 24;
+pub const JSJitOpcode_JS_JIT_OP_perm4: JSJitOpcode = 25;
+pub const JSJitOpcode_JS_JIT_OP_perm5: JSJitOpcode = 26;
+pub const JSJitOpcode_JS_JIT_OP_swap: JSJitOpcode = 27;
+pub const JSJitOpcode_JS_JIT_OP_swap2: JSJitOpcode = 28;
+pub const JSJitOpcode_JS_JIT_OP_rot3l: JSJitOpcode = 29;
+pub const JSJitOpcode_JS_JIT_OP_rot3r: JSJitOpcode = 30;
+pub const JSJitOpcode_JS_JIT_OP_rot4l: JSJitOpcode = 31;
+pub const JSJitOpcode_JS_JIT_OP_rot5l: JSJitOpcode = 32;
+pub const JSJitOpcode_JS_JIT_OP_call_constructor: JSJitOpcode = 33;
+pub const JSJitOpcode_JS_JIT_OP_call: JSJitOpcode = 34;
+pub const JSJitOpcode_JS_JIT_OP_tail_call: JSJitOpcode = 35;
+pub const JSJitOpcode_JS_JIT_OP_call_method: JSJitOpcode = 36;
+pub const JSJitOpcode_JS_JIT_OP_tail_call_method: JSJitOpcode = 37;
+pub const JSJitOpcode_JS_JIT_OP_array_from: JSJitOpcode = 38;
+pub const JSJitOpcode_JS_JIT_OP_apply: JSJitOpcode = 39;
+pub const JSJitOpcode_JS_JIT_OP_return: JSJitOpcode = 40;
+pub const JSJitOpcode_JS_JIT_OP_return_undef: JSJitOpcode = 41;
+pub const JSJitOpcode_JS_JIT_OP_check_ctor_return: JSJitOpcode = 42;
+pub const JSJitOpcode_JS_JIT_OP_check_ctor: JSJitOpcode = 43;
+pub const JSJitOpcode_JS_JIT_OP_init_ctor: JSJitOpcode = 44;
+pub const JSJitOpcode_JS_JIT_OP_check_brand: JSJitOpcode = 45;
+pub const JSJitOpcode_JS_JIT_OP_add_brand: JSJitOpcode = 46;
+pub const JSJitOpcode_JS_JIT_OP_return_async: JSJitOpcode = 47;
+pub const JSJitOpcode_JS_JIT_OP_throw: JSJitOpcode = 48;
+pub const JSJitOpcode_JS_JIT_OP_throw_error: JSJitOpcode = 49;
+pub const JSJitOpcode_JS_JIT_OP_eval: JSJitOpcode = 50;
+pub const JSJitOpcode_JS_JIT_OP_apply_eval: JSJitOpcode = 51;
+pub const JSJitOpcode_JS_JIT_OP_regexp: JSJitOpcode = 52;
+pub const JSJitOpcode_JS_JIT_OP_get_super: JSJitOpcode = 53;
+pub const JSJitOpcode_JS_JIT_OP_import: JSJitOpcode = 54;
+pub const JSJitOpcode_JS_JIT_OP_get_var_undef: JSJitOpcode = 55;
+pub const JSJitOpcode_JS_JIT_OP_get_var: JSJitOpcode = 56;
+pub const JSJitOpcode_JS_JIT_OP_put_var: JSJitOpcode = 57;
+pub const JSJitOpcode_JS_JIT_OP_put_var_init: JSJitOpcode = 58;
+pub const JSJitOpcode_JS_JIT_OP_get_ref_value: JSJitOpcode = 59;
+pub const JSJitOpcode_JS_JIT_OP_put_ref_value: JSJitOpcode = 60;
+pub const JSJitOpcode_JS_JIT_OP_define_var: JSJitOpcode = 61;
+pub const JSJitOpcode_JS_JIT_OP_check_define_var: JSJitOpcode = 62;
+pub const JSJitOpcode_JS_JIT_OP_define_func: JSJitOpcode = 63;
+pub const JSJitOpcode_JS_JIT_OP_get_field: JSJitOpcode = 64;
+pub const JSJitOpcode_JS_JIT_OP_get_field2: JSJitOpcode = 65;
+pub const JSJitOpcode_JS_JIT_OP_put_field: JSJitOpcode = 66;
+pub const JSJitOpcode_JS_JIT_OP_get_private_field: JSJitOpcode = 67;
+pub const JSJitOpcode_JS_JIT_OP_put_private_field: JSJitOpcode = 68;
+pub const JSJitOpcode_JS_JIT_OP_define_private_field: JSJitOpcode = 69;
+pub const JSJitOpcode_JS_JIT_OP_get_array_el: JSJitOpcode = 70;
+pub const JSJitOpcode_JS_JIT_OP_get_array_el2: JSJitOpcode = 71;
+pub const JSJitOpcode_JS_JIT_OP_put_array_el: JSJitOpcode = 72;
+pub const JSJitOpcode_JS_JIT_OP_get_super_value: JSJitOpcode = 73;
+pub const JSJitOpcode_JS_JIT_OP_put_super_value: JSJitOpcode = 74;
+pub const JSJitOpcode_JS_JIT_OP_define_field: JSJitOpcode = 75;
+pub const JSJitOpcode_JS_JIT_OP_set_name: JSJitOpcode = 76;
+pub const JSJitOpcode_JS_JIT_OP_set_name_computed: JSJitOpcode = 77;
+pub const JSJitOpcode_JS_JIT_OP_set_proto: JSJitOpcode = 78;
+pub const JSJitOpcode_JS_JIT_OP_set_home_object: JSJitOpcode = 79;
+pub const JSJitOpcode_JS_JIT_OP_define_array_el: JSJitOpcode = 80;
+pub const JSJitOpcode_JS_JIT_OP_append: JSJitOpcode = 81;
+pub const JSJitOpcode_JS_JIT_OP_copy_data_properties: JSJitOpcode = 82;
+pub const JSJitOpcode_JS_JIT_OP_define_method: JSJitOpcode = 83;
+pub const JSJitOpcode_JS_JIT_OP_define_method_computed: JSJitOpcode = 84;
+pub const JSJitOpcode_JS_JIT_OP_define_class: JSJitOpcode = 85;
+pub const JSJitOpcode_JS_JIT_OP_define_class_computed: JSJitOpcode = 86;
+pub const JSJitOpcode_JS_JIT_OP_get_loc: JSJitOpcode = 87;
+pub const JSJitOpcode_JS_JIT_OP_put_loc: JSJitOpcode = 88;
+pub const JSJitOpcode_JS_JIT_OP_set_loc: JSJitOpcode = 89;
+pub const JSJitOpcode_JS_JIT_OP_get_arg: JSJitOpcode = 90;
+pub const JSJitOpcode_JS_JIT_OP_put_arg: JSJitOpcode = 91;
+pub const JSJitOpcode_JS_JIT_OP_set_arg: JSJitOpcode = 92;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref: JSJitOpcode = 93;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref: JSJitOpcode = 94;
+pub const JSJitOpcode_JS_JIT_OP_set_var_ref: JSJitOpcode = 95;
+pub const JSJitOpcode_JS_JIT_OP_set_loc_uninitialized: JSJitOpcode = 96;
+pub const JSJitOpcode_JS_JIT_OP_get_loc_check: JSJitOpcode = 97;
+pub const JSJitOpcode_JS_JIT_OP_put_loc_check: JSJitOpcode = 98;
+pub const JSJitOpcode_JS_JIT_OP_put_loc_check_init: JSJitOpcode = 99;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref_check: JSJitOpcode = 100;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref_check: JSJitOpcode = 101;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref_check_init: JSJitOpcode = 102;
+pub const JSJitOpcode_JS_JIT_OP_close_loc: JSJitOpcode = 103;
+pub const JSJitOpcode_JS_JIT_OP_if_false: JSJitOpcode = 104;
+pub const JSJitOpcode_JS_JIT_OP_if_true: JSJitOpcode = 105;
+pub const JSJitOpcode_JS_JIT_OP_goto: JSJitOpcode = 106;
+pub const JSJitOpcode_JS_JIT_OP_catch: JSJitOpcode = 107;
+pub const JSJitOpcode_JS_JIT_OP_gosub: JSJitOpcode = 108;
+pub const JSJitOpcode_JS_JIT_OP_ret: JSJitOpcode = 109;
+pub const JSJitOpcode_JS_JIT_OP_nip_catch: JSJitOpcode = 110;
+pub const JSJitOpcode_JS_JIT_OP_check_object: JSJitOpcode = 111;
+pub const JSJitOpcode_JS_JIT_OP_to_object: JSJitOpcode = 112;
+pub const JSJitOpcode_JS_JIT_OP_to_propkey: JSJitOpcode = 113;
+pub const JSJitOpcode_JS_JIT_OP_to_propkey2: JSJitOpcode = 114;
+pub const JSJitOpcode_JS_JIT_OP_with_get_var: JSJitOpcode = 115;
+pub const JSJitOpcode_JS_JIT_OP_with_put_var: JSJitOpcode = 116;
+pub const JSJitOpcode_JS_JIT_OP_with_delete_var: JSJitOpcode = 117;
+pub const JSJitOpcode_JS_JIT_OP_with_make_ref: JSJitOpcode = 118;
+pub const JSJitOpcode_JS_JIT_OP_with_get_ref: JSJitOpcode = 119;
+pub const JSJitOpcode_JS_JIT_OP_with_get_ref_undef: JSJitOpcode = 120;
+pub const JSJitOpcode_JS_JIT_OP_make_loc_ref: JSJitOpcode = 121;
+pub const JSJitOpcode_JS_JIT_OP_make_arg_ref: JSJitOpcode = 122;
+pub const JSJitOpcode_JS_JIT_OP_make_var_ref_ref: JSJitOpcode = 123;
+pub const JSJitOpcode_JS_JIT_OP_make_var_ref: JSJitOpcode = 124;
+pub const JSJitOpcode_JS_JIT_OP_for_in_start: JSJitOpcode = 125;
+pub const JSJitOpcode_JS_JIT_OP_for_of_start: JSJitOpcode = 126;
+pub const JSJitOpcode_JS_JIT_OP_for_await_of_start: JSJitOpcode = 127;
+pub const JSJitOpcode_JS_JIT_OP_for_in_next: JSJitOpcode = 128;
+pub const JSJitOpcode_JS_JIT_OP_for_of_next: JSJitOpcode = 129;
+pub const JSJitOpcode_JS_JIT_OP_iterator_get_value_done: JSJitOpcode = 130;
+pub const JSJitOpcode_JS_JIT_OP_iterator_close: JSJitOpcode = 131;
+pub const JSJitOpcode_JS_JIT_OP_iterator_next: JSJitOpcode = 132;
+pub const JSJitOpcode_JS_JIT_OP_iterator_call: JSJitOpcode = 133;
+pub const JSJitOpcode_JS_JIT_OP_initial_yield: JSJitOpcode = 134;
+pub const JSJitOpcode_JS_JIT_OP_yield: JSJitOpcode = 135;
+pub const JSJitOpcode_JS_JIT_OP_yield_star: JSJitOpcode = 136;
+pub const JSJitOpcode_JS_JIT_OP_async_yield_star: JSJitOpcode = 137;
+pub const JSJitOpcode_JS_JIT_OP_await: JSJitOpcode = 138;
+pub const JSJitOpcode_JS_JIT_OP_neg: JSJitOpcode = 139;
+pub const JSJitOpcode_JS_JIT_OP_plus: JSJitOpcode = 140;
+pub const JSJitOpcode_JS_JIT_OP_dec: JSJitOpcode = 141;
+pub const JSJitOpcode_JS_JIT_OP_inc: JSJitOpcode = 142;
+pub const JSJitOpcode_JS_JIT_OP_post_dec: JSJitOpcode = 143;
+pub const JSJitOpcode_JS_JIT_OP_post_inc: JSJitOpcode = 144;
+pub const JSJitOpcode_JS_JIT_OP_dec_loc: JSJitOpcode = 145;
+pub const JSJitOpcode_JS_JIT_OP_inc_loc: JSJitOpcode = 146;
+pub const JSJitOpcode_JS_JIT_OP_add_loc: JSJitOpcode = 147;
+pub const JSJitOpcode_JS_JIT_OP_not: JSJitOpcode = 148;
+pub const JSJitOpcode_JS_JIT_OP_lnot: JSJitOpcode = 149;
+pub const JSJitOpcode_JS_JIT_OP_typeof: JSJitOpcode = 150;
+pub const JSJitOpcode_JS_JIT_OP_delete: JSJitOpcode = 151;
+pub const JSJitOpcode_JS_JIT_OP_delete_var: JSJitOpcode = 152;
+pub const JSJitOpcode_JS_JIT_OP_mul: JSJitOpcode = 153;
+pub const JSJitOpcode_JS_JIT_OP_div: JSJitOpcode = 154;
+pub const JSJitOpcode_JS_JIT_OP_mod: JSJitOpcode = 155;
+pub const JSJitOpcode_JS_JIT_OP_add: JSJitOpcode = 156;
+pub const JSJitOpcode_JS_JIT_OP_sub: JSJitOpcode = 157;
+pub const JSJitOpcode_JS_JIT_OP_shl: JSJitOpcode = 158;
+pub const JSJitOpcode_JS_JIT_OP_sar: JSJitOpcode = 159;
+pub const JSJitOpcode_JS_JIT_OP_shr: JSJitOpcode = 160;
+pub const JSJitOpcode_JS_JIT_OP_and: JSJitOpcode = 161;
+pub const JSJitOpcode_JS_JIT_OP_xor: JSJitOpcode = 162;
+pub const JSJitOpcode_JS_JIT_OP_or: JSJitOpcode = 163;
+pub const JSJitOpcode_JS_JIT_OP_pow: JSJitOpcode = 164;
+pub const JSJitOpcode_JS_JIT_OP_lt: JSJitOpcode = 165;
+pub const JSJitOpcode_JS_JIT_OP_lte: JSJitOpcode = 166;
+pub const JSJitOpcode_JS_JIT_OP_gt: JSJitOpcode = 167;
+pub const JSJitOpcode_JS_JIT_OP_gte: JSJitOpcode = 168;
+pub const JSJitOpcode_JS_JIT_OP_instanceof: JSJitOpcode = 169;
+pub const JSJitOpcode_JS_JIT_OP_in: JSJitOpcode = 170;
+pub const JSJitOpcode_JS_JIT_OP_eq: JSJitOpcode = 171;
+pub const JSJitOpcode_JS_JIT_OP_neq: JSJitOpcode = 172;
+pub const JSJitOpcode_JS_JIT_OP_strict_eq: JSJitOpcode = 173;
+pub const JSJitOpcode_JS_JIT_OP_strict_neq: JSJitOpcode = 174;
+pub const JSJitOpcode_JS_JIT_OP_is_undefined_or_null: JSJitOpcode = 175;
+pub const JSJitOpcode_JS_JIT_OP_private_in: JSJitOpcode = 176;
+pub const JSJitOpcode_JS_JIT_OP_push_bigint_i32: JSJitOpcode = 177;
+pub const JSJitOpcode_JS_JIT_OP_using_dispose_init: JSJitOpcode = 178;
+pub const JSJitOpcode_JS_JIT_OP_using_dispose: JSJitOpcode = 179;
+pub const JSJitOpcode_JS_JIT_OP_using_dispose_async: JSJitOpcode = 180;
+pub const JSJitOpcode_JS_JIT_OP_using_dispose_merge: JSJitOpcode = 181;
+pub const JSJitOpcode_JS_JIT_OP_using_dispose_end: JSJitOpcode = 182;
+pub const JSJitOpcode_JS_JIT_OP_using_check: JSJitOpcode = 183;
+pub const JSJitOpcode_JS_JIT_OP_nop: JSJitOpcode = 184;
+pub const JSJitOpcode_JS_JIT_OP_push_minus1: JSJitOpcode = 185;
+pub const JSJitOpcode_JS_JIT_OP_push_0: JSJitOpcode = 186;
+pub const JSJitOpcode_JS_JIT_OP_push_1: JSJitOpcode = 187;
+pub const JSJitOpcode_JS_JIT_OP_push_2: JSJitOpcode = 188;
+pub const JSJitOpcode_JS_JIT_OP_push_3: JSJitOpcode = 189;
+pub const JSJitOpcode_JS_JIT_OP_push_4: JSJitOpcode = 190;
+pub const JSJitOpcode_JS_JIT_OP_push_5: JSJitOpcode = 191;
+pub const JSJitOpcode_JS_JIT_OP_push_6: JSJitOpcode = 192;
+pub const JSJitOpcode_JS_JIT_OP_push_7: JSJitOpcode = 193;
+pub const JSJitOpcode_JS_JIT_OP_push_i8: JSJitOpcode = 194;
+pub const JSJitOpcode_JS_JIT_OP_push_i16: JSJitOpcode = 195;
+pub const JSJitOpcode_JS_JIT_OP_push_const8: JSJitOpcode = 196;
+pub const JSJitOpcode_JS_JIT_OP_fclosure8: JSJitOpcode = 197;
+pub const JSJitOpcode_JS_JIT_OP_push_empty_string: JSJitOpcode = 198;
+pub const JSJitOpcode_JS_JIT_OP_get_loc8: JSJitOpcode = 199;
+pub const JSJitOpcode_JS_JIT_OP_put_loc8: JSJitOpcode = 200;
+pub const JSJitOpcode_JS_JIT_OP_set_loc8: JSJitOpcode = 201;
+pub const JSJitOpcode_JS_JIT_OP_get_loc0_loc1: JSJitOpcode = 202;
+pub const JSJitOpcode_JS_JIT_OP_get_loc0: JSJitOpcode = 203;
+pub const JSJitOpcode_JS_JIT_OP_get_loc1: JSJitOpcode = 204;
+pub const JSJitOpcode_JS_JIT_OP_get_loc2: JSJitOpcode = 205;
+pub const JSJitOpcode_JS_JIT_OP_get_loc3: JSJitOpcode = 206;
+pub const JSJitOpcode_JS_JIT_OP_put_loc0: JSJitOpcode = 207;
+pub const JSJitOpcode_JS_JIT_OP_put_loc1: JSJitOpcode = 208;
+pub const JSJitOpcode_JS_JIT_OP_put_loc2: JSJitOpcode = 209;
+pub const JSJitOpcode_JS_JIT_OP_put_loc3: JSJitOpcode = 210;
+pub const JSJitOpcode_JS_JIT_OP_set_loc0: JSJitOpcode = 211;
+pub const JSJitOpcode_JS_JIT_OP_set_loc1: JSJitOpcode = 212;
+pub const JSJitOpcode_JS_JIT_OP_set_loc2: JSJitOpcode = 213;
+pub const JSJitOpcode_JS_JIT_OP_set_loc3: JSJitOpcode = 214;
+pub const JSJitOpcode_JS_JIT_OP_get_arg0: JSJitOpcode = 215;
+pub const JSJitOpcode_JS_JIT_OP_get_arg1: JSJitOpcode = 216;
+pub const JSJitOpcode_JS_JIT_OP_get_arg2: JSJitOpcode = 217;
+pub const JSJitOpcode_JS_JIT_OP_get_arg3: JSJitOpcode = 218;
+pub const JSJitOpcode_JS_JIT_OP_put_arg0: JSJitOpcode = 219;
+pub const JSJitOpcode_JS_JIT_OP_put_arg1: JSJitOpcode = 220;
+pub const JSJitOpcode_JS_JIT_OP_put_arg2: JSJitOpcode = 221;
+pub const JSJitOpcode_JS_JIT_OP_put_arg3: JSJitOpcode = 222;
+pub const JSJitOpcode_JS_JIT_OP_set_arg0: JSJitOpcode = 223;
+pub const JSJitOpcode_JS_JIT_OP_set_arg1: JSJitOpcode = 224;
+pub const JSJitOpcode_JS_JIT_OP_set_arg2: JSJitOpcode = 225;
+pub const JSJitOpcode_JS_JIT_OP_set_arg3: JSJitOpcode = 226;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref0: JSJitOpcode = 227;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref1: JSJitOpcode = 228;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref2: JSJitOpcode = 229;
+pub const JSJitOpcode_JS_JIT_OP_get_var_ref3: JSJitOpcode = 230;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref0: JSJitOpcode = 231;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref1: JSJitOpcode = 232;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref2: JSJitOpcode = 233;
+pub const JSJitOpcode_JS_JIT_OP_put_var_ref3: JSJitOpcode = 234;
+pub const JSJitOpcode_JS_JIT_OP_set_var_ref0: JSJitOpcode = 235;
+pub const JSJitOpcode_JS_JIT_OP_set_var_ref1: JSJitOpcode = 236;
+pub const JSJitOpcode_JS_JIT_OP_set_var_ref2: JSJitOpcode = 237;
+pub const JSJitOpcode_JS_JIT_OP_set_var_ref3: JSJitOpcode = 238;
+pub const JSJitOpcode_JS_JIT_OP_get_length: JSJitOpcode = 239;
+pub const JSJitOpcode_JS_JIT_OP_if_false8: JSJitOpcode = 240;
+pub const JSJitOpcode_JS_JIT_OP_if_true8: JSJitOpcode = 241;
+pub const JSJitOpcode_JS_JIT_OP_goto8: JSJitOpcode = 242;
+pub const JSJitOpcode_JS_JIT_OP_goto16: JSJitOpcode = 243;
+pub const JSJitOpcode_JS_JIT_OP_call0: JSJitOpcode = 244;
+pub const JSJitOpcode_JS_JIT_OP_call1: JSJitOpcode = 245;
+pub const JSJitOpcode_JS_JIT_OP_call2: JSJitOpcode = 246;
+pub const JSJitOpcode_JS_JIT_OP_call3: JSJitOpcode = 247;
+pub const JSJitOpcode_JS_JIT_OP_is_undefined: JSJitOpcode = 248;
+pub const JSJitOpcode_JS_JIT_OP_is_null: JSJitOpcode = 249;
+pub const JSJitOpcode_JS_JIT_OP_typeof_is_undefined: JSJitOpcode = 250;
+pub const JSJitOpcode_JS_JIT_OP_typeof_is_function: JSJitOpcode = 251;
+pub const JSJitOpcode_JS_JIT_OPCODE_COUNT: JSJitOpcode = 252;
+pub type JSJitOpcode = ::core::ffi::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitOpcodeInfo {
+    pub opcode: u8,
+    pub size: u8,
+    pub n_pop: u8,
+    pub n_push: u8,
+    pub format: u8,
+    pub reserved: [u8; 3usize],
+    pub name: *const ::core::ffi::c_char,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitOpcodeInfo"][::core::mem::size_of::<JSJitOpcodeInfo>() - 16usize];
+    ["Alignment of JSJitOpcodeInfo"][::core::mem::align_of::<JSJitOpcodeInfo>() - 8usize];
+    ["Offset of field: JSJitOpcodeInfo::opcode"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, opcode) - 0usize];
+    ["Offset of field: JSJitOpcodeInfo::size"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, size) - 1usize];
+    ["Offset of field: JSJitOpcodeInfo::n_pop"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, n_pop) - 2usize];
+    ["Offset of field: JSJitOpcodeInfo::n_push"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, n_push) - 3usize];
+    ["Offset of field: JSJitOpcodeInfo::format"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, format) - 4usize];
+    ["Offset of field: JSJitOpcodeInfo::reserved"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, reserved) - 5usize];
+    ["Offset of field: JSJitOpcodeInfo::name"]
+        [::core::mem::offset_of!(JSJitOpcodeInfo, name) - 8usize];
+};
+pub const JSJitConstantKind_JS_JIT_CONSTANT_IMMEDIATE: JSJitConstantKind = 0;
+pub const JSJitConstantKind_JS_JIT_CONSTANT_STRING: JSJitConstantKind = 1;
+pub const JSJitConstantKind_JS_JIT_CONSTANT_BIG_INT: JSJitConstantKind = 2;
+pub const JSJitConstantKind_JS_JIT_CONSTANT_FUNCTION: JSJitConstantKind = 3;
+pub const JSJitConstantKind_JS_JIT_CONSTANT_OBJECT: JSJitConstantKind = 4;
+pub type JSJitConstantKind = ::core::ffi::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitConstantDescriptor {
+    pub index: u32,
+    pub tag: i32,
+    pub kind: u32,
+    pub reserved: u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitConstantDescriptor"]
+        [::core::mem::size_of::<JSJitConstantDescriptor>() - 16usize];
+    ["Alignment of JSJitConstantDescriptor"]
+        [::core::mem::align_of::<JSJitConstantDescriptor>() - 4usize];
+    ["Offset of field: JSJitConstantDescriptor::index"]
+        [::core::mem::offset_of!(JSJitConstantDescriptor, index) - 0usize];
+    ["Offset of field: JSJitConstantDescriptor::tag"]
+        [::core::mem::offset_of!(JSJitConstantDescriptor, tag) - 4usize];
+    ["Offset of field: JSJitConstantDescriptor::kind"]
+        [::core::mem::offset_of!(JSJitConstantDescriptor, kind) - 8usize];
+    ["Offset of field: JSJitConstantDescriptor::reserved"]
+        [::core::mem::offset_of!(JSJitConstantDescriptor, reserved) - 12usize];
+};
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_OK: JSJitSnapshotStatus = 0;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_INVALID_ARGUMENT: JSJitSnapshotStatus = -1;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_NOT_BYTECODE: JSJitSnapshotStatus = -2;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_GENERATOR: JSJitSnapshotStatus = -3;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_ASYNC: JSJitSnapshotStatus = -4;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_EVAL: JSJitSnapshotStatus = -5;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_WITH: JSJitSnapshotStatus = -6;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_OUT_OF_MEMORY: JSJitSnapshotStatus = -7;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_TOO_LARGE: JSJitSnapshotStatus = -8;
+pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_INVALID_BYTECODE: JSJitSnapshotStatus = -9;
+pub type JSJitSnapshotStatus = ::core::ffi::c_int;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSJitFunctionSnapshot {
@@ -2142,10 +2498,24 @@ pub struct JSJitFunctionSnapshot {
     pub flags: u32,
     pub function: JSJitFunctionId,
     pub opaque: *mut ::core::ffi::c_void,
+    pub source_revision: u64,
+    pub opcode_fingerprint: u64,
+    pub bytecode: *const u8,
+    pub bytecode_len: u32,
+    pub arg_count: u16,
+    pub local_count: u16,
+    pub closure_count: u16,
+    pub stack_size: u16,
+    pub constants: *const JSJitConstantDescriptor,
+    pub constant_count: u32,
+    pub exception_map: *const u8,
+    pub exception_map_len: u32,
+    pub source_map: *const u8,
+    pub source_map_len: u32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitFunctionSnapshot"][::core::mem::size_of::<JSJitFunctionSnapshot>() - 40usize];
+    ["Size of JSJitFunctionSnapshot"][::core::mem::size_of::<JSJitFunctionSnapshot>() - 128usize];
     ["Alignment of JSJitFunctionSnapshot"]
         [::core::mem::align_of::<JSJitFunctionSnapshot>() - 8usize];
     ["Offset of field: JSJitFunctionSnapshot::struct_size"]
@@ -2156,6 +2526,34 @@ const _: () = {
         [::core::mem::offset_of!(JSJitFunctionSnapshot, function) - 8usize];
     ["Offset of field: JSJitFunctionSnapshot::opaque"]
         [::core::mem::offset_of!(JSJitFunctionSnapshot, opaque) - 32usize];
+    ["Offset of field: JSJitFunctionSnapshot::source_revision"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, source_revision) - 40usize];
+    ["Offset of field: JSJitFunctionSnapshot::opcode_fingerprint"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, opcode_fingerprint) - 48usize];
+    ["Offset of field: JSJitFunctionSnapshot::bytecode"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, bytecode) - 56usize];
+    ["Offset of field: JSJitFunctionSnapshot::bytecode_len"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, bytecode_len) - 64usize];
+    ["Offset of field: JSJitFunctionSnapshot::arg_count"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, arg_count) - 68usize];
+    ["Offset of field: JSJitFunctionSnapshot::local_count"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, local_count) - 70usize];
+    ["Offset of field: JSJitFunctionSnapshot::closure_count"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, closure_count) - 72usize];
+    ["Offset of field: JSJitFunctionSnapshot::stack_size"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, stack_size) - 74usize];
+    ["Offset of field: JSJitFunctionSnapshot::constants"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, constants) - 80usize];
+    ["Offset of field: JSJitFunctionSnapshot::constant_count"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, constant_count) - 88usize];
+    ["Offset of field: JSJitFunctionSnapshot::exception_map"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, exception_map) - 96usize];
+    ["Offset of field: JSJitFunctionSnapshot::exception_map_len"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, exception_map_len) - 104usize];
+    ["Offset of field: JSJitFunctionSnapshot::source_map"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, source_map) - 112usize];
+    ["Offset of field: JSJitFunctionSnapshot::source_map_len"]
+        [::core::mem::offset_of!(JSJitFunctionSnapshot, source_map_len) - 120usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2304,6 +2702,19 @@ unsafe extern "C" {
         vtable: *const JSJitBackendVTable,
         opaque: *mut ::core::ffi::c_void,
     ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_JitGetOpcodeTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitOpcodeInfo;
+}
+unsafe extern "C" {
+    pub fn JS_JitSnapshotFunction(
+        ctx: *mut JSContext,
+        function: JSValue,
+        out: *mut *mut JSJitFunctionSnapshot,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_JitFreeSnapshot(snapshot: *mut JSJitFunctionSnapshot);
 }
 pub const __JS_ATOM_NULL: _bindgen_ty_5 = 0;
 pub const JS_ATOM_null: _bindgen_ty_5 = 1;

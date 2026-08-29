@@ -4,6 +4,7 @@
 //! on the QuickJS interpreter until compiler tiers are enabled.
 
 pub mod abi;
+pub mod bytecode;
 mod config;
 mod error;
 mod metrics;

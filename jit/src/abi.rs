@@ -7,8 +7,8 @@ use rquickjs_core::qjs;
 pub const ABI_MAJOR: u16 = 1;
 pub const ABI_MINOR: u16 = 0;
 
-const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
-const OPCODE_FINGERPRINT: u64 = 0x0054_b0c4_5fd0_91af;
+pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
+pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
 const BUILD_FEATURE_FLAGS: u64 = 0x0000_0000_0000_0001;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -231,11 +231,60 @@ fn function_snapshot_layout_fingerprint() -> u64 {
         mem::offset_of!(qjs::JSJitFunctionSnapshot, function),
         mem::size_of::<qjs::JSJitFunctionId>(),
     );
-    layout_field(
+    hash = layout_field(
         hash,
         mem::offset_of!(qjs::JSJitFunctionSnapshot, opaque),
         mem::size_of::<*mut core::ffi::c_void>(),
-    )
+    );
+    for (offset, size) in [
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, source_revision),
+            8,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, opcode_fingerprint),
+            8,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, bytecode),
+            mem::size_of::<*const u8>(),
+        ),
+        (mem::offset_of!(qjs::JSJitFunctionSnapshot, bytecode_len), 4),
+        (mem::offset_of!(qjs::JSJitFunctionSnapshot, arg_count), 2),
+        (mem::offset_of!(qjs::JSJitFunctionSnapshot, local_count), 2),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, closure_count),
+            2,
+        ),
+        (mem::offset_of!(qjs::JSJitFunctionSnapshot, stack_size), 2),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, constants),
+            mem::size_of::<*const qjs::JSJitConstantDescriptor>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, constant_count),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, exception_map),
+            mem::size_of::<*const u8>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, exception_map_len),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, source_map),
+            mem::size_of::<*const u8>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitFunctionSnapshot, source_map_len),
+            4,
+        ),
+    ] {
+        hash = layout_field(hash, offset, size);
+    }
+    hash
 }
 
 fn entry_handle_layout_fingerprint() -> u64 {

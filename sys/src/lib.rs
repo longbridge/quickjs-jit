@@ -15,6 +15,22 @@ pub const SIZE_T_ERROR: &str =
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+/// Build-time metadata generated from QuickJS's `quickjs-opcode.h` macros.
+#[cfg(feature = "jit-abi")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JitGeneratedOpcode {
+    pub opcode: u8,
+    pub size: u8,
+    pub n_pop: u8,
+    pub n_push: u8,
+    pub format: u8,
+    pub format_name: &'static str,
+    pub name: &'static str,
+}
+
+#[cfg(feature = "jit-abi")]
+include!(concat!(env!("OUT_DIR"), "/quickjs-jit-opcodes.rs"));
+
 #[doc(hidden)]
 #[cfg(all(feature = "jit-test-support", feature = "bindgen"))]
 pub const JIT_BINDGEN_BINDINGS: Option<&str> =

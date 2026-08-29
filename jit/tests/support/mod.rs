@@ -4,10 +4,102 @@ use std::sync::{
 };
 
 use rquickjs_core::runtime::{JitBackend, JitBackendAttachError, RuntimeJitGuard};
-use rquickjs_core::Runtime;
+use rquickjs_core::{context::EvalOptions, Context, Runtime, Value};
 
 use crate::abi::{AbiInfo, AbiMismatch, AbiStructure};
+use crate::bytecode::{
+    CompileSnapshot, DeoptPoint, OsrPoint, RuntimeConstants, SnapshotStatus, VerifierMetadata,
+};
 use crate::{Jit, JitConfig, JitDiagnosticKind, JitError};
+
+pub use crate::bytecode::decode_raw;
+
+pub struct SnapshotFixture {
+    runtime: Runtime,
+    _context: Context,
+    snapshot: CompileSnapshot,
+    _runtime_constants: RuntimeConstants,
+}
+
+impl SnapshotFixture {
+    pub fn compile(source: &str) -> Self {
+        let runtime = Runtime::new().expect("snapshot runtime");
+        let context = Context::full(&runtime).expect("snapshot context");
+        let snapshot = context.with(|ctx| {
+            let mut options = EvalOptions::default();
+            options.global = true;
+            options.strict = false;
+            let function: Value<'_> = ctx
+                .eval_with_options(source, options)
+                .expect("compile snapshot fixture");
+            unsafe {
+                CompileSnapshot::capture_with_runtime_constants(
+                    &runtime,
+                    ctx.as_raw().as_ptr(),
+                    function.as_raw(),
+                )
+            }
+            .expect("snapshot supported function")
+        });
+        let (snapshot, runtime_constants) = snapshot;
+        Self {
+            runtime,
+            _context: context,
+            snapshot,
+            _runtime_constants: runtime_constants,
+        }
+    }
+
+    pub fn snapshot(&self) -> CompileSnapshot {
+        self.snapshot.clone()
+    }
+}
+
+impl Drop for SnapshotFixture {
+    fn drop(&mut self) {
+        self.runtime.run_gc();
+    }
+}
+
+pub fn snapshot_status(source: &str) -> SnapshotStatus {
+    let runtime = Runtime::new().expect("snapshot runtime");
+    let context = Context::full(&runtime).expect("snapshot context");
+    context.with(|ctx| {
+        let mut options = EvalOptions::default();
+        options.global = true;
+        options.strict = false;
+        let function: Value<'_> = ctx
+            .eval_with_options(source, options)
+            .expect("compile snapshot status fixture");
+        match unsafe { CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_raw()) } {
+            Ok(_) => SnapshotStatus::Ok,
+            Err(status) => status,
+        }
+    })
+}
+
+pub fn snapshot_from_parts(
+    bytecode: Vec<u8>,
+    arg_count: u16,
+    local_count: u16,
+    closure_count: u16,
+    constant_count: u32,
+) -> CompileSnapshot {
+    CompileSnapshot::from_untrusted_bytecode(
+        bytecode,
+        arg_count,
+        local_count,
+        closure_count,
+        constant_count,
+    )
+}
+
+pub fn verifier_metadata(
+    osr_points: Vec<OsrPoint>,
+    deopt_points: Vec<DeoptPoint>,
+) -> VerifierMetadata {
+    VerifierMetadata::new(osr_points, deopt_points)
+}
 
 #[derive(Clone)]
 pub struct LifecycleRecorder {
