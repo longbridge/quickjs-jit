@@ -112,7 +112,8 @@ pub enum MacJitPolicy {
     /// The callback receives a pointer to [`MacJitWriteContext`]. It must
     /// validate the context and perform the copy, returning zero on success.
     /// This policy must first be installed through
-    /// [`CodeAllocator::bootstrap_mac_jit_policy`].
+    /// [`CodeAllocator::bootstrap_mac_jit_policy`] before constructing or
+    /// using any allocator that could establish the default policy.
     AllowListCallback(unsafe extern "C" fn(*mut c_void) -> i32),
 }
 
@@ -467,17 +468,32 @@ impl CodeAllocator {
 
     /// Establishes the immutable process-wide macOS JIT policy.
     ///
-    /// This must be called before any macOS code allocator creates the process
-    /// JIT heap. Repeating it with a different policy is rejected.
+    /// Callback policy bootstrap must happen before constructing or using any
+    /// macOS code allocator that could immutably establish the default
+    /// [`MacJitPolicy::ThreadWriteProtect`] policy. Waiting only until before
+    /// JIT heap creation is not sufficient. Repeating bootstrap with a
+    /// different policy is rejected.
     ///
     /// # Safety
     ///
-    /// For [`MacJitPolicy::AllowListCallback`], the embedder must arrange for
-    /// the exact callback to be registered in Apple's signed JIT callback
-    /// allowlist, must preserve its code and ABI for the process lifetime, and
-    /// must ensure that it neither unwinds nor re-enters this allocator.
-    /// Apple may terminate the process when an unregistered callback is used;
-    /// that precondition cannot be detected or recovered by this crate.
+    /// For [`MacJitPolicy::AllowListCallback`], the caller guarantees all of
+    /// the following process-wide preconditions:
+    ///
+    /// - the embedder registers the exact callback in the entitlement-backed
+    ///   Apple JIT callback allowlist;
+    /// - the embedder freezes the late-loaded callback allowlist (for example,
+    ///   with `pthread_jit_write_freeze_callbacks_np`) before the first
+    ///   callback use whenever the platform or entitlement requires it;
+    /// - the callback's code, address, and ABI remain valid for the process
+    ///   lifetime; and
+    /// - the callback returns normally: it never unwinds, never performs
+    ///   `longjmp` or another non-local control transfer, and never re-enters
+    ///   this allocator in a way that could skip restoration of JIT write
+    ///   protection.
+    ///
+    /// Violating these preconditions may terminate the process or leave JIT
+    /// write protection disabled. Neither outcome is detectable or recoverable
+    /// by this crate.
     pub unsafe fn bootstrap_mac_jit_policy(policy: MacJitPolicy) -> Result<(), CodeMemoryError> {
         if !backend::SUPPORTED {
             return Err(CodeMemoryError::UnsupportedPlatform);
