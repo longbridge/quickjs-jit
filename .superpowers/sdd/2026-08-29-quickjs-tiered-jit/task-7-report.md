@@ -143,7 +143,7 @@ The supported subset includes:
   drops, and QuickJS stack permutations;
 - goto, true/false branches, loop headers, return, and return-undefined;
 - unary plus, negation, increment/decrement, bit-not, and logical-not;
-- add/subtract/multiply/divide/modulo, bitwise operations and shifts;
+- add/subtract/multiply/divide, bitwise operations and shifts;
 - numeric relational, loose numeric equality, and strict numeric equality.
 
 Overflowing i32 arithmetic changes to the JavaScript Number path. Tests cover
@@ -352,13 +352,14 @@ remainder semantics.
 
 ### Exact safe-point and poll proof
 
-`FrameStateId(n)` is encoded as Cranelift source location `n + 1`; zero stays
-reserved for “no source location,” and the all-ones sentinel is rejected.
+`FrameStateId(n)` is encoded as Cranelift source location `n`. Zero is a valid
+source location; Cranelift's default/no-location sentinel is `u32::MAX`, which
+is rejected for frame-state IDs.
 Polls, exits, and OSR states therefore cannot collapse merely because they
-share a bytecode PC. OSR labels emit a trapping-capable frame load so their
-state has an observable machine range. After code generation, compilation
-requires each required source location to exist and requires every selected
-offset to be both in the machine-code range and distinct.
+share a bytecode PC. OSR labels emit a source-tagged non-null frame branch so
+their state has an observable non-call machine range. After code generation,
+compilation requires each required source location to exist and requires every
+selected offset to be both in the machine-code range and distinct.
 
 Polling is conservative at every non-entry basic-block entry in addition to
 function entry, backward branches, immediately before returns, and each 1,024
@@ -498,3 +499,180 @@ Review-fix commits:
 - Nested QuickJS: `85aaac8 fix(jit): support ABI info prefixes`
 - Root implementation: `d7da0de fix(jit): harden pure baseline publication`
 - This appended report is committed separately.
+
+---
+
+## Review fix round 2 (2026-08-30)
+
+Status: **DONE**
+
+Root review-fix commit:
+`0f14d3e fix(jit): make baseline safepoints exact`
+
+Nested QuickJS change: none; the nested repository remains clean at
+`85aaac8 fix(jit): support ABI info prefixes`.
+
+This section supersedes the round-1 safe-point claim that a source-range start
+was sufficient for a poll, the statement that zero was Cranelift's default
+source location, and the assumption that pointer equality alone made live
+stack scanning safe.
+
+### RED/GREEN evidence
+
+1. **Exact poll return addresses.** The new safe-point audit was initially RED
+   at compile time because artifacts exposed neither a location kind nor the
+   Cranelift call-return table. Poll states now carry a unique `SourceLoc`
+   only on their `call_indirect`. Compilation reads
+   `compiled.buffer.call_sites()` and accepts exactly one return address inside
+   exactly one matching source range. Runtime-API loads keep the default
+   source location. Entry poll, return poll, and return marker at bytecode PC
+   zero have distinct native offsets.
+2. **Exact non-call markers.** Applying the initial range rule to loop/OSR
+   fixtures exposed a second RED: an unused marker load could disappear, and a
+   `trapz` marker produced separate hot and cold ranges. Non-call states now
+   emit one source-tagged branch that reasserts the non-null entry-frame ABI
+   invariant and otherwise continues normally; an invalid null frame takes
+   the existing retry edge. Missing, duplicate, or multiple source ranges,
+   call sites, and native offsets are rejected as `InvalidArtifact`.
+3. **Deep retry atomicity.** Extending `SyntheticFrameSnapshot` with the poll
+   counter and interrupt threshold made the modulo fixture RED: the former
+   stub polled once before retrying. Any function containing `%` now emits its
+   retry exit immediately after the sret/frame parameters, before reading the
+   frame or invoking the entry poll. Tag-dependent refcount/dynamic guards
+   likewise remain before polling. Snapshots also include the test-only
+   backtrace-capture flag and captured PCs, so every atomic-RETRY fixture
+   compares all pointed test state as well as frame and value buffers.
+4. **Validated bounded stack scanning.** A zero-length but misaligned range was
+   the safe RED reproducer: the old equality loop accepted it and reached the
+   poll. Generated code now checks both pointers non-null, both 16-byte
+   aligned, unsigned `top >= base`, a whole-slot checked difference, and slot
+   count no greater than the verified maximum before dereferencing. It scans
+   with a bounded `(cursor, remaining)` loop. Null, reversed, misaligned,
+   oversize, and address-wrap fixtures all return retry without polling,
+   faulting, hanging, or changing the deep snapshot. Synthetic empty stacks
+   now own an explicitly 16-byte-aligned backing slot while retaining
+   `top == base`.
+5. **Windows ARM64 fallback.** Tests that unwrap native publication are
+   excluded on Windows ARM64. A dedicated target test compiles Tier 1 code
+   successfully and requires publication to return
+   `UnwindRegistrationUnsupported`, rather than failing the suite or claiming
+   registration for an unsupported format.
+6. **Real System V unwind.** On GNU/Linux, the existing test-only interrupt
+   poll callback captures a libc backtrace on its next invocation. The test
+   requires the trace to contain the exact published poll return PC retained
+   from Cranelift and then continue into a non-inlined Rust caller. It passes
+   in debug and release, exercising the registered `.eh_frame` with a real
+   unwinder rather than checking registration lifetime alone. No production
+   runtime helper or ABI field was added.
+
+### Safe-point representation and rejection rules
+
+Artifact frame states now retain:
+
+- `CallReturn` or `Marker` as an explicit location kind;
+- the unique Cranelift source-location value;
+- the complete source range; and
+- the exact call return address or marker-range start as `code_offset`.
+
+`SourceLoc::default()` is the all-ones sentinel (`u32::MAX`), while source
+location zero is valid and belongs to `FrameStateId(0)`. For a poll, API table
+and function-pointer loads are untagged and only `call_indirect` receives the
+state location. The accepted call return satisfies
+`range.start < return_address <= range.end`. For a marker, the exact location
+is `range.start`, and any call return within its range is an artifact error.
+Every required state must have one nonempty range, exactly one kind-appropriate
+native location, an in-bounds offset, and an offset distinct from every other
+state.
+
+### Retry and stack safety proof
+
+The unconditional modulo check occurs before frame buffer loads, refcount
+guards, and the entry poll. A modulo execution can therefore change only its
+hidden caller-owned `JSJitExit` result, never the `JSJitExecFrame`, poll state,
+or any pointed frame buffer. Dynamic/refcounted input guards read but do not
+mutate their buffers and reach retry before the first poll.
+
+For live stack validation, the verified maximum stack depth is embedded as a
+machine constant. Only after pointer and length checks pass can the counted
+loop read a tag at `cursor + value_tag`; `remaining` decreases on each edge,
+so malformed pointer equality cannot create an unbounded scan. The generated
+code continues to use the selected ISA's pointer type and 16-byte `JSValue`
+stride.
+
+### Verification
+
+```text
+$ cargo test -p rquickjs-jit --features compiler,test-support --test baseline
+21 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --test baseline --release \
+    --features compiler,test-support
+21 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --features compiler,test-support \
+    --test platform --test abi
+25 passed; 0 failed
+
+$ cargo test -p rquickjs-jit --test abi --features test-support,bindgen
+11 passed; 0 failed, including fresh-bindgen parity
+
+$ cargo check -p rquickjs-sys --features jit-abi,update-bindings
+Finished successfully; no bundled-binding or nested-repository diff
+
+$ cc -std=c11 -D_GNU_SOURCE -DCONFIG_JIT_ABI=1 ... \
+    -o /tmp/rquickjs-task7-round2-api-test
+$ /tmp/rquickjs-task7-round2-api-test
+Exited successfully, including ABI 1.0/1.1 prefix canaries
+
+$ cargo test -p rquickjs-jit --all-targets \
+    --features compiler,test-support
+161 passed; 0 failed (Windows ARM64 target test cfg-disabled locally)
+
+$ cargo test --workspace --all-targets
+All workspace tests passed
+
+$ cargo clippy -p rquickjs-jit --all-targets \
+    --features compiler,test-support -- -D warnings
+Finished successfully
+
+$ cargo fmt --all -- --check
+Finished successfully
+
+$ git diff --check
+Finished successfully in root and nested QuickJS repositories
+```
+
+The release build still emits QuickJS's pre-existing `buf2` GCC warning. The
+workspace build still emits the pre-existing unused `Command` import warning
+from `sys/build.rs`. Neither warning originates in this round.
+
+### Cross-target limitations and self-review
+
+The host has only `x86_64-unknown-linux-gnu` and
+`wasm32-unknown-unknown` Rust targets installed; no target or toolchain was
+installed for this task. AArch64 machine-code generation remains covered by
+Cranelift cross-target compilation and host-publication rejection, but native
+execution still belongs to platform CI. The Windows ARM64 fallback test must
+run on its native CI runner because the unsupported unwind path is selected by
+the build target.
+
+Final self-review confirmed:
+
+- every poll offset is an actual Cranelift call return, never an API-load or
+  first-range approximation;
+- every marker has one explicit non-call range and cannot silently disappear;
+- retry fixtures compare poll/backtrace state and all frame buffers;
+- no malformed stack range is dereferenced before validation, and the scan is
+  count-bounded by verified metadata;
+- Windows ARM64 never returns an executable with unregistered unwind data;
+- GNU/Linux debug and optimized code both unwind through an exact generated
+  poll PC; and
+- no QuickJS header, ABI version, bundled binding, general Task 8 helper, or
+  nested repository file changed in this round.
+
+Review-fix commits:
+
+- Root implementation: `0f14d3e fix(jit): make baseline safepoints exact`
+- Nested QuickJS: unchanged at
+  `85aaac8 fix(jit): support ABI info prefixes`
+- This report is committed separately.
