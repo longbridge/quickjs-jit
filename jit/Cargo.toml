@@ -26,6 +26,7 @@ trybuild = "1"
 [features]
 default = []
 bindgen = ["rquickjs-core/bindgen"]
+parallel = ["rquickjs-core/parallel", "rquickjs/parallel"]
 compiler = [
   "dep:cranelift-codegen",
   "dep:cranelift-frontend",

@@ -1,13 +1,17 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
+    ptr,
     sync::{
-        atomic::{AtomicI32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
 
-use rquickjs::{Context, Function, Object, Runtime};
+use rquickjs::{
+    allocator::{Allocator, RustAllocator},
+    Context, Function, Object, Runtime,
+};
 use rquickjs_core::{qjs, runtime::JitBackend};
 use rquickjs_jit::{abi::JitExitExt, bytecode::CompileSnapshot};
 
@@ -23,6 +27,9 @@ enum EntryKind {
     InvalidDeopt,
     Retry,
     Malformed(MalformedExit),
+    FailingInterrupt(Arc<AtomicBool>),
+    FailingPrebuiltInterrupt(Arc<AtomicBool>),
+    FailingMalformed(Arc<AtomicBool>),
 }
 
 impl EntryKind {
@@ -35,6 +42,9 @@ impl EntryKind {
             Self::InvalidDeopt => native_invalid_deopt,
             Self::Retry => native_retry,
             Self::Malformed(_) => native_malformed,
+            Self::FailingInterrupt(_) => native_failing_interrupt,
+            Self::FailingPrebuiltInterrupt(_) => native_failing_prebuilt_interrupt,
+            Self::FailingMalformed(_) => native_failing_malformed,
         }
     }
 }
@@ -281,6 +291,46 @@ unsafe extern "C" fn native_interrupt(frame: *mut qjs::JSJitExecFrame) -> qjs::J
     qjs::JSJitExit::interrupt()
 }
 
+unsafe extern "C" fn native_failing_interrupt(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<EntryPin>());
+        let EntryKind::FailingInterrupt(fail_allocations) = &pin.kind else {
+            return qjs::JSJitExit::retry_interpreter();
+        };
+        qjs::JS_Throw((*frame).ctx, qjs::JS_MKVAL(qjs::JS_TAG_INT, 17));
+        fail_allocations.store(true, Ordering::SeqCst);
+    }
+    qjs::JSJitExit::interrupt()
+}
+
+unsafe extern "C" fn native_failing_malformed(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<EntryPin>());
+        let EntryKind::FailingMalformed(fail_allocations) = &pin.kind else {
+            return qjs::JSJitExit::retry_interpreter();
+        };
+        qjs::JS_Throw((*frame).ctx, qjs::JS_MKVAL(qjs::JS_TAG_INT, 23));
+        fail_allocations.store(true, Ordering::SeqCst);
+    }
+    qjs::JSJitExit::done()
+}
+
+unsafe extern "C" fn native_failing_prebuilt_interrupt(
+    frame: *mut qjs::JSJitExecFrame,
+) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<EntryPin>());
+        let EntryKind::FailingPrebuiltInterrupt(fail_allocations) = &pin.kind else {
+            return qjs::JSJitExit::retry_interpreter();
+        };
+        let error = take_global(frame, b"__jitPending\0");
+        qjs::JS_SetUncatchableError((*frame).ctx, error);
+        qjs::JS_Throw((*frame).ctx, error);
+        fail_allocations.store(true, Ordering::SeqCst);
+    }
+    qjs::JSJitExit::interrupt()
+}
+
 unsafe extern "C" fn native_deopt(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
     unsafe {
         let pin = &*((*frame).entry.pin.cast::<EntryPin>());
@@ -362,6 +412,51 @@ unsafe extern "C" fn native_malformed(frame: *mut qjs::JSJitExecFrame) -> qjs::J
 fn snapshot<'js>(ctx: &rquickjs::Ctx<'js>, function: &Function<'js>) -> CompileSnapshot {
     unsafe { CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw()) }
         .expect("supported bytecode function")
+}
+
+struct FailingAllocator {
+    fail: Arc<AtomicBool>,
+}
+
+unsafe impl Allocator for FailingAllocator {
+    fn alloc(&mut self, size: usize) -> *mut u8 {
+        if self.fail.load(Ordering::SeqCst) {
+            ptr::null_mut()
+        } else {
+            RustAllocator.alloc(size)
+        }
+    }
+
+    fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
+        if self.fail.load(Ordering::SeqCst) {
+            ptr::null_mut()
+        } else {
+            RustAllocator.calloc(count, size)
+        }
+    }
+
+    unsafe fn dealloc(&mut self, pointer: *mut u8) {
+        unsafe { RustAllocator.dealloc(pointer) };
+    }
+
+    unsafe fn realloc(&mut self, pointer: *mut u8, new_size: usize) -> *mut u8 {
+        if self.fail.load(Ordering::SeqCst) {
+            ptr::null_mut()
+        } else {
+            unsafe { RustAllocator.realloc(pointer, new_size) }
+        }
+    }
+
+    unsafe fn usable_size(pointer: *mut u8) -> usize {
+        unsafe { RustAllocator::usable_size(pointer) }
+    }
+}
+
+fn failing_runtime(fail: &Arc<AtomicBool>) -> Runtime {
+    Runtime::new_with_alloc(FailingAllocator {
+        fail: Arc::clone(fail),
+    })
+    .expect("runtime initializes before allocation failure is enabled")
 }
 
 struct DropProbe(Arc<AtomicUsize>);
@@ -699,6 +794,174 @@ fn native_interrupt_remains_uncatchable() {
 
     assert!(result.is_err(), "an uncatchable interrupt reached JS catch");
     assert_eq!(releases.load(Ordering::SeqCst), 1);
+    drop(guard);
+}
+
+fn assert_pending_uncatchable_survives_get_and_rethrow(
+    context: &Context,
+    fail_allocations: &AtomicBool,
+) {
+    fail_allocations.store(false, Ordering::SeqCst);
+    context.with(|ctx| unsafe {
+        for _ in 0..2 {
+            let pending = qjs::JS_GetException(ctx.as_raw().as_ptr());
+            assert!(
+                qjs::JS_IsUncatchableError(pending),
+                "get transferred a catchable boundary exception"
+            );
+            qjs::JS_Throw(ctx.as_raw().as_ptr(), pending);
+        }
+
+        let pending = qjs::JS_GetException(ctx.as_raw().as_ptr());
+        assert!(qjs::JS_IsUncatchableError(pending));
+        qjs::JS_FreeValue(ctx.as_raw().as_ptr(), pending);
+
+        let ordinary_catch: bool = ctx
+            .eval("try { throw 29 } catch (_) { true }")
+            .expect("an ordinary primitive remains catchable after recovery");
+        assert!(ordinary_catch);
+    });
+}
+
+#[test]
+fn primitive_interrupt_is_uncatchable_when_error_allocation_fails() {
+    let fail_allocations = Arc::new(AtomicBool::new(false));
+    let runtime = failing_runtime(&fail_allocations);
+    let first_context = Context::full(&runtime).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.target = function target() { return 1 };
+            globalThis.wrapper = function wrapper() {
+                try { target(); return false; }
+                catch (_) { return true; }
+            };
+            "#,
+        )
+        .unwrap();
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+    drop(first_context);
+
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(NativeBackend::one(
+            &captured,
+            EntryKind::FailingInterrupt(Arc::clone(&fail_allocations)),
+            Arc::clone(&releases),
+        ))
+        .unwrap();
+
+    let result = context.with(|ctx| ctx.eval::<bool, _>("wrapper()"));
+
+    assert!(
+        result.is_err(),
+        "allocation failure made the primitive interrupt catchable"
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+    fail_allocations.store(false, Ordering::SeqCst);
+    context.with(|ctx| unsafe {
+        qjs::JS_ResetUncatchableError(ctx.as_raw().as_ptr());
+        let reset = qjs::JS_GetException(ctx.as_raw().as_ptr());
+        assert!(
+            !qjs::JS_IsUncatchableError(reset),
+            "the public reset operation did not clear the transferred sentinel"
+        );
+        qjs::JS_FreeValue(ctx.as_raw().as_ptr(), reset);
+    });
+
+    let result_after_reset = context.with(|ctx| ctx.eval::<bool, _>("wrapper()"));
+    assert!(
+        result_after_reset.is_err(),
+        "resetting one transfer permanently disarmed the runtime sentinel"
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 2);
+    assert_pending_uncatchable_survives_get_and_rethrow(&context, &fail_allocations);
+    drop(guard);
+}
+
+#[test]
+fn backtrace_allocation_failure_cannot_disarm_an_uncatchable_interrupt() {
+    let fail_allocations = Arc::new(AtomicBool::new(false));
+    let runtime = failing_runtime(&fail_allocations);
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.__jitPending = new Error("prebuilt interrupt");
+            delete globalThis.__jitPending.stack;
+            globalThis.target = function target() { return 1 };
+            globalThis.wrapper = function wrapper() {
+                try { target(); return false; }
+                catch (_) { return true; }
+            };
+            "#,
+        )
+        .unwrap();
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(NativeBackend::one(
+            &captured,
+            EntryKind::FailingPrebuiltInterrupt(Arc::clone(&fail_allocations)),
+            Arc::clone(&releases),
+        ))
+        .unwrap();
+
+    let result = context.with(|ctx| ctx.eval::<bool, _>("wrapper()"));
+
+    assert!(
+        result.is_err(),
+        "backtrace OOM replaced an uncatchable interrupt with a catchable value"
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_pending_uncatchable_survives_get_and_rethrow(&context, &fail_allocations);
+    drop(guard);
+}
+
+#[test]
+fn malformed_exit_is_uncatchable_when_error_allocation_fails() {
+    let fail_allocations = Arc::new(AtomicBool::new(false));
+    let runtime = failing_runtime(&fail_allocations);
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.target = function target() { return 1 };
+            globalThis.wrapper = function wrapper() {
+                try { target(); return false; }
+                catch (_) { return true; }
+            };
+            "#,
+        )
+        .unwrap();
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(NativeBackend::one(
+            &captured,
+            EntryKind::FailingMalformed(Arc::clone(&fail_allocations)),
+            Arc::clone(&releases),
+        ))
+        .unwrap();
+
+    let result = context.with(|ctx| ctx.eval::<bool, _>("wrapper()"));
+
+    assert!(
+        result.is_err(),
+        "allocation failure made malformed-exit normalization catchable"
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_pending_uncatchable_survives_get_and_rethrow(&context, &fail_allocations);
     drop(guard);
 }
 

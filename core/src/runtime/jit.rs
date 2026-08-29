@@ -4,11 +4,15 @@ use alloc::{
     boxed::Box,
     collections::BTreeMap,
     sync::{Arc, Weak as ArcWeak},
+    vec::Vec,
 };
 use core::{
     cell::UnsafeCell,
     ffi::c_void,
-    fmt, mem,
+    fmt,
+    hint::spin_loop,
+    mem,
+    ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -24,6 +28,14 @@ struct RetainedFunction {
     function: qjs::JSValue,
 }
 
+// These owning handles are never exposed to workers. Moving the private
+// record does not access QuickJS: all creation/map movement is serialized by
+// RegistryMutex, and FunctionRegistryOwner extracts and destroys records only
+// during runtime detachment or attachment rollback after marking the registry
+// detached. Both run under the owning RawRuntime lock. This proof is
+// independent of callers merely possessing a Ctx.
+unsafe impl Send for RetainedFunction {}
+
 impl Drop for RetainedFunction {
     fn drop(&mut self) {
         unsafe {
@@ -34,30 +46,82 @@ impl Drop for RetainedFunction {
 }
 
 struct FunctionRegistryState {
-    rt: NonNull<qjs::JSRuntime>,
+    attached: bool,
+    rt: usize,
     functions: BTreeMap<FunctionKey, RetainedFunction>,
+    retired: Vec<RetainedFunction>,
+}
+
+struct RegistryMutex<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// The acquire/release pair is the sole access path to the UnsafeCell. This is
+// a deliberately non-reentrant mutex: callers must move owned JS values out
+// and release the guard before invoking callbacks or freeing those values.
+unsafe impl<T: Send> Sync for RegistryMutex<T> {}
+
+impl<T> RegistryMutex<T> {
+    fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    fn lock(&self) -> RegistryMutexGuard<'_, T> {
+        while self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.locked.load(Ordering::Relaxed) {
+                spin_loop();
+            }
+        }
+        RegistryMutexGuard { mutex: self }
+    }
+}
+
+struct RegistryMutexGuard<'a, T> {
+    mutex: &'a RegistryMutex<T>,
+}
+
+impl<T> Deref for RegistryMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> DerefMut for RegistryMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for RegistryMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        self.mutex.locked.store(false, Ordering::Release);
+    }
 }
 
 struct FunctionRegistryCell {
-    attached: AtomicBool,
-    state: UnsafeCell<FunctionRegistryState>,
+    state: RegistryMutex<FunctionRegistryState>,
 }
-
-// Registry state is accessed only by APIs that borrow a `Ctx` for this exact
-// runtime, or by QuickJS callbacks. Both paths execute while the runtime lock
-// is held. The atomic attached flag is the sole worker-readable state.
-unsafe impl Send for FunctionRegistryCell {}
-unsafe impl Sync for FunctionRegistryCell {}
 
 struct FunctionRegistryOwner(Arc<FunctionRegistryCell>);
 
 impl FunctionRegistryOwner {
     fn new(rt: NonNull<qjs::JSRuntime>) -> Self {
         Self(Arc::new(FunctionRegistryCell {
-            attached: AtomicBool::new(true),
-            state: UnsafeCell::new(FunctionRegistryState {
-                rt,
+            state: RegistryMutex::new(FunctionRegistryState {
+                attached: true,
+                rt: rt.as_ptr() as usize,
                 functions: BTreeMap::new(),
+                retired: Vec::new(),
             }),
         }))
     }
@@ -68,29 +132,48 @@ impl FunctionRegistryOwner {
         }
     }
 
-    unsafe fn retire(&self, id: u64, generation: u64) {
-        let retained = unsafe {
-            (&mut *self.0.state.get())
-                .functions
-                .remove(&(id, generation))
-        };
-        drop(retained);
+    fn retire(&self, id: u64, generation: u64) {
+        let mut state = self.0.state.lock();
+        if let Some(retained) = state.functions.remove(&(id, generation)) {
+            // A retirement callback can race safe registry users holding Ctx
+            // clones. Keep removed values owned until detach, where the raw
+            // runtime lock excludes those users and frees are serialized.
+            state.retired.push(retained);
+        }
     }
 
-    unsafe fn clear(&self) {
-        self.0.attached.store(false, Ordering::Release);
-        unsafe { (&mut *self.0.state.get()).functions.clear() };
+    fn clear(&self) {
+        let (functions, retired) = {
+            let mut state = self.0.state.lock();
+            state.attached = false;
+            (
+                mem::take(&mut state.functions),
+                mem::take(&mut state.retired),
+            )
+        };
+
+        // JS_FreeValue may finalize bytecode and invoke backend callbacks.
+        // The non-reentrant map lock must never be held across these drops.
+        drop(functions);
+        drop(retired);
     }
 }
 
-/// A weak, runtime-thread-only handle to functions retained by an attached JIT backend.
+impl Drop for FunctionRegistryOwner {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// A weak handle to functions retained by an attached JIT backend.
 ///
 /// The registry duplicates a function and its context, which transitively
 /// retains the function's constant pool without storing a strong [`Runtime`]
 /// reference. Retained QuickJS values are released by the owning raw runtime
 /// during backend detachment, before the backend allocation and runtime are
-/// freed. This handle contains no raw QuickJS pointer and does not keep that
-/// owner alive.
+/// freed. The handle can cross threads but contains no raw QuickJS pointer and
+/// does not keep that owner alive; operations require a matching live [`Ctx`]
+/// and are internally synchronized.
 #[derive(Clone)]
 pub struct JitFunctionRegistry {
     inner: ArcWeak<FunctionRegistryCell>,
@@ -100,8 +183,9 @@ impl JitFunctionRegistry {
     /// Retains one source function and its transitive runtime constants.
     ///
     /// This must be called from a `Context::with` callback for the runtime to
-    /// which this registry is attached. Replacing an existing key releases
-    /// the old duplicate on that same runtime thread.
+    /// which this registry is attached. Retaining an existing key is
+    /// idempotent. Retired values are released during runtime detachment,
+    /// before QuickJS frees the runtime.
     pub fn retain_function<'js>(
         &self,
         ctx: &Ctx<'js>,
@@ -113,14 +197,17 @@ impl JitFunctionRegistry {
             .inner
             .upgrade()
             .ok_or(JitFunctionRegistryError::Detached)?;
-        if !registry.attached.load(Ordering::Acquire) {
+        let mut state = registry.state.lock();
+        if !state.attached {
             return Err(JitFunctionRegistryError::Detached);
         }
 
         let ctx_ptr = ctx.as_raw();
-        let state = unsafe { &*registry.state.get() };
-        if unsafe { qjs::JS_GetRuntime(ctx_ptr.as_ptr()) } != state.rt.as_ptr() {
+        if unsafe { qjs::JS_GetRuntime(ctx_ptr.as_ptr()) } as usize != state.rt {
             return Err(JitFunctionRegistryError::WrongRuntime);
+        }
+        if state.functions.contains_key(&(id, generation)) {
+            return Ok(());
         }
 
         let retained_ctx = NonNull::new(unsafe { qjs::JS_DupContext(ctx_ptr.as_ptr()) })
@@ -129,26 +216,25 @@ impl JitFunctionRegistry {
             ctx: retained_ctx,
             function: unsafe { qjs::JS_DupValue(ctx_ptr.as_ptr(), function.as_value().as_raw()) },
         };
-        let replaced = unsafe {
-            (&mut *registry.state.get())
-                .functions
-                .insert((id, generation), retained)
-        };
-        drop(replaced);
+        if let Some(replaced) = state.functions.insert((id, generation), retained) {
+            // The contains check and insert are covered by one guard, so this
+            // is defensive only. Never drop an owned JS value under the lock.
+            state.retired.push(replaced);
+        }
         Ok(())
     }
 
-    /// Returns the number of retained source functions while on the runtime thread.
+    /// Returns the number of retained source functions for a matching live context.
     pub fn retained_len<'js>(&self, ctx: &Ctx<'js>) -> Result<usize, JitFunctionRegistryError> {
         let registry = self
             .inner
             .upgrade()
             .ok_or(JitFunctionRegistryError::Detached)?;
-        if !registry.attached.load(Ordering::Acquire) {
+        let state = registry.state.lock();
+        if !state.attached {
             return Err(JitFunctionRegistryError::Detached);
         }
-        let state = unsafe { &*registry.state.get() };
-        if unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) } != state.rt.as_ptr() {
+        if unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) } as usize != state.rt {
             return Err(JitFunctionRegistryError::WrongRuntime);
         }
         Ok(state.functions.len())
@@ -160,7 +246,7 @@ impl JitFunctionRegistry {
     pub fn is_attached(&self) -> bool {
         self.inner
             .upgrade()
-            .is_some_and(|registry| registry.attached.load(Ordering::Acquire))
+            .is_some_and(|registry| registry.state.lock().attached)
     }
 }
 
@@ -249,15 +335,15 @@ impl fmt::Display for JitBackendAttachError {
 }
 
 pub(super) struct BackendState {
-    backend: Box<dyn JitBackend>,
     registry: FunctionRegistryOwner,
+    backend: Box<dyn JitBackend>,
 }
 
 impl BackendState {
     pub(super) fn new(rt: NonNull<qjs::JSRuntime>, mut backend: Box<dyn JitBackend>) -> Self {
         let registry = FunctionRegistryOwner::new(rt);
         backend.runtime_attached(registry.handle());
-        Self { backend, registry }
+        Self { registry, backend }
     }
 
     pub(super) fn as_opaque(&mut self) -> *mut c_void {
@@ -304,13 +390,13 @@ unsafe extern "C" fn release_entry(opaque: *mut c_void, entry: qjs::JSJitEntryHa
 unsafe extern "C" fn runtime_detach(opaque: *mut c_void, _rt: *mut qjs::JSRuntime) {
     let state = unsafe { BackendState::from_opaque(opaque) };
     state.backend.runtime_detach();
-    unsafe { state.registry.clear() };
+    state.registry.clear();
 }
 
 unsafe extern "C" fn function_retire(opaque: *mut c_void, id: u64, generation: u64) {
     let state = unsafe { BackendState::from_opaque(opaque) };
     state.backend.function_retire(id, generation);
-    unsafe { state.registry.retire(id, generation) };
+    state.registry.retire(id, generation);
 }
 
 unsafe extern "C" fn memory_used(opaque: *mut c_void) -> qjs::size_t {
@@ -372,5 +458,26 @@ impl Drop for RuntimeJitGuard {
         let detached = unsafe { runtime.inner.lock().detach_jit_backend(self.token) };
 
         debug_assert!(detached.is_ok(), "QuickJS rejected JIT backend detach");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use super::RegistryMutex;
+
+    #[test]
+    fn registry_mutex_guard_releases_the_lock_during_unwind() {
+        let mutex = RegistryMutex::new(41_u32);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let mut value = mutex.lock();
+            *value += 1;
+            panic!("exercise registry lock unwind");
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(*mutex.lock(), 42);
     }
 }
