@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::mpsc::{self, Receiver, SyncSender, TrySendError},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+        Arc,
+    },
 };
 
 use crate::{
@@ -19,12 +23,16 @@ pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
 ) -> Result<(), Box<CompileCompletion>> {
     let key = request.key();
     let requested_tier = request.tier();
+    let artifact_key = request.artifact_key();
+    let attempt_id = request.attempt_id();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compiler.compile(request)))
             .unwrap_or(Err(CompileFailure::CompilerPanicked));
     sender.send(CompileCompletion {
         key,
         requested_tier,
+        artifact_key,
+        attempt_id,
         result,
     })
 }
@@ -80,12 +88,22 @@ pub enum CompileState {
     Retired,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AttemptId(u64);
+
+impl AttemptId {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompileRequest {
     key: FunctionKey,
     tier: Tier,
     snapshot: VerifiedFunction,
     artifact_key: ArtifactKey,
+    attempt_id: AttemptId,
 }
 
 impl CompileRequest {
@@ -104,12 +122,18 @@ impl CompileRequest {
     pub const fn snapshot(&self) -> &VerifiedFunction {
         &self.snapshot
     }
+
+    pub const fn attempt_id(&self) -> AttemptId {
+        self.attempt_id
+    }
 }
 
 #[derive(Debug)]
 pub struct CompileCompletion {
     pub key: FunctionKey,
     pub requested_tier: Tier,
+    pub artifact_key: ArtifactKey,
+    pub attempt_id: AttemptId,
     pub result: Result<CompiledArtifact, CompileFailure>,
 }
 
@@ -122,6 +146,39 @@ pub enum CompletionSendError {
 #[derive(Clone, Debug)]
 pub struct CompletionSender {
     sender: Option<SyncSender<CompileCompletion>>,
+    signals: Arc<CompletionQueueSignals>,
+}
+
+#[derive(Debug, Default)]
+struct CompletionQueueSignals {
+    pending: AtomicUsize,
+    saturated: AtomicU64,
+}
+
+impl CompletionQueueSignals {
+    fn increment_pending(&self) {
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                Some(pending.saturating_add(1))
+            });
+    }
+
+    fn decrement_pending(&self) {
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                Some(pending.saturating_sub(1))
+            });
+    }
+
+    fn record_saturation(&self) {
+        let _ = self
+            .saturated
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_add(1))
+            });
+    }
 }
 
 impl CompletionSender {
@@ -129,9 +186,15 @@ impl CompletionSender {
         let Some(sender) = &self.sender else {
             return Err(CompletionSendError::Closed(Box::new(completion)));
         };
+        self.signals.increment_pending();
         sender.try_send(completion).map_err(|error| match error {
-            TrySendError::Full(completion) => CompletionSendError::Full(Box::new(completion)),
+            TrySendError::Full(completion) => {
+                self.signals.decrement_pending();
+                self.signals.record_saturation();
+                CompletionSendError::Full(Box::new(completion))
+            }
             TrySendError::Disconnected(completion) => {
+                self.signals.decrement_pending();
                 CompletionSendError::Closed(Box::new(completion))
             }
         })
@@ -141,7 +204,29 @@ impl CompletionSender {
         let Some(sender) = &self.sender else {
             return Err(Box::new(completion));
         };
-        sender.send(completion).map_err(|error| Box::new(error.0))
+        self.signals.increment_pending();
+        sender.send(completion).map_err(|error| {
+            self.signals.decrement_pending();
+            Box::new(error.0)
+        })
+    }
+}
+
+pub const DEFAULT_COMPLETION_DRAIN_BUDGET: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletionDrain {
+    drained: usize,
+    remaining: usize,
+}
+
+impl CompletionDrain {
+    pub const fn drained(self) -> usize {
+        self.drained
+    }
+
+    pub const fn remaining(self) -> usize {
+        self.remaining
     }
 }
 
@@ -153,12 +238,85 @@ pub enum QueueError {
     Blacklisted,
     Shutdown,
     SnapshotIdentity,
+    AttemptIdsExhausted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InFlight {
+    attempt_id: AttemptId,
+    artifact_key: ArtifactKey,
+    tier: Tier,
 }
 
 #[derive(Debug)]
-struct FunctionState {
+struct TierRecord {
     state: CompileState,
     attempts: u8,
+}
+
+impl Default for TierRecord {
+    fn default() -> Self {
+        Self {
+            state: CompileState::Cold,
+            attempts: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct FunctionState {
+    baseline: TierRecord,
+    optimizing: TierRecord,
+    published: Option<Tier>,
+    retired: bool,
+}
+
+impl FunctionState {
+    fn tier(&self, tier: Tier) -> &TierRecord {
+        match tier {
+            Tier::Baseline => &self.baseline,
+            Tier::Optimizing => &self.optimizing,
+        }
+    }
+
+    fn tier_mut(&mut self, tier: Tier) -> &mut TierRecord {
+        match tier {
+            Tier::Baseline => &mut self.baseline,
+            Tier::Optimizing => &mut self.optimizing,
+        }
+    }
+
+    fn active_state(&self) -> Option<CompileState> {
+        [self.baseline.state, self.optimizing.state]
+            .into_iter()
+            .find(|state| {
+                matches!(
+                    state,
+                    CompileState::Queued(_) | CompileState::Compiling(_) | CompileState::Ready(_)
+                )
+            })
+    }
+
+    fn visible_state(&self) -> CompileState {
+        if self.retired {
+            return CompileState::Retired;
+        }
+        if let Some(active) = self.active_state() {
+            return active;
+        }
+        if let Some(published) = self.published {
+            return CompileState::Installed(published);
+        }
+        [self.baseline.state, self.optimizing.state]
+            .into_iter()
+            .find(|state| {
+                matches!(
+                    state,
+                    CompileState::Backoff { .. } | CompileState::Blacklisted
+                )
+            })
+            .unwrap_or(CompileState::Cold)
+    }
 }
 
 #[derive(Debug)]
@@ -169,10 +327,12 @@ pub struct Coordinator {
     queue: VecDeque<CompileRequest>,
     functions: HashMap<FunctionKey, FunctionState>,
     current_generations: HashMap<u64, u64>,
-    in_flight: HashMap<FunctionKey, ArtifactKey>,
+    in_flight: HashMap<FunctionKey, InFlight>,
+    next_attempt_id: u64,
     metrics: JitMetrics,
     completion_sender: Option<SyncSender<CompileCompletion>>,
     completion_receiver: Option<Receiver<CompileCompletion>>,
+    completion_signals: Arc<CompletionQueueSignals>,
     shutdown: bool,
     cache: CodeCache,
     installed_keys: HashMap<(FunctionKey, Tier), ArtifactKey>,
@@ -184,13 +344,13 @@ impl Coordinator {
         max_queue_len: usize,
         max_completion_len: usize,
         max_attempts: u8,
-        max_artifacts: usize,
+        max_code_bytes: usize,
     ) -> Self {
         Self::with_environment(
             max_queue_len,
             max_completion_len,
             max_attempts,
-            max_artifacts,
+            max_code_bytes,
             ArtifactEnvironment::default(),
         )
     }
@@ -199,10 +359,11 @@ impl Coordinator {
         max_queue_len: usize,
         max_completion_len: usize,
         max_attempts: u8,
-        max_artifacts: usize,
+        max_code_bytes: usize,
         environment: ArtifactEnvironment,
     ) -> Self {
         let (completion_sender, completion_receiver) = mpsc::sync_channel(max_completion_len);
+        let completion_signals = Arc::new(CompletionQueueSignals::default());
         Self {
             max_queue_len,
             max_attempts,
@@ -211,11 +372,13 @@ impl Coordinator {
             functions: HashMap::new(),
             current_generations: HashMap::new(),
             in_flight: HashMap::new(),
+            next_attempt_id: 0,
             metrics: JitMetrics::disabled(),
             completion_sender: Some(completion_sender),
             completion_receiver: Some(completion_receiver),
+            completion_signals,
             shutdown: false,
-            cache: CodeCache::new(max_artifacts),
+            cache: CodeCache::new(max_code_bytes),
             installed_keys: HashMap::new(),
             environment,
         }
@@ -237,11 +400,39 @@ impl Coordinator {
         {
             return Err(QueueError::Retired);
         }
-        match self.state(key) {
+        if self
+            .functions
+            .get(&key)
+            .is_some_and(|function| function.retired)
+        {
+            return Err(QueueError::Retired);
+        }
+        if self
+            .functions
+            .get(&key)
+            .and_then(FunctionState::active_state)
+            .is_some()
+        {
+            return Err(QueueError::NotReady);
+        }
+        let installed_baseline = self.installed_keys.contains_key(&(key, Tier::Baseline));
+        let installed_optimizing = self.installed_keys.contains_key(&(key, Tier::Optimizing));
+        match tier {
+            Tier::Baseline if installed_baseline || installed_optimizing => {
+                return Err(QueueError::NotReady)
+            }
+            Tier::Optimizing if !installed_baseline || installed_optimizing => {
+                return Err(QueueError::NotReady)
+            }
+            _ => {}
+        }
+        let tier_state = self
+            .functions
+            .get(&key)
+            .map_or(CompileState::Cold, |function| function.tier(tier).state);
+        match tier_state {
             CompileState::Cold => {}
             CompileState::Backoff { retry_after, .. } if self.clock >= retry_after => {}
-            CompileState::Installed(Tier::Baseline) if tier == Tier::Optimizing => {}
-            CompileState::Retired => return Err(QueueError::Retired),
             CompileState::Blacklisted => return Err(QueueError::Blacklisted),
             _ => return Err(QueueError::NotReady),
         }
@@ -275,20 +466,19 @@ impl Coordinator {
             self.retire_older_generations(key);
             self.current_generations.insert(key.id, key.generation);
         }
+        let Some(next_attempt_id) = self.next_attempt_id.checked_add(1) else {
+            return Err(QueueError::AttemptIdsExhausted);
+        };
+        self.next_attempt_id = next_attempt_id;
         self.queue.push_back(CompileRequest {
             key,
             tier,
             snapshot,
             artifact_key,
+            attempt_id: AttemptId(next_attempt_id),
         });
-        let attempts = self.functions.get(&key).map_or(0, |record| record.attempts);
-        self.functions.insert(
-            key,
-            FunctionState {
-                state: CompileState::Queued(tier),
-                attempts,
-            },
-        );
+        let function = self.functions.entry(key).or_default();
+        function.tier_mut(tier).state = CompileState::Queued(tier);
         self.metrics.queued = self.metrics.queued.saturating_add(1);
         Ok(())
     }
@@ -299,28 +489,47 @@ impl Coordinator {
             let Some(record) = self.functions.get_mut(&request.key) else {
                 continue;
             };
-            if record.state != CompileState::Queued(request.tier) {
+            if record.tier(request.tier).state != CompileState::Queued(request.tier) {
                 continue;
             }
-            record.state = CompileState::Compiling(request.tier);
-            self.in_flight.insert(request.key, request.artifact_key);
+            record.tier_mut(request.tier).state = CompileState::Compiling(request.tier);
+            self.in_flight.insert(
+                request.key,
+                InFlight {
+                    attempt_id: request.attempt_id,
+                    artifact_key: request.artifact_key,
+                    tier: request.tier,
+                },
+            );
             self.metrics.compiling = self.metrics.compiling.saturating_add(1);
             return Some(request);
         }
     }
 
     pub fn complete(&mut self, completion: CompileCompletion) {
+        let Some(expected) = self.in_flight.get(&completion.key).copied() else {
+            self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
+            return;
+        };
         if !invalidate::is_current_generation(&self.current_generations, completion.key)
-            || self.state(completion.key) != CompileState::Compiling(completion.requested_tier)
+            || self
+                .functions
+                .get(&completion.key)
+                .map(|function| function.tier(completion.requested_tier).state)
+                != Some(CompileState::Compiling(completion.requested_tier))
+            || expected.attempt_id != completion.attempt_id
+            || expected.tier != completion.requested_tier
+            || expected.artifact_key != completion.artifact_key
         {
             self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             return;
         }
-        let expected = self.in_flight.remove(&completion.key);
         match completion.result {
-            Ok(artifact) if expected == Some(artifact.key()) => {
+            Ok(artifact) if completion.artifact_key == artifact.key() => {
+                self.in_flight.remove(&completion.key);
                 if let Some(record) = self.functions.get_mut(&completion.key) {
-                    record.state = CompileState::Ready(completion.requested_tier);
+                    record.tier_mut(completion.requested_tier).state =
+                        CompileState::Ready(completion.requested_tier);
                 }
                 if !invalidate::is_current_generation(&self.current_generations, completion.key) {
                     self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
@@ -330,42 +539,46 @@ impl Coordinator {
                 let artifact_key = artifact.key();
                 match install::publish(&mut self.cache, artifact) {
                     Ok(insert) => {
-                        if let Some(evicted) = insert.evicted() {
-                            self.record_eviction(evicted);
+                        for evicted in insert.evictions() {
+                            self.record_eviction(*evicted);
                         }
                         self.installed_keys
                             .insert((completion.key, completion.requested_tier), artifact_key);
                         if let Some(record) = self.functions.get_mut(&completion.key) {
-                            record.state = CompileState::Installed(completion.requested_tier);
+                            let tier_record = record.tier_mut(completion.requested_tier);
+                            tier_record.state = CompileState::Cold;
+                            tier_record.attempts = 0;
+                            record.published = Some(completion.requested_tier);
                         }
                         self.metrics.installed = self.metrics.installed.saturating_add(1);
                     }
-                    Err(_) => self.record_failure(completion.key),
+                    Err(_) => self.record_failure(completion.key, completion.requested_tier),
                 }
             }
             Ok(_) => {
                 self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
-                self.record_failure(completion.key);
             }
             Err(_) => {
-                self.record_failure(completion.key);
+                self.in_flight.remove(&completion.key);
+                self.record_failure(completion.key, completion.requested_tier);
             }
         }
     }
 
-    fn record_failure(&mut self, key: FunctionKey) {
+    fn record_failure(&mut self, key: FunctionKey, tier: Tier) {
         self.metrics.compile_failures = self.metrics.compile_failures.saturating_add(1);
         let Some(record) = self.functions.get_mut(&key) else {
             return;
         };
-        record.attempts = record.attempts.saturating_add(1);
-        if record.attempts >= self.max_attempts {
-            record.state = CompileState::Blacklisted;
+        let tier_record = record.tier_mut(tier);
+        tier_record.attempts = tier_record.attempts.saturating_add(1);
+        if tier_record.attempts >= self.max_attempts {
+            tier_record.state = CompileState::Blacklisted;
             self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
         } else {
-            let retry_after = self.clock.saturating_add(u64::from(record.attempts));
-            record.state = CompileState::Backoff {
-                attempts: record.attempts,
+            let retry_after = self.clock.saturating_add(u64::from(tier_record.attempts));
+            tier_record.state = CompileState::Backoff {
+                attempts: tier_record.attempts,
                 retry_after,
             };
         }
@@ -386,15 +599,10 @@ impl Coordinator {
     fn retire_state(&mut self, key: FunctionKey) {
         self.queue.retain(|request| request.key != key);
         self.in_flight.remove(&key);
-        let attempts = self.functions.get(&key).map_or(0, |record| record.attempts);
-        let was_retired = self.state(key) == CompileState::Retired;
-        self.functions.insert(
-            key,
-            FunctionState {
-                state: CompileState::Retired,
-                attempts,
-            },
-        );
+        let function = self.functions.entry(key).or_default();
+        let was_retired = function.retired;
+        function.retired = true;
+        function.published = None;
         if !was_retired {
             self.metrics.retired = self.metrics.retired.saturating_add(1);
         }
@@ -406,41 +614,61 @@ impl Coordinator {
     fn record_eviction(&mut self, evicted: ArtifactKey) {
         let key = FunctionKey::new(evicted.function_id, evicted.generation);
         self.installed_keys.remove(&(key, evicted.tier));
-        if self.state(key) == CompileState::Installed(evicted.tier) {
-            let fallback = if evicted.tier == Tier::Optimizing
-                && self.installed_keys.contains_key(&(key, Tier::Baseline))
-            {
-                CompileState::Installed(Tier::Baseline)
-            } else {
-                CompileState::Cold
-            };
-            if let Some(record) = self.functions.get_mut(&key) {
-                record.state = fallback;
+        if let Some(record) = self.functions.get_mut(&key) {
+            if record.published == Some(evicted.tier) {
+                record.published = (evicted.tier == Tier::Optimizing
+                    && self.installed_keys.contains_key(&(key, Tier::Baseline)))
+                .then_some(Tier::Baseline);
             }
         }
         self.metrics.evicted = self.metrics.evicted.saturating_add(1);
     }
 
     pub fn retire(&mut self, key: FunctionKey) {
-        self.current_generations
-            .entry(key.id)
-            .and_modify(|generation| *generation = (*generation).max(key.generation))
-            .or_insert(key.generation);
+        let advances_watermark = self
+            .current_generations
+            .get(&key.id)
+            .is_none_or(|generation| key.generation > *generation);
+        if advances_watermark {
+            self.retire_older_generations(key);
+            self.current_generations.insert(key.id, key.generation);
+        }
         self.retire_state(key);
     }
 
     pub fn state(&self, key: FunctionKey) -> CompileState {
         self.functions
             .get(&key)
-            .map_or(CompileState::Cold, |record| record.state)
+            .map_or(CompileState::Cold, FunctionState::visible_state)
+    }
+
+    pub fn tier_state(&self, key: FunctionKey, tier: Tier) -> CompileState {
+        let Some(function) = self.functions.get(&key) else {
+            return CompileState::Cold;
+        };
+        if function.retired {
+            return CompileState::Retired;
+        }
+        let state = function.tier(tier).state;
+        if state != CompileState::Cold {
+            return state;
+        }
+        if self.installed_keys.contains_key(&(key, tier)) {
+            CompileState::Installed(tier)
+        } else {
+            CompileState::Cold
+        }
     }
 
     pub fn advance_clock(&mut self, now: u64) {
         self.clock = self.clock.max(now);
     }
 
-    pub const fn metrics(&self) -> &JitMetrics {
-        &self.metrics
+    pub fn metrics(&self) -> JitMetrics {
+        let mut metrics = self.metrics.clone();
+        metrics.completion_queue_saturated =
+            self.completion_signals.saturated.load(Ordering::Acquire);
+        metrics
     }
 
     pub fn pin(&mut self, key: FunctionKey, tier: Tier) -> Option<ExecutionPin> {
@@ -452,26 +680,42 @@ impl Coordinator {
         self.cache.len()
     }
 
+    pub fn poll_cache_reclamation(&mut self) -> usize {
+        self.cache.poll_reclamation()
+    }
+
     pub fn completion_sender(&self) -> CompletionSender {
         CompletionSender {
             sender: self.completion_sender.clone(),
+            signals: Arc::clone(&self.completion_signals),
         }
     }
 
     /// Applies worker completions on the caller's runtime-locked coordinator.
-    pub fn drain_completions(&mut self) -> usize {
-        let mut pending = Vec::new();
-        let Some(receiver) = self.completion_receiver.as_ref() else {
-            return 0;
-        };
-        while let Ok(completion) = receiver.try_recv() {
-            pending.push(completion);
-        }
-        let drained = pending.len();
-        for completion in pending {
+    pub fn drain_completions(&mut self) -> CompletionDrain {
+        self.drain_completions_with_budget(DEFAULT_COMPLETION_DRAIN_BUDGET)
+    }
+
+    /// Applies at most `budget` worker completions without allocating an intermediate queue.
+    pub fn drain_completions_with_budget(&mut self, budget: usize) -> CompletionDrain {
+        let mut drained = 0;
+        while drained < budget {
+            let completion = self
+                .completion_receiver
+                .as_ref()
+                .and_then(|receiver| receiver.try_recv().ok());
+            let Some(completion) = completion else {
+                break;
+            };
+            self.completion_signals.decrement_pending();
             self.complete(completion);
+            drained += 1;
         }
-        drained
+        self.poll_cache_reclamation();
+        CompletionDrain {
+            drained,
+            remaining: self.completion_signals.pending.load(Ordering::Acquire),
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -483,6 +727,7 @@ impl Coordinator {
         self.in_flight.clear();
         self.completion_receiver.take();
         self.completion_sender.take();
+        self.completion_signals.pending.store(0, Ordering::Release);
         let functions = self.functions.keys().copied().collect::<Vec<_>>();
         for key in functions {
             self.retire_state(key);
@@ -522,11 +767,11 @@ mod tests {
 
         let observed = control.next_request().expect("worker reached compiler");
         assert_eq!(observed.key(), key);
-        assert_eq!(coordinator.drain_completions(), 0);
+        assert_eq!(coordinator.drain_completions().drained(), 0);
         control.complete(CompiledArtifact::fake(Tier::Baseline));
         worker.join().unwrap();
 
-        assert_eq!(coordinator.drain_completions(), 1);
+        assert_eq!(coordinator.drain_completions().drained(), 1);
         assert_eq!(
             coordinator.state(key),
             CompileState::Installed(Tier::Baseline)
@@ -554,7 +799,7 @@ mod tests {
             &coordinator.completion_sender(),
         )
         .unwrap();
-        assert_eq!(coordinator.drain_completions(), 1);
+        assert_eq!(coordinator.drain_completions().drained(), 1);
         assert!(matches!(
             coordinator.state(key),
             CompileState::Backoff { attempts: 1, .. }

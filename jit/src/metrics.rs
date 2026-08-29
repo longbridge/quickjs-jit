@@ -12,6 +12,7 @@ pub struct JitMetrics {
     pub blacklisted: u64,
     pub retired: u64,
     pub queue_saturated: u64,
+    pub completion_queue_saturated: u64,
     pub evicted: u64,
 }
 
@@ -27,6 +28,7 @@ impl JitMetrics {
             blacklisted: 0,
             retired: 0,
             queue_saturated: 0,
+            completion_queue_saturated: 0,
             evicted: 0,
         }
     }

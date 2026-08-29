@@ -26,10 +26,16 @@ pub(super) struct CachedArtifact {
     last_used: AtomicU64,
     invalidated: AtomicBool,
     _deopt_target: Option<DeoptPin>,
+    charge_bytes: usize,
 }
 
 impl CachedArtifact {
-    fn new(artifact: CompiledArtifact, last_used: u64, deopt_target: Option<DeoptPin>) -> Self {
+    fn new(
+        artifact: CompiledArtifact,
+        last_used: u64,
+        deopt_target: Option<DeoptPin>,
+        charge_bytes: usize,
+    ) -> Self {
         Self {
             artifact,
             execution_pins: AtomicUsize::new(0),
@@ -37,6 +43,7 @@ impl CachedArtifact {
             last_used: AtomicU64::new(last_used),
             invalidated: AtomicBool::new(false),
             _deopt_target: deopt_target,
+            charge_bytes,
         }
     }
 
@@ -61,32 +68,42 @@ pub enum CacheError {
     ArtifactPinned,
     MissingArtifact,
     MissingDeoptTarget,
+    ArtifactTooLarge,
+    ChargeOverflow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheInsert {
-    evicted: Option<ArtifactKey>,
+    evicted: Box<[ArtifactKey]>,
 }
 
 impl CacheInsert {
-    pub const fn evicted(self) -> Option<ArtifactKey> {
-        self.evicted
+    pub fn evicted(&self) -> Option<ArtifactKey> {
+        self.evicted.first().copied()
+    }
+
+    pub fn evictions(&self) -> &[ArtifactKey] {
+        &self.evicted
     }
 }
 
 #[derive(Debug)]
 pub struct CodeCache {
-    capacity: usize,
+    max_bytes: usize,
+    charged_bytes: usize,
     clock: u64,
     artifacts: BTreeMap<ArtifactKey, Arc<CachedArtifact>>,
+    reclaim_needed: Arc<AtomicBool>,
 }
 
 impl CodeCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(max_bytes: usize) -> Self {
         Self {
-            capacity,
+            max_bytes,
+            charged_bytes: 0,
             clock: 0,
             artifacts: BTreeMap::new(),
+            reclaim_needed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -96,8 +113,12 @@ impl CodeCache {
     }
 
     pub fn insert(&mut self, artifact: CompiledArtifact) -> Result<CacheInsert, CacheError> {
-        if self.capacity == 0 {
+        if self.max_bytes == 0 {
             return Err(CacheError::CapacityZero);
+        }
+        let charge_bytes = artifact.charge_bytes().ok_or(CacheError::ChargeOverflow)?;
+        if charge_bytes > self.max_bytes {
+            return Err(CacheError::ArtifactTooLarge);
         }
         self.collect_invalidated();
         let key = artifact.key();
@@ -106,30 +127,72 @@ impl CodeCache {
                 .artifacts
                 .get(&key.with_tier(Tier::Baseline))
                 .ok_or(CacheError::MissingDeoptTarget)?;
-            Some(DeoptPin::new(Arc::clone(baseline)))
+            Some(DeoptPin::new(
+                Arc::clone(baseline),
+                Arc::clone(&self.reclaim_needed),
+            ))
         } else {
             None
         };
-        if let Some(existing) = self.artifacts.get(&key) {
+        let existing_charge = if let Some(existing) = self.artifacts.get(&key) {
             if !existing.is_evictable() {
                 return Err(CacheError::ArtifactPinned);
             }
-            self.artifacts.remove(&key);
-        }
-        let evicted = if self.artifacts.len() >= self.capacity {
-            let candidate =
-                evict::candidate(&self.artifacts).ok_or(CacheError::AllArtifactsPinned)?;
-            self.artifacts.remove(&candidate);
-            Some(candidate)
+            existing.charge_bytes
         } else {
-            None
+            0
         };
+        let retained_bytes = self
+            .charged_bytes
+            .checked_sub(existing_charge)
+            .ok_or(CacheError::ChargeOverflow)?;
+        let desired_bytes = retained_bytes
+            .checked_add(charge_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
+        let needed_bytes = desired_bytes.saturating_sub(self.max_bytes);
+        let mut selected = Vec::new();
+        let mut freed_bytes = 0usize;
+        for (candidate, candidate_bytes) in evict::candidates(&self.artifacts, key) {
+            if freed_bytes >= needed_bytes {
+                break;
+            }
+            freed_bytes = freed_bytes
+                .checked_add(candidate_bytes)
+                .ok_or(CacheError::ChargeOverflow)?;
+            selected.push(candidate);
+        }
+        if freed_bytes < needed_bytes {
+            return Err(CacheError::AllArtifactsPinned);
+        }
+        if existing_charge != 0 || self.artifacts.contains_key(&key) {
+            self.remove(key);
+        }
+        for candidate in &selected {
+            self.remove(*candidate);
+        }
         let tick = self.next_tick();
+        self.charged_bytes = self
+            .charged_bytes
+            .checked_add(charge_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
         self.artifacts.insert(
             key,
-            Arc::new(CachedArtifact::new(artifact, tick, deopt_target)),
+            Arc::new(CachedArtifact::new(
+                artifact,
+                tick,
+                deopt_target,
+                charge_bytes,
+            )),
         );
-        Ok(CacheInsert { evicted })
+        Ok(CacheInsert {
+            evicted: selected.into_boxed_slice(),
+        })
+    }
+
+    fn remove(&mut self, key: ArtifactKey) -> Option<Arc<CachedArtifact>> {
+        let artifact = self.artifacts.remove(&key)?;
+        self.charged_bytes = self.charged_bytes.saturating_sub(artifact.charge_bytes);
+        Some(artifact)
     }
 
     pub fn contains(&self, key: ArtifactKey) -> bool {
@@ -164,7 +227,10 @@ impl CodeCache {
         }
         artifact.execution_pins.fetch_add(1, Ordering::AcqRel);
         artifact.last_used.store(tick, Ordering::Release);
-        Some(ExecutionPin { artifact })
+        Some(ExecutionPin {
+            artifact,
+            reclaim_needed: Arc::clone(&self.reclaim_needed),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -173,6 +239,10 @@ impl CodeCache {
 
     pub fn is_empty(&self) -> bool {
         self.artifacts.is_empty()
+    }
+
+    pub const fn charged_bytes(&self) -> usize {
+        self.charged_bytes
     }
 
     pub fn deopt_references(&self, key: ArtifactKey) -> Option<usize> {
@@ -210,34 +280,50 @@ impl CodeCache {
             let Some(candidate) = candidate else {
                 break;
             };
-            self.artifacts.remove(&candidate);
+            self.remove(candidate);
             removed = removed.saturating_add(1);
         }
         removed
+    }
+
+    /// Reclaims invalidated artifacts after a pin release has made progress possible.
+    pub fn poll_reclamation(&mut self) -> usize {
+        if !self.reclaim_needed.swap(false, Ordering::AcqRel) {
+            return 0;
+        }
+        self.collect_invalidated()
     }
 }
 
 #[derive(Debug)]
 struct DeoptPin {
     target: Arc<CachedArtifact>,
+    reclaim_needed: Arc<AtomicBool>,
 }
 
 impl DeoptPin {
-    fn new(target: Arc<CachedArtifact>) -> Self {
+    fn new(target: Arc<CachedArtifact>, reclaim_needed: Arc<AtomicBool>) -> Self {
         target.deopt_references.fetch_add(1, Ordering::AcqRel);
-        Self { target }
+        Self {
+            target,
+            reclaim_needed,
+        }
     }
 }
 
 impl Drop for DeoptPin {
     fn drop(&mut self) {
-        self.target.deopt_references.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.target.deopt_references.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 && self.target.invalidated.load(Ordering::Acquire) {
+            self.reclaim_needed.store(true, Ordering::Release);
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct ExecutionPin {
     artifact: Arc<CachedArtifact>,
+    reclaim_needed: Arc<AtomicBool>,
 }
 
 impl ExecutionPin {
@@ -252,6 +338,9 @@ impl ExecutionPin {
 
 impl Drop for ExecutionPin {
     fn drop(&mut self) {
-        self.artifact.execution_pins.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.artifact.execution_pins.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 && self.artifact.invalidated.load(Ordering::Acquire) {
+            self.reclaim_needed.store(true, Ordering::Release);
+        }
     }
 }

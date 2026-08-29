@@ -214,6 +214,24 @@ impl CompiledArtifact {
         self.benefit.snapshot()
     }
 
+    pub fn charge_bytes(&self) -> Option<usize> {
+        fn add_slice<T>(total: usize, len: usize) -> Option<usize> {
+            total.checked_add(len.checked_mul(core::mem::size_of::<T>())?)
+        }
+
+        let mut total = self.code.bytes().len();
+        total = add_slice::<Relocation>(total, self.relocations.len())?;
+        total = add_slice::<StackMap>(total, self.stack_maps.len())?;
+        for map in &self.stack_maps {
+            total = add_slice::<u16>(total, map.live_slots.len())?;
+        }
+        total = add_slice::<FrameState>(total, self.frame_states.len())?;
+        for state in &self.frame_states {
+            total = add_slice::<u16>(total, state.slots.len())?;
+        }
+        add_slice::<ArtifactDependency>(total, self.dependencies.len())
+    }
+
     pub(crate) fn record_benefit(&self, score: u64) {
         self.benefit.record(score);
     }

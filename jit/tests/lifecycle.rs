@@ -48,6 +48,8 @@ fn stale_result_is_never_installed() {
     coordinator.complete(CompileCompletion {
         key,
         requested_tier: Tier::Baseline,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
         result: Ok(CompiledArtifact::empty(request.artifact_key())),
     });
 
@@ -65,10 +67,12 @@ fn repeated_failures_blacklist_only_the_generation() {
         coordinator
             .queue(key, Tier::Baseline, coordinator_snapshot())
             .unwrap();
-        assert!(coordinator.begin_next().is_some());
+        let request = coordinator.begin_next().expect("queued attempt begins");
         coordinator.complete(CompileCompletion {
             key,
             requested_tier: Tier::Baseline,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
             result: Err(CompileFailure::UnsupportedOpcode),
         });
         if attempt < 4 {
@@ -99,6 +103,17 @@ fn artifact_key(function_id: u64, generation: u64, tier: Tier) -> ArtifactKey {
         opcode_fingerprint: 6,
         config_fingerprint: 7,
     }
+}
+
+fn artifact_with_code(key: ArtifactKey, bytes: usize) -> CompiledArtifact {
+    CompiledArtifact::from_parts(
+        key,
+        CodeAllocation::inert(vec![0; bytes]),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 #[test]
@@ -161,13 +176,13 @@ fn cache_evicts_low_benefit_least_recent_artifact() {
     let c = artifact_key(3, 1, Tier::Baseline);
     let d = artifact_key(4, 1, Tier::Baseline);
     for key in [a, b, c] {
-        cache.insert(CompiledArtifact::empty(key)).unwrap();
+        cache.insert(artifact_with_code(key, 1)).unwrap();
     }
     cache.record_benefit(a, 10).unwrap();
     assert!(cache.touch(b));
 
     assert_eq!(
-        cache.insert(CompiledArtifact::empty(d)).unwrap().evicted(),
+        cache.insert(artifact_with_code(d, 1)).unwrap().evicted(),
         Some(c)
     );
     assert!(cache.contains(a));
@@ -184,13 +199,78 @@ fn active_execution_pin_prevents_eviction() {
     let c = artifact_key(3, 1, Tier::Baseline);
     let d = artifact_key(4, 1, Tier::Baseline);
     for key in [a, b, c] {
-        cache.insert(CompiledArtifact::empty(key)).unwrap();
+        cache.insert(artifact_with_code(key, 1)).unwrap();
     }
     let pin = cache.pin(a).expect("installed artifact can be pinned");
 
-    cache.insert(CompiledArtifact::empty(d)).unwrap();
+    cache.insert(artifact_with_code(d, 1)).unwrap();
     assert!(cache.contains(a));
     assert_eq!(pin.key(), a);
+}
+
+#[test]
+fn cache_enforces_byte_quota_with_deterministic_multi_eviction() {
+    let mut cache = CodeCache::new(8);
+    let a = artifact_key(1, 1, Tier::Baseline);
+    let b = artifact_key(2, 1, Tier::Baseline);
+    let c = artifact_key(3, 1, Tier::Baseline);
+    cache.insert(artifact_with_code(a, 4)).unwrap();
+    cache.insert(artifact_with_code(b, 4)).unwrap();
+
+    let insertion = cache.insert(artifact_with_code(c, 8)).unwrap();
+
+    assert_eq!(insertion.evictions(), &[a, b]);
+    assert_eq!(cache.charged_bytes(), 8);
+    assert!(!cache.contains(a));
+    assert!(!cache.contains(b));
+    assert!(cache.contains(c));
+}
+
+#[test]
+fn cache_rejects_single_oversize_artifact_without_mutation() {
+    let mut cache = CodeCache::new(3);
+    let key = artifact_key(1, 1, Tier::Baseline);
+
+    assert_eq!(
+        cache.insert(artifact_with_code(key, 4)).unwrap_err(),
+        rquickjs_jit::code_cache::CacheError::ArtifactTooLarge
+    );
+    assert_eq!(cache.charged_bytes(), 0);
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn cache_charges_owned_relocation_metadata() {
+    let mut cache = CodeCache::new(std::mem::size_of::<Relocation>() - 1);
+    let key = artifact_key(1, 1, Tier::Baseline);
+    let artifact = CompiledArtifact::from_parts(
+        key,
+        CodeAllocation::inert(Vec::new()),
+        vec![Relocation::new(0, 0, 0)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    assert_eq!(
+        cache.insert(artifact).unwrap_err(),
+        rquickjs_jit::code_cache::CacheError::ArtifactTooLarge
+    );
+}
+
+#[test]
+fn replacement_and_invalidation_update_cache_byte_charge() {
+    let mut cache = CodeCache::new(5);
+    let replaced = artifact_key(1, 1, Tier::Baseline);
+    let invalidated = artifact_key(2, 1, Tier::Baseline);
+    cache.insert(artifact_with_code(replaced, 3)).unwrap();
+    cache.insert(artifact_with_code(invalidated, 2)).unwrap();
+    assert_eq!(cache.charged_bytes(), 5);
+
+    cache.insert(artifact_with_code(replaced, 1)).unwrap();
+    assert_eq!(cache.charged_bytes(), 3);
+    assert_eq!(cache.invalidate(FunctionKey::new(2, 1)), 1);
+    assert_eq!(cache.charged_bytes(), 1);
 }
 
 #[test]
@@ -231,7 +311,9 @@ fn successful_completion(request: &rquickjs_jit::runtime::CompileRequest) -> Com
     CompileCompletion {
         key: request.key(),
         requested_tier: request.tier(),
-        result: Ok(CompiledArtifact::empty(request.artifact_key())),
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Ok(artifact_with_code(request.artifact_key(), 1)),
     }
 }
 
@@ -273,12 +355,14 @@ fn completion_channel_is_bounded_and_drained_only_by_coordinator() {
         sender.try_send(successful_completion(&second)),
         Err(CompletionSendError::Full(_))
     ));
+    assert_eq!(coordinator.metrics().queue_saturated, 0);
+    assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
 
     assert_eq!(
         coordinator.state(first.key()),
         CompileState::Compiling(Tier::Baseline)
     );
-    assert_eq!(coordinator.drain_completions(), 1);
+    assert_eq!(coordinator.drain_completions().drained(), 1);
     assert_eq!(
         coordinator.state(first.key()),
         CompileState::Installed(Tier::Baseline)
@@ -286,6 +370,39 @@ fn completion_channel_is_bounded_and_drained_only_by_coordinator() {
     assert_eq!(
         coordinator.state(second.key()),
         CompileState::Compiling(Tier::Baseline)
+    );
+}
+
+#[test]
+fn completion_drain_obeys_exact_budget_and_reports_remaining_work() {
+    let mut coordinator = Coordinator::with_limits(3, 3, 4, 16);
+    let sender = coordinator.completion_sender();
+    let mut requests = Vec::new();
+    for id in 1..=3 {
+        let key = FunctionKey::new(id, 1);
+        coordinator
+            .queue(key, Tier::Baseline, coordinator_snapshot())
+            .unwrap();
+        requests.push(coordinator.begin_next().unwrap());
+    }
+    for request in &requests {
+        sender.try_send(successful_completion(request)).unwrap();
+    }
+
+    let first_poll = coordinator.drain_completions_with_budget(2);
+    assert_eq!(first_poll.drained(), 2);
+    assert_eq!(first_poll.remaining(), 1);
+    assert_eq!(
+        coordinator.state(requests[2].key()),
+        CompileState::Compiling(Tier::Baseline)
+    );
+
+    let second_poll = coordinator.drain_completions_with_budget(2);
+    assert_eq!(second_poll.drained(), 1);
+    assert_eq!(second_poll.remaining(), 0);
+    assert_eq!(
+        coordinator.state(requests[2].key()),
+        CompileState::Installed(Tier::Baseline)
     );
 }
 
@@ -317,7 +434,7 @@ fn shutdown_closes_publication_and_retires_pending_work() {
 }
 
 #[test]
-fn mismatched_artifact_identity_is_rejected_without_wedging_compilation() {
+fn mismatched_artifact_identity_leaves_legitimate_attempt_in_flight() {
     let mut coordinator = coordinator(4);
     let key = FunctionKey::new(1, 1);
     coordinator
@@ -332,16 +449,95 @@ fn mismatched_artifact_identity_is_rejected_without_wedging_compilation() {
     coordinator.complete(CompileCompletion {
         key,
         requested_tier: Tier::Baseline,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
         result: Ok(CompiledArtifact::empty(wrong_key)),
     });
 
-    assert!(matches!(
+    assert_eq!(
         coordinator.state(key),
-        CompileState::Backoff { attempts: 1, .. }
-    ));
+        CompileState::Compiling(Tier::Baseline)
+    );
+    coordinator.complete(successful_completion(&request));
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Installed(Tier::Baseline)
+    );
     assert_eq!(coordinator.metrics().stale_results, 1);
-    assert_eq!(coordinator.metrics().compile_failures, 1);
-    assert_eq!(coordinator.metrics().installed, 0);
+    assert_eq!(coordinator.metrics().compile_failures, 0);
+    assert_eq!(coordinator.metrics().installed, 1);
+}
+
+#[test]
+fn mismatched_failure_identity_leaves_legitimate_attempt_in_flight() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(1, 1);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    let wrong_key = ArtifactKey {
+        target_isa: request.artifact_key().target_isa + 1,
+        ..request.artifact_key()
+    };
+
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        attempt_id: request.attempt_id(),
+        artifact_key: wrong_key,
+        result: Err(CompileFailure::UnsupportedOpcode),
+    });
+
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Compiling(Tier::Baseline)
+    );
+    coordinator.complete(successful_completion(&request));
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Installed(Tier::Baseline)
+    );
+    assert_eq!(coordinator.metrics().stale_results, 1);
+    assert_eq!(coordinator.metrics().compile_failures, 0);
+}
+
+#[test]
+fn old_same_key_retry_completion_cannot_satisfy_new_attempt() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(1, 1);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let first = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: first.artifact_key(),
+        attempt_id: first.attempt_id(),
+        result: Err(CompileFailure::UnsupportedOpcode),
+    });
+    let CompileState::Backoff { retry_after, .. } = coordinator.state(key) else {
+        unreachable!()
+    };
+    coordinator.advance_clock(retry_after);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let second = coordinator.begin_next().unwrap();
+
+    coordinator.complete(successful_completion(&first));
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Compiling(Tier::Baseline)
+    );
+    coordinator.complete(successful_completion(&second));
+
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Installed(Tier::Baseline)
+    );
+    assert_eq!(coordinator.metrics().stale_results, 1);
 }
 
 #[test]
@@ -363,6 +559,23 @@ fn newer_generation_retires_older_in_flight_compilation() {
     assert_eq!(coordinator.state(new), CompileState::Queued(Tier::Baseline));
     assert_eq!(coordinator.metrics().stale_results, 1);
     assert_eq!(coordinator.metrics().installed, 0);
+}
+
+#[test]
+fn advancing_retirement_watermark_unpublishes_every_lower_generation() {
+    let mut coordinator = coordinator(4);
+    let installed = FunctionKey::new(1, 1);
+    coordinator
+        .queue(installed, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    coordinator.complete(successful_completion(&request));
+    assert!(coordinator.pin(installed, Tier::Baseline).is_some());
+
+    coordinator.retire(FunctionKey::new(installed.id, 2));
+
+    assert_eq!(coordinator.state(installed), CompileState::Retired);
+    assert!(coordinator.pin(installed, Tier::Baseline).is_none());
 }
 
 #[test]
@@ -442,6 +655,85 @@ fn optimizing_install_replaces_entry_but_retains_baseline_target() {
     assert!(coordinator.pin(key, Tier::Optimizing).is_none());
     assert_eq!(baseline_pin.key().tier, Tier::Baseline);
     assert_eq!(optimizing_pin.key().tier, Tier::Optimizing);
+    drop(baseline_pin);
+    drop(optimizing_pin);
+    assert_eq!(coordinator.poll_cache_reclamation(), 2);
+    assert_eq!(coordinator.cache_len(), 0);
+}
+
+#[test]
+fn optimizing_queue_requires_an_installed_baseline() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(1, 1);
+
+    assert_eq!(
+        coordinator.queue(key, Tier::Optimizing, coordinator_snapshot()),
+        Err(QueueError::NotReady)
+    );
+    assert_eq!(coordinator.state(key), CompileState::Cold);
+}
+
+#[test]
+fn baseline_retry_cannot_switch_to_optimizing_tier() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(1, 1);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Err(CompileFailure::UnsupportedOpcode),
+    });
+    let CompileState::Backoff { retry_after, .. } = coordinator.state(key) else {
+        unreachable!()
+    };
+    coordinator.advance_clock(retry_after);
+
+    assert_eq!(
+        coordinator.queue(key, Tier::Optimizing, coordinator_snapshot()),
+        Err(QueueError::NotReady)
+    );
+    assert!(matches!(
+        coordinator.state(key),
+        CompileState::Backoff { attempts: 1, .. }
+    ));
+}
+
+#[test]
+fn optimizing_failure_preserves_baseline_and_its_own_retry_state() {
+    let mut coordinator = Coordinator::with_limits(2, 2, 4, 16);
+    let key = FunctionKey::new(1, 1);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let baseline = coordinator.begin_next().unwrap();
+    coordinator.complete(successful_completion(&baseline));
+    coordinator
+        .queue(key, Tier::Optimizing, coordinator_snapshot())
+        .unwrap();
+    let optimizing = coordinator.begin_next().unwrap();
+
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Optimizing,
+        artifact_key: optimizing.artifact_key(),
+        attempt_id: optimizing.attempt_id(),
+        result: Err(CompileFailure::UnsupportedOpcode),
+    });
+
+    assert_eq!(
+        coordinator.state(key),
+        CompileState::Installed(Tier::Baseline)
+    );
+    assert!(matches!(
+        coordinator.tier_state(key, Tier::Optimizing),
+        CompileState::Backoff { attempts: 1, .. }
+    ));
+    assert!(coordinator.pin(key, Tier::Baseline).is_some());
 }
 
 #[cfg(feature = "test-support")]
@@ -563,6 +855,8 @@ fn wrong_tier_completion_does_not_consume_legitimate_in_flight_request() {
     coordinator.complete(CompileCompletion {
         key,
         requested_tier: Tier::Optimizing,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
         result: Err(CompileFailure::Cancelled),
     });
     assert_eq!(
@@ -633,6 +927,22 @@ fn released_invalidated_artifact_is_reclaimed_before_live_eviction() {
     assert!(!cache.contains(retired));
     assert!(cache.contains(live));
     assert!(cache.contains(newcomer));
+}
+
+#[test]
+fn final_pin_drop_marks_invalidated_artifact_for_explicit_poll_reclamation() {
+    let mut cache = CodeCache::new(1);
+    let retired = artifact_key(1, 1, Tier::Baseline);
+    cache.insert(artifact_with_code(retired, 1)).unwrap();
+    let pin = cache.pin(retired).unwrap();
+    assert_eq!(cache.invalidate(FunctionKey::new(1, 1)), 0);
+
+    drop(pin);
+
+    assert!(cache.contains(retired));
+    assert_eq!(cache.poll_reclamation(), 1);
+    assert!(!cache.contains(retired));
+    assert_eq!(cache.charged_bytes(), 0);
 }
 
 #[test]

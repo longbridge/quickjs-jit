@@ -7,8 +7,9 @@ mod invalidate;
 
 pub use crate::compiler::CompileFailure;
 pub use coordinator::{
-    compile_and_send, ArtifactEnvironment, CompileCompletion, CompileRequest, CompileState,
-    CompletionSendError, CompletionSender, Coordinator, FunctionKey, QueueError, Tier,
+    compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
+    CompileState, CompletionDrain, CompletionSendError, CompletionSender, Coordinator, FunctionKey,
+    QueueError, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 pub use hotness::HotnessState;
 

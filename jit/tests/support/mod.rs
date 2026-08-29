@@ -89,6 +89,8 @@ impl Harness {
             .remove(&key)
             .expect("harness request exists");
         let requested_tier = request.tier();
+        let artifact_key = request.artifact_key();
+        let attempt_id = request.attempt_id();
         self.control.complete(artifact);
         let result = self.compiler.compile(request);
         self.coordinator
@@ -97,6 +99,8 @@ impl Harness {
             .complete(CompileCompletion {
                 key,
                 requested_tier,
+                artifact_key,
+                attempt_id,
                 result,
             });
     }
@@ -116,6 +120,8 @@ impl Harness {
             coordinator.begin_next().expect("harness failure begins")
         };
         let requested_tier = request.tier();
+        let artifact_key = request.artifact_key();
+        let attempt_id = request.attempt_id();
         self.control.fail(failure);
         let result = self.compiler.compile(request);
         self.coordinator
@@ -124,6 +130,8 @@ impl Harness {
             .complete(CompileCompletion {
                 key,
                 requested_tier,
+                artifact_key,
+                attempt_id,
                 result,
             });
     }
