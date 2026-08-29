@@ -5,7 +5,8 @@ mod evict;
 
 pub use artifact::{
     ArtifactDependency, ArtifactKey, BenefitSnapshot, CodeAllocation, CompiledArtifact, FrameState,
-    Relocation, StackMap,
+    Relocation, RelocationKind, RelocationResolveError, RelocationTarget, ResolvedRelocation,
+    StackMap, UnwindKind, UnwindMetadata,
 };
 
 use std::{

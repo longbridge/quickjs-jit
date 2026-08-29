@@ -25,11 +25,13 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-cranelift-codegen = { version = "0.116", optional = true }
+cranelift-codegen = { version = "0.116", optional = true, features = ["x86", "arm64", "enable-serde"] }
 cranelift-frontend = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 cranelift-object = { version = "0.116", optional = true }
 cranelift-native = { version = "0.116", optional = true }
+postcard = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
 rquickjs = { path = "..", features = ["jit-abi"] }
@@ -46,5 +48,7 @@ compiler = [
   "dep:cranelift-module",
   "dep:cranelift-object",
   "dep:cranelift-native",
+  "dep:postcard",
+  "dep:target-lexicon",
 ]
 test-support = ["rquickjs-core/jit-test-support"]

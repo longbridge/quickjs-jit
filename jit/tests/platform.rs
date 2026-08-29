@@ -21,7 +21,7 @@ mod host_asm;
 
 use rquickjs::{Context, Runtime};
 use rquickjs_jit::{
-    code_cache::Relocation,
+    code_cache::{Relocation, RelocationKind, RelocationTarget, ResolvedRelocation},
     platform::{CodeAllocator, CodeMemoryError, FaultInjection, MacJitPolicy},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,8 +60,8 @@ fn relocations_are_validated_as_a_batch_before_writes() {
     writable.write(0, &[0xaa; 16]).unwrap();
     let before = writable.bytes().to_vec();
     let relocations = [
-        Relocation::new(0, 0x1020, -0x20),
-        Relocation::new(28, 0x2000, 0),
+        ResolvedRelocation::new(0, RelocationKind::Abs8, 0x1020, -0x20),
+        ResolvedRelocation::new(28, RelocationKind::Abs8, 0x2000, 0),
     ];
 
     assert!(matches!(
@@ -71,9 +71,45 @@ fn relocations_are_validated_as_a_batch_before_writes() {
     assert_eq!(writable.bytes(), before);
 
     writable
-        .apply_relocations(&[Relocation::new(0, 0x1020, -0x20)])
+        .apply_relocations(&[ResolvedRelocation::new(
+            0,
+            RelocationKind::Abs8,
+            0x1020,
+            -0x20,
+        )])
         .unwrap();
     assert_eq!(&writable.bytes()[..8], &0x1000_u64.to_le_bytes());
+}
+
+#[test]
+fn symbolic_relocation_preserves_kind_and_symbol_through_publication() {
+    let relocation = Relocation::with_target(
+        8,
+        RelocationKind::Abs8,
+        RelocationTarget::Symbol("qjsjit_interrupt_poll".into()),
+        -0x20,
+    );
+    assert_eq!(relocation.kind, RelocationKind::Abs8);
+    assert_eq!(
+        relocation.target,
+        RelocationTarget::Symbol("qjsjit_interrupt_poll".into())
+    );
+    let resolved = relocation
+        .resolve_with(|target| match target {
+            RelocationTarget::Symbol(name) if name.as_ref() == "qjsjit_interrupt_poll" => {
+                Some(0x1020)
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    let allocator = CodeAllocator::for_host().unwrap();
+    let mut writable = allocator.allocate(32).unwrap();
+    writable.apply_relocations(&[resolved]).unwrap();
+    assert_eq!(&writable.bytes()[8..16], &0x1000_u64.to_le_bytes());
+    writable.declare_indirect_targets(&[0]).unwrap();
+    let executable = writable.publish().unwrap();
+    assert_eq!(executable.len(), 32);
 }
 
 #[test]

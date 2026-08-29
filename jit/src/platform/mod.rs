@@ -87,7 +87,7 @@ use std::{
     },
 };
 
-use crate::code_cache::Relocation;
+use crate::code_cache::{RelocationKind, ResolvedRelocation};
 
 /// Deterministic platform failure used to verify interpreter fallback paths.
 #[doc(hidden)]
@@ -274,6 +274,11 @@ pub enum CodeMemoryError {
         target: u64,
         addend: i64,
     },
+    UnsupportedRelocationKind {
+        kind: RelocationKind,
+    },
+    TargetIsaMismatch,
+    UnresolvedRelocationTarget,
     InvalidIndirectTarget {
         offset: usize,
         alignment: usize,
@@ -363,6 +368,15 @@ impl fmt::Display for CodeMemoryError {
                 f,
                 "relocation at {offset} cannot represent target {target} plus addend {addend}"
             ),
+            Self::UnsupportedRelocationKind { kind } => {
+                write!(f, "relocation kind {kind:?} is unsupported by the publisher")
+            }
+            Self::TargetIsaMismatch => {
+                f.write_str("compiled target ISA does not match the publishing host")
+            }
+            Self::UnresolvedRelocationTarget => {
+                f.write_str("compiled relocation target was not resolved before publication")
+            }
             Self::InvalidIndirectTarget {
                 offset,
                 alignment,
@@ -724,37 +738,88 @@ impl WritableCode {
         Ok(())
     }
 
-    /// Applies absolute 64-bit relocations after validating the complete batch.
-    pub fn apply_relocations(&mut self, relocations: &[Relocation]) -> Result<(), CodeMemoryError> {
-        const WIDTH: usize = size_of::<u64>();
+    /// Applies already-resolved Cranelift relocations after validating the
+    /// complete batch. No staged byte changes if any relocation is invalid.
+    pub fn apply_relocations(
+        &mut self,
+        relocations: &[ResolvedRelocation],
+    ) -> Result<(), CodeMemoryError> {
         let mut writes = Vec::with_capacity(relocations.len());
         for relocation in relocations {
             let offset = relocation.offset as usize;
+            let width = match relocation.kind {
+                RelocationKind::Abs8 => 8,
+                RelocationKind::Abs4
+                | RelocationKind::X86PCRel4
+                | RelocationKind::X86CallPCRel4
+                | RelocationKind::X86CallPLTRel4
+                | RelocationKind::X86GOTPCRel4
+                | RelocationKind::X86SecRel
+                | RelocationKind::Arm64Call => 4,
+                kind => return Err(CodeMemoryError::UnsupportedRelocationKind { kind }),
+            };
             let end = offset
-                .checked_add(WIDTH)
+                .checked_add(width)
                 .ok_or(CodeMemoryError::RelocationOutOfBounds {
                     offset,
-                    width: WIDTH,
+                    width,
                     allocation_len: self.bytes.len(),
                 })?;
             if end > self.bytes.len() {
                 return Err(CodeMemoryError::RelocationOutOfBounds {
                     offset,
-                    width: WIDTH,
+                    width,
                     allocation_len: self.bytes.len(),
                 });
             }
-            let value = i128::from(relocation.target) + i128::from(relocation.addend);
-            let value =
-                u64::try_from(value).map_err(|_| CodeMemoryError::RelocationValueOutOfRange {
-                    offset,
-                    target: relocation.target,
-                    addend: relocation.addend,
-                })?;
-            writes.push((offset, value.to_le_bytes()));
+            let absolute = i128::from(relocation.target) + i128::from(relocation.addend);
+            let out_of_range = || CodeMemoryError::RelocationValueOutOfRange {
+                offset,
+                target: relocation.target,
+                addend: relocation.addend,
+            };
+            let (bytes, width) = match relocation.kind {
+                RelocationKind::Abs8 => {
+                    let value = u64::try_from(absolute).map_err(|_| out_of_range())?;
+                    (value.to_le_bytes(), 8)
+                }
+                RelocationKind::Abs4 | RelocationKind::X86SecRel => {
+                    let value = u32::try_from(absolute).map_err(|_| out_of_range())?;
+                    let mut bytes = [0; 8];
+                    bytes[..4].copy_from_slice(&value.to_le_bytes());
+                    (bytes, 4)
+                }
+                RelocationKind::X86PCRel4
+                | RelocationKind::X86CallPCRel4
+                | RelocationKind::X86CallPLTRel4
+                | RelocationKind::X86GOTPCRel4 => {
+                    let place = self.as_ptr() as usize as i128 + offset as i128;
+                    let value = i32::try_from(absolute - place).map_err(|_| out_of_range())?;
+                    let mut bytes = [0; 8];
+                    bytes[..4].copy_from_slice(&value.to_le_bytes());
+                    (bytes, 4)
+                }
+                RelocationKind::Arm64Call => {
+                    let place = self.as_ptr() as usize as i128 + offset as i128;
+                    let delta = absolute - place;
+                    if delta % 4 != 0 || !(-(1_i128 << 27)..(1_i128 << 27)).contains(&delta) {
+                        return Err(out_of_range());
+                    }
+                    let current = u32::from_le_bytes(
+                        self.bytes[offset..end].try_into().expect("validated width"),
+                    );
+                    let immediate = ((delta >> 2) as u32) & 0x03ff_ffff;
+                    let value = (current & 0xfc00_0000) | immediate;
+                    let mut bytes = [0; 8];
+                    bytes[..4].copy_from_slice(&value.to_le_bytes());
+                    (bytes, 4)
+                }
+                kind => return Err(CodeMemoryError::UnsupportedRelocationKind { kind }),
+            };
+            writes.push((offset, bytes, width));
         }
-        for (offset, bytes) in writes {
-            self.bytes[offset..offset + WIDTH].copy_from_slice(&bytes);
+        for (offset, bytes, width) in writes {
+            self.bytes[offset..offset + width].copy_from_slice(&bytes[..width]);
         }
         Ok(())
     }

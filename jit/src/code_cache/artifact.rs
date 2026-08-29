@@ -45,17 +45,124 @@ impl CodeAllocation {
     }
 }
 
+/// Exact relocation encodings emitted by Cranelift 0.116.
+///
+/// Keeping the encoding in the artifact prevents the publisher from silently
+/// treating target-relative relocations as absolute addresses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RelocationKind {
+    Abs4,
+    Abs8,
+    X86PCRel4,
+    X86CallPCRel4,
+    X86CallPLTRel4,
+    X86GOTPCRel4,
+    X86SecRel,
+    Arm32Call,
+    Arm64Call,
+    S390xPCRel32Dbl,
+    S390xPLTRel32Dbl,
+    ElfX86_64TlsGd,
+    MachOX86_64Tlv,
+    MachOAarch64TlsAdrPage21,
+    MachOAarch64TlsAdrPageOff12,
+    Aarch64TlsDescAdrPage21,
+    Aarch64TlsDescLd64Lo12,
+    Aarch64TlsDescAddLo12,
+    Aarch64TlsDescCall,
+    Aarch64AdrGotPage21,
+    Aarch64Ld64GotLo12Nc,
+    RiscvCallPlt,
+    RiscvTlsGdHi20,
+    RiscvPCRelLo12I,
+    RiscvGotHi20,
+    S390xTlsGd64,
+    S390xTlsGdCall,
+    PulleyCallIndirectHost,
+}
+
+/// A relocation target retained symbolically until a writable allocation has
+/// a stable address and the runtime has resolved external symbols.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RelocationTarget {
+    Absolute(u64),
+    FunctionOffset(u32),
+    Symbol(Box<str>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Relocation {
     pub offset: u32,
-    pub target: u64,
+    pub kind: RelocationKind,
+    pub target: RelocationTarget,
     pub addend: i64,
 }
 
 impl Relocation {
+    /// Backwards-compatible constructor for an absolute 64-bit relocation.
     pub const fn new(offset: u32, target: u64, addend: i64) -> Self {
         Self {
             offset,
+            kind: RelocationKind::Abs8,
+            target: RelocationTarget::Absolute(target),
+            addend,
+        }
+    }
+
+    pub const fn with_target(
+        offset: u32,
+        kind: RelocationKind,
+        target: RelocationTarget,
+        addend: i64,
+    ) -> Self {
+        Self {
+            offset,
+            kind,
+            target,
+            addend,
+        }
+    }
+
+    /// Resolves the symbolic target without discarding the relocation kind.
+    pub fn resolve_with(
+        &self,
+        mut resolve: impl FnMut(&RelocationTarget) -> Option<u64>,
+    ) -> Result<ResolvedRelocation, RelocationResolveError> {
+        let target = match self.target {
+            RelocationTarget::Absolute(target) => target,
+            _ => resolve(&self.target).ok_or(RelocationResolveError::UnresolvedTarget)?,
+        };
+        Ok(ResolvedRelocation::new(
+            self.offset,
+            self.kind,
+            target,
+            self.addend,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelocationResolveError {
+    UnresolvedTarget,
+}
+
+/// A relocation whose target address has been explicitly resolved and is
+/// ready for validation by the W^X publisher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedRelocation {
+    pub offset: u32,
+    pub kind: RelocationKind,
+    pub target: u64,
+    pub addend: i64,
+}
+
+impl ResolvedRelocation {
+    pub const fn new(offset: u32, kind: RelocationKind, target: u64, addend: i64) -> Self {
+        Self {
+            offset,
+            kind,
             target,
             addend,
         }
@@ -74,6 +181,50 @@ impl StackMap {
             code_offset,
             live_slots: live_slots.into_boxed_slice(),
         }
+    }
+}
+
+/// Native unwind format represented by serialized Cranelift 0.116 metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum UnwindKind {
+    SystemV,
+    WindowsX64,
+    WindowsArm64,
+}
+
+/// Version-pinned unwind metadata retained with compiled code.
+///
+/// The encoding is Cranelift 0.116's serde representation. Keeping it opaque
+/// here avoids making the cache depend on Cranelift when the compiler feature
+/// is disabled while preserving the complete unwind plan for registration by
+/// a later installation stage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnwindMetadata {
+    kind: UnwindKind,
+    frame_size: u32,
+    encoding: Box<[u8]>,
+}
+
+impl UnwindMetadata {
+    pub fn new(kind: UnwindKind, frame_size: u32, encoding: Vec<u8>) -> Self {
+        Self {
+            kind,
+            frame_size,
+            encoding: encoding.into_boxed_slice(),
+        }
+    }
+
+    pub const fn kind(&self) -> UnwindKind {
+        self.kind
+    }
+
+    pub const fn frame_size(&self) -> u32 {
+        self.frame_size
+    }
+
+    pub fn encoding(&self) -> &[u8] {
+        &self.encoding
     }
 }
 
@@ -145,6 +296,7 @@ pub struct CompiledArtifact {
     key: ArtifactKey,
     code: CodeAllocation,
     relocations: Box<[Relocation]>,
+    unwind_metadata: Option<UnwindMetadata>,
     stack_maps: Box<[StackMap]>,
     frame_states: Box<[FrameState]>,
     dependencies: Box<[ArtifactDependency]>,
@@ -177,6 +329,7 @@ impl CompiledArtifact {
             key,
             code,
             relocations: relocations.into_boxed_slice(),
+            unwind_metadata: None,
             stack_maps: stack_maps.into_boxed_slice(),
             frame_states: frame_states.into_boxed_slice(),
             dependencies: dependencies.into_boxed_slice(),
@@ -196,6 +349,15 @@ impl CompiledArtifact {
 
     pub fn relocations(&self) -> &[Relocation] {
         &self.relocations
+    }
+
+    pub fn unwind_metadata(&self) -> Option<&UnwindMetadata> {
+        self.unwind_metadata.as_ref()
+    }
+
+    pub fn with_unwind_metadata(mut self, metadata: Option<UnwindMetadata>) -> Self {
+        self.unwind_metadata = metadata;
+        self
     }
 
     pub fn stack_maps(&self) -> &[StackMap] {
@@ -221,6 +383,15 @@ impl CompiledArtifact {
 
         let mut total = self.code.bytes().len();
         total = add_slice::<Relocation>(total, self.relocations.len())?;
+        for relocation in &self.relocations {
+            if let RelocationTarget::Symbol(symbol) = &relocation.target {
+                total = total.checked_add(symbol.len())?;
+            }
+        }
+        if let Some(unwind) = &self.unwind_metadata {
+            total = total.checked_add(core::mem::size_of::<UnwindMetadata>())?;
+            total = total.checked_add(unwind.encoding.len())?;
+        }
         total = add_slice::<StackMap>(total, self.stack_maps.len())?;
         for map in &self.stack_maps {
             total = add_slice::<u16>(total, map.live_slots.len())?;
@@ -257,6 +428,7 @@ impl CompiledArtifact {
             },
             code: CodeAllocation::inert(Vec::new()),
             relocations: Box::new([]),
+            unwind_metadata: None,
             stack_maps: Box::new([]),
             frame_states: Box::new([]),
             dependencies: Box::new([]),

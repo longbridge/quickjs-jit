@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    mem, ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -232,6 +233,195 @@ pub fn snapshot_from_parts(
     )
 }
 
+/// Builds the smallest worker-safe verified function used by compiler tests.
+pub fn verified_bytecode(bytecode: Vec<u8>, arg_count: u16, local_count: u16) -> VerifiedFunction {
+    CompileSnapshot::from_untrusted_bytecode(bytecode, arg_count, local_count, 0, 0)
+        .verify(VerifyLimits::default())
+        .expect("synthetic bytecode verifies")
+}
+
+/// Stable Rust representation of QuickJS's 16-byte non-NaN-boxed value ABI.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JSValueRepr {
+    pub payload: u64,
+    pub tag: i64,
+}
+
+impl JSValueRepr {
+    pub const fn new(payload: u64, tag: i64) -> Self {
+        Self { payload, tag }
+    }
+
+    pub const fn undefined() -> Self {
+        Self::new(0, rquickjs_core::qjs::JS_TAG_UNDEFINED as i64)
+    }
+
+    pub const fn int32(value: i32) -> Self {
+        Self::new(value as i64 as u64, rquickjs_core::qjs::JS_TAG_INT as i64)
+    }
+
+    pub const fn float64(value: f64) -> Self {
+        Self::new(value.to_bits(), rquickjs_core::qjs::JS_TAG_FLOAT64 as i64)
+    }
+
+    pub fn as_f64(self) -> Option<f64> {
+        (self.tag == rquickjs_core::qjs::JS_TAG_FLOAT64 as i64)
+            .then(|| f64::from_bits(self.payload))
+    }
+
+    fn into_raw(self) -> rquickjs_core::qjs::JSValue {
+        // The ABI validation tests independently prove both layouts are 16
+        // bytes with the tag at byte 8.
+        unsafe { mem::transmute(self) }
+    }
+
+    fn from_raw(value: rquickjs_core::qjs::JSValue) -> Self {
+        unsafe { mem::transmute(value) }
+    }
+}
+
+const _: () =
+    assert!(mem::size_of::<JSValueRepr>() == mem::size_of::<rquickjs_core::qjs::JSValue>());
+const _: () =
+    assert!(mem::offset_of!(JSValueRepr, tag) == mem::offset_of!(rquickjs_core::qjs::JSValue, tag));
+
+#[derive(Debug)]
+struct PollState {
+    count: AtomicUsize,
+    interrupt_at: AtomicUsize,
+}
+
+unsafe extern "C" fn synthetic_interrupt_poll(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+) -> i32 {
+    let state = unsafe { &*((*frame).rt.cast::<PollState>()) };
+    let count = state.count.fetch_add(1, Ordering::AcqRel) + 1;
+    usize::from(count == state.interrupt_at.load(Ordering::Acquire)) as i32
+}
+
+static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
+    rquickjs_core::qjs::JSJitRuntimeAPI {
+        struct_size: mem::size_of::<rquickjs_core::qjs::JSJitRuntimeAPI>() as u32,
+        major: rquickjs_core::qjs::QJSJIT_RUNTIME_API_MAJOR as u16,
+        minor: rquickjs_core::qjs::QJSJIT_RUNTIME_API_MINOR as u16,
+        interrupt_poll: Some(synthetic_interrupt_poll),
+    };
+
+/// Result observed after invoking a generated aggregate-return entry point.
+#[derive(Clone, Copy, Debug)]
+pub struct SyntheticOutcome {
+    pub exit: rquickjs_core::qjs::JSJitExit,
+    pub result: JSValueRepr,
+}
+
+/// Owns all buffers referenced by one synthetic `JSJitExecFrame`.
+pub struct SyntheticFrame {
+    frame: rquickjs_core::qjs::JSJitExecFrame,
+    arguments: Vec<JSValueRepr>,
+    locals: Vec<JSValueRepr>,
+    stack: Vec<JSValueRepr>,
+    bytecode: Vec<u8>,
+    poll: Box<PollState>,
+}
+
+impl SyntheticFrame {
+    pub fn new(arguments: &[JSValueRepr], local_count: usize, stack_size: usize) -> Self {
+        let mut arguments = arguments.to_vec();
+        let mut locals = vec![JSValueRepr::undefined(); local_count];
+        let mut stack = vec![JSValueRepr::undefined(); stack_size];
+        let bytecode = vec![0_u8];
+        let poll = Box::new(PollState {
+            count: AtomicUsize::new(0),
+            interrupt_at: AtomicUsize::new(usize::MAX),
+        });
+        let frame = rquickjs_core::qjs::JSJitExecFrame {
+            struct_size: mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>() as u32,
+            flags: 0,
+            rt: (&*poll as *const PollState).cast_mut().cast(),
+            ctx: ptr::null_mut(),
+            function_id: 0,
+            generation: 0,
+            arg_buf: arguments.as_mut_ptr().cast(),
+            var_buf: locals.as_mut_ptr().cast(),
+            stack_base: stack.as_mut_ptr().cast(),
+            stack_top: stack.as_mut_ptr().cast(),
+            bytecode_start: bytecode.as_ptr(),
+            pc: bytecode.as_ptr(),
+            result: JSValueRepr::undefined().into_raw(),
+            entry: rquickjs_core::qjs::JSJitEntryHandle {
+                struct_size: mem::size_of::<rquickjs_core::qjs::JSJitEntryHandle>() as u32,
+                reserved: 0,
+                entry: None,
+                pin: ptr::null_mut(),
+            },
+            runtime_api: &SYNTHETIC_RUNTIME_API,
+        };
+        Self {
+            frame,
+            arguments,
+            locals,
+            stack,
+            bytecode,
+            poll,
+        }
+    }
+
+    pub fn set_bytecode(&mut self, bytecode: &[u8]) {
+        self.bytecode.clear();
+        self.bytecode.extend_from_slice(bytecode);
+        self.frame.bytecode_start = self.bytecode.as_ptr();
+        self.frame.pc = self.bytecode.as_ptr();
+    }
+
+    pub fn bytecode_start(&self) -> *const u8 {
+        self.frame.bytecode_start
+    }
+
+    pub fn interrupt_on_poll(&mut self, poll: usize) {
+        self.poll.interrupt_at.store(poll, Ordering::Release);
+    }
+
+    pub fn poll_count(&self) -> usize {
+        self.poll.count.load(Ordering::Acquire)
+    }
+
+    pub fn frame_bytes(&self) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                ptr::addr_of!(self.frame).cast::<u8>(),
+                mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
+            )
+        }
+        .to_vec()
+    }
+
+    /// Invokes an entry whose Cranelift signature has an sret pointer followed
+    /// by the execution-frame pointer and no ordinary return values.
+    pub unsafe fn call(
+        &mut self,
+        executable: &crate::platform::ExecutableCode,
+    ) -> SyntheticOutcome {
+        type Entry = unsafe extern "C" fn(
+            *mut rquickjs_core::qjs::JSJitExecFrame,
+        ) -> rquickjs_core::qjs::JSJitExit;
+        let entry: Entry = unsafe { mem::transmute(executable.as_ptr()) };
+        let exit = unsafe { entry(ptr::addr_of_mut!(self.frame)) };
+        SyntheticOutcome {
+            exit,
+            result: JSValueRepr::from_raw(self.frame.result),
+        }
+    }
+}
+
+impl Drop for SyntheticFrame {
+    fn drop(&mut self) {
+        // Read the owned buffers so dead-code analysis cannot obscure that
+        // their allocations intentionally pin every pointer in `frame`.
+        let _ = (&self.arguments, &self.locals, &self.stack, &self.bytecode);
+    }
+}
+
 pub fn verifier_metadata(
     osr_points: Vec<OsrPoint>,
     deopt_points: Vec<DeoptPoint>,
@@ -361,11 +551,12 @@ pub enum AbiMismatchFixture {
     EntryHandleLayout,
     ExecFrameLayout,
     ExitLayout,
+    RuntimeApiLayout,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -379,6 +570,7 @@ impl AbiMismatchFixture {
         Self::EntryHandleLayout,
         Self::ExecFrameLayout,
         Self::ExitLayout,
+        Self::RuntimeApiLayout,
         Self::BackendVTableLayout,
     ];
 
@@ -399,6 +591,7 @@ impl AbiMismatchFixture {
             Self::EntryHandleLayout => AbiMismatch::StructureLayout(AbiStructure::EntryHandle),
             Self::ExecFrameLayout => AbiMismatch::StructureLayout(AbiStructure::ExecFrame),
             Self::ExitLayout => AbiMismatch::StructureLayout(AbiStructure::Exit),
+            Self::RuntimeApiLayout => AbiMismatch::StructureLayout(AbiStructure::RuntimeApi),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }

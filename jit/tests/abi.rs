@@ -73,6 +73,27 @@ fn abi_minor_additions_are_appended_after_the_v1_0_tail() {
         std::mem::offset_of!(qjs::JSJitABIInfo, exit_layout_fingerprint),
         previous_tail + std::mem::size_of::<u64>()
     );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitABIInfo, runtime_api_layout_fingerprint),
+        previous_tail + 2 * std::mem::size_of::<u64>()
+    );
+}
+
+#[test]
+fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
+    use rquickjs_core::qjs;
+
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 0);
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitExecFrame, runtime_api),
+        std::mem::offset_of!(qjs::JSJitExecFrame, entry)
+            + std::mem::size_of::<qjs::JSJitEntryHandle>()
+    );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitRuntimeAPI, interrupt_poll),
+        8
+    );
 }
 
 #[test]

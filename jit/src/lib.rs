@@ -9,6 +9,8 @@ pub mod code_cache;
 pub mod compiler;
 mod config;
 mod error;
+#[cfg(feature = "compiler")]
+pub mod ir;
 mod metrics;
 pub mod platform;
 pub mod runtime;

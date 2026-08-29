@@ -2,6 +2,11 @@
 
 use crate::{code_cache::CompiledArtifact, runtime::CompileRequest};
 
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub mod baseline;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+mod helpers;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 
