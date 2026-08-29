@@ -184,28 +184,45 @@ pub enum DecodeError {
     Truncated { pc: u32, size: usize },
 }
 
-pub fn decode_raw(bytes: &[u8]) -> Result<Vec<Instruction>, DecodeError> {
+pub(crate) enum BoundedDecodeError {
+    Decode(DecodeError),
+    InstructionLimit { pc: u32 },
+}
+
+pub(crate) fn decode_bounded(
+    bytes: &[u8],
+    max_instructions: usize,
+) -> Result<Vec<Instruction>, BoundedDecodeError> {
     let mut result = Vec::new();
     let mut pc = 0usize;
     while pc < bytes.len() {
+        if result.len() >= max_instructions {
+            return Err(BoundedDecodeError::InstructionLimit { pc: pc as u32 });
+        }
         let raw_opcode = bytes[pc];
-        let opcode = Opcode::from_byte(raw_opcode).ok_or(DecodeError::UnknownOpcode {
-            pc: pc as u32,
-            opcode: raw_opcode,
+        let opcode = Opcode::from_byte(raw_opcode).ok_or({
+            BoundedDecodeError::Decode(DecodeError::UnknownOpcode {
+                pc: pc as u32,
+                opcode: raw_opcode,
+            })
         })?;
         if opcode.name() == "invalid" {
-            return Err(DecodeError::InvalidOpcode { pc: pc as u32 });
+            return Err(BoundedDecodeError::Decode(DecodeError::InvalidOpcode {
+                pc: pc as u32,
+            }));
         }
         let size = opcode.size();
-        let end = pc.checked_add(size).ok_or(DecodeError::Truncated {
-            pc: pc as u32,
-            size,
-        })?;
-        if end > bytes.len() {
-            return Err(DecodeError::Truncated {
+        let end = pc.checked_add(size).ok_or({
+            BoundedDecodeError::Decode(DecodeError::Truncated {
                 pc: pc as u32,
                 size,
-            });
+            })
+        })?;
+        if end > bytes.len() {
+            return Err(BoundedDecodeError::Decode(DecodeError::Truncated {
+                pc: pc as u32,
+                size,
+            }));
         }
         result.push(Instruction {
             pc: pc as u32,
@@ -215,6 +232,13 @@ pub fn decode_raw(bytes: &[u8]) -> Result<Vec<Instruction>, DecodeError> {
         pc = end;
     }
     Ok(result)
+}
+
+pub fn decode_raw(bytes: &[u8]) -> Result<Vec<Instruction>, DecodeError> {
+    decode_bounded(bytes, usize::MAX).map_err(|error| match error {
+        BoundedDecodeError::Decode(error) => error,
+        BoundedDecodeError::InstructionLimit { .. } => unreachable!("unbounded decoder limit"),
+    })
 }
 
 #[cfg(test)]
@@ -244,22 +268,46 @@ mod tests {
 
     #[test]
     fn arbitrary_byte_sequences_decode_completely_or_return_an_error() {
-        let mut state = 0xa341_316c_u32;
-        for len in 0..=512 {
-            let mut bytes = vec![0; len];
-            for byte in &mut bytes {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                *byte = state as u8;
+        for mut state in [0xa341_316c_u32, 0x243f_6a88, 0x9e37_79b9, 0xdead_beef] {
+            for len in 0..=512 {
+                let mut bytes = vec![0; len];
+                for byte in &mut bytes {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    *byte = state as u8;
+                }
+                let result = std::panic::catch_unwind(|| decode_raw(&bytes));
+                assert!(result.is_ok(), "decoder panicked for {bytes:02x?}");
+                if let Ok(instructions) = result.unwrap() {
+                    assert_eq!(
+                        instructions.iter().map(Instruction::size).sum::<usize>(),
+                        bytes.len()
+                    );
+                }
             }
-            let result = std::panic::catch_unwind(|| decode_raw(&bytes));
-            assert!(result.is_ok(), "decoder panicked for {bytes:02x?}");
-            if let Ok(instructions) = result.unwrap() {
-                assert_eq!(
-                    instructions.iter().map(Instruction::size).sum::<usize>(),
-                    bytes.len()
-                );
+        }
+
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                let bytes = [first, second];
+                let result = std::panic::catch_unwind(|| decode_raw(&bytes));
+                assert!(result.is_ok(), "decoder panicked for {bytes:02x?}");
+                if let Ok(instructions) = result.unwrap() {
+                    assert_eq!(
+                        instructions.iter().map(Instruction::size).sum::<usize>(),
+                        bytes.len()
+                    );
+                }
+            }
+        }
+
+        for opcode in linked_opcode_table() {
+            let mut complete = vec![0; opcode.size()];
+            complete[0] = opcode.id();
+            assert!(std::panic::catch_unwind(|| decode_raw(&complete)).is_ok());
+            for prefix_len in 1..opcode.size() {
+                assert!(std::panic::catch_unwind(|| decode_raw(&complete[..prefix_len])).is_ok());
             }
         }
     }

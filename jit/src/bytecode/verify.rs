@@ -1,7 +1,8 @@
 use super::{
-    cfg, decode_raw,
+    cfg,
+    decode::{decode_bounded, BoundedDecodeError},
     stack::{self, SlotKind, StateProof},
-    CompileSnapshot, ControlFlowGraph, DecodeError, Instruction, OperandFormat,
+    CompileSnapshot, ControlFlowGraph, DecodeError, Instruction, OperandFormat, SnapshotStatus,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +59,9 @@ impl VerifyError {
 pub enum VerifyErrorKind {
     Decode(DecodeError),
     IncompatibleSnapshot,
+    EmptyBytecode,
+    MissingTerminator,
+    UnreachableInstruction,
     BranchTargetOutOfRange {
         target: i64,
     },
@@ -98,6 +102,7 @@ pub enum VerifyErrorKind {
         count: u32,
     },
     UnsupportedExceptionRegion,
+    UnsupportedFunctionKind(SnapshotStatus),
     OsrPointNotInstructionBoundary,
     OsrPointNotLoopHeader,
     IncompleteOsrState,
@@ -146,8 +151,18 @@ fn short_index(instruction: &Instruction) -> Option<u32> {
         .and_then(|value| value.is_ascii_digit().then_some(u32::from(value - b'0')))
 }
 
-fn indexed_operand(instruction: &Instruction) -> Option<(IndexSpace, u32)> {
+fn indexed_operand(instruction: &Instruction) -> Option<(IndexSpace, u32, u32)> {
     let format = instruction.opcode().format();
+    let name = instruction.opcode().name();
+    if format == OperandFormat::AtomU16 {
+        let space = match name {
+            "make_loc_ref" => IndexSpace::Local,
+            "make_arg_ref" => IndexSpace::Argument,
+            "make_var_ref_ref" => IndexSpace::Closure,
+            _ => return None,
+        };
+        return Some((space, u32::from(instruction.operand_u16(5)), 1));
+    }
     let space = match format {
         OperandFormat::Local | OperandFormat::Local8 | OperandFormat::NoneLocal => {
             IndexSpace::Local
@@ -168,7 +183,8 @@ fn indexed_operand(instruction: &Instruction) -> Option<(IndexSpace, u32)> {
         }
         _ => unreachable!(),
     };
-    Some((space, index))
+    let width = u32::from(matches!(name, "using_dispose" | "using_dispose_async")) + 1;
+    Some((space, index, width))
 }
 
 #[derive(Clone, Copy)]
@@ -184,7 +200,7 @@ fn validate_indices(
     instructions: &[Instruction],
 ) -> Result<(), VerifyError> {
     for instruction in instructions {
-        let Some((space, index)) = indexed_operand(instruction) else {
+        let Some((space, index, width)) = indexed_operand(instruction) else {
             continue;
         };
         let count = match space {
@@ -193,17 +209,45 @@ fn validate_indices(
             IndexSpace::Closure => u32::from(snapshot.closure_count()),
             IndexSpace::Constant => snapshot.constant_count(),
         };
-        if index >= count {
+        let checked_index = index.saturating_add(width - 1);
+        if checked_index >= count {
             let kind = match space {
-                IndexSpace::Local => VerifyErrorKind::LocalIndexOutOfRange { index, count },
-                IndexSpace::Argument => VerifyErrorKind::ArgumentIndexOutOfRange { index, count },
-                IndexSpace::Closure => VerifyErrorKind::ClosureIndexOutOfRange { index, count },
-                IndexSpace::Constant => VerifyErrorKind::ConstantIndexOutOfRange { index, count },
+                IndexSpace::Local => VerifyErrorKind::LocalIndexOutOfRange {
+                    index: checked_index,
+                    count,
+                },
+                IndexSpace::Argument => VerifyErrorKind::ArgumentIndexOutOfRange {
+                    index: checked_index,
+                    count,
+                },
+                IndexSpace::Closure => VerifyErrorKind::ClosureIndexOutOfRange {
+                    index: checked_index,
+                    count,
+                },
+                IndexSpace::Constant => VerifyErrorKind::ConstantIndexOutOfRange {
+                    index: checked_index,
+                    count,
+                },
             };
             return Err(VerifyError::new(instruction.pc(), kind));
         }
     }
     Ok(())
+}
+
+fn unsupported_function_kind(instruction: &Instruction) -> Option<SnapshotStatus> {
+    match instruction.opcode().name() {
+        "eval" | "apply_eval" => Some(SnapshotStatus::Eval),
+        "with_get_var" | "with_put_var" | "with_delete_var" | "with_make_ref" | "with_get_ref"
+        | "with_get_ref_undef" => Some(SnapshotStatus::With),
+        "initial_yield" | "yield" | "yield_star" => Some(SnapshotStatus::Generator),
+        "return_async"
+        | "for_await_of_start"
+        | "async_yield_star"
+        | "await"
+        | "using_dispose_async" => Some(SnapshotStatus::Async),
+        _ => None,
+    }
 }
 
 fn verify_metadata(
@@ -315,15 +359,26 @@ pub(crate) fn verify(
         ));
     }
 
-    let instructions = decode_raw(snapshot.bytecode()).map_err(|error| {
-        VerifyError::new(decode_error_pc(&error), VerifyErrorKind::Decode(error))
-    })?;
-    if instructions.len() > limits.max_instructions {
+    let instructions = decode_bounded(snapshot.bytecode(), limits.max_instructions).map_err(
+        |error| match error {
+            BoundedDecodeError::Decode(error) => {
+                VerifyError::new(decode_error_pc(&error), VerifyErrorKind::Decode(error))
+            }
+            BoundedDecodeError::InstructionLimit { pc } => VerifyError::new(
+                pc,
+                VerifyErrorKind::ResourceLimit {
+                    resource: Resource::DecodedInstructions,
+                },
+            ),
+        },
+    )?;
+    validate_indices(&snapshot, &instructions)?;
+    if let Some((instruction, status)) = instructions.iter().find_map(|instruction| {
+        unsupported_function_kind(instruction).map(|kind| (instruction, kind))
+    }) {
         return Err(VerifyError::new(
-            0,
-            VerifyErrorKind::ResourceLimit {
-                resource: Resource::DecodedInstructions,
-            },
+            instruction.pc(),
+            VerifyErrorKind::UnsupportedFunctionKind(status),
         ));
     }
     if let Some(instruction) = instructions.iter().find(|instruction| {
@@ -337,13 +392,28 @@ pub(crate) fn verify(
             VerifyErrorKind::UnsupportedExceptionRegion,
         ));
     }
-    validate_indices(&snapshot, &instructions)?;
     let cfg = cfg::build(
         &instructions,
         snapshot.bytecode().len(),
         limits.max_basic_blocks,
     )?;
     let proof = stack::prove(&snapshot, &instructions, &cfg, limits.max_work_units)?;
+    if let Some(instruction) = instructions
+        .iter()
+        .find(|instruction| !proof.visited.contains(&instruction.pc()))
+    {
+        return Err(VerifyError::new(
+            instruction.pc(),
+            VerifyErrorKind::UnreachableInstruction,
+        ));
+    }
+    let tail = instructions.last().expect("CFG rejected empty bytecode");
+    if !cfg::has_valid_exit(tail) {
+        return Err(VerifyError::new(
+            tail.pc(),
+            VerifyErrorKind::MissingTerminator,
+        ));
+    }
     verify_metadata(&snapshot, &instructions, &cfg, &proof)?;
     Ok(VerifiedFunction {
         snapshot,

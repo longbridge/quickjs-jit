@@ -23,6 +23,7 @@ pub mod opcode {
     pub const PUSH_I32: u8 = qjs::QJS_JIT_OP_PUSH_I32;
     pub const PUSH_I8: u8 = qjs::QJS_JIT_OP_PUSH_I8;
     pub const PUSH_TRUE: u8 = qjs::QJS_JIT_OP_PUSH_TRUE;
+    pub const PUSH_THIS: u8 = qjs::QJS_JIT_OP_PUSH_THIS;
     pub const PUSH_CONST8: u8 = qjs::QJS_JIT_OP_PUSH_CONST8;
     pub const ADD: u8 = qjs::QJS_JIT_OP_ADD;
     pub const PLUS: u8 = qjs::QJS_JIT_OP_PLUS;
@@ -32,12 +33,28 @@ pub mod opcode {
     pub const GET_LOC0_LOC1: u8 = qjs::QJS_JIT_OP_GET_LOC0_LOC1;
     pub const GET_ARG: u8 = qjs::QJS_JIT_OP_GET_ARG;
     pub const GET_VAR_REF: u8 = qjs::QJS_JIT_OP_GET_VAR_REF;
+    pub const PUT_LOC: u8 = qjs::QJS_JIT_OP_PUT_LOC;
     pub const SET_LOC_UNINITIALIZED: u8 = qjs::QJS_JIT_OP_SET_LOC_UNINITIALIZED;
+    pub const FOR_OF_START: u8 = qjs::QJS_JIT_OP_FOR_OF_START;
+    pub const USING_DISPOSE_INIT: u8 = qjs::QJS_JIT_OP_USING_DISPOSE_INIT;
+    pub const INC_LOC: u8 = qjs::QJS_JIT_OP_INC_LOC;
+    pub const DEC_LOC: u8 = qjs::QJS_JIT_OP_DEC_LOC;
+    pub const ADD_LOC: u8 = qjs::QJS_JIT_OP_ADD_LOC;
+    pub const MAKE_LOC_REF: u8 = qjs::QJS_JIT_OP_MAKE_LOC_REF;
+    pub const MAKE_ARG_REF: u8 = qjs::QJS_JIT_OP_MAKE_ARG_REF;
+    pub const MAKE_VAR_REF_REF: u8 = qjs::QJS_JIT_OP_MAKE_VAR_REF_REF;
+    pub const USING_DISPOSE: u8 = qjs::QJS_JIT_OP_USING_DISPOSE;
+    pub const USING_DISPOSE_ASYNC: u8 = qjs::QJS_JIT_OP_USING_DISPOSE_ASYNC;
+    pub const EVAL: u8 = qjs::QJS_JIT_OP_EVAL;
+    pub const WITH_GET_VAR: u8 = qjs::QJS_JIT_OP_WITH_GET_VAR;
+    pub const INITIAL_YIELD: u8 = qjs::QJS_JIT_OP_INITIAL_YIELD;
+    pub const AWAIT: u8 = qjs::QJS_JIT_OP_AWAIT;
     pub const IF_FALSE8: u8 = qjs::QJS_JIT_OP_IF_FALSE8;
     pub const GOTO8: u8 = qjs::QJS_JIT_OP_GOTO8;
     pub const CATCH: u8 = qjs::QJS_JIT_OP_CATCH;
     pub const RETURN: u8 = qjs::QJS_JIT_OP_RETURN;
     pub const RETURN_UNDEF: u8 = qjs::QJS_JIT_OP_RETURN_UNDEF;
+    pub const THROW_ERROR: u8 = qjs::QJS_JIT_OP_THROW_ERROR;
     pub const NOP: u8 = qjs::QJS_JIT_OP_NOP;
 }
 
@@ -47,6 +64,39 @@ pub struct ConstantDescriptor {
     index: u32,
     tag: i32,
     kind: u32,
+}
+
+/// Scalar execution flags copied from the QuickJS bytecode function.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FunctionFlags(u32);
+
+impl FunctionFlags {
+    const STRICT: u32 = qjs::JS_JIT_FUNCTION_STRICT;
+    const SUPPORTED: u32 = Self::STRICT;
+
+    const fn from_raw(bits: u32) -> Option<Self> {
+        if bits & !Self::SUPPORTED == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn non_strict() -> Self {
+        Self(0)
+    }
+
+    pub const fn strict() -> Self {
+        Self(Self::STRICT)
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn is_strict(self) -> bool {
+        self.0 & Self::STRICT != 0
+    }
 }
 
 impl ConstantDescriptor {
@@ -146,6 +196,7 @@ struct SnapshotData {
     generation: u64,
     source_revision: u64,
     opcode_fingerprint: u64,
+    flags: FunctionFlags,
     bytecode: Vec<u8>,
     arg_count: u16,
     local_count: u16,
@@ -201,6 +252,10 @@ impl CompileSnapshot {
         self.data.opcode_fingerprint
     }
 
+    pub fn flags(&self) -> FunctionFlags {
+        self.data.flags
+    }
+
     pub fn constants(&self) -> &[ConstantDescriptor] {
         &self.data.constants
     }
@@ -241,12 +296,32 @@ impl CompileSnapshot {
         closure_count: u16,
         constant_count: u32,
     ) -> Self {
+        Self::from_untrusted_bytecode_with_flags(
+            bytecode,
+            arg_count,
+            local_count,
+            closure_count,
+            constant_count,
+            FunctionFlags::non_strict(),
+        )
+    }
+
+    /// Creates an untrusted snapshot with explicit scalar execution flags.
+    pub fn from_untrusted_bytecode_with_flags(
+        bytecode: Vec<u8>,
+        arg_count: u16,
+        local_count: u16,
+        closure_count: u16,
+        constant_count: u32,
+        flags: FunctionFlags,
+    ) -> Self {
         Self {
             data: Arc::new(SnapshotData {
                 function_id: 0,
                 generation: 0,
                 source_revision: crate::abi::SOURCE_REVISION,
                 opcode_fingerprint: crate::abi::OPCODE_FINGERPRINT,
+                flags,
                 bytecode,
                 arg_count,
                 local_count,
@@ -307,6 +382,7 @@ impl CompileSnapshot {
         {
             return Err(SnapshotStatus::IncompatibleAbi);
         }
+        let flags = FunctionFlags::from_raw(raw.flags).ok_or(SnapshotStatus::IncompatibleAbi)?;
         const MAX_RAW_SNAPSHOT: usize = 64 * 1024 * 1024;
         let total = (raw.bytecode_len as usize)
             .saturating_add(raw.exception_map_len as usize)
@@ -343,6 +419,7 @@ impl CompileSnapshot {
                 generation: raw.function.generation,
                 source_revision: raw.source_revision,
                 opcode_fingerprint: raw.opcode_fingerprint,
+                flags,
                 bytecode: unsafe { copied(raw.bytecode, raw.bytecode_len as usize)? },
                 arg_count: raw.arg_count,
                 local_count: raw.local_count,

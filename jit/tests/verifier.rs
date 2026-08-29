@@ -1,6 +1,6 @@
 use rquickjs_jit::bytecode::{
-    decode_raw, opcode, CompileSnapshot, DecodeError, DeoptPoint, OsrPoint, Resource, SlotKind,
-    VerifierMetadata, VerifyErrorKind, VerifyLimits,
+    decode_raw, linked_opcode_table, opcode, CompileSnapshot, DecodeError, DeoptPoint, OsrPoint,
+    Resource, SlotKind, SnapshotStatus, VerifierMetadata, VerifyErrorKind, VerifyLimits,
 };
 
 fn snapshot_from_parts(
@@ -60,24 +60,35 @@ fn decoder_rejects_unknown_opcodes_and_never_panics_on_arbitrary_bytes() {
 
 #[test]
 fn verifier_never_panics_on_arbitrary_untrusted_snapshots() {
-    let mut state = 0x243f_6a88_u32;
-    for len in 0..=256 {
-        let mut bytes = vec![0; len];
-        for byte in &mut bytes {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            *byte = state as u8;
+    for mut state in [0x243f_6a88_u32, 0xa341_316c, 0x9e37_79b9, 0xdead_beef] {
+        for len in 0..=512 {
+            let mut bytes = vec![0; len];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            let snapshot = snapshot_from_parts(
+                bytes.clone(),
+                state as u16 & 7,
+                (state >> 3) as u16 & 7,
+                (state >> 6) as u16 & 7,
+                (state >> 9) & 7,
+            );
+            let result = std::panic::catch_unwind(|| snapshot.verify(VerifyLimits::default()));
+            assert!(result.is_ok(), "verifier panicked for {bytes:02x?}");
         }
-        let snapshot = snapshot_from_parts(
-            bytes.clone(),
-            state as u16 & 7,
-            (state >> 3) as u16 & 7,
-            (state >> 6) as u16 & 7,
-            (state >> 9) & 7,
-        );
-        let result = std::panic::catch_unwind(|| snapshot.verify(VerifyLimits::default()));
-        assert!(result.is_ok(), "verifier panicked for {bytes:02x?}");
+    }
+
+    for opcode in linked_opcode_table() {
+        let mut complete = vec![0; opcode.size()];
+        complete[0] = opcode.id();
+        complete.push(opcode::RETURN_UNDEF);
+        let result = std::panic::catch_unwind(|| {
+            snapshot_from_parts(complete, 4, 4, 4, 4).verify(VerifyLimits::default())
+        });
+        assert!(result.is_ok(), "verifier panicked for {}", opcode.name());
     }
 }
 
@@ -252,7 +263,7 @@ fn set_local_uninitialized_records_the_conservative_slot_kind() {
         vec![],
         vec![DeoptPoint::new(
             0,
-            vec![SlotKind::Uninitialized],
+            vec![SlotKind::Tagged],
             vec![SlotKind::Uninitialized],
         )],
     );
@@ -265,6 +276,185 @@ fn set_local_uninitialized_records_the_conservative_slot_kind() {
     )
     .with_metadata(metadata);
     assert!(snapshot.verify(VerifyLimits::default()).is_ok());
+}
+
+#[test]
+fn entry_locals_start_as_tagged_undefined_values() {
+    let metadata = verifier_metadata(
+        vec![],
+        vec![DeoptPoint::new(
+            0,
+            vec![SlotKind::Tagged],
+            vec![SlotKind::Tagged],
+        )],
+    );
+    let snapshot = snapshot_from_parts(vec![opcode::NOP, opcode::RETURN_UNDEF], 0, 1, 0, 0)
+        .with_metadata(metadata);
+    assert!(snapshot.verify(VerifyLimits::default()).is_ok());
+}
+
+#[test]
+fn mixed_output_opcodes_record_catch_and_uninitialized_slots() {
+    let for_of = snapshot_from_parts(
+        vec![opcode::PUSH_TRUE, opcode::FOR_OF_START, opcode::RETURN],
+        0,
+        0,
+        0,
+        0,
+    )
+    .with_metadata(verifier_metadata(
+        vec![],
+        vec![DeoptPoint::new(
+            1,
+            vec![SlotKind::Tagged],
+            vec![SlotKind::Tagged, SlotKind::Tagged, SlotKind::CatchOffset],
+        )],
+    ));
+    assert!(for_of.verify(VerifyLimits::default()).is_ok());
+
+    let using_init =
+        snapshot_from_parts(vec![opcode::USING_DISPOSE_INIT, opcode::RETURN], 0, 0, 0, 0)
+            .with_metadata(verifier_metadata(
+                vec![],
+                vec![DeoptPoint::new(0, vec![], vec![SlotKind::Uninitialized])],
+            ));
+    assert!(using_init.verify(VerifyLimits::default()).is_ok());
+}
+
+#[test]
+fn local_arithmetic_updates_the_local_slot_kind() {
+    let cases = [
+        vec![
+            opcode::PUSH_I8,
+            1,
+            opcode::PUT_LOC,
+            0,
+            0,
+            opcode::INC_LOC,
+            0,
+            opcode::NOP,
+            opcode::RETURN_UNDEF,
+        ],
+        vec![
+            opcode::PUSH_I8,
+            1,
+            opcode::PUT_LOC,
+            0,
+            0,
+            opcode::DEC_LOC,
+            0,
+            opcode::NOP,
+            opcode::RETURN_UNDEF,
+        ],
+        vec![
+            opcode::PUSH_I8,
+            1,
+            opcode::PUT_LOC,
+            0,
+            0,
+            opcode::PUSH_I8,
+            2,
+            opcode::ADD_LOC,
+            0,
+            opcode::NOP,
+            opcode::RETURN_UNDEF,
+        ],
+    ];
+
+    for bytes in cases {
+        let pc = bytes.iter().rposition(|byte| *byte == opcode::NOP).unwrap() as u32;
+        let snapshot = snapshot_from_parts(bytes, 0, 1, 0, 0).with_metadata(verifier_metadata(
+            vec![],
+            vec![DeoptPoint::new(
+                pc,
+                vec![SlotKind::Tagged],
+                vec![SlotKind::Tagged],
+            )],
+        ));
+        assert!(snapshot.verify(VerifyLimits::default()).is_ok());
+    }
+}
+
+#[test]
+fn verifier_checks_indices_embedded_after_atom_operands() {
+    let fixtures = [
+        (
+            opcode::MAKE_LOC_REF,
+            VerifyErrorKind::LocalIndexOutOfRange { index: 1, count: 1 },
+        ),
+        (
+            opcode::MAKE_ARG_REF,
+            VerifyErrorKind::ArgumentIndexOutOfRange { index: 1, count: 1 },
+        ),
+        (
+            opcode::MAKE_VAR_REF_REF,
+            VerifyErrorKind::ClosureIndexOutOfRange { index: 1, count: 1 },
+        ),
+    ];
+
+    for (opcode, expected) in fixtures {
+        let bytes = vec![opcode, 0, 0, 0, 0, 1, 0, opcode::RETURN];
+        let error = snapshot_from_parts(bytes, 1, 1, 1, 0)
+            .verify(VerifyLimits::default())
+            .unwrap_err();
+        assert_eq!(error.kind(), &expected);
+    }
+}
+
+#[test]
+fn using_dispose_validates_its_adjacent_local_pair() {
+    for dispose in [opcode::USING_DISPOSE, opcode::USING_DISPOSE_ASYNC] {
+        let mut bytes = vec![opcode::USING_DISPOSE_INIT, dispose, 0, 0];
+        bytes.push(opcode::RETURN);
+        let error = snapshot_from_parts(bytes, 0, 1, 0, 0)
+            .verify(VerifyLimits::default())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            &VerifyErrorKind::LocalIndexOutOfRange { index: 1, count: 1 }
+        );
+    }
+}
+
+#[test]
+fn untrusted_snapshots_reject_feature_only_opcodes_by_category() {
+    let fixtures = [
+        (
+            vec![opcode::EVAL, 0, 0, 0, 0, opcode::RETURN],
+            SnapshotStatus::Eval,
+        ),
+        (
+            vec![
+                opcode::WITH_GET_VAR,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                opcode::RETURN_UNDEF,
+            ],
+            SnapshotStatus::With,
+        ),
+        (
+            vec![opcode::INITIAL_YIELD, opcode::RETURN_UNDEF],
+            SnapshotStatus::Generator,
+        ),
+        (vec![opcode::AWAIT, opcode::RETURN], SnapshotStatus::Async),
+    ];
+
+    for (bytes, status) in fixtures {
+        let error = snapshot_from_parts(bytes, 0, 0, 0, 0)
+            .verify(VerifyLimits::default())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            &VerifyErrorKind::UnsupportedFunctionKind(status)
+        );
+    }
 }
 
 #[test]
@@ -338,4 +528,67 @@ fn every_verifier_resource_has_a_distinct_limit_error() {
         let error = base.verify(limits).unwrap_err();
         assert_eq!(error.kind(), &VerifyErrorKind::ResourceLimit { resource });
     }
+}
+
+#[test]
+fn instruction_limit_stops_decoding_before_later_malformed_bytes() {
+    let snapshot = snapshot_from_parts(vec![opcode::NOP, u8::MAX], 0, 0, 0, 0);
+    let error = snapshot
+        .verify(VerifyLimits {
+            max_instructions: 0,
+            ..VerifyLimits::default()
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        &VerifyErrorKind::ResourceLimit {
+            resource: Resource::DecodedInstructions,
+        }
+    );
+}
+
+#[test]
+fn large_frame_proof_is_charged_by_state_cells() {
+    let mut bytecode = vec![opcode::NOP; 20_000];
+    bytecode.push(opcode::RETURN_UNDEF);
+    let snapshot = snapshot_from_parts(bytecode, 0, u16::MAX, 0, 0);
+    let error = snapshot.verify(VerifyLimits::default()).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        &VerifyErrorKind::ResourceLimit {
+            resource: Resource::WorkUnits,
+        }
+    );
+}
+
+#[test]
+fn verifier_rejects_empty_and_unterminated_bytecode() {
+    let empty = snapshot_from_parts(vec![], 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .unwrap_err();
+    assert_eq!(empty.pc(), 0);
+    assert_eq!(empty.kind(), &VerifyErrorKind::EmptyBytecode);
+
+    let unterminated = snapshot_from_parts(vec![opcode::NOP], 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .unwrap_err();
+    assert_eq!(unterminated.pc(), 0);
+    assert_eq!(unterminated.kind(), &VerifyErrorKind::MissingTerminator);
+}
+
+#[test]
+fn verifier_rejects_unreachable_orphan_instructions() {
+    let error = snapshot_from_parts(vec![opcode::RETURN_UNDEF, opcode::ADD], 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .unwrap_err();
+    assert_eq!(error.pc(), 1);
+    assert_eq!(error.kind(), &VerifyErrorKind::UnreachableInstruction);
+}
+
+#[test]
+fn throw_error_is_a_terminal_instruction() {
+    let bytecode = vec![opcode::THROW_ERROR, 0, 0, 0, 0, 0];
+    assert!(snapshot_from_parts(bytecode, 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .is_ok());
 }

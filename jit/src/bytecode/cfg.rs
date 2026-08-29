@@ -57,8 +57,19 @@ fn is_unconditional(instruction: &Instruction) -> bool {
 fn is_terminal(instruction: &Instruction) -> bool {
     matches!(
         instruction.opcode().name(),
-        "return" | "return_undef" | "return_async" | "throw" | "tail_call" | "tail_call_method"
+        "return"
+            | "return_undef"
+            | "return_async"
+            | "throw"
+            | "throw_error"
+            | "tail_call"
+            | "tail_call_method"
     )
+}
+
+pub(crate) fn has_valid_exit(instruction: &Instruction) -> bool {
+    is_terminal(instruction)
+        || (instruction.branch_target().is_some() && is_unconditional(instruction))
 }
 
 pub(crate) fn build(
@@ -67,11 +78,7 @@ pub(crate) fn build(
     max_blocks: usize,
 ) -> Result<ControlFlowGraph, VerifyError> {
     if instructions.is_empty() {
-        return Ok(ControlFlowGraph {
-            blocks: Vec::new(),
-            by_pc: BTreeMap::new(),
-            loop_headers: BTreeSet::new(),
-        });
+        return Err(VerifyError::new(0, VerifyErrorKind::EmptyBytecode));
     }
     let instruction_pcs: BTreeSet<u32> = instructions.iter().map(Instruction::pc).collect();
     let mut boundaries = BTreeSet::from([0_u32]);

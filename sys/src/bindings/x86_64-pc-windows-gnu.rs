@@ -2090,6 +2090,7 @@ unsafe extern "C" {
 #[derive(Debug, Copy, Clone)]
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
 pub const QJSJIT_ABI_MINOR: u32 = 0;
+pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSJitFunctionId {

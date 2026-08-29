@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rquickjs_core::qjs;
 
@@ -23,6 +23,10 @@ pub(crate) struct AbstractState {
 }
 
 impl AbstractState {
+    fn cell_count(&self) -> usize {
+        self.locals.len().saturating_add(self.stack.len())
+    }
+
     pub(crate) fn live_slots(&self, snapshot: &CompileSnapshot) -> Vec<SlotKind> {
         let mut result = Vec::with_capacity(
             snapshot.arg_count() as usize
@@ -41,9 +45,30 @@ impl AbstractState {
     }
 }
 
+struct WorkBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl WorkBudget {
+    fn charge(&mut self, pc: u32, units: usize) -> Result<(), VerifyError> {
+        self.used = self.used.saturating_add(units);
+        if self.used > self.limit {
+            return Err(VerifyError::new(
+                pc,
+                VerifyErrorKind::ResourceLimit {
+                    resource: Resource::WorkUnits,
+                },
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct StateProof {
     pub(crate) before: BTreeMap<u32, AbstractState>,
     pub(crate) after: BTreeMap<u32, AbstractState>,
+    pub(crate) visited: BTreeSet<u32>,
 }
 
 fn effective_pop(instruction: &Instruction) -> usize {
@@ -199,6 +224,23 @@ fn transfer(
         state.locals[index] = popped_top;
     }
 
+    if matches!(name, "inc_loc" | "dec_loc" | "add_loc") {
+        let index = local_index(instruction).expect("local format was validated");
+        state.locals[index] = SlotKind::Tagged;
+    }
+
+    if matches!(name, "for_of_start" | "for_await_of_start") {
+        state
+            .stack
+            .extend([SlotKind::Tagged, SlotKind::Tagged, SlotKind::CatchOffset]);
+        return check_stack_size(snapshot, instruction, state);
+    }
+
+    if name == "using_dispose_init" {
+        state.stack.push(SlotKind::Uninitialized);
+        return check_stack_size(snapshot, instruction, state);
+    }
+
     if let Some(values) = copied_stack_values(name, &popped) {
         state.stack.extend(values);
         return check_stack_size(snapshot, instruction, state);
@@ -266,46 +308,81 @@ pub(crate) fn prove(
         return Ok(StateProof {
             before: BTreeMap::new(),
             after: BTreeMap::new(),
+            visited: BTreeSet::new(),
         });
     }
+    let before_points: BTreeSet<u32> = snapshot
+        .data
+        .metadata
+        .osr_points
+        .iter()
+        .map(|point| point.pc)
+        .chain(
+            snapshot
+                .data
+                .metadata
+                .deopt_points
+                .iter()
+                .map(|point| point.pc),
+        )
+        .collect();
+    let after_points: BTreeSet<u32> = snapshot
+        .data
+        .metadata
+        .deopt_points
+        .iter()
+        .map(|point| point.pc)
+        .collect();
+    let mut budget = WorkBudget {
+        used: 0,
+        limit: max_work_units,
+    };
+    budget.charge(0, snapshot.local_count() as usize)?;
     let mut block_entries = BTreeMap::new();
     block_entries.insert(
         0,
         AbstractState {
-            locals: vec![SlotKind::Uninitialized; snapshot.local_count() as usize],
+            locals: vec![SlotKind::Tagged; snapshot.local_count() as usize],
             stack: Vec::new(),
         },
     );
     let mut queue = VecDeque::from([0_u32]);
     let mut before = BTreeMap::new();
     let mut after = BTreeMap::new();
-    let mut work_units = 0usize;
+    let mut visited = BTreeSet::new();
 
     while let Some(block_pc) = queue.pop_front() {
         let block = cfg.block(block_pc).expect("CFG successor names a block");
-        let mut state = block_entries[&block_pc].clone();
+        let entry = &block_entries[&block_pc];
+        budget.charge(block_pc, entry.cell_count())?;
+        let mut state = entry.clone();
         for instruction in &instructions[block.instruction_range()] {
-            work_units = work_units.saturating_add(1);
-            if work_units > max_work_units {
-                return Err(VerifyError::new(
-                    instruction.pc(),
-                    VerifyErrorKind::ResourceLimit {
-                        resource: Resource::WorkUnits,
-                    },
-                ));
+            budget.charge(instruction.pc(), 1usize.saturating_add(state.cell_count()))?;
+            if before_points.contains(&instruction.pc()) {
+                budget.charge(instruction.pc(), state.cell_count())?;
+                before.insert(instruction.pc(), state.clone());
             }
-            before.insert(instruction.pc(), state.clone());
+            visited.insert(instruction.pc());
             transfer(snapshot, instruction, &mut state)?;
-            after.insert(instruction.pc(), state.clone());
+            if after_points.contains(&instruction.pc()) {
+                budget.charge(instruction.pc(), state.cell_count())?;
+                after.insert(instruction.pc(), state.clone());
+            }
         }
         for successor in block.successors() {
             if let Some(expected) = block_entries.get_mut(successor) {
+                budget.charge(*successor, state.cell_count())?;
                 merge_state(*successor, expected, &state)?;
             } else {
+                budget.charge(*successor, state.cell_count())?;
                 block_entries.insert(*successor, state.clone());
                 queue.push_back(*successor);
             }
         }
     }
-    Ok(StateProof { before, after })
+    Ok(StateProof {
+        before,
+        after,
+        visited,
+    })
 }

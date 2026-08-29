@@ -87,6 +87,7 @@ pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
 pub const QJSJIT_ABI_MINOR: u32 = 0;
+pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub type size_t = ::core::ffi::c_ulong;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

@@ -1,7 +1,7 @@
 use rquickjs::{context::EvalOptions, Context, Runtime, Value};
 use rquickjs_jit::bytecode::{
-    opcode, CompileSnapshot, DecodeError, DeoptPoint, RuntimeConstants, SlotKind, SnapshotStatus,
-    VerifierMetadata, VerifyLimits,
+    opcode, CompileSnapshot, DecodeError, DeoptPoint, FunctionFlags, RuntimeConstants, SlotKind,
+    SnapshotStatus, VerifierMetadata, VerifyLimits,
 };
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
@@ -196,4 +196,44 @@ fn float_constants_produce_float64_verifier_slots() {
         .with_metadata(metadata)
         .verify(VerifyLimits::default())
         .is_ok());
+}
+
+#[test]
+fn strict_and_non_strict_snapshots_preserve_this_mode() {
+    let loose = SnapshotFixture::compile("function loose() { return this } loose").snapshot();
+    let strict = SnapshotFixture::compile("function strict() { 'use strict'; return this } strict")
+        .snapshot();
+
+    assert!(!loose.flags().is_strict());
+    assert!(strict.flags().is_strict());
+    assert_eq!(loose.flags().bits(), 0);
+    assert_eq!(strict.flags().bits(), 1);
+    assert!(loose.verify(VerifyLimits::default()).is_ok());
+    assert!(strict.verify(VerifyLimits::default()).is_ok());
+}
+
+#[test]
+fn untrusted_push_this_requires_explicit_strictness_metadata() {
+    let bytecode = vec![opcode::PUSH_THIS, opcode::RETURN];
+    let loose = CompileSnapshot::from_untrusted_bytecode_with_flags(
+        bytecode.clone(),
+        0,
+        0,
+        0,
+        0,
+        FunctionFlags::non_strict(),
+    );
+    let strict = CompileSnapshot::from_untrusted_bytecode_with_flags(
+        bytecode,
+        0,
+        0,
+        0,
+        0,
+        FunctionFlags::strict(),
+    );
+
+    assert!(!loose.flags().is_strict());
+    assert!(strict.flags().is_strict());
+    assert!(loose.verify(VerifyLimits::default()).is_ok());
+    assert!(strict.verify(VerifyLimits::default()).is_ok());
 }
