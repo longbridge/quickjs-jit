@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use rquickjs_core::runtime::{JitBackend, JitBackendAttachError, RuntimeJitGuard};
@@ -8,11 +11,138 @@ use rquickjs_core::{context::EvalOptions, Context, Runtime, Value};
 
 use crate::abi::{AbiInfo, AbiMismatch, AbiStructure};
 use crate::bytecode::{
-    CompileSnapshot, DeoptPoint, OsrPoint, RuntimeConstants, SnapshotStatus, VerifierMetadata,
+    opcode, CompileSnapshot, DeoptPoint, OsrPoint, RuntimeConstants, SnapshotStatus,
+    VerifiedFunction, VerifierMetadata, VerifyLimits,
 };
-use crate::{Jit, JitConfig, JitDiagnosticKind, JitError};
+use crate::code_cache::CompiledArtifact;
+use crate::compiler::{mock::FakeCompiler, mock::FakeCompilerControl, Compiler};
+use crate::runtime::{
+    CompileCompletion, CompileFailure, CompileRequest, CompileState, Coordinator, FunctionKey, Tier,
+};
+use crate::{Jit, JitConfig, JitDiagnosticKind, JitError, JitMetrics};
 
 pub use crate::bytecode::decode_raw;
+
+fn coordinator_snapshot() -> VerifiedFunction {
+    CompileSnapshot::from_untrusted_bytecode(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .expect("coordinator fixture verifies")
+}
+
+pub struct Harness {
+    coordinator: Mutex<Coordinator>,
+    requests: Mutex<HashMap<FunctionKey, CompileRequest>>,
+    compiler: FakeCompiler,
+    control: FakeCompilerControl,
+}
+
+impl Default for Harness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Harness {
+    pub fn new() -> Self {
+        Self::with_max_attempts(4)
+    }
+
+    pub fn with_max_attempts(max_attempts: u8) -> Self {
+        let (compiler, control) = FakeCompiler::new(8);
+        Self {
+            coordinator: Mutex::new(Coordinator::with_limits(8, 8, max_attempts, 3)),
+            requests: Mutex::new(HashMap::new()),
+            compiler,
+            control,
+        }
+    }
+
+    pub fn queue(&self, key: FunctionKey) {
+        let request = {
+            let mut coordinator = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coordinator
+                .queue(key, Tier::Baseline, coordinator_snapshot())
+                .expect("harness queue accepted");
+            coordinator.begin_next().expect("harness request begins")
+        };
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, request);
+    }
+
+    pub fn retire(&self, key: FunctionKey) {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retire(key);
+    }
+
+    pub fn complete(&self, key: FunctionKey, artifact: CompiledArtifact) {
+        let request = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key)
+            .expect("harness request exists");
+        let requested_tier = request.tier();
+        self.control.complete(artifact);
+        let result = self.compiler.compile(request);
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .complete(CompileCompletion {
+                key,
+                requested_tier,
+                result,
+            });
+    }
+
+    pub fn fail(&self, key: FunctionKey, failure: CompileFailure) {
+        let request = {
+            let mut coordinator = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let CompileState::Backoff { retry_after, .. } = coordinator.state(key) {
+                coordinator.advance_clock(retry_after);
+            }
+            coordinator
+                .queue(key, Tier::Baseline, coordinator_snapshot())
+                .expect("harness failure queued");
+            coordinator.begin_next().expect("harness failure begins")
+        };
+        let requested_tier = request.tier();
+        self.control.fail(failure);
+        let result = self.compiler.compile(request);
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .complete(CompileCompletion {
+                key,
+                requested_tier,
+                result,
+            });
+    }
+
+    pub fn state(&self, key: FunctionKey) -> CompileState {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state(key)
+    }
+
+    pub fn metrics(&self) -> JitMetrics {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .metrics()
+            .clone()
+    }
+}
 
 pub struct SnapshotFixture {
     runtime: Runtime,

@@ -5,9 +5,12 @@
 
 pub mod abi;
 pub mod bytecode;
+pub mod code_cache;
+pub mod compiler;
 mod config;
 mod error;
 mod metrics;
+pub mod runtime;
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
