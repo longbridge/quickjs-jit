@@ -221,11 +221,13 @@ pub enum AbiMismatchFixture {
     HotEventLayout,
     FunctionSnapshotLayout,
     EntryHandleLayout,
+    ExecFrameLayout,
+    ExitLayout,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -237,6 +239,8 @@ impl AbiMismatchFixture {
         Self::HotEventLayout,
         Self::FunctionSnapshotLayout,
         Self::EntryHandleLayout,
+        Self::ExecFrameLayout,
+        Self::ExitLayout,
         Self::BackendVTableLayout,
     ];
 
@@ -255,6 +259,8 @@ impl AbiMismatchFixture {
                 AbiMismatch::StructureLayout(AbiStructure::FunctionSnapshot)
             }
             Self::EntryHandleLayout => AbiMismatch::StructureLayout(AbiStructure::EntryHandle),
+            Self::ExecFrameLayout => AbiMismatch::StructureLayout(AbiStructure::ExecFrame),
+            Self::ExitLayout => AbiMismatch::StructureLayout(AbiStructure::Exit),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }

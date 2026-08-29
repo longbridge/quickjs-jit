@@ -37,6 +37,21 @@ const DUMP_SHAPES: u64 = 0x80000;
 #[cfg(feature = "jit-test-support")]
 struct RuntimeDropProbe(Option<Box<dyn FnOnce() + Send + 'static>>);
 
+#[cfg(feature = "jit-abi")]
+struct JitBackendAttachment {
+    token: u64,
+    _backend: Box<super::jit::BackendState>,
+}
+
+#[cfg(feature = "jit-abi")]
+impl core::fmt::Debug for JitBackendAttachment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JitBackendAttachment")
+            .field("token", &self.token)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(feature = "jit-test-support")]
 impl core::fmt::Debug for RuntimeDropProbe {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -132,7 +147,9 @@ pub(crate) struct RawRuntime {
     #[allow(dead_code)]
     pub allocator: Option<AllocatorHolder>,
     #[cfg(feature = "jit-abi")]
-    jit_backend_attached: bool,
+    jit_backend: Option<JitBackendAttachment>,
+    #[cfg(feature = "jit-abi")]
+    jit_next_attach_token: u64,
     #[cfg(feature = "jit-test-support")]
     runtime_drop_probe: Option<RuntimeDropProbe>,
     #[cfg(feature = "loader")]
@@ -146,10 +163,14 @@ unsafe impl Send for RawRuntime {}
 impl Drop for RawRuntime {
     fn drop(&mut self) {
         #[cfg(feature = "jit-abi")]
-        debug_assert!(
-            !self.jit_backend_attached,
-            "a JIT backend remained attached during runtime teardown"
-        );
+        unsafe {
+            // Runtime execution and teardown both hold the same runtime lock,
+            // so no native entry pin can still be active here. The backend's
+            // detach callback drains/cancels any queued work before its box is
+            // released and before QuickJS begins finalization.
+            let detached = self.detach_jit_backend_for_runtime_drop();
+            debug_assert!(detached.is_ok(), "QuickJS rejected forced JIT detach");
+        }
         unsafe {
             let ptr = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr());
             let mut opaque: Box<Opaque> = Box::from_raw(ptr as *mut _);
@@ -191,7 +212,9 @@ impl RawRuntime {
             info: None,
             allocator: None,
             #[cfg(feature = "jit-abi")]
-            jit_backend_attached: false,
+            jit_backend: None,
+            #[cfg(feature = "jit-abi")]
+            jit_next_attach_token: 0,
             #[cfg(feature = "jit-test-support")]
             runtime_drop_probe: None,
             #[cfg(feature = "loader")]
@@ -223,7 +246,9 @@ impl RawRuntime {
             info: None,
             allocator: Some(allocator),
             #[cfg(feature = "jit-abi")]
-            jit_backend_attached: false,
+            jit_backend: None,
+            #[cfg(feature = "jit-abi")]
+            jit_next_attach_token: 0,
             #[cfg(feature = "jit-test-support")]
             runtime_drop_probe: None,
             #[cfg(feature = "loader")]
@@ -242,16 +267,25 @@ impl RawRuntime {
     pub(super) unsafe fn attach_jit_backend(
         &mut self,
         vtable: *const qjs::JSJitBackendVTable,
-        opaque: *mut core::ffi::c_void,
-    ) -> StdResult<(), super::JitBackendAttachError> {
-        if self.jit_backend_attached {
+        mut backend: Box<super::jit::BackendState>,
+    ) -> StdResult<u64, super::JitBackendAttachError> {
+        if self.jit_backend.is_some() {
             return Err(super::JitBackendAttachError::AlreadyAttached);
         }
+        let token = self
+            .jit_next_attach_token
+            .checked_add(1)
+            .ok_or(super::JitBackendAttachError::EngineRejected)?;
+        let opaque = backend.as_opaque();
         let status = unsafe { qjs::JS_SetJitBackend(self.rt.as_ptr(), vtable, opaque) };
         match status {
             qjs::JS_JIT_BACKEND_OK => {
-                self.jit_backend_attached = true;
-                Ok(())
+                self.jit_next_attach_token = token;
+                self.jit_backend = Some(JitBackendAttachment {
+                    token,
+                    _backend: backend,
+                });
+                Ok(token)
             }
             qjs::JS_JIT_BACKEND_ALREADY_ATTACHED => {
                 Err(super::JitBackendAttachError::AlreadyAttached)
@@ -264,12 +298,29 @@ impl RawRuntime {
     #[cfg(feature = "jit-abi")]
     pub(super) unsafe fn detach_jit_backend(
         &mut self,
+        token: u64,
     ) -> StdResult<(), super::JitBackendAttachError> {
+        let Some(attachment) = self.jit_backend.as_ref() else {
+            return Ok(());
+        };
+        if attachment.token != token {
+            return Ok(());
+        }
+        unsafe { self.detach_jit_backend_for_runtime_drop() }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    unsafe fn detach_jit_backend_for_runtime_drop(
+        &mut self,
+    ) -> StdResult<(), super::JitBackendAttachError> {
+        if self.jit_backend.is_none() {
+            return Ok(());
+        }
         let status = unsafe {
             qjs::JS_SetJitBackend(self.rt.as_ptr(), core::ptr::null(), core::ptr::null_mut())
         };
         if status == qjs::JS_JIT_BACKEND_OK {
-            self.jit_backend_attached = false;
+            drop(self.jit_backend.take());
             Ok(())
         } else {
             Err(super::JitBackendAttachError::EngineRejected)

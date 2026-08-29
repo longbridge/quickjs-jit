@@ -5,7 +5,7 @@ use core::{ffi::c_void, fmt, mem, ptr};
 
 use crate::qjs;
 
-use super::Runtime;
+use super::{Runtime, WeakRuntime};
 
 /// A backend registered with one QuickJS runtime.
 ///
@@ -13,8 +13,10 @@ use super::Runtime;
 ///
 /// Implementations must obey the ownership contracts of `quickjs-jit.h`, must
 /// not unwind through a callback, and must not retain borrowed callback
-/// arguments beyond the call. QuickJS invokes callbacks only while the owning
-/// runtime is locked.
+/// arguments beyond the call. Every nonempty entry handle must carry a pin
+/// that keeps its code and metadata alive until `release_entry`; nonzero PCs
+/// may be published only for verifier-approved OSR states. QuickJS invokes
+/// callbacks only while the owning runtime is locked.
 pub unsafe trait JitBackend: Send + 'static {
     fn record_hot(&mut self, _event: &qjs::JSJitHotEvent) -> u32 {
         0
@@ -26,7 +28,7 @@ pub unsafe trait JitBackend: Send + 'static {
         qjs::JSJitEntryHandle {
             struct_size: mem::size_of::<qjs::JSJitEntryHandle>() as u32,
             reserved: 0,
-            entry: ptr::null_mut(),
+            entry: None,
             pin: ptr::null_mut(),
         }
     }
@@ -59,11 +61,15 @@ impl fmt::Display for JitBackendAttachError {
     }
 }
 
-struct BackendState {
+pub(super) struct BackendState {
     backend: Box<dyn JitBackend>,
 }
 
 impl BackendState {
+    pub(super) fn as_opaque(&mut self) -> *mut c_void {
+        (self as *mut Self).cast()
+    }
+
     unsafe fn from_opaque<'a>(opaque: *mut c_void) -> &'a mut Self {
         debug_assert!(!opaque.is_null());
         unsafe { &mut *opaque.cast() }
@@ -131,10 +137,10 @@ static BACKEND_VTABLE: qjs::JSJitBackendVTable = qjs::JSJitBackendVTable {
     memory_used: Some(memory_used),
 };
 
-/// Owns one backend attachment and keeps its runtime alive through detachment.
+/// Owns the token for one backend allocation stored by the raw runtime.
 pub struct RuntimeJitGuard {
-    runtime: Runtime,
-    backend: Option<Box<BackendState>>,
+    runtime: WeakRuntime,
+    token: u64,
 }
 
 impl RuntimeJitGuard {
@@ -142,19 +148,18 @@ impl RuntimeJitGuard {
     where
         B: JitBackend,
     {
-        let mut state = Box::new(BackendState {
+        let state = Box::new(BackendState {
             backend: Box::new(backend),
         });
-        let opaque = (&mut *state as *mut BackendState).cast::<c_void>();
 
-        {
+        let token = {
             let mut raw = runtime.inner.lock();
-            unsafe { raw.attach_jit_backend(&BACKEND_VTABLE, opaque)? };
-        }
+            unsafe { raw.attach_jit_backend(&BACKEND_VTABLE, state)? }
+        };
 
         Ok(Self {
-            runtime: runtime.clone(),
-            backend: Some(state),
+            runtime: runtime.weak(),
+            token,
         })
     }
 }
@@ -167,19 +172,13 @@ impl fmt::Debug for RuntimeJitGuard {
 
 impl Drop for RuntimeJitGuard {
     fn drop(&mut self) {
-        let detached = {
-            let mut raw = self.runtime.inner.lock();
-            unsafe { raw.detach_jit_backend() }
+        let Some(runtime) = self.runtime.try_ref() else {
+            // RawRuntime::drop already forced detachment and released the
+            // backend allocation associated with this token.
+            return;
         };
+        let detached = unsafe { runtime.inner.lock().detach_jit_backend(self.token) };
 
-        if detached.is_ok() {
-            drop(self.backend.take());
-        } else if let Some(backend) = self.backend.take() {
-            // The C runtime may still hold this pointer. Leaking on an
-            // impossible engine rejection is safer than creating a dangling
-            // callback target.
-            mem::forget(backend);
-        }
         debug_assert!(detached.is_ok(), "QuickJS rejected JIT backend detach");
     }
 }

@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 0;
+pub const QJSJIT_ABI_MINOR: u32 = 1;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub type size_t = ::core::ffi::c_ulong;
 #[repr(C)]
@@ -2556,12 +2556,39 @@ const _: () = {
     ["Offset of field: JSJitFunctionSnapshot::source_map_len"]
         [::core::mem::offset_of!(JSJitFunctionSnapshot, source_map_len) - 120usize];
 };
+pub const JSJitExitKind_JS_JIT_EXIT_DONE: JSJitExitKind = 0;
+pub const JSJitExitKind_JS_JIT_EXIT_EXCEPTION: JSJitExitKind = 1;
+pub const JSJitExitKind_JS_JIT_EXIT_INTERRUPT: JSJitExitKind = 2;
+pub const JSJitExitKind_JS_JIT_EXIT_DEOPT: JSJitExitKind = 3;
+pub const JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER: JSJitExitKind = 4;
+pub type JSJitExitKind = ::core::ffi::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitExit {
+    pub kind: u32,
+    pub reserved: u32,
+    pub resume_pc: *const u8,
+    pub resume_stack_top: *mut JSValue,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitExit"][::core::mem::size_of::<JSJitExit>() - 24usize];
+    ["Alignment of JSJitExit"][::core::mem::align_of::<JSJitExit>() - 8usize];
+    ["Offset of field: JSJitExit::kind"][::core::mem::offset_of!(JSJitExit, kind) - 0usize];
+    ["Offset of field: JSJitExit::reserved"][::core::mem::offset_of!(JSJitExit, reserved) - 4usize];
+    ["Offset of field: JSJitExit::resume_pc"]
+        [::core::mem::offset_of!(JSJitExit, resume_pc) - 8usize];
+    ["Offset of field: JSJitExit::resume_stack_top"]
+        [::core::mem::offset_of!(JSJitExit, resume_stack_top) - 16usize];
+};
+pub type JSJitEntryFn =
+    ::core::option::Option<unsafe extern "C" fn(frame: *mut JSJitExecFrame) -> JSJitExit>;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSJitEntryHandle {
     pub struct_size: u32,
     pub reserved: u32,
-    pub entry: *mut ::core::ffi::c_void,
+    pub entry: JSJitEntryFn,
     pub pin: *mut ::core::ffi::c_void,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
@@ -2576,6 +2603,55 @@ const _: () = {
         [::core::mem::offset_of!(JSJitEntryHandle, entry) - 8usize];
     ["Offset of field: JSJitEntryHandle::pin"]
         [::core::mem::offset_of!(JSJitEntryHandle, pin) - 16usize];
+};
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct JSJitExecFrame {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub rt: *mut JSRuntime,
+    pub ctx: *mut JSContext,
+    pub function_id: u64,
+    pub generation: u64,
+    pub arg_buf: *mut JSValue,
+    pub var_buf: *mut JSValue,
+    pub stack_base: *mut JSValue,
+    pub stack_top: *mut JSValue,
+    pub bytecode_start: *const u8,
+    pub pc: *const u8,
+    pub result: JSValue,
+    pub entry: JSJitEntryHandle,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitExecFrame"][::core::mem::size_of::<JSJitExecFrame>() - 128usize];
+    ["Alignment of JSJitExecFrame"][::core::mem::align_of::<JSJitExecFrame>() - 8usize];
+    ["Offset of field: JSJitExecFrame::struct_size"]
+        [::core::mem::offset_of!(JSJitExecFrame, struct_size) - 0usize];
+    ["Offset of field: JSJitExecFrame::flags"]
+        [::core::mem::offset_of!(JSJitExecFrame, flags) - 4usize];
+    ["Offset of field: JSJitExecFrame::rt"][::core::mem::offset_of!(JSJitExecFrame, rt) - 8usize];
+    ["Offset of field: JSJitExecFrame::ctx"]
+        [::core::mem::offset_of!(JSJitExecFrame, ctx) - 16usize];
+    ["Offset of field: JSJitExecFrame::function_id"]
+        [::core::mem::offset_of!(JSJitExecFrame, function_id) - 24usize];
+    ["Offset of field: JSJitExecFrame::generation"]
+        [::core::mem::offset_of!(JSJitExecFrame, generation) - 32usize];
+    ["Offset of field: JSJitExecFrame::arg_buf"]
+        [::core::mem::offset_of!(JSJitExecFrame, arg_buf) - 40usize];
+    ["Offset of field: JSJitExecFrame::var_buf"]
+        [::core::mem::offset_of!(JSJitExecFrame, var_buf) - 48usize];
+    ["Offset of field: JSJitExecFrame::stack_base"]
+        [::core::mem::offset_of!(JSJitExecFrame, stack_base) - 56usize];
+    ["Offset of field: JSJitExecFrame::stack_top"]
+        [::core::mem::offset_of!(JSJitExecFrame, stack_top) - 64usize];
+    ["Offset of field: JSJitExecFrame::bytecode_start"]
+        [::core::mem::offset_of!(JSJitExecFrame, bytecode_start) - 72usize];
+    ["Offset of field: JSJitExecFrame::pc"][::core::mem::offset_of!(JSJitExecFrame, pc) - 80usize];
+    ["Offset of field: JSJitExecFrame::result"]
+        [::core::mem::offset_of!(JSJitExecFrame, result) - 88usize];
+    ["Offset of field: JSJitExecFrame::entry"]
+        [::core::mem::offset_of!(JSJitExecFrame, entry) - 104usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2597,10 +2673,12 @@ pub struct JSJitABIInfo {
     pub function_snapshot_layout_fingerprint: u64,
     pub entry_handle_layout_fingerprint: u64,
     pub backend_vtable_layout_fingerprint: u64,
+    pub exec_frame_layout_fingerprint: u64,
+    pub exit_layout_fingerprint: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 104usize];
+    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 120usize];
     ["Alignment of JSJitABIInfo"][::core::mem::align_of::<JSJitABIInfo>() - 8usize];
     ["Offset of field: JSJitABIInfo::struct_size"]
         [::core::mem::offset_of!(JSJitABIInfo, struct_size) - 0usize];
@@ -2634,6 +2712,10 @@ const _: () = {
         [::core::mem::offset_of!(JSJitABIInfo, entry_handle_layout_fingerprint) - 88usize];
     ["Offset of field: JSJitABIInfo::backend_vtable_layout_fingerprint"]
         [::core::mem::offset_of!(JSJitABIInfo, backend_vtable_layout_fingerprint) - 96usize];
+    ["Offset of field: JSJitABIInfo::exec_frame_layout_fingerprint"]
+        [::core::mem::offset_of!(JSJitABIInfo, exec_frame_layout_fingerprint) - 104usize];
+    ["Offset of field: JSJitABIInfo::exit_layout_fingerprint"]
+        [::core::mem::offset_of!(JSJitABIInfo, exit_layout_fingerprint) - 112usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2716,6 +2798,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn JS_JitFreeSnapshot(snapshot: *mut JSJitFunctionSnapshot);
+}
+unsafe extern "C" {
+    pub fn JS_JitInvalidateFunction(ctx: *mut JSContext, function: JSValue) -> ::core::ffi::c_int;
 }
 pub const __JS_ATOM_NULL: _bindgen_ty_5 = 0;
 pub const JS_ATOM_null: _bindgen_ty_5 = 1;

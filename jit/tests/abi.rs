@@ -60,6 +60,22 @@ fn linked_abi_matches_rust_contract() {
 }
 
 #[test]
+fn abi_minor_additions_are_appended_after_the_v1_0_tail() {
+    use rquickjs_core::qjs;
+
+    let previous_tail = std::mem::offset_of!(qjs::JSJitABIInfo, backend_vtable_layout_fingerprint)
+        + std::mem::size_of::<u64>();
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitABIInfo, exec_frame_layout_fingerprint),
+        previous_tail
+    );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitABIInfo, exit_layout_fingerprint),
+        previous_tail + std::mem::size_of::<u64>()
+    );
+}
+
+#[test]
 #[cfg(feature = "test-support")]
 fn backend_is_detached_before_runtime_drop() {
     let events = rquickjs_jit::test_support::record_lifecycle();

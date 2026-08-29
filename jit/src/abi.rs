@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 0;
+pub const ABI_MINOR: u16 = 1;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -20,7 +20,52 @@ pub enum AbiStructure {
     HotEvent,
     FunctionSnapshot,
     EntryHandle,
+    ExecFrame,
+    Exit,
     BackendVTable,
+}
+
+/// Constructors for the authoritative native-to-interpreter exit contract.
+pub trait JitExitExt: Sized {
+    fn done() -> Self;
+    fn exception() -> Self;
+    fn interrupt() -> Self;
+    fn resume(resume_pc: *const u8) -> Self;
+    fn retry_interpreter() -> Self;
+}
+
+impl JitExitExt for qjs::JSJitExit {
+    fn done() -> Self {
+        new_exit(qjs::JSJitExitKind_JS_JIT_EXIT_DONE, core::ptr::null())
+    }
+
+    fn exception() -> Self {
+        new_exit(qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION, core::ptr::null())
+    }
+
+    fn interrupt() -> Self {
+        new_exit(qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT, core::ptr::null())
+    }
+
+    fn resume(resume_pc: *const u8) -> Self {
+        new_exit(qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT, resume_pc)
+    }
+
+    fn retry_interpreter() -> Self {
+        new_exit(
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            core::ptr::null(),
+        )
+    }
+}
+
+fn new_exit(kind: u32, resume_pc: *const u8) -> qjs::JSJitExit {
+    qjs::JSJitExit {
+        kind,
+        reserved: 0,
+        resume_pc,
+        resume_stack_top: core::ptr::null_mut(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +175,10 @@ impl AbiInfo {
             Some(AbiMismatch::StructureLayout(AbiStructure::FunctionSnapshot))
         } else if raw.entry_handle_layout_fingerprint != entry_handle_layout_fingerprint() {
             Some(AbiMismatch::StructureLayout(AbiStructure::EntryHandle))
+        } else if raw.exec_frame_layout_fingerprint != exec_frame_layout_fingerprint() {
+            Some(AbiMismatch::StructureLayout(AbiStructure::ExecFrame))
+        } else if raw.exit_layout_fingerprint != exit_layout_fingerprint() {
+            Some(AbiMismatch::StructureLayout(AbiStructure::Exit))
         } else if raw.backend_vtable_layout_fingerprint != backend_vtable_layout_fingerprint() {
             Some(AbiMismatch::StructureLayout(AbiStructure::BackendVTable))
         } else if raw.build_fingerprint != expected_build_fingerprint() {
@@ -168,6 +217,12 @@ impl AbiInfo {
             }
             AbiMismatch::StructureLayout(AbiStructure::EntryHandle) => {
                 self.raw.entry_handle_layout_fingerprint ^= 1
+            }
+            AbiMismatch::StructureLayout(AbiStructure::ExecFrame) => {
+                self.raw.exec_frame_layout_fingerprint ^= 1
+            }
+            AbiMismatch::StructureLayout(AbiStructure::Exit) => {
+                self.raw.exit_layout_fingerprint ^= 1
             }
             AbiMismatch::StructureLayout(AbiStructure::BackendVTable) => {
                 self.raw.backend_vtable_layout_fingerprint ^= 1
@@ -294,13 +349,85 @@ fn entry_handle_layout_fingerprint() -> u64 {
     hash = layout_field(
         hash,
         mem::offset_of!(qjs::JSJitEntryHandle, entry),
-        mem::size_of::<*mut core::ffi::c_void>(),
+        mem::size_of::<qjs::JSJitEntryFn>(),
     );
     layout_field(
         hash,
         mem::offset_of!(qjs::JSJitEntryHandle, pin),
         mem::size_of::<*mut core::ffi::c_void>(),
     )
+}
+
+fn exec_frame_layout_fingerprint() -> u64 {
+    let mut hash = layout_start::<qjs::JSJitExecFrame>();
+    for (offset, size) in [
+        (mem::offset_of!(qjs::JSJitExecFrame, struct_size), 4),
+        (mem::offset_of!(qjs::JSJitExecFrame, flags), 4),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, rt),
+            mem::size_of::<*mut qjs::JSRuntime>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, ctx),
+            mem::size_of::<*mut qjs::JSContext>(),
+        ),
+        (mem::offset_of!(qjs::JSJitExecFrame, function_id), 8),
+        (mem::offset_of!(qjs::JSJitExecFrame, generation), 8),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, arg_buf),
+            mem::size_of::<*mut qjs::JSValue>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, var_buf),
+            mem::size_of::<*mut qjs::JSValue>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, stack_base),
+            mem::size_of::<*mut qjs::JSValue>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, stack_top),
+            mem::size_of::<*mut qjs::JSValue>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, bytecode_start),
+            mem::size_of::<*const u8>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, pc),
+            mem::size_of::<*const u8>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, result),
+            mem::size_of::<qjs::JSValue>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExecFrame, entry),
+            mem::size_of::<qjs::JSJitEntryHandle>(),
+        ),
+    ] {
+        hash = layout_field(hash, offset, size);
+    }
+    hash
+}
+
+fn exit_layout_fingerprint() -> u64 {
+    let mut hash = layout_start::<qjs::JSJitExit>();
+    for (offset, size) in [
+        (mem::offset_of!(qjs::JSJitExit, kind), 4),
+        (mem::offset_of!(qjs::JSJitExit, reserved), 4),
+        (
+            mem::offset_of!(qjs::JSJitExit, resume_pc),
+            mem::size_of::<*const u8>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitExit, resume_stack_top),
+            mem::size_of::<*mut qjs::JSValue>(),
+        ),
+    ] {
+        hash = layout_field(hash, offset, size);
+    }
+    hash
 }
 
 fn backend_vtable_layout_fingerprint() -> u64 {
@@ -365,6 +492,14 @@ fn abi_info_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitABIInfo, backend_vtable_layout_fingerprint),
             8,
         ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, exec_frame_layout_fingerprint),
+            8,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, exit_layout_fingerprint),
+            8,
+        ),
     ] {
         hash = layout_field(hash, offset, size);
     }
@@ -388,5 +523,7 @@ fn expected_build_fingerprint() -> u64 {
     hash = hash_u64(hash, hot_event_layout_fingerprint());
     hash = hash_u64(hash, function_snapshot_layout_fingerprint());
     hash = hash_u64(hash, entry_handle_layout_fingerprint());
-    hash_u64(hash, backend_vtable_layout_fingerprint())
+    hash = hash_u64(hash, backend_vtable_layout_fingerprint());
+    hash = hash_u64(hash, exec_frame_layout_fingerprint());
+    hash_u64(hash, exit_layout_fingerprint())
 }
