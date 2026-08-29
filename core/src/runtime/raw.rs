@@ -267,7 +267,7 @@ impl RawRuntime {
     pub(super) unsafe fn attach_jit_backend(
         &mut self,
         vtable: *const qjs::JSJitBackendVTable,
-        mut backend: Box<super::jit::BackendState>,
+        backend: Box<dyn super::jit::JitBackend>,
     ) -> StdResult<u64, super::JitBackendAttachError> {
         if self.jit_backend.is_some() {
             return Err(super::JitBackendAttachError::AlreadyAttached);
@@ -276,6 +276,7 @@ impl RawRuntime {
             .jit_next_attach_token
             .checked_add(1)
             .ok_or(super::JitBackendAttachError::EngineRejected)?;
+        let mut backend = Box::new(super::jit::BackendState::new(self.rt, backend));
         let opaque = backend.as_opaque();
         let status = unsafe { qjs::JS_SetJitBackend(self.rt.as_ptr(), vtable, opaque) };
         match status {

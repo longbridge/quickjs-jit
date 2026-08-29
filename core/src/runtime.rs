@@ -26,7 +26,10 @@ use alloc::boxed::Box;
 pub use base::{Runtime, WeakRuntime};
 #[cfg(feature = "jit-abi")]
 #[cfg_attr(feature = "doc-cfg", doc(cfg(feature = "jit-abi")))]
-pub use jit::{JitBackend, JitBackendAttachError, RuntimeJitGuard};
+pub use jit::{
+    JitBackend, JitBackendAttachError, JitFunctionRegistry, JitFunctionRegistryError,
+    RuntimeJitGuard,
+};
 pub use userdata::{UserDataError, UserDataGuard};
 
 #[cfg(feature = "futures")]

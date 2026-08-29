@@ -2775,6 +2775,7 @@ pub const JS_JIT_BACKEND_OK: _bindgen_ty_4 = 0;
 pub const JS_JIT_BACKEND_INVALID_ARGUMENT: _bindgen_ty_4 = -1;
 pub const JS_JIT_BACKEND_ALREADY_ATTACHED: _bindgen_ty_4 = -2;
 pub const JS_JIT_BACKEND_INVALID_VTABLE: _bindgen_ty_4 = -3;
+pub const JS_JIT_BACKEND_BUSY: _bindgen_ty_4 = -4;
 pub type _bindgen_ty_4 = ::core::ffi::c_int;
 unsafe extern "C" {
     pub fn JS_GetJitABIInfo(out: *mut JSJitABIInfo) -> ::core::ffi::c_int;

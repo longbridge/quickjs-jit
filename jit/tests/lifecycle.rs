@@ -1,8 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use rquickjs::{Context, Function, Runtime};
-use rquickjs_core::{qjs, runtime::JitBackend};
-use rquickjs_jit::abi::JitExitExt;
+use rquickjs_core::{
+    qjs,
+    runtime::{JitBackend, JitFunctionRegistry},
+};
+use rquickjs_jit::{abi::JitExitExt, bytecode::CompileSnapshot};
 
 unsafe extern "C" fn native_done(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
     unsafe {
@@ -111,5 +114,119 @@ fn raw_runtime_forces_detach_and_drains_work_while_guard_survives() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         ["detach", "queued_work_drop", "backend_drop"]
+    );
+}
+
+struct RegistryValueDrop {
+    events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Drop for RegistryValueDrop {
+    fn drop(&mut self) {
+        self.events.lock().unwrap().push("registry_value_drop");
+    }
+}
+
+struct RegistryBackend {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    pending: Option<PendingWork>,
+    registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
+}
+
+unsafe impl JitBackend for RegistryBackend {
+    fn runtime_attached(&mut self, registry: JitFunctionRegistry) {
+        *self.registry.lock().unwrap() = Some(registry);
+    }
+
+    fn runtime_detach(&mut self) {
+        self.events.lock().unwrap().push("detach");
+        drop(self.pending.take());
+    }
+}
+
+impl Drop for RegistryBackend {
+    fn drop(&mut self) {
+        self.events.lock().unwrap().push("backend_drop");
+    }
+}
+
+#[test]
+fn runtime_owned_registry_releases_functions_before_free_while_guard_survives() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let registry_slot = Arc::new(Mutex::new(None));
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let guard = runtime
+        .attach_jit_backend(RegistryBackend {
+            events: Arc::clone(&events),
+            pending: Some(PendingWork {
+                events: Arc::clone(&events),
+            }),
+            registry: Arc::clone(&registry_slot),
+        })
+        .unwrap();
+    let registry = registry_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("runtime_attached supplied a registry handle");
+
+    context.with(|ctx| {
+        let value_drop = RegistryValueDrop {
+            events: Arc::clone(&events),
+        };
+        let host = Function::new(ctx.clone(), move || {
+            let _ = &value_drop;
+        })
+        .unwrap();
+        ctx.globals().set("__jitRegistryValue", host).unwrap();
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.target = (function make(value) {
+                return function target() { return value };
+            })(globalThis.__jitRegistryValue);
+            delete globalThis.__jitRegistryValue;
+            "#,
+        )
+        .unwrap();
+
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        let snapshot = unsafe {
+            CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw())
+        }
+        .unwrap();
+        registry
+            .retain_function(
+                &ctx,
+                &function,
+                snapshot.function_id(),
+                snapshot.generation(),
+            )
+            .unwrap();
+        assert_eq!(registry.retained_len(&ctx).unwrap(), 1);
+        ctx.eval::<(), _>("delete globalThis.target").unwrap();
+    });
+    assert!(events.lock().unwrap().is_empty());
+
+    drop(runtime);
+    assert!(events.lock().unwrap().is_empty());
+    drop(context);
+    events.lock().unwrap().push("runtime_drop_returned");
+
+    assert!(!registry.is_attached());
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        [
+            "detach",
+            "queued_work_drop",
+            "registry_value_drop",
+            "backend_drop",
+            "runtime_drop_returned",
+        ]
+    );
+    drop(guard);
+    assert_eq!(
+        events.lock().unwrap().last(),
+        Some(&"runtime_drop_returned")
     );
 }

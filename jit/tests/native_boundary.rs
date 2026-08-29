@@ -2,12 +2,12 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicI32, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
 
-use rquickjs::{Context, Function, Runtime};
+use rquickjs::{Context, Function, Object, Runtime};
 use rquickjs_core::{qjs, runtime::JitBackend};
 use rquickjs_jit::{abi::JitExitExt, bytecode::CompileSnapshot};
 
@@ -22,6 +22,7 @@ enum EntryKind {
     },
     InvalidDeopt,
     Retry,
+    Malformed(MalformedExit),
 }
 
 impl EntryKind {
@@ -33,8 +34,19 @@ impl EntryKind {
             Self::Deopt { .. } => native_deopt,
             Self::InvalidDeopt => native_invalid_deopt,
             Self::Retry => native_retry,
+            Self::Malformed(_) => native_malformed,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum MalformedExit {
+    DoneWithPendingAndResult,
+    DoneExceptionWithoutPending,
+    ExceptionWithPendingAndResult,
+    InterruptWithResult,
+    DeoptWithPendingAndResult,
+    RetryWithPendingAndResult,
 }
 
 #[derive(Clone)]
@@ -139,6 +151,103 @@ unsafe impl JitBackend for UnpinnedBackend {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReentrantPhase {
+    Acquire,
+    Entry,
+}
+
+#[derive(Clone, Copy)]
+enum ReentrantAction {
+    Detach,
+    Replace,
+}
+
+struct ReentrantPin {
+    phase: ReentrantPhase,
+    action: ReentrantAction,
+    status: Arc<AtomicI32>,
+}
+
+struct ReentrantBackend {
+    rt: usize,
+    phase: ReentrantPhase,
+    action: ReentrantAction,
+    status: Arc<AtomicI32>,
+    releases: Arc<AtomicUsize>,
+    detaches: Arc<AtomicUsize>,
+}
+
+unsafe impl JitBackend for ReentrantBackend {
+    fn acquire_entry(&mut self, _id: u64, _generation: u64, _pc: u32) -> qjs::JSJitEntryHandle {
+        if matches!(self.phase, ReentrantPhase::Acquire) {
+            self.status.store(
+                unsafe { attempt_backend_change(self.rt as *mut qjs::JSRuntime, self.action) },
+                Ordering::SeqCst,
+            );
+        }
+
+        let pin = Arc::new(ReentrantPin {
+            phase: self.phase,
+            action: self.action,
+            status: Arc::clone(&self.status),
+        });
+        qjs::JSJitEntryHandle {
+            struct_size: std::mem::size_of::<qjs::JSJitEntryHandle>() as u32,
+            reserved: 0,
+            entry: Some(native_reentrant),
+            pin: Arc::into_raw(pin).cast_mut().cast::<c_void>(),
+        }
+    }
+
+    fn release_entry(&mut self, entry: qjs::JSJitEntryHandle) {
+        unsafe { drop(Arc::from_raw(entry.pin.cast::<ReentrantPin>())) };
+        self.releases.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn runtime_detach(&mut self) {
+        self.detaches.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+unsafe fn attempt_backend_change(
+    rt: *mut qjs::JSRuntime,
+    action: ReentrantAction,
+) -> std::ffi::c_int {
+    match action {
+        ReentrantAction::Detach => unsafe {
+            qjs::JS_SetJitBackend(rt, std::ptr::null(), std::ptr::null_mut())
+        },
+        ReentrantAction::Replace => {
+            let replacement = qjs::JSJitBackendVTable {
+                struct_size: std::mem::size_of::<qjs::JSJitBackendVTable>() as u32,
+                record_hot: None,
+                submit_snapshot: None,
+                acquire_entry: None,
+                release_entry: None,
+                runtime_detach: None,
+                function_retire: None,
+                memory_used: None,
+            };
+            unsafe { qjs::JS_SetJitBackend(rt, &replacement, std::ptr::null_mut()) }
+        }
+    }
+}
+
+unsafe extern "C" fn native_reentrant(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<ReentrantPin>());
+        if matches!(pin.phase, ReentrantPhase::Entry) {
+            pin.status.store(
+                attempt_backend_change((*frame).rt, pin.action),
+                Ordering::SeqCst,
+            );
+        }
+        (*frame).result = qjs::JS_MKVAL(qjs::JS_TAG_INT, 42);
+    }
+    qjs::JSJitExit::done()
+}
+
 unsafe extern "C" fn native_done(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
     unsafe {
         (*frame).result = qjs::JS_MKVAL(qjs::JS_TAG_INT, 42);
@@ -160,10 +269,14 @@ unsafe extern "C" fn native_throw(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
 }
 
 unsafe extern "C" fn native_interrupt(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    const MESSAGE: &[u8] = b"catchable primitive";
     unsafe {
-        let error = qjs::JS_NewError((*frame).ctx);
-        qjs::JS_SetUncatchableError((*frame).ctx, error);
-        qjs::JS_Throw((*frame).ctx, error);
+        let value = qjs::JS_NewStringLen(
+            (*frame).ctx,
+            MESSAGE.as_ptr().cast(),
+            MESSAGE.len() as qjs::size_t,
+        );
+        qjs::JS_Throw((*frame).ctx, value);
     }
     qjs::JSJitExit::interrupt()
 }
@@ -189,9 +302,193 @@ unsafe extern "C" fn native_retry(_frame: *mut qjs::JSJitExecFrame) -> qjs::JSJi
     qjs::JSJitExit::retry_interpreter()
 }
 
+unsafe fn take_global(frame: *mut qjs::JSJitExecFrame, name: &'static [u8]) -> qjs::JSValue {
+    unsafe {
+        let global = qjs::JS_GetGlobalObject((*frame).ctx);
+        let value = qjs::JS_GetPropertyStr((*frame).ctx, global, name.as_ptr().cast());
+        qjs::JS_SetPropertyStr(
+            (*frame).ctx,
+            global,
+            name.as_ptr().cast(),
+            qjs::JS_UNDEFINED,
+        );
+        qjs::JS_FreeValue((*frame).ctx, global);
+        value
+    }
+}
+
+unsafe extern "C" fn native_malformed(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<EntryPin>());
+        let EntryKind::Malformed(kind) = pin.kind else {
+            return qjs::JSJitExit::retry_interpreter();
+        };
+
+        if matches!(
+            kind,
+            MalformedExit::DoneWithPendingAndResult
+                | MalformedExit::ExceptionWithPendingAndResult
+                | MalformedExit::DeoptWithPendingAndResult
+                | MalformedExit::RetryWithPendingAndResult
+        ) {
+            let pending = take_global(frame, b"__jitPending\0");
+            qjs::JS_Throw((*frame).ctx, pending);
+        }
+        if matches!(
+            kind,
+            MalformedExit::DoneWithPendingAndResult
+                | MalformedExit::ExceptionWithPendingAndResult
+                | MalformedExit::InterruptWithResult
+                | MalformedExit::DeoptWithPendingAndResult
+                | MalformedExit::RetryWithPendingAndResult
+        ) {
+            (*frame).result = take_global(frame, b"__jitResult\0");
+        }
+
+        match kind {
+            MalformedExit::DoneWithPendingAndResult => qjs::JSJitExit::done(),
+            MalformedExit::DoneExceptionWithoutPending => {
+                (*frame).result = qjs::JS_EXCEPTION;
+                qjs::JSJitExit::done()
+            }
+            MalformedExit::ExceptionWithPendingAndResult => qjs::JSJitExit::exception(),
+            MalformedExit::InterruptWithResult => qjs::JSJitExit::interrupt(),
+            MalformedExit::DeoptWithPendingAndResult => qjs::JSJitExit::resume((*frame).pc),
+            MalformedExit::RetryWithPendingAndResult => qjs::JSJitExit::retry_interpreter(),
+        }
+    }
+}
+
 fn snapshot<'js>(ctx: &rquickjs::Ctx<'js>, function: &Function<'js>) -> CompileSnapshot {
     unsafe { CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw()) }
         .expect("supported bytecode function")
+}
+
+struct DropProbe(Arc<AtomicUsize>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn install_drop_value<'js>(ctx: &rquickjs::Ctx<'js>, name: &str, drops: Arc<AtomicUsize>) {
+    let probe = DropProbe(drops);
+    let function = Function::new(ctx.clone(), move || {
+        let _ = &probe;
+    })
+    .unwrap();
+    let object = Object::new(ctx.clone()).unwrap();
+    object.set("probe", function).unwrap();
+    ctx.globals().set(name, object).unwrap();
+}
+
+fn assert_malformed_exit_is_uncatchable_and_balanced(
+    kind: MalformedExit,
+    pending_value: bool,
+    result_value: bool,
+) {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.target = function target() { return 1 };
+            globalThis.wrapper = function wrapper() {
+                try { target(); return "accepted"; }
+                catch (_) { return "caught"; }
+            };
+            "#,
+        )
+        .unwrap();
+        if pending_value {
+            install_drop_value(&ctx, "__jitPending", Arc::clone(&drops));
+        }
+        if result_value {
+            install_drop_value(&ctx, "__jitResult", Arc::clone(&drops));
+        }
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(NativeBackend::one(
+            &captured,
+            EntryKind::Malformed(kind),
+            Arc::clone(&releases),
+        ))
+        .unwrap();
+
+    let result = context.with(|ctx| ctx.eval::<String, _>("wrapper()"));
+
+    assert!(
+        result.is_err(),
+        "malformed native exit reached interpreted JavaScript"
+    );
+    drop(result);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        usize::from(pending_value) + usize::from(result_value),
+        "the malformed exit did not release every transferred value"
+    );
+    drop(guard);
+}
+
+fn assert_reentrant_backend_change_is_busy(phase: ReentrantPhase, action: ReentrantAction) {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let rt = context.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.target = function target() { return 1 }")
+            .unwrap();
+        unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) }
+    });
+    let status = Arc::new(AtomicI32::new(i32::MAX));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let detaches = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(ReentrantBackend {
+            rt: rt as usize,
+            phase,
+            action,
+            status: Arc::clone(&status),
+            releases: Arc::clone(&releases),
+            detaches: Arc::clone(&detaches),
+        })
+        .unwrap();
+
+    let result = context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        function.call::<_, i32>(()).unwrap()
+    });
+
+    assert_eq!(result, 42);
+    assert_eq!(status.load(Ordering::SeqCst), qjs::JS_JIT_BACKEND_BUSY);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_eq!(detaches.load(Ordering::SeqCst), 0);
+    drop(guard);
+    assert_eq!(detaches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn backend_detach_during_acquire_is_busy_and_releases_the_captured_pin_once() {
+    assert_reentrant_backend_change_is_busy(ReentrantPhase::Acquire, ReentrantAction::Detach);
+}
+
+#[test]
+fn backend_replace_during_acquire_is_busy_and_releases_the_captured_pin_once() {
+    assert_reentrant_backend_change_is_busy(ReentrantPhase::Acquire, ReentrantAction::Replace);
+}
+
+#[test]
+fn backend_detach_during_entry_is_busy_and_releases_the_captured_pin_once() {
+    assert_reentrant_backend_change_is_busy(ReentrantPhase::Entry, ReentrantAction::Detach);
+}
+
+#[test]
+fn backend_replace_during_entry_is_busy_and_releases_the_captured_pin_once() {
+    assert_reentrant_backend_change_is_busy(ReentrantPhase::Entry, ReentrantAction::Replace);
 }
 
 #[test]
@@ -406,6 +703,60 @@ fn native_interrupt_remains_uncatchable() {
 }
 
 #[test]
+fn malformed_done_with_pending_exception_frees_exception_and_transferred_result() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::DoneWithPendingAndResult,
+        true,
+        true,
+    );
+}
+
+#[test]
+fn malformed_done_rejects_exception_sentinel_without_a_pending_exception() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::DoneExceptionWithoutPending,
+        false,
+        false,
+    );
+}
+
+#[test]
+fn malformed_exception_exit_frees_its_forbidden_transferred_result() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::ExceptionWithPendingAndResult,
+        true,
+        true,
+    );
+}
+
+#[test]
+fn malformed_interrupt_exit_frees_its_forbidden_transferred_result() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::InterruptWithResult,
+        false,
+        true,
+    );
+}
+
+#[test]
+fn malformed_deopt_with_pending_exception_frees_exception_and_transferred_result() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::DeoptWithPendingAndResult,
+        true,
+        true,
+    );
+}
+
+#[test]
+fn malformed_retry_with_pending_exception_frees_exception_and_transferred_result() {
+    assert_malformed_exit_is_uncatchable_and_balanced(
+        MalformedExit::RetryWithPendingAndResult,
+        true,
+        true,
+    );
+}
+
+#[test]
 fn deopt_resumes_after_the_materialized_side_effect_exactly_once() {
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
@@ -457,7 +808,7 @@ fn deopt_resumes_after_the_materialized_side_effect_exactly_once() {
 }
 
 #[test]
-fn deopt_rejects_a_pc_inside_an_instruction_after_releasing_the_pin() {
+fn deopt_rejects_a_pc_inside_an_instruction_as_uncatchable_after_releasing_the_pin() {
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
     let captured = context.with(|ctx| {
@@ -489,11 +840,11 @@ fn deopt_rejects_a_pc_inside_an_instruction_after_releasing_the_pin() {
         ))
         .unwrap();
 
-    let caught = context.with(|ctx| ctx.eval::<String, _>("wrapper()").unwrap());
+    let result = context.with(|ctx| ctx.eval::<String, _>("wrapper()"));
 
     assert!(
-        caught.contains("invalid JIT deopt PC"),
-        "mid-instruction resume was not rejected at the boundary: {caught}"
+        result.is_err(),
+        "mid-instruction resume was caught by interpreted JavaScript"
     );
     assert_eq!(releases.load(Ordering::SeqCst), 1);
     drop(guard);
