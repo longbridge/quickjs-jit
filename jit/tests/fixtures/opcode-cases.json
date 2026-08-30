@@ -27,7 +27,7 @@
       "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
       "expression": "f(10,0)",
       "helper": null,
-      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+      "dimensions": ["normal", "exception-or-nonthrow"]
     },
     {
       "opcode": "object",
@@ -69,30 +69,31 @@
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "exception-or-nonthrow"
       ]
     },
     {
       "opcode": "get_field",
       "definition": "function f(o){ return o.answer }",
-      "expression": "f({answer:42})",
+      "expression": "(()=>{const events=[];const value=f({get answer(){events.push('get');return 42}});return [value,events]})()",
       "helper": "GetProperty",
       "dimensions": [
         "normal",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     },
     {
       "opcode": "put_field",
       "definition": "function f(o,a){ o.answer=a; return o.answer }",
-      "expression": "f({},42)",
+      "expression": "(()=>{const events=[];const target={};const proxy=new Proxy(target,{set(o,k,v){events.push('set:'+k);o[k]=v;return true}});return [f(proxy,42),events]})()",
       "helper": "SetProperty",
       "dimensions": [
         "normal",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     },
     {
@@ -131,45 +132,51 @@
     {
       "opcode": "plus",
       "definition": "function f(a){ return +a }",
-      "expression": "f({valueOf(){return 42}})",
+      "expression": "(()=>{const events=[];const value=f({[Symbol.toPrimitive](){events.push('number');return 42}});return [value,events]})()",
       "helper": "ToNumeric",
       "dimensions": [
         "normal",
+        "numeric-tag-edge",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     },
     {
       "opcode": "post_inc",
       "definition": "function f(a){ let x=a; x++; return x }",
-      "expression": "f(41)",
+      "expression": "f(2147483647)",
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "numeric-tag-edge",
+        "exception-or-nonthrow"
       ]
     },
     {
       "opcode": "add",
       "definition": "function f(a,b){ return a+b }",
-      "expression": "f({valueOf(){return 20}},22)",
+      "expression": "(()=>{const events=[];const value=f({[Symbol.toPrimitive](){events.push('left');return 20}},{[Symbol.toPrimitive](){events.push('right');return 22}});return [value,events]})()",
       "helper": "AddSlow",
       "dimensions": [
         "normal",
+        "numeric-tag-edge",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     },
     {
       "opcode": "lt",
       "definition": "function f(a,b){ return a < b }",
-      "expression": "f({valueOf(){return 20}},22)",
+      "expression": "(()=>{const events=[];const value=f({[Symbol.toPrimitive](){events.push('left');return 20}},{[Symbol.toPrimitive](){events.push('right');return 22}});return [value,events]})()",
       "helper": "CompareSlow",
       "dimensions": [
         "normal",
+        "numeric-tag-edge",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     },
     {
@@ -179,8 +186,7 @@
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "exception-or-nonthrow"
       ]
     },
     {
@@ -190,8 +196,7 @@
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "exception-or-nonthrow"
       ]
     },
     {
@@ -201,8 +206,7 @@
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "exception-or-nonthrow"
       ]
     },
     {
@@ -212,8 +216,7 @@
       "helper": null,
       "dimensions": [
         "normal",
-        "exception-or-nonthrow",
-        "ownership-gc"
+        "exception-or-nonthrow"
       ]
     },
     {
@@ -263,12 +266,13 @@
     {
       "opcode": "call1",
       "definition": "function f(g,a){ let x=g(a); return x+0 }",
-      "expression": "f(x=>x+1,41)",
+      "expression": "(()=>{const events=[];const value=f(x=>{events.push('call');return x+1},41);return [value,events]})()",
       "helper": "Call",
       "dimensions": [
         "normal",
         "exception-or-nonthrow",
-        "ownership-gc"
+        "ownership-gc",
+        "coercion-reentrancy"
       ]
     }
   ]

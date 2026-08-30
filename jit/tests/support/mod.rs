@@ -26,16 +26,13 @@ use crate::bytecode::{
 struct JitTraceEvent {
     pc: u32,
     opcode: u8,
-    reserved: [u8; 3],
+    kind: u8,
+    helper_id: u8,
+    reserved: u8,
 }
 
 #[cfg(feature = "compiler")]
 unsafe extern "C" {
-    fn JS_JitGetHelperCount(
-        rt: *mut rquickjs_core::qjs::JSRuntime,
-        helper_id: u32,
-        count: *mut u64,
-    ) -> i32;
     fn JS_JitSetExecutionTrace(
         rt: *mut rquickjs_core::qjs::JSRuntime,
         events: *mut JitTraceEvent,
@@ -242,6 +239,7 @@ struct ForcedBaselineBackend {
     entries: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
     registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
+    stress_gc: bool,
 }
 
 #[cfg(feature = "compiler")]
@@ -249,6 +247,7 @@ struct ForcedEntryPin {
     code: PublishedBaselineCode,
     entries: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
+    stress_gc: bool,
 }
 
 #[cfg(feature = "compiler")]
@@ -259,6 +258,9 @@ unsafe extern "C" fn forced_entry_trampoline(
         *mut rquickjs_core::qjs::JSJitExecFrame,
     ) -> rquickjs_core::qjs::JSJitExit;
     let pin = unsafe { &*((*frame).entry.pin.cast::<ForcedEntryPin>()) };
+    if pin.stress_gc {
+        unsafe { (*frame).flags |= rquickjs_core::qjs::JS_JIT_FRAME_STRESS_GC };
+    }
     pin.entries.fetch_add(1, Ordering::SeqCst);
     let native: Entry = unsafe { mem::transmute(pin.code.as_ptr()) };
     let exit = unsafe { native(frame) };
@@ -294,6 +296,7 @@ unsafe impl JitBackend for ForcedBaselineBackend {
                 code: self.code.clone(),
                 entries: Arc::clone(&self.entries),
                 retries: Arc::clone(&self.retries),
+                stress_gc: self.stress_gc,
             }))
             .cast(),
             stack_map_count: u32::try_from(self.code.stack_maps().len()).unwrap_or(u32::MAX),
@@ -372,6 +375,7 @@ fn compile_named_function(
     context: &Context,
     definition: &str,
     function_name: &str,
+    stress_gc: bool,
 ) -> ForcedInstallation {
     eval_global_definition(context, definition)
         .unwrap_or_else(|error| panic!("baseline definition failed: {error}"));
@@ -407,6 +411,7 @@ fn compile_named_function(
             entries: Arc::clone(&entries),
             retries: Arc::clone(&retries),
             registry: Arc::clone(&registry_slot),
+            stress_gc,
         })
         .expect("forced baseline backend attaches");
     let registry = registry_slot
@@ -442,6 +447,7 @@ pub struct DifferentialRun {
     require_baseline: bool,
     expected_opcode: Option<String>,
     expected_helper: Option<HelperId>,
+    stress_gc: bool,
 }
 
 #[cfg(feature = "compiler")]
@@ -452,6 +458,7 @@ pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
         require_baseline: true,
         expected_opcode: None,
         expected_helper: None,
+        stress_gc: false,
     }
 }
 
@@ -501,6 +508,11 @@ impl DifferentialRun {
         self
     }
 
+    pub fn stress_gc(mut self) -> Self {
+        self.stress_gc = true;
+        self
+    }
+
     pub fn assert_same(self) {
         let interpreter_runtime = Runtime::new().expect("interpreter runtime");
         let interpreter_context = Context::full(&interpreter_runtime).expect("interpreter context");
@@ -510,7 +522,8 @@ impl DifferentialRun {
 
         let runtime = Runtime::new().expect("compiled runtime");
         let context = Context::full(&runtime).expect("compiled context");
-        let installation = compile_named_function(&runtime, &context, &self.definition, "f");
+        let installation =
+            compile_named_function(&runtime, &context, &self.definition, "f", self.stress_gc);
         let rt =
             context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
         let mut trace = vec![JitTraceEvent::default(); 16_384];
@@ -569,7 +582,7 @@ impl DifferentialRun {
                 "forced baseline silently retried in the interpreter"
             );
         }
-        if let Some(expected) = self.expected_opcode {
+        if let Some(expected) = self.expected_opcode.as_deref() {
             let opcode = linked_opcode_table()
                 .find(|opcode| opcode.name() == expected)
                 .unwrap_or_else(|| panic!("unknown expected opcode {expected}"));
@@ -605,12 +618,30 @@ impl DifferentialRun {
                 HelperId::NewArray => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY,
                 HelperId::NewObject => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT,
             };
-            let mut count = 0;
-            assert_eq!(
-                unsafe { JS_JitGetHelperCount(rt, helper_id, &mut count) },
-                0
+            let expected_opcode = self
+                .expected_opcode
+                .as_deref()
+                .expect("helper evidence requires an expected opcode");
+            let opcode = linked_opcode_table()
+                .find(|opcode| opcode.name() == expected_opcode)
+                .expect("expected helper opcode is linked");
+            assert!(
+                trace.iter().any(|event| {
+                    event.kind == 1
+                        && u32::from(event.helper_id) == helper_id
+                        && event.opcode == opcode.id()
+                        && trace.iter().any(|opcode_event| {
+                            opcode_event.kind == 0
+                                && opcode_event.pc == event.pc
+                                && opcode_event.opcode == event.opcode
+                        })
+                }),
+                "expected helper {helper:?} was not executed by target opcode {expected_opcode}; trace={:?}",
+                trace
+                    .iter()
+                    .map(|event| (event.pc, event.opcode, event.kind, event.helper_id))
+                    .collect::<Vec<_>>()
             );
-            assert!(count > 0, "expected helper {helper:?} was not executed");
         }
         drop(installation.guard);
         assert!(
@@ -655,7 +686,7 @@ impl ForcedBaselineRun {
     pub fn assert_uncatchable_interrupt(self) {
         let runtime = Runtime::new().expect("compiled interrupt runtime");
         let context = Context::full(&runtime).expect("compiled interrupt context");
-        let installation = compile_named_function(&runtime, &context, &self.definition, "f");
+        let installation = compile_named_function(&runtime, &context, &self.definition, "f", false);
         let polls = Arc::new(AtomicUsize::new(0));
         runtime.set_interrupt_handler({
             let polls = Arc::clone(&polls);
@@ -730,6 +761,17 @@ pub fn verified_bytecode(bytecode: Vec<u8>, arg_count: u16, local_count: u16) ->
     CompileSnapshot::from_untrusted_bytecode(bytecode, arg_count, local_count, 0, 0)
         .verify(VerifyLimits::default())
         .expect("synthetic bytecode verifies")
+}
+
+/// Compiles a synthetic fixture through implemented lowering arms without
+/// changing the policy applied by the public compiler entry point.
+#[cfg(feature = "compiler")]
+#[doc(hidden)]
+pub fn compile_implemented_fixture(
+    compiler: &BaselineCompiler,
+    function: &VerifiedFunction,
+) -> Result<crate::compiler::baseline::RelocatableCode, CompileFailure> {
+    compiler.compile_implemented_for_test(function)
 }
 
 /// Stable Rust representation of QuickJS's 16-byte non-NaN-boxed value ABI.

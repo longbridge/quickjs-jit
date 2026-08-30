@@ -151,6 +151,26 @@ jobs:
       - name: Gate closed opcode policy and executed Tier 1 manifest
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test opcodes --test differential -- --test-threads=1
 
+  jit-platform-compiler:
+    name: ${{ matrix.os }} / JIT compiler graph and native smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Check the complete compiler build graph
+        run: cargo check -p rquickjs-jit --all-targets --features compiler,test-support
+      - name: Smoke published native execution on the host
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test differential ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter -- --exact --test-threads=1
+
   examples:
     runs-on: ubuntu-latest
     steps:

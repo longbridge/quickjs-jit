@@ -146,15 +146,6 @@ impl VerifiedFunction {
                 super::tier1_policy(instruction.opcode().id())
                     .expect("verified opcode belongs to the generated table")
             {
-                #[cfg(feature = "test-support")]
-                if self.snapshot.function_id() == 0
-                    && reason == super::FallbackReason::UnsupportedOpcode
-                {
-                    // Synthetic compiler unit fixtures exercise implemented
-                    // lowerings independently of the production advertised
-                    // policy. Captured/runtime functions never have ID zero.
-                    continue;
-                }
                 let rejection = super::Tier1Rejection::new(instruction.pc(), reason);
                 if reason == super::FallbackReason::UnsupportedOpcode {
                     unsupported.get_or_insert(rejection);

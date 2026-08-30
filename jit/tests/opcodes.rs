@@ -5,6 +5,18 @@ use rquickjs_jit::bytecode::{
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
+#[test]
+fn synthetic_function_identity_cannot_bypass_the_closed_policy() {
+    let mut bytecode = vec![rquickjs_jit::bytecode::opcode::PUSH_I32];
+    bytecode.extend_from_slice(&42_i32.to_le_bytes());
+    bytecode.push(rquickjs_jit::bytecode::opcode::RETURN);
+    let verified = rquickjs_jit::test_support::verified_bytecode(bytecode, 0, 0);
+    let rejection = verified
+        .tier1_eligibility()
+        .expect_err("ID-zero synthetic bytecode remains subject to production policy");
+    assert_eq!(rejection.reason(), FallbackReason::UnsupportedOpcode);
+}
+
 #[derive(Deserialize)]
 struct Manifest {
     cases: Vec<Case>,

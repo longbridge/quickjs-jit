@@ -125,6 +125,13 @@ pub struct BaselineCompiler {
     host_publishable: bool,
 }
 
+#[derive(Clone, Copy)]
+enum CompilePolicy {
+    AdvertisedOnly,
+    #[cfg(feature = "test-support")]
+    ImplementedForCompilerTest,
+}
+
 impl BaselineCompiler {
     pub fn host() -> Self {
         let mut flag_builder = settings::builder();
@@ -156,6 +163,22 @@ impl BaselineCompiler {
 
     /// Compiles verified bytecode without allocating executable memory.
     pub fn compile(&self, function: &VerifiedFunction) -> Result<RelocatableCode, CompileFailure> {
+        self.compile_with_policy(function, CompilePolicy::AdvertisedOnly)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn compile_implemented_for_test(
+        &self,
+        function: &VerifiedFunction,
+    ) -> Result<RelocatableCode, CompileFailure> {
+        self.compile_with_policy(function, CompilePolicy::ImplementedForCompilerTest)
+    }
+
+    fn compile_with_policy(
+        &self,
+        function: &VerifiedFunction,
+        policy: CompilePolicy,
+    ) -> Result<RelocatableCode, CompileFailure> {
         if self.isa.triple().pointer_width().map(|width| width.bits()) != Ok(64)
             || self.isa.triple().endianness() != Ok(Endianness::Little)
         {
@@ -165,7 +188,13 @@ impl BaselineCompiler {
         let layout = FrameLayout::validated(
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
-        let ir = BaselineIr::translate(function)?;
+        let ir = match policy {
+            CompilePolicy::AdvertisedOnly => BaselineIr::translate(function)?,
+            #[cfg(feature = "test-support")]
+            CompilePolicy::ImplementedForCompilerTest => {
+                BaselineIr::translate_implemented_for_test(function)?
+            }
+        };
         let logical_stack_capacity = u32::from(function.snapshot().stack_size());
         let scratch_slots =
             u32::try_from(MAX_HELPER_SCRATCH_SLOTS).map_err(|_| CompileFailure::InvalidArtifact)?;

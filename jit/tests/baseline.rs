@@ -16,7 +16,10 @@ use rquickjs_jit::{
     compiler::{baseline::BaselineCompiler, CompileFailure},
     ir::BaselineIr,
     platform::CodeMemoryError,
-    test_support::{verified_bytecode, JSValueRepr, SnapshotFixture, SyntheticFrame},
+    test_support::{
+        compile_implemented_fixture, verified_bytecode, JSValueRepr, SnapshotFixture,
+        SyntheticFrame,
+    },
 };
 use std::collections::BTreeSet;
 
@@ -33,7 +36,7 @@ fn compile(
     locals: u16,
 ) -> rquickjs_jit::compiler::baseline::RelocatableCode {
     let function = verified_bytecode(bytecode, args, locals);
-    BaselineCompiler::host().compile(&function).unwrap()
+    compile_implemented_fixture(&BaselineCompiler::host(), &function).unwrap()
 }
 
 fn assert_deep_retry(
@@ -531,8 +534,7 @@ fn maximum_synthetic_logical_capacity_reserves_scratch_without_u16_overflow() {
     let function = verified_bytecode(vec![opcode::RETURN_UNDEF], 0, 0);
     assert_eq!(function.snapshot().stack_size(), u16::MAX);
 
-    BaselineCompiler::host()
-        .compile(&function)
+    compile_implemented_fixture(&BaselineCompiler::host(), &function)
         .expect("scratch capacity addition uses a widened integer");
 }
 
@@ -754,7 +756,7 @@ fn cross_target_compilation_can_never_publish_on_the_host() {
         .finish(flags)
         .unwrap();
     let function = verified_bytecode(vec![opcode::RETURN_UNDEF], 0, 0);
-    let code = BaselineCompiler::new(isa).compile(&function).unwrap();
+    let code = compile_implemented_fixture(&BaselineCompiler::new(isa), &function).unwrap();
 
     assert!(matches!(
         code.publish(),

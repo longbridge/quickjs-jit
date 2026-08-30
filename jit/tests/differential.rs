@@ -5,10 +5,12 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
-use rquickjs_jit::bytecode::FallbackReason;
-use rquickjs_jit::bytecode::HelperId;
+use rquickjs_jit::bytecode::{
+    linked_opcode_table, tier1_policy, FallbackReason, HelperId, Tier1Policy,
+};
 use rquickjs_jit::test_support::{assert_tier1_rejected, differential};
 use serde::Deserialize;
+use std::collections::BTreeSet;
 
 #[derive(Deserialize)]
 struct OpcodeManifest {
@@ -20,40 +22,162 @@ struct OpcodeCase {
     opcode: String,
     definition: String,
     expression: String,
-    helper: Option<String>,
+    helper: Option<ManifestHelper>,
+    dimensions: BTreeSet<Dimension>,
 }
 
-fn helper(name: &str) -> HelperId {
-    match name {
-        "Dup" => HelperId::Dup,
-        "Free" => HelperId::Free,
-        "ResolveConst" => HelperId::ResolveConst,
-        "ToNumeric" => HelperId::ToNumeric,
-        "ToBool" => HelperId::ToBool,
-        "AddSlow" => HelperId::AddSlow,
-        "CompareSlow" => HelperId::CompareSlow,
-        "GetProperty" => HelperId::GetProperty,
-        "SetProperty" => HelperId::SetProperty,
-        "Call" => HelperId::Call,
-        "NewArray" => HelperId::NewArray,
-        "NewObject" => HelperId::NewObject,
-        _ => panic!("unknown manifest helper {name}"),
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "kebab-case")]
+enum Dimension {
+    Normal,
+    NumericTagEdge,
+    ExceptionOrNonthrow,
+    OwnershipGc,
+    CoercionReentrancy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+enum ManifestHelper {
+    Dup,
+    Free,
+    ResolveConst,
+    ToNumeric,
+    ToBool,
+    AddSlow,
+    CompareSlow,
+    GetProperty,
+    SetProperty,
+    Call,
+    NewArray,
+    NewObject,
+}
+
+impl ManifestHelper {
+    const fn id(self) -> HelperId {
+        match self {
+            Self::Dup => HelperId::Dup,
+            Self::Free => HelperId::Free,
+            Self::ResolveConst => HelperId::ResolveConst,
+            Self::ToNumeric => HelperId::ToNumeric,
+            Self::ToBool => HelperId::ToBool,
+            Self::AddSlow => HelperId::AddSlow,
+            Self::CompareSlow => HelperId::CompareSlow,
+            Self::GetProperty => HelperId::GetProperty,
+            Self::SetProperty => HelperId::SetProperty,
+            Self::Call => HelperId::Call,
+            Self::NewArray => HelperId::NewArray,
+            Self::NewObject => HelperId::NewObject,
+        }
     }
+}
+
+fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
+    let mut required = BTreeSet::from([Dimension::Normal, Dimension::ExceptionOrNonthrow]);
+    let opcode = linked_opcode_table()
+        .find(|opcode| opcode.name() == case.opcode)
+        .expect("manifest opcode is linked");
+    if matches!(tier1_policy(opcode.id()), Some(Tier1Policy::Helper(_))) {
+        required.insert(Dimension::OwnershipGc);
+    }
+    if matches!(case.opcode.as_str(), "plus" | "post_inc" | "add" | "lt") {
+        required.insert(Dimension::NumericTagEdge);
+    }
+    if matches!(
+        case.helper,
+        Some(
+            ManifestHelper::ToNumeric
+                | ManifestHelper::AddSlow
+                | ManifestHelper::CompareSlow
+                | ManifestHelper::GetProperty
+                | ManifestHelper::SetProperty
+                | ManifestHelper::Call
+        )
+    ) {
+        required.insert(Dimension::CoercionReentrancy);
+    }
+    required
+}
+
+fn validate_dimensions(manifest: &OpcodeManifest) -> Result<(), String> {
+    for case in &manifest.cases {
+        let opcode = linked_opcode_table()
+            .find(|opcode| opcode.name() == case.opcode)
+            .ok_or_else(|| format!("unknown opcode {}", case.opcode))?;
+        let expected_helper = match tier1_policy(opcode.id()) {
+            Some(Tier1Policy::Helper(helper)) => Some(helper),
+            Some(Tier1Policy::Native) => None,
+            _ => return Err(format!("{} is not advertised", case.opcode)),
+        };
+        if case.helper.map(ManifestHelper::id) != expected_helper {
+            return Err(format!("{} helper does not match policy", case.opcode));
+        }
+        let missing: Vec<_> = required_dimensions(case)
+            .difference(&case.dimensions)
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("{} missing {missing:?}", case.opcode));
+        }
+        let extra: Vec<_> = case
+            .dimensions
+            .difference(&required_dimensions(case))
+            .copied()
+            .collect();
+        if !extra.is_empty() {
+            return Err(format!("{} has inapplicable {extra:?}", case.opcode));
+        }
+    }
+    Ok(())
 }
 
 #[test]
 fn manifest_executes_every_advertised_opcode_at_its_native_pc() {
     let manifest: OpcodeManifest =
         serde_json::from_str(include_str!("fixtures/opcode-cases.json")).unwrap();
+    validate_dimensions(&manifest).expect("manifest has semantic dimension evidence");
     for case in manifest.cases {
         let mut run = differential(&case.definition, &case.expression)
             .force_baseline()
             .expect_executed_opcode(&case.opcode);
-        if let Some(expected) = case.helper.as_deref() {
-            run = run.expect_helper(helper(expected));
+        if case.dimensions.contains(&Dimension::OwnershipGc) {
+            run = run.stress_gc();
+        }
+        if let Some(expected) = case.helper {
+            run = run.expect_helper(expected.id());
         }
         run.assert_same();
     }
+}
+
+#[test]
+fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() {
+    let source = include_str!("fixtures/opcode-cases.json");
+    let manifest: OpcodeManifest = serde_json::from_str(source).unwrap();
+    validate_dimensions(&manifest).unwrap();
+
+    let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+    value["cases"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|case| case["opcode"] == "add")
+        .unwrap()["dimensions"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|dimension| dimension != "coercion-reentrancy");
+    let missing: OpcodeManifest = serde_json::from_value(value.clone()).unwrap();
+    assert!(validate_dimensions(&missing).unwrap_err().contains("add"));
+
+    value["cases"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|case| case["opcode"] == "add")
+        .unwrap()["dimensions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("invented-dimension"));
+    assert!(serde_json::from_value::<OpcodeManifest>(value).is_err());
 }
 
 #[test]

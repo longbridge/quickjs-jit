@@ -63,8 +63,24 @@ pub struct BaselineIr {
 
 impl BaselineIr {
     pub fn translate(function: &VerifiedFunction) -> Result<Self, CompileFailure> {
-        if let Err(rejection) = function.tier1_eligibility() {
-            return Err(CompileFailure::Tier1Rejected(rejection.reason()));
+        Self::translate_with_policy(function, true)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn translate_implemented_for_test(
+        function: &VerifiedFunction,
+    ) -> Result<Self, CompileFailure> {
+        Self::translate_with_policy(function, false)
+    }
+
+    fn translate_with_policy(
+        function: &VerifiedFunction,
+        enforce_advertised_policy: bool,
+    ) -> Result<Self, CompileFailure> {
+        if enforce_advertised_policy {
+            if let Err(rejection) = function.tier1_eligibility() {
+                return Err(CompileFailure::Tier1Rejected(rejection.reason()));
+            }
         }
         let block_depths = block_depths(function)?;
         let snapshot = function.snapshot();
