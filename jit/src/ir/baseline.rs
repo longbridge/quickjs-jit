@@ -46,6 +46,9 @@ pub struct BaselineIr {
 
 impl BaselineIr {
     pub fn translate(function: &VerifiedFunction) -> Result<Self, CompileFailure> {
+        if let Err(rejection) = function.tier1_eligibility() {
+            return Err(CompileFailure::Tier1Rejected(rejection.reason()));
+        }
         let block_depths = block_depths(function)?;
         let snapshot = function.snapshot();
         let mut states = FrameStateTable::default();

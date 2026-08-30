@@ -2,6 +2,7 @@
 
 mod cfg;
 mod decode;
+mod policy;
 mod stack;
 mod verify;
 
@@ -13,6 +14,10 @@ pub use cfg::{BasicBlock, ControlFlowGraph};
 pub use decode::{
     decode_raw, linked_opcode_table, DecodeError, Instruction, Opcode, OperandFormat,
 };
+pub use policy::{
+    tier1_policy, FallbackReason, HelperId, Tier1Policy, Tier1Rejection, GENERATED_OPCODE_COUNT,
+    GENERATED_OPCODE_FINGERPRINT,
+};
 pub use stack::SlotKind;
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
 
@@ -20,6 +25,7 @@ pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, Verif
 pub mod opcode {
     use rquickjs_core::qjs;
 
+    pub const PUSH_UNDEFINED: u8 = qjs::QJS_JIT_OP_UNDEFINED;
     pub const PUSH_I32: u8 = qjs::QJS_JIT_OP_PUSH_I32;
     pub const PUSH_I8: u8 = qjs::QJS_JIT_OP_PUSH_I8;
     pub const PUSH_TRUE: u8 = qjs::QJS_JIT_OP_PUSH_TRUE;

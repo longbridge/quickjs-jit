@@ -132,6 +132,18 @@ impl VerifiedFunction {
     pub const fn control_flow_graph(&self) -> &ControlFlowGraph {
         &self.cfg
     }
+
+    pub fn tier1_eligibility(&self) -> Result<(), super::Tier1Rejection> {
+        for instruction in &self.instructions {
+            if let super::Tier1Policy::Reject(reason) =
+                super::tier1_policy(instruction.opcode().id())
+                    .expect("verified opcode belongs to the generated table")
+            {
+                return Err(super::Tier1Rejection::new(instruction.pc(), reason));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn decode_error_pc(error: &DecodeError) -> u32 {
@@ -233,21 +245,6 @@ fn validate_indices(
         }
     }
     Ok(())
-}
-
-fn unsupported_function_kind(instruction: &Instruction) -> Option<SnapshotStatus> {
-    match instruction.opcode().name() {
-        "eval" | "apply_eval" => Some(SnapshotStatus::Eval),
-        "with_get_var" | "with_put_var" | "with_delete_var" | "with_make_ref" | "with_get_ref"
-        | "with_get_ref_undef" => Some(SnapshotStatus::With),
-        "initial_yield" | "yield" | "yield_star" => Some(SnapshotStatus::Generator),
-        "return_async"
-        | "for_await_of_start"
-        | "async_yield_star"
-        | "await"
-        | "using_dispose_async" => Some(SnapshotStatus::Async),
-        _ => None,
-    }
 }
 
 fn verify_metadata(
@@ -373,25 +370,6 @@ pub(crate) fn verify(
         },
     )?;
     validate_indices(&snapshot, &instructions)?;
-    if let Some((instruction, status)) = instructions.iter().find_map(|instruction| {
-        unsupported_function_kind(instruction).map(|kind| (instruction, kind))
-    }) {
-        return Err(VerifyError::new(
-            instruction.pc(),
-            VerifyErrorKind::UnsupportedFunctionKind(status),
-        ));
-    }
-    if let Some(instruction) = instructions.iter().find(|instruction| {
-        matches!(
-            instruction.opcode().name(),
-            "catch" | "gosub" | "ret" | "nip_catch"
-        )
-    }) {
-        return Err(VerifyError::new(
-            instruction.pc(),
-            VerifyErrorKind::UnsupportedExceptionRegion,
-        ));
-    }
     let cfg = cfg::build(
         &instructions,
         snapshot.bytecode().len(),

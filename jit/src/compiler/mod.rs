@@ -19,6 +19,7 @@ pub trait Compiler: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompileFailure {
     UnsupportedOpcode,
+    Tier1Rejected(crate::bytecode::FallbackReason),
     ResourceLimit,
     Cancelled,
     CompilerPanicked,

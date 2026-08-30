@@ -7,6 +7,10 @@ rust-version = "1.87"
 license = "MIT"
 description = "Optional tiered JIT runtime for rquickjs"
 repository = "https://github.com/DelSkayn/rquickjs.git"
+build = "build.rs"
+
+[build-dependencies]
+rquickjs-sys = { path = "../sys", features = ["jit-abi"] }
 
 [dependencies]
 rquickjs-core = { path = "../core", features = ["jit-abi"] }
@@ -66,4 +70,12 @@ required-features = ["compiler", "test-support"]
 
 [[test]]
 name = "gpui_shell_surface"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "opcodes"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "differential"
 required-features = ["compiler", "test-support"]

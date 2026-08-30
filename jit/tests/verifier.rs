@@ -1,6 +1,6 @@
 use rquickjs_jit::bytecode::{
-    decode_raw, linked_opcode_table, opcode, CompileSnapshot, DecodeError, DeoptPoint, OsrPoint,
-    Resource, SlotKind, SnapshotStatus, VerifierMetadata, VerifyErrorKind, VerifyLimits,
+    decode_raw, linked_opcode_table, opcode, CompileSnapshot, DecodeError, DeoptPoint,
+    FallbackReason, OsrPoint, Resource, SlotKind, VerifierMetadata, VerifyErrorKind, VerifyLimits,
 };
 
 fn snapshot_from_parts(
@@ -417,53 +417,76 @@ fn using_dispose_validates_its_adjacent_local_pair() {
 }
 
 #[test]
-fn untrusted_snapshots_reject_feature_only_opcodes_by_category() {
+fn well_formedness_and_tier1_eligibility_are_separate() {
     let fixtures = [
         (
-            vec![opcode::EVAL, 0, 0, 0, 0, opcode::RETURN],
-            SnapshotStatus::Eval,
+            vec![
+                opcode::PUSH_UNDEFINED,
+                opcode::EVAL,
+                0,
+                0,
+                0,
+                0,
+                opcode::RETURN,
+            ],
+            FallbackReason::DirectEval,
         ),
         (
             vec![
+                opcode::PUSH_UNDEFINED,
                 opcode::WITH_GET_VAR,
                 0,
                 0,
                 0,
                 0,
-                0,
+                5,
                 0,
                 0,
                 0,
                 0,
                 opcode::RETURN_UNDEF,
             ],
-            SnapshotStatus::With,
+            FallbackReason::WithScope,
         ),
         (
             vec![opcode::INITIAL_YIELD, opcode::RETURN_UNDEF],
-            SnapshotStatus::Generator,
+            FallbackReason::Generator,
         ),
-        (vec![opcode::AWAIT, opcode::RETURN], SnapshotStatus::Async),
+        (
+            vec![opcode::PUSH_UNDEFINED, opcode::AWAIT, opcode::RETURN],
+            FallbackReason::Async,
+        ),
     ];
 
-    for (bytes, status) in fixtures {
-        let error = snapshot_from_parts(bytes, 0, 0, 0, 0)
+    for (bytes, reason) in fixtures {
+        let verified = snapshot_from_parts(bytes, 0, 0, 0, 0)
             .verify(VerifyLimits::default())
-            .unwrap_err();
+            .expect("feature policy must not be a bytecode well-formedness error");
+        let rejection = verified.tier1_eligibility().unwrap_err();
         assert_eq!(
-            error.kind(),
-            &VerifyErrorKind::UnsupportedFunctionKind(status)
+            verified.instructions()[rejection.pc() as usize]
+                .opcode()
+                .name(),
+            match reason {
+                FallbackReason::DirectEval => "eval",
+                FallbackReason::WithScope => "with_get_var",
+                FallbackReason::Generator => "initial_yield",
+                FallbackReason::Async => "await",
+                _ => unreachable!(),
+            }
         );
+        assert_eq!(rejection.reason(), reason);
     }
 }
 
 #[test]
-fn verifier_rejects_unsupported_exception_regions_before_ir() {
-    let error = snapshot_from_parts(vec![opcode::CATCH, 0, 0, 0, 0, opcode::RETURN], 0, 0, 0, 0)
+fn exception_opcodes_are_well_formed_but_tier1_rejected() {
+    let verified = snapshot_from_parts(vec![opcode::CATCH, 4, 0, 0, 0, opcode::RETURN], 0, 0, 0, 0)
         .verify(VerifyLimits::default())
-        .unwrap_err();
-    assert_eq!(error.pc(), 0);
-    assert_eq!(error.kind(), &VerifyErrorKind::UnsupportedExceptionRegion);
+        .unwrap();
+    let rejection = verified.tier1_eligibility().unwrap_err();
+    assert_eq!(rejection.pc(), 0);
+    assert_eq!(rejection.reason(), FallbackReason::ExceptionRegion);
 }
 
 #[test]

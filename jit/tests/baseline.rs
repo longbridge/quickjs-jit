@@ -11,7 +11,7 @@ use cranelift_codegen::{isa, settings};
 use rquickjs::{Context, Runtime};
 use rquickjs_core::qjs;
 use rquickjs_jit::{
-    bytecode::{linked_opcode_table, opcode, VerifyLimits},
+    bytecode::{linked_opcode_table, opcode, FallbackReason, VerifyLimits},
     code_cache::{FrameStateLocationKind, RelocationTarget},
     compiler::{baseline::BaselineCompiler, CompileFailure},
     ir::BaselineIr,
@@ -321,6 +321,27 @@ fn flattened_frame_slot_count_above_u16_max_is_rejected() {
     assert_eq!(
         BaselineIr::translate(&function),
         Err(CompileFailure::ResourceLimit)
+    );
+}
+
+#[test]
+fn baseline_rejects_ineligible_opcode_before_lowering() {
+    let function = verified_bytecode(
+        vec![
+            opcode::PUSH_UNDEFINED,
+            opcode::EVAL,
+            0,
+            0,
+            0,
+            0,
+            opcode::RETURN,
+        ],
+        0,
+        0,
+    );
+    assert_eq!(
+        BaselineIr::translate(&function),
+        Err(CompileFailure::Tier1Rejected(FallbackReason::DirectEval))
     );
 }
 

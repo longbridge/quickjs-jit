@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "coverage_scope": "currently eligible Tier 1 families",
+  "dimensions": ["normal", "numeric-tag-edge", "exception-or-nonthrow", "ownership-gc", "coercion-order"],
+  "families": {
+    "immediates-control": ["normal", "exception-or-nonthrow"],
+    "locals-stack": ["normal", "ownership-gc"],
+    "numeric-conversion": ["normal", "numeric-tag-edge", "exception-or-nonthrow", "coercion-order"],
+    "property": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-order"],
+    "call": ["normal", "exception-or-nonthrow", "ownership-gc"],
+    "object-array": ["normal", "ownership-gc"]
+  }
+}
