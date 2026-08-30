@@ -207,7 +207,11 @@ pub fn compose_test262_program(
     harness: &str,
 ) -> String {
     if variant == Test262Variant::RawScript {
-        return case.body().to_owned();
+        // Test262 `raw` means the source text is evaluated verbatim.  The
+        // frontmatter is a JavaScript comment; stripping it would also strip
+        // license text, hashbang positioning, or any Annex B lexical sentinel
+        // which precedes it.
+        return case.source().to_owned();
     }
     let mut program = String::with_capacity(harness.len() + case.body().len() + 16);
     program.push_str(harness);
@@ -668,30 +672,49 @@ pub fn discover_test262(root: &Path) -> io::Result<Vec<PathBuf>> {
 /// `getPrototypeOf`, `instanceof`, or `toString`) can execute user Proxy traps.
 /// Suites needing object-graph comparison must make an explicit snapshot in
 /// the fixture while its intended effects can be recorded in the event log.
-pub fn canonical_observation_source(expression: &str) -> String {
-    format!(
-        r#"
-(() => {{
-  const primitive = value => {{
-    if (value === undefined) return {{type:'undefined'}};
-    if (typeof value === 'number') {{
-      if (Number.isNaN(value)) return {{type:'number', value:'NaN'}};
-      if (Object.is(value, -0)) return {{type:'number', value:'-0'}};
-      if (value === Infinity) return {{type:'number', value:'+Infinity'}};
-      if (value === -Infinity) return {{type:'number', value:'-Infinity'}};
-    }}
-    if (typeof value === 'bigint') return {{type:'bigint', value:String(value)}};
-    if (typeof value === 'symbol') return {{type:'symbol', global:Symbol.keyFor(value) ?? null, description:value.description ?? null}};
-    return {{type:typeof value, value}};
-  }};
+pub const fn canonical_observer_prelude() -> &'static str {
+    r#"
+(() => {
+  // Capture every observer before evaluating untrusted code.  In particular,
+  // the expression may poison any global or intrinsic property.
+  const $apply = Reflect.apply;
+  const $numberIsNaN = Number.isNaN;
+  const $objectIs = Object.is;
+  const $symbolKeyFor = Symbol.keyFor;
+  const $string = String;
+  const $jsonStringify = JSON.stringify;
+  const primitive = value => {
+    if (value === undefined) return {type:'undefined'};
+    if (typeof value === 'number') {
+      if ($apply($numberIsNaN, undefined, [value])) return {type:'number', value:'NaN'};
+      if ($apply($objectIs, undefined, [value, -0])) return {type:'number', value:'-0'};
+      if (value === Infinity) return {type:'number', value:'+Infinity'};
+      if (value === -Infinity) return {type:'number', value:'-Infinity'};
+    }
+    if (typeof value === 'bigint') return {type:'bigint', value:$apply($string, undefined, [value])};
+    if (typeof value === 'symbol') return {type:'symbol', global:$apply($symbolKeyFor, undefined, [value]) ?? null};
+    return {type:typeof value, value};
+  };
   const observe = value =>
     ((typeof value !== 'object' || value === null) && typeof value !== 'function')
-      ? primitive(value) : {{type:typeof value,opaque:true}};
-  try {{ return JSON.stringify({{ok:true, coverage:'primitive-only', value:observe(({expression}))}}); }}
-  catch (error) {{ return JSON.stringify({{ok:false, coverage:'primitive-only', exception:observe(error)}}); }}
-}})()
+      ? primitive(value) : {type:typeof value,opaque:true};
+  const observer = thunk => {
+    try { return $apply($jsonStringify, undefined, [{ok:true, coverage:'primitive-only', value:observe(thunk())}]); }
+    catch (error) { return $apply($jsonStringify, undefined, [{ok:false, coverage:'primitive-only', exception:observe(error)}]); }
+  };
+  Object.defineProperty(globalThis, '__rquickjsTrustedObserve', {value:observer,writable:false,configurable:false,enumerable:false});
+})()
 "#
-    )
+}
+
+/// Calls the trusted observer. The caller must evaluate
+/// [`canonical_observer_prelude`] before any fixture, harness, or test source.
+pub fn canonical_observation_source(expression: &str) -> String {
+    canonical_observation_call_source(expression)
+}
+
+pub fn canonical_observation_call_source(expression: &str) -> String {
+    format!("__rquickjsTrustedObserve(()=>({expression}))")
 }
 
 /// Observes a fixture-declared, Proxy-free plain data graph.
@@ -700,28 +723,36 @@ pub fn canonical_observation_source(expression: &str) -> String {
 /// objects/arrays and primitives. This explicit capability is intentionally
 /// separate from [`canonical_observation_source`], which is safe for arbitrary
 /// JavaScript values but treats objects as opaque.
-pub fn canonical_plain_data_observation_source(expression: &str) -> String {
+pub fn canonical_plain_data_observer_prelude() -> String {
     format!(
-        r#"(() => {{
+        r#"{}(() => {{
+ const $apply=Reflect.apply,$ownKeys=Reflect.ownKeys,$getDescriptors=Object.getOwnPropertyDescriptors,$arrayIsArray=Array.isArray,$numberIsNaN=Number.isNaN,$objectIs=Object.is,$symbolKeyFor=Symbol.keyFor,$string=String,$jsonStringify=JSON.stringify,$JSON=JSON;
  const seen=new Map(); let nextId=1;
  const primitive=value=>{{
   if(value===undefined)return{{type:'undefined'}};
-  if(typeof value==='number'){{if(Number.isNaN(value))return{{type:'number',value:'NaN'}};if(Object.is(value,-0))return{{type:'number',value:'-0'}};}}
-  if(typeof value==='bigint')return{{type:'bigint',value:String(value)}};
-  if(typeof value==='symbol')return{{type:'symbol',global:Symbol.keyFor(value)??null,description:value.description??null}};
+  if(typeof value==='number'){{if($apply($numberIsNaN,undefined,[value]))return{{type:'number',value:'NaN'}};if($apply($objectIs,undefined,[value,-0]))return{{type:'number',value:'-0'}};}}
+  if(typeof value==='bigint')return{{type:'bigint',value:$apply($string,undefined,[value])}};
+  if(typeof value==='symbol')return{{type:'symbol',global:$apply($symbolKeyFor,undefined,[value])??null}};
   return{{type:typeof value,value}};
  }};
  const observe=value=>{{
   if((typeof value!=='object'||value===null)&&typeof value!=='function')return primitive(value);
   if(seen.has(value))return{{ref:seen.get(value)}};
   const id=nextId++;seen.set(value,id);
-  const descriptors=Object.getOwnPropertyDescriptors(value);
-  const properties=Reflect.ownKeys(descriptors).map(key=>{{const d=descriptors[key];return{{key:observe(key),enumerable:d.enumerable,configurable:d.configurable,writable:'writable'in d?d.writable:null,value:'value'in d?observe(d.value):null,get:null,set:null}}}});
-  return{{id,tag:Array.isArray(value)?'[object Array]':'[object Object]',prototype:Array.isArray(value)?'Array':'Object',properties}};
+  const descriptors=$apply($getDescriptors,undefined,[value]);
+  const properties=$apply($ownKeys,undefined,[descriptors]).map(key=>{{const d=descriptors[key];return{{key:observe(key),enumerable:d.enumerable,configurable:d.configurable,writable:'writable'in d?d.writable:null,value:'value'in d?observe(d.value):null,get:null,set:null}}}});
+  const array=$apply($arrayIsArray,undefined,[value]);
+  return{{id,tag:array?'[object Array]':'[object Object]',prototype:array?'Array':'Object',properties}};
  }};
- return JSON.stringify({{ok:true,value:observe(({expression}))}});
-}})()"#
+ const observer=thunk=>$apply($jsonStringify,undefined,[{{ok:true,value:observe(thunk())}}]);
+ Object.defineProperty(globalThis,'__rquickjsTrustedPlainObserve',{{value:observer,writable:false,configurable:false,enumerable:false}});
+}})()"#,
+        ""
     )
+}
+
+pub fn canonical_plain_data_observation_source(expression: &str) -> String {
+    format!("__rquickjsTrustedPlainObserve(()=>({expression}))")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

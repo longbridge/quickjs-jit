@@ -56,3 +56,34 @@ Implementation commit: `728e95f`
 
 The scheduled cross-platform, C-reference, WASM, and full 256-shard corpus jobs
 are CI evidence requirements; they were not represented as local execution.
+# Final semantic hardening follow-up
+
+- `RawScript` now evaluates the exact pinned Test262 source bytes. A pinned
+  Annex B HTML-close-comment case proves that text before the frontmatter is
+  retained and that the intended `EvalError` is actually executed.
+- Primitive and explicit plain-graph observers are installed before any
+  fixture, harness, definition, or invocation. Their intrinsic operations are
+  captured once in non-replaceable closures; later changes to global helpers do
+  not affect observations. A pre-existing non-configurable fake handle fails
+  installation rather than silently accepting invalid evidence.
+- Seeded Tier 1 and Tier 2 comparisons warm and replay the generated eligible
+  function itself. They require installation, native entries, Tier 2 entries
+  where requested, exact interpreter results, and zero fallback/retry counts.
+- The differential randomized target hashes all input bytes into a closed
+  eligible grammar, warms and replays that same program, and rejects inputs
+  outside the grammar. Five versioned, opcode-fingerprinted semantic seeds cover
+  arithmetic, increment, branch, verifier, and lowering shapes.
+- CI pins `cargo-fuzz` 0.13.2, executes bounded runs for all six targets, fails
+  through pipelines with `pipefail`, and uploads logs and reproducers on every
+  outcome.
+
+Verification on Linux x86_64:
+
+- release `correctness_runner`: 21/21 passed
+- release `differential`: 9/9 passed
+- release `regressions`: 1/1 passed
+- all six randomized binaries compile
+- all six local bounded deterministic runs completed without target failure
+- Task 13 files pass rustfmt and `git diff --check`
+- whole-workspace fmt/clippy was temporarily affected by concurrent, uncommitted
+  Task 14 benchmark/profitability files; no Task 14 file is included here

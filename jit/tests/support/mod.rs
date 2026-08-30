@@ -339,22 +339,16 @@ fn eval_global_definition(context: &Context, definition: &str) -> Result<(), Str
 }
 
 #[cfg(feature = "compiler")]
+fn install_canonical_observer(context: &Context) {
+    context.with(|ctx| {
+        ctx.eval::<(), _>(crate::correctness::canonical_observer_prelude())
+            .expect("install trusted canonical observer before untrusted source")
+    });
+}
+
+#[cfg(feature = "compiler")]
 fn eval_canonical(context: &Context, expression: &str) -> Result<String, String> {
-    let source = format!(
-        r#"
-        JSON.stringify((() => {{
-            try {{
-                return {{ ok: true, value: ({expression}) }};
-            }} catch (error) {{
-                return {{
-                    ok: false,
-                    name: String(error && error.name),
-                    message: String(error && error.message)
-                }};
-            }}
-        }})())
-        "#
-    );
+    let source = crate::correctness::canonical_observation_call_source(expression);
     context.with(|ctx| {
         ctx.eval::<String, _>(source)
             .map_err(|error| format!("{error:?}"))
@@ -470,6 +464,7 @@ pub fn assert_tier1_rejected(
 ) {
     let runtime = Runtime::new().expect("rejected fixture runtime");
     let context = Context::full(&runtime).expect("rejected fixture context");
+    install_canonical_observer(&context);
     eval_global_definition(&context, definition).expect("rejected fixture definition");
     let expected_value = eval_canonical(&context, expression);
     let snapshot = context.with(|ctx| {
@@ -516,12 +511,14 @@ impl DifferentialRun {
     pub fn assert_same(self) {
         let interpreter_runtime = Runtime::new().expect("interpreter runtime");
         let interpreter_context = Context::full(&interpreter_runtime).expect("interpreter context");
+        install_canonical_observer(&interpreter_context);
         eval_global_definition(&interpreter_context, &self.definition)
             .unwrap_or_else(|error| panic!("interpreter definition failed: {error}"));
         let expected = eval_canonical(&interpreter_context, &self.expression);
 
         let runtime = Runtime::new().expect("compiled runtime");
         let context = Context::full(&runtime).expect("compiled context");
+        install_canonical_observer(&context);
         let installation =
             compile_named_function(&runtime, &context, &self.definition, "f", self.stress_gc);
         let rt =

@@ -11,7 +11,7 @@ use rquickjs_jit::bytecode::{
 };
 use rquickjs_jit::test_support::{assert_tier1_rejected, differential};
 use rquickjs_jit::{
-    correctness::{canonical_observation_source, StructuredProgram},
+    correctness::{canonical_observation_source, canonical_observer_prelude},
     JitRuntime,
 };
 use serde::Deserialize;
@@ -242,6 +242,17 @@ fn coercion_exception_and_gc_visible_ownership_match() {
 }
 
 #[test]
+fn trusted_observer_is_installed_before_untrusted_definition_poisoning() {
+    differential(
+        "Number.isNaN=()=>{throw 1};Object.is=()=>{throw 2};Symbol.keyFor=()=>{throw 3};String=()=>{throw 4};JSON.stringify=()=>{throw 5};function f(a,b){return a+b}",
+        "f(NaN,0)",
+    )
+    .force_baseline()
+    .expect_executed_opcode("add")
+    .assert_same();
+}
+
+#[test]
 fn every_advertised_helper_family_has_a_real_native_execution_case() {
     let cases = [
         (
@@ -287,16 +298,18 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
 #[test]
 fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
     for seed in 0..64 {
-        let program = StructuredProgram::generate(seed, 32);
-        let definition = "function f(g,x){return g(x)+0}";
-        let invocation = format!("f(()=>{},0)", program.source());
+        let (definition, invocation) = seeded_eligible_function(seed);
         differential(definition, &invocation)
             .force_baseline()
-            .expect_executed_opcode("call1")
-            .expect_helper(HelperId::Call)
+            .expect_executed_opcode(match seed % 3 {
+                0 => "add",
+                1 => "post_inc",
+                _ => "if_false8",
+            })
             .assert_same();
         let interpreter = Runtime::new().unwrap();
         let expected = Context::full(&interpreter).unwrap().with(|ctx| {
+            ctx.eval::<(), _>(canonical_observer_prelude()).unwrap();
             ctx.eval::<(), _>(definition).unwrap();
             ctx.eval::<String, _>(canonical_observation_source(&invocation))
                 .unwrap()
@@ -312,6 +325,7 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
             .build()
             .unwrap();
         let automatic_context = Context::full(&automatic).unwrap();
+        automatic_context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         let warm = format!("for(let i=0;i<256;i++){{{invocation};}}");
         for _ in 0..128 {
@@ -335,10 +349,16 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
             "seed {seed} automatic fallback: {metrics:?}"
         );
         assert_eq!(
-            actual,
-            expected,
-            "seed {seed}; minimize with fuel {}",
-            program.fuel()
+            metrics.native_retries, 0,
+            "seed {seed} automatic retry: {metrics:?}"
+        );
+        assert!(
+            metrics.installed > 0,
+            "seed {seed} was not installed: {metrics:?}"
+        );
+        assert_eq!(
+            actual, expected,
+            "seed {seed}; definition={definition}; invocation={invocation}"
         );
     }
 }
@@ -346,11 +366,10 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
 #[test]
 fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
     for seed in 0..16 {
-        let program = StructuredProgram::generate(seed, 32);
-        let definition = "function f(){return 2}";
-        let invocation = format!("(()=>{{f();return {};}})()", program.source());
+        let (definition, invocation) = seeded_eligible_function(seed);
         let interpreter = Runtime::new().unwrap();
         let expected = Context::full(&interpreter).unwrap().with(|ctx| {
+            ctx.eval::<(), _>(canonical_observer_prelude()).unwrap();
             ctx.eval::<(), _>(definition).unwrap();
             ctx.eval::<String, _>(canonical_observation_source(&invocation))
                 .unwrap()
@@ -363,10 +382,11 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
             .unwrap();
         let optimized = JitRuntime::builder().config(config).build().unwrap();
         let context = Context::full(&optimized).unwrap();
+        context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
-        let warm = "for(let i=0;i<256;i++){f();}";
+        let warm = format!("for(let i=0;i<256;i++){{{invocation};}}");
         for _ in 0..128 {
-            context.with(|ctx| ctx.eval::<(), _>(warm).unwrap());
+            context.with(|ctx| ctx.eval::<(), _>(warm.as_str()).unwrap());
             optimized.jit().poll();
             if optimized.metrics().tier2_entries > 0 {
                 break;
@@ -385,6 +405,25 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
             metrics.native_fallbacks, 0,
             "seed {seed} optimized fallback: {metrics:?}"
         );
+        assert_eq!(
+            metrics.native_retries, 0,
+            "seed {seed} optimized retry: {metrics:?}"
+        );
+        assert!(
+            metrics.installed > 0 && metrics.native_entries > 0,
+            "seed {seed} lacks native evidence: {metrics:?}"
+        );
         assert_eq!(actual, expected, "optimized seed {seed}");
     }
+}
+
+fn seeded_eligible_function(seed: u64) -> (&'static str, String) {
+    let a = (seed as i16 % 97) - 48;
+    let b = ((seed.rotate_left(17) as i16) % 31) - 15;
+    let definition = match seed % 3 {
+        0 => "function f(a,b){return a+b}",
+        1 => "function f(a,b){let x=a+b;x++;return x}",
+        _ => "function f(a,b){let x=a+b;if(x)return x;return b}",
+    };
+    (definition, format!("f({a},{b})"))
 }

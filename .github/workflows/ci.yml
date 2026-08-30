@@ -152,8 +152,27 @@ jobs:
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test opcodes --test differential -- --test-threads=1
       - name: Run bounded Test262 in interpreter, automatic, and strict eligible tiers
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test correctness_runner --test regressions --test test262 -- --test-threads=1
-      - name: Compile all six byte-driven fuzz targets
-        run: cargo check --manifest-path jit/fuzz/Cargo.toml --bins
+      - name: Install bounded fuzz runner
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Run all six byte-driven fuzz targets
+        working-directory: jit/fuzz
+        run: |
+          set -o pipefail
+          mkdir -p ../../target/jit-fuzz-artifacts ../../target/jit-fuzz-logs
+          for target in snapshot verifier frame_state lowering relocations; do
+            cargo +nightly fuzz run "$target" "corpus/$target" -- -runs=128 -artifact_prefix="../../target/jit-fuzz-artifacts/$target-" -print_final_stats=1 2>&1 | tee "../../target/jit-fuzz-logs/$target.log"
+          done
+          cargo +nightly fuzz run differential corpus/differential -- -runs=16 -artifact_prefix=../../target/jit-fuzz-artifacts/differential- -print_final_stats=1 2>&1 | tee ../../target/jit-fuzz-logs/differential.log
+      - name: Upload fuzz logs and reproducers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-fuzz-${{ github.run_id }}
+          path: |
+            target/jit-fuzz-logs
+            target/jit-fuzz-artifacts
 
   jit-platform-compiler:
     name: ${{ matrix.os }} / JIT compiler graph and native smoke
