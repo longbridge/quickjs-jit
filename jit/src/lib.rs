@@ -462,6 +462,7 @@ struct ProductionBackend {
     optimizing_hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
+    feedback: runtime::FeedbackTable,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
     native_exits: u64,
@@ -889,6 +890,7 @@ impl ProductionBackend {
             environment,
         );
         coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
+        let feedback_capacity = config.max_queue_len().max(32);
         Ok(Self {
             environment,
             coordinator,
@@ -899,6 +901,7 @@ impl ProductionBackend {
             optimizing_requested: std::collections::HashSet::new(),
             optimizing_hotness: std::collections::HashMap::new(),
             optimizing_snapshots: std::collections::HashMap::new(),
+            feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
             metrics,
             native_entries: 0,
             native_exits: 0,
@@ -944,9 +947,10 @@ impl ProductionBackend {
             .collect::<Vec<_>>();
         for key in ready_for_tier2 {
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
+                let feedback = self.feedback.snapshot(self.clock);
                 if self
                     .coordinator
-                    .queue(key, runtime::Tier::Optimizing, snapshot.clone())
+                    .queue_with_feedback(key, runtime::Tier::Optimizing, snapshot.clone(), feedback)
                     .is_err()
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
@@ -1045,6 +1049,47 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             return 0;
         }
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        let observed = match event.feedback_type {
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_INT32 => {
+                Some(runtime::ObservedType::Int32)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_FLOAT64 => {
+                Some(runtime::ObservedType::Float64)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_BOOL => {
+                Some(runtime::ObservedType::Bool)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_NULL => {
+                Some(runtime::ObservedType::Null)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_UNDEFINED => {
+                Some(runtime::ObservedType::Undefined)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_STRING => {
+                Some(runtime::ObservedType::String)
+            }
+            rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_OBJECT => {
+                Some(runtime::ObservedType::Object)
+            }
+            _ => None,
+        };
+        if event.feedback_slot != u32::MAX {
+            if let Some(observed) = observed {
+                self.feedback
+                    .observe_type(key, event.pc, runtime::FeedbackKind::Value, observed);
+            }
+        }
+        if event.callee.id != 0 {
+            self.feedback.observe_type(
+                key,
+                event.pc,
+                runtime::FeedbackKind::CallTarget,
+                runtime::ObservedType::Function(runtime::FunctionKey::new(
+                    event.callee.id,
+                    event.callee.generation,
+                )),
+            );
+        }
         if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Baseline),
             runtime::CompileState::Installed(_)

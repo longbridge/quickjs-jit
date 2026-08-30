@@ -2123,6 +2123,15 @@ const _: () = {
 pub const JSJitHotKind_JS_JIT_HOT_CALL: JSJitHotKind = 0;
 pub const JSJitHotKind_JS_JIT_HOT_LOOP: JSJitHotKind = 1;
 pub type JSJitHotKind = ::core::ffi::c_uint;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_NONE: JSJitFeedbackType = 0;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_INT32: JSJitFeedbackType = 1;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_FLOAT64: JSJitFeedbackType = 2;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_BOOL: JSJitFeedbackType = 3;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_NULL: JSJitFeedbackType = 4;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_UNDEFINED: JSJitFeedbackType = 5;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_STRING: JSJitFeedbackType = 6;
+pub const JSJitFeedbackType_JS_JIT_FEEDBACK_OBJECT: JSJitFeedbackType = 7;
+pub type JSJitFeedbackType = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSJitHotEvent {
@@ -2131,10 +2140,13 @@ pub struct JSJitHotEvent {
     pub function: JSJitFunctionId,
     pub pc: u32,
     pub count: u32,
+    pub feedback_type: u32,
+    pub feedback_slot: u32,
+    pub callee: JSJitFunctionId,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitHotEvent"][::core::mem::size_of::<JSJitHotEvent>() - 40usize];
+    ["Size of JSJitHotEvent"][::core::mem::size_of::<JSJitHotEvent>() - 72usize];
     ["Alignment of JSJitHotEvent"][::core::mem::align_of::<JSJitHotEvent>() - 8usize];
     ["Offset of field: JSJitHotEvent::struct_size"]
         [::core::mem::offset_of!(JSJitHotEvent, struct_size) - 0usize];
@@ -2144,6 +2156,12 @@ const _: () = {
     ["Offset of field: JSJitHotEvent::pc"][::core::mem::offset_of!(JSJitHotEvent, pc) - 32usize];
     ["Offset of field: JSJitHotEvent::count"]
         [::core::mem::offset_of!(JSJitHotEvent, count) - 36usize];
+    ["Offset of field: JSJitHotEvent::feedback_type"]
+        [::core::mem::offset_of!(JSJitHotEvent, feedback_type) - 40usize];
+    ["Offset of field: JSJitHotEvent::feedback_slot"]
+        [::core::mem::offset_of!(JSJitHotEvent, feedback_slot) - 44usize];
+    ["Offset of field: JSJitHotEvent::callee"]
+        [::core::mem::offset_of!(JSJitHotEvent, callee) - 48usize];
 };
 pub const JSJitOperandFormat_JS_JIT_FMT_none: JSJitOperandFormat = 0;
 pub const JSJitOperandFormat_JS_JIT_FMT_none_int: JSJitOperandFormat = 1;

@@ -73,6 +73,19 @@ fn compile_request_owns_an_immutable_feedback_snapshot() {
 }
 
 #[test]
+fn tier2_feedback_requires_exact_generation_stable_value_and_nonzero_epoch() {
+    let key = FunctionKey::new(41, 7);
+    let other_generation = FunctionKey::new(41, 8);
+    let mut table = FeedbackTable::new(8, 2);
+    table.observe_type(key, 0, FeedbackKind::Value, ObservedType::Int32);
+    assert!(!table.snapshot(0).has_stable_value_for(key));
+    assert!(!table.snapshot(1).has_stable_value_for(other_generation));
+    assert!(table.snapshot(1).has_stable_value_for(key));
+    table.observe_type(key, 0, FeedbackKind::Value, ObservedType::String);
+    assert!(!table.snapshot(2).has_stable_value_for(key));
+}
+
+#[test]
 fn narrow_optimizer_preserves_javascript_numeric_edges() {
     let mut compiler = OptimizedCompiler;
     let negative_zero = compiler

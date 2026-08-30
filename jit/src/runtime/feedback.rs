@@ -108,6 +108,18 @@ impl FeedbackSnapshot {
     pub fn entries(&self) -> &[FeedbackSnapshotEntry] {
         &self.entries
     }
+
+    /// Tier 2 may only consume feedback belonging to the exact function
+    /// generation and frozen at a nonzero runtime epoch.
+    pub fn has_stable_value_for(&self, function: FunctionKey) -> bool {
+        self.epoch != 0
+            && self.entries.iter().any(|entry| {
+                entry.function == function
+                    && entry.kind == FeedbackKind::Value
+                    && entry.state == FeedbackState::Monomorphic
+                    && entry.observations.len() == 1
+            })
+    }
 }
 
 #[derive(Debug)]

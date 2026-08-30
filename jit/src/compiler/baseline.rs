@@ -266,20 +266,6 @@ impl BaselineCompiler {
         self.compile_with_policy_start(function, policy, control, None, GuardExit::Retry)
     }
 
-    pub(crate) fn compile_optimizing(
-        &self,
-        function: &VerifiedFunction,
-        control: Option<&CompileControl>,
-    ) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy_start(
-            function,
-            CompilePolicy::AdvertisedOnly,
-            control,
-            None,
-            GuardExit::Deopt,
-        )
-    }
-
     fn compile_with_policy_start(
         &self,
         function: &VerifiedFunction,
@@ -589,6 +575,28 @@ impl Compiler for BaselineCompiler {
         control.check()?;
         Ok(artifact_from_relocatable(request, code))
     }
+}
+
+/// Emits the shared QuickJS frame ABI after Tier 2 has independently built
+/// and validated its optimization/guard plan. This is deliberately a free
+/// lowering primitive: the optimizing compiler neither owns nor invokes a
+/// production `BaselineCompiler`.
+pub(crate) fn lower_tier2_machine(
+    isa: &OwnedTargetIsa,
+    function: &VerifiedFunction,
+    control: Option<&CompileControl>,
+) -> Result<RelocatableCode, CompileFailure> {
+    BaselineCompiler {
+        isa: isa.clone(),
+        host_publishable: isa_is_host_compatible(&**isa),
+    }
+    .compile_with_policy_start(
+        function,
+        CompilePolicy::AdvertisedOnly,
+        control,
+        None,
+        GuardExit::Deopt,
+    )
 }
 
 pub(crate) fn artifact_from_relocatable(

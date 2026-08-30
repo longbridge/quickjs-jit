@@ -227,14 +227,23 @@ fn fold(op: NumericBinaryOp, lhs: NumericConstant, rhs: NumericConstant) -> Nume
 /// subset and attaches exact guard/deopt metadata. Unsupported semantics reject
 /// the tier and leave Tier 1 installed.
 pub struct Tier2Compiler {
-    baseline: BaselineCompiler,
+    isa: cranelift_codegen::isa::OwnedTargetIsa,
     feedback_epoch: u64,
 }
 
 impl Tier2Compiler {
     pub fn host(feedback_epoch: u64) -> Self {
+        use cranelift_codegen::settings::{self, Configurable};
+        let mut settings = settings::builder();
+        settings
+            .set("opt_level", "speed")
+            .expect("Cranelift opt_level setting");
+        let isa = cranelift_native::builder()
+            .expect("host architecture is supported by Cranelift")
+            .finish(settings::Flags::new(settings))
+            .expect("host ISA settings are valid");
         Self {
-            baseline: BaselineCompiler::host(),
+            isa,
             feedback_epoch,
         }
     }
@@ -386,11 +395,14 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
+        if !request.feedback().has_stable_value_for(request.key()) {
+            return Err(CompileFailure::InvalidArtifact);
+        }
         let metadata = Self::plan(
             request.snapshot(),
             request.feedback_epoch().max(self.feedback_epoch),
         )?;
-        let code = self.baseline.compile_optimizing(request.snapshot(), None)?;
+        let code = super::baseline::lower_tier2_machine(&self.isa, request.snapshot(), None)?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
             .with_dependencies(vec![dependency])
@@ -406,6 +418,9 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
+        if !request.feedback().has_stable_value_for(request.key()) {
+            return Err(CompileFailure::InvalidArtifact);
+        }
         let metadata = Self::plan(
             request.snapshot(),
             request.feedback_epoch().max(self.feedback_epoch),
@@ -416,9 +431,8 @@ impl Compiler for Tier2Compiler {
                 .len()
                 .saturating_mul(core::mem::size_of::<DeoptMap>()),
         )?;
-        let code = self
-            .baseline
-            .compile_optimizing(request.snapshot(), Some(control))?;
+        let code =
+            super::baseline::lower_tier2_machine(&self.isa, request.snapshot(), Some(control))?;
         control.check()?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
