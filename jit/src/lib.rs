@@ -70,40 +70,12 @@ fn artifact_environment(
     runtime_id: u64,
     info: &abi::AbiInfo,
     config: &JitConfig,
+    compiler: &compiler::baseline::BaselineCompiler,
 ) -> runtime::ArtifactEnvironment {
     fn mix(hash: u64, value: u64) -> u64 {
         (hash ^ value).wrapping_mul(0x100000001b3)
     }
-    let os_abi = if cfg!(target_os = "linux") {
-        1_u64
-    } else if cfg!(target_os = "macos") {
-        2
-    } else {
-        3
-    };
-    let architecture = if cfg!(target_arch = "x86_64") {
-        1_u64
-    } else {
-        2
-    };
-    let target_isa = (os_abi << 32) | architecture;
-    let mut cpu_features = 0_u64;
-    #[cfg(target_arch = "x86_64")]
-    {
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse2"));
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse3")) << 1;
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("ssse3")) << 2;
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse4.1")) << 3;
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse4.2")) << 4;
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("avx")) << 5;
-        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("avx2")) << 6;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("neon"));
-        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("aes")) << 1;
-        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("crc")) << 2;
-    }
+    let target_identity = compiler.target_identity();
     let mut config_fingerprint = 0xcbf29ce484222325;
     for value in [
         u64::from(config.call_threshold()),
@@ -121,8 +93,8 @@ fn artifact_environment(
     }
     runtime::ArtifactEnvironment {
         runtime_id,
-        target_isa,
-        cpu_features,
+        target_isa: target_identity.triple_fingerprint(),
+        cpu_features: target_identity.codegen_fingerprint(),
         abi_fingerprint: mix(
             mix(info.build_fingerprint(), info.source_revision()),
             info.opcode_fingerprint(),
@@ -137,6 +109,10 @@ pub struct Jit {
     metrics: Arc<Mutex<JitMetrics>>,
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
+    #[cfg(feature = "test-support")]
+    test_environment: Option<runtime::ArtifactEnvironment>,
+    #[cfg(feature = "test-support")]
+    test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
 
 impl Jit {
@@ -185,6 +161,50 @@ impl Jit {
             config.clone(),
             Arc::clone(&metrics),
         )?;
+        #[cfg(all(
+            feature = "test-support",
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let test_environment = Some(backend.environment);
+        #[cfg(all(
+            feature = "test-support",
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let test_last_acquired_key = Arc::clone(&backend.test_last_acquired_key);
         #[cfg(not(all(
             feature = "compiler",
             any(
@@ -219,6 +239,104 @@ impl Jit {
             metrics,
             config,
             _guard: guard,
+            #[cfg(feature = "test-support")]
+            test_environment: {
+                #[cfg(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                ))]
+                {
+                    test_environment
+                }
+                #[cfg(not(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                )))]
+                {
+                    None
+                }
+            },
+            #[cfg(feature = "test-support")]
+            test_last_acquired_key: {
+                #[cfg(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                ))]
+                {
+                    test_last_acquired_key
+                }
+                #[cfg(not(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                )))]
+                {
+                    Arc::new(Mutex::new(None))
+                }
+            },
         })
     }
 
@@ -246,6 +364,21 @@ impl Jit {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.config.observe(&snapshot);
         }));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_artifact_environment(&self) -> runtime::ArtifactEnvironment {
+        self.test_environment.expect("production compiler backend")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_last_acquired_artifact_key(&self) -> Option<code_cache::ArtifactKey> {
+        *self
+            .test_last_acquired_key
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -317,6 +450,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
     )
 ))]
 struct ProductionBackend {
+    environment: runtime::ArtifactEnvironment,
     config: JitConfig,
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
@@ -326,6 +460,8 @@ struct ProductionBackend {
     native_exits: u64,
     native_fallbacks: u64,
     native_retries: u64,
+    #[cfg(feature = "test-support")]
+    test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
 
 #[cfg(all(
@@ -356,6 +492,7 @@ impl ProductionBackend {
         metrics: Arc<Mutex<JitMetrics>>,
     ) -> Result<Self, JitError> {
         let compiler = Arc::new(compiler::baseline::BaselineCompiler::host());
+        let environment = artifact_environment(runtime_id, info, &config, &compiler);
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
             compiler,
             config.workers(),
@@ -371,10 +508,11 @@ impl ProductionBackend {
             config.max_compile_attempts(),
             config.max_code_bytes(),
             config.max_metadata_bytes(),
-            artifact_environment(runtime_id, info, &config),
+            environment,
         );
         coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
         Ok(Self {
+            environment,
             coordinator,
             config,
             workers,
@@ -384,6 +522,8 @@ impl ProductionBackend {
             native_exits: 0,
             native_fallbacks: 0,
             native_retries: 0,
+            #[cfg(feature = "test-support")]
+            test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -494,6 +634,13 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let Some(published) = pin.artifact().published() else {
             return empty;
         };
+        #[cfg(feature = "test-support")]
+        {
+            *self
+                .test_last_acquired_key
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pin.artifact().key());
+        }
         let entry = published.as_ptr();
         let stack_map_count = u32::try_from(published.stack_maps().len()).unwrap_or(u32::MAX);
         let pin = Box::into_raw(Box::new(pin)).cast();
@@ -630,21 +777,38 @@ mod production_environment_tests {
         let first = Runtime::new().unwrap();
         let second = Runtime::new().unwrap();
         let info = abi::AbiInfo::linked().unwrap();
-        let base = artifact_environment(first.jit_runtime_id(), &info, &JitConfig::default());
-        let other_runtime =
-            artifact_environment(second.jit_runtime_id(), &info, &JitConfig::default());
+        let compiler = compiler::baseline::BaselineCompiler::host();
+        let base = artifact_environment(
+            first.jit_runtime_id(),
+            &info,
+            &JitConfig::default(),
+            &compiler,
+        );
+        let other_runtime = artifact_environment(
+            second.jit_runtime_id(),
+            &info,
+            &JitConfig::default(),
+            &compiler,
+        );
         let other_config = artifact_environment(
             first.jit_runtime_id(),
             &info,
             &JitConfig::builder().call_threshold(99).build().unwrap(),
+            &compiler,
         );
         assert_ne!(base.runtime_id, other_runtime.runtime_id);
         assert_ne!(base.runtime_id, 0);
         assert_ne!(base.target_isa, 0);
-        assert_ne!(base.target_isa >> 32, 0, "target ISA includes the OS ABI");
+        assert_eq!(
+            base.target_isa,
+            compiler.target_identity().triple_fingerprint()
+        );
+        assert_eq!(
+            base.cpu_features,
+            compiler.target_identity().codegen_fingerprint()
+        );
         assert_ne!(base.abi_fingerprint, 0);
         assert_ne!(base.config_fingerprint, other_config.config_fingerprint);
-        #[cfg(target_arch = "x86_64")]
-        assert_ne!(base.cpu_features & 1, 0, "x86-64 requires SSE2");
+        assert_ne!(base.cpu_features, 0);
     }
 }

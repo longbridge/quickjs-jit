@@ -125,6 +125,79 @@ pub struct BaselineCompiler {
     host_publishable: bool,
 }
 
+/// Stable, complete identity of the Cranelift target used to produce code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetIdentity {
+    triple: String,
+    shared_flags: Vec<(String, String)>,
+    isa_flags: Vec<(String, String)>,
+}
+
+impl TargetIdentity {
+    pub fn from_isa(isa: &dyn TargetIsa) -> Self {
+        let mut shared_flags = isa
+            .flags()
+            .iter()
+            .map(|value| (value.name.to_owned(), value.value_string()))
+            .collect::<Vec<_>>();
+        let mut isa_flags = isa
+            .isa_flags()
+            .into_iter()
+            .map(|value| (value.name.to_owned(), value.value_string()))
+            .collect::<Vec<_>>();
+        shared_flags.sort_unstable();
+        isa_flags.sort_unstable();
+        Self {
+            triple: isa.triple().to_string(),
+            shared_flags,
+            isa_flags,
+        }
+    }
+
+    pub fn triple(&self) -> &str {
+        &self.triple
+    }
+
+    pub fn shared_flags(&self) -> &[(String, String)] {
+        &self.shared_flags
+    }
+
+    pub fn isa_flags(&self) -> &[(String, String)] {
+        &self.isa_flags
+    }
+
+    fn hash_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> u64 {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for field in fields {
+            for byte in (field.len() as u64)
+                .to_le_bytes()
+                .into_iter()
+                .chain(field.bytes())
+            {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    }
+
+    pub fn triple_fingerprint(&self) -> u64 {
+        Self::hash_fields([self.triple.as_str()])
+    }
+
+    pub fn codegen_fingerprint(&self) -> u64 {
+        Self::hash_fields(
+            self.shared_flags
+                .iter()
+                .flat_map(|(name, value)| ["shared", name.as_str(), value.as_str()])
+                .chain(
+                    self.isa_flags
+                        .iter()
+                        .flat_map(|(name, value)| ["isa", name.as_str(), value.as_str()]),
+                ),
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CompilePolicy {
     AdvertisedOnly,
@@ -159,6 +232,10 @@ impl BaselineCompiler {
 
     pub fn isa(&self) -> &dyn TargetIsa {
         &*self.isa
+    }
+
+    pub fn target_identity(&self) -> TargetIdentity {
+        TargetIdentity::from_isa(self.isa())
     }
 
     /// Compiles verified bytecode without allocating executable memory.
@@ -373,6 +450,51 @@ impl BaselineCompiler {
             host_publishable: self.host_publishable,
             clif: clif_text,
         })
+    }
+}
+
+#[cfg(test)]
+mod target_identity_tests {
+    use super::*;
+
+    #[test]
+    fn target_identity_is_the_canonical_identity_of_the_compilers_actual_isa() {
+        let compiler = BaselineCompiler::host();
+        assert_eq!(
+            compiler.target_identity(),
+            TargetIdentity::from_isa(compiler.isa())
+        );
+        assert_eq!(
+            compiler.target_identity().triple(),
+            compiler.isa().triple().to_string()
+        );
+        assert!(!compiler.target_identity().shared_flags().is_empty());
+        assert!(!compiler.target_identity().isa_flags().is_empty());
+    }
+
+    #[test]
+    fn every_codegen_setting_value_participates_in_target_identity() {
+        let compiler = BaselineCompiler::host();
+        let identity = compiler.target_identity();
+        assert!(!identity.shared_flags().is_empty());
+        for index in 0..identity.shared_flags().len() {
+            let mut changed = identity.clone();
+            changed.shared_flags[index].1.push_str("-changed");
+            assert_ne!(
+                identity.codegen_fingerprint(),
+                changed.codegen_fingerprint(),
+                "setting {} was omitted from the identity",
+                identity.shared_flags()[index].0
+            );
+        }
+        for index in 0..identity.isa_flags().len() {
+            let mut changed = identity.clone();
+            changed.isa_flags[index].1.push_str("-changed");
+            assert_ne!(
+                identity.codegen_fingerprint(),
+                changed.codegen_fingerprint()
+            );
+        }
     }
 }
 

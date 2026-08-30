@@ -227,6 +227,103 @@ fn production_backend_receives_owned_snapshots_automatically() {
     )
 ))]
 #[test]
+fn two_production_runtimes_compile_install_execute_and_retire_independently() {
+    let config = rquickjs_jit::JitConfig::default();
+    let runtime_a = Runtime::new().unwrap();
+    let jit_a = rquickjs_jit::Jit::attach(&runtime_a, config.clone()).unwrap();
+    let context_a = Context::full(&runtime_a).unwrap();
+    let runtime_b = Runtime::new().unwrap();
+    let jit_b = rquickjs_jit::Jit::attach(&runtime_b, config).unwrap();
+    let context_b = Context::full(&runtime_b).unwrap();
+
+    let environment_a = jit_a.test_artifact_environment();
+    let environment_b = jit_b.test_artifact_environment();
+    assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
+
+    context_a.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.f = function f(a, b) { return a + b }; f(1, 2)")
+            .unwrap()
+    });
+    context_b.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.f = function f(a, b) { return b + a }; f(1, 2)")
+            .unwrap()
+    });
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while Instant::now() < deadline
+        && (jit_a.metrics().installed == 0 || jit_b.metrics().installed == 0)
+    {
+        jit_a.poll();
+        jit_b.poll();
+        std::thread::yield_now();
+    }
+    assert!(jit_a.metrics().installed > 0, "A: {:?}", jit_a.metrics());
+    assert!(jit_b.metrics().installed > 0, "B: {:?}", jit_b.metrics());
+
+    for value in 0..64 {
+        let a: i32 = context_a
+            .with(|ctx| ctx.eval(format!("f({value}, 1)")))
+            .unwrap();
+        let b: i32 = context_b
+            .with(|ctx| ctx.eval(format!("f({value}, 1)")))
+            .unwrap();
+        assert_eq!(a, value + 1);
+        assert_eq!(b, value + 1);
+    }
+    let a_metrics = jit_a.metrics();
+    let b_metrics = jit_b.metrics();
+    assert!(a_metrics.code_bytes > 0 && b_metrics.code_bytes > 0);
+    assert!(a_metrics.native_entries > 0 && b_metrics.native_entries > 0);
+    assert_eq!(a_metrics.native_entries, a_metrics.native_exits);
+    assert_eq!(b_metrics.native_entries, b_metrics.native_exits);
+    let ordered_a: String = context_a
+        .with(|ctx| ctx.eval("f('left', 'right')"))
+        .unwrap();
+    let ordered_b: String = context_b
+        .with(|ctx| ctx.eval("f('left', 'right')"))
+        .unwrap();
+    assert_eq!(ordered_a, "leftright");
+    assert_eq!(ordered_b, "rightleft");
+    let key_a = jit_a.test_last_acquired_artifact_key().unwrap();
+    let key_b = jit_b.test_last_acquired_artifact_key().unwrap();
+    assert_eq!(key_a.runtime_id, environment_a.runtime_id);
+    assert_eq!(key_b.runtime_id, environment_b.runtime_id);
+    assert_ne!(key_a, key_b);
+
+    drop(context_a);
+    drop(jit_a);
+    drop(runtime_a);
+    for value in 64..128 {
+        let b: i32 = context_b
+            .with(|ctx| ctx.eval(format!("f({value}, 1)")))
+            .unwrap();
+        assert_eq!(b, value + 1);
+    }
+    let surviving = jit_b.metrics();
+    assert!(surviving.native_entries > b_metrics.native_entries);
+    assert_eq!(surviving.native_entries, surviving.native_exits);
+}
+
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[test]
 fn pending_job_poll_installs_without_an_additional_eligible_function_call() {
     let runtime = Runtime::new().unwrap();
     let jit = rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap();
