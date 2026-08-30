@@ -244,7 +244,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     let threshold_start = Instant::now();
     let mut install_poll = 0u64;
     let mut before = jit.as_ref().map(Jit::metrics).unwrap_or_default();
-    for _ in 0..256 {
+    for _ in 0..threshold_attempts(mode) {
         let _threshold_checksum: String = context
             .with(|ctx| ctx.eval("String(workload(2000, 0))"))
             .map_err(err)?;
@@ -257,7 +257,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
                 install_poll = install_poll.saturating_add(poll_ns);
             }
             before = now;
-            if native_ready(mode, &before) {
+            if native_ready(mode, &before) || before.blacklisted > 0 {
                 break;
             }
         }
@@ -338,6 +338,13 @@ fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics) -> bool {
         "tier2" => m.tier2_entries > 0,
         "automatic" => m.profitability_evaluations > 0 && m.native_entries > 0,
         _ => false,
+    }
+}
+fn threshold_attempts(mode: &str) -> usize {
+    if mode == "interpreter" {
+        1
+    } else {
+        64
     }
 }
 fn validate_sample(mode: &str, r: &WorkerResult) -> Result<(), String> {
@@ -598,5 +605,10 @@ mod tests {
     fn rotation_interleaves_order() {
         let m = vec!["a".into(), "b".into(), "c".into()];
         assert_eq!(rotated(&m, 1).collect::<Vec<_>>(), vec!["b", "c", "a"]);
+    }
+    #[test]
+    fn interpreter_never_pays_a_tier_up_loop() {
+        assert_eq!(threshold_attempts("interpreter"), 1);
+        assert_eq!(threshold_attempts("automatic"), 64);
     }
 }

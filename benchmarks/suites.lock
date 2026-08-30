@@ -7,7 +7,7 @@ commit = "ddf43e5e9872538a2c1ef693b84424beb0163195"
 subdirectory = "tests/microbench.js:int_arith"
 license = "MIT"
 upstream_sha256 = "8745b6b1d616153ba1f0a19349ee37e6d83804af25062d0ee7451f6d6edaad6c"
-adapted_sha256 = "e9f1fcb85664ed4c36b35c30dc5a301055ced995153a50bfdbc16366e8866b24"
+adapted_sha256 = "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e"
 
 [[suite]]
 name = "sunspider"

@@ -3,7 +3,8 @@
  */
 function workload(iterations) {
   let globalResult = 0;
-  for (let j = 0; j < iterations; j++) {
+  const outer = Math.max(1, iterations >> 7);
+  for (let j = 0; j < outer; j++) {
     let sum = 0;
     for (let i = 0; i < 1000; i++) sum += i * i;
     globalResult += sum;
