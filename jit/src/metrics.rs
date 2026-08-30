@@ -22,6 +22,10 @@ pub struct JitMetrics {
     pub pending_snapshot_bytes: usize,
     pub active_ir_bytes: usize,
     pub evicted: u64,
+    pub native_entries: u64,
+    pub native_exits: u64,
+    pub native_fallbacks: u64,
+    pub native_retries: u64,
 }
 
 impl JitMetrics {
@@ -46,6 +50,10 @@ impl JitMetrics {
             pending_snapshot_bytes: 0,
             active_ir_bytes: 0,
             evicted: 0,
+            native_entries: 0,
+            native_exits: 0,
+            native_fallbacks: 0,
+            native_retries: 0,
         }
     }
 

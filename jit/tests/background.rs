@@ -154,7 +154,26 @@ fn thousand_hot_reload_completions_stay_generation_isolated() {
     assert_eq!(coordinator.metrics().retired, 1_000);
 }
 
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 #[test]
 fn production_backend_receives_owned_snapshots_automatically() {
     let runtime = Runtime::new().unwrap();
@@ -180,9 +199,106 @@ fn production_backend_receives_owned_snapshots_automatically() {
         let value: i32 = ctx.eval("add(20, 22)").unwrap();
         assert_eq!(value, 42);
     });
+    let metrics = jit.metrics();
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert_eq!(metrics.native_entries, metrics.native_exits);
+    assert_eq!(metrics.native_fallbacks, 0);
+    assert_eq!(metrics.native_retries, 0);
 }
 
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[test]
+fn pending_job_poll_installs_without_an_additional_eligible_function_call() {
+    let runtime = Runtime::new().unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "globalThis.f = function f(a, b) { return a + b; };\n\
+             f(1, 2); Promise.resolve().then(() => 7);",
+        )
+        .unwrap();
+    });
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while Instant::now() < deadline && jit.metrics().installed == 0 {
+        let _ = runtime.execute_pending_job();
+        std::thread::yield_now();
+    }
+    assert!(jit.metrics().installed > 0, "{:?}", jit.metrics());
+}
+
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[test]
+fn generator_resume_keeps_jit_stack_capacity_initialized() {
+    let runtime = Runtime::new().unwrap();
+    let _jit = rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let value: i32 = ctx
+            .eval("function* g(){ yield 20; return 22 } const i=g(); i.next().value+i.next().value")
+            .unwrap();
+        assert_eq!(value, 42);
+    });
+}
+
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 #[test]
 fn snapshot_quota_falls_back_without_disabling_runtime() {
     let runtime = Runtime::new().unwrap();

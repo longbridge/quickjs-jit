@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 3;
+pub const ABI_MINOR: u16 = 4;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -132,6 +132,18 @@ impl AbiInfo {
 
     pub const fn little_endian(&self) -> bool {
         self.raw.little_endian != 0
+    }
+
+    pub(crate) const fn source_revision(&self) -> u64 {
+        self.raw.source_revision
+    }
+
+    pub(crate) const fn opcode_fingerprint(&self) -> u64 {
+        self.raw.opcode_fingerprint
+    }
+
+    pub(crate) const fn build_fingerprint(&self) -> u64 {
+        self.raw.build_fingerprint
     }
 
     pub(crate) fn query_linked() -> Result<Self, AbiError> {
@@ -542,6 +554,8 @@ fn backend_vtable_layout_fingerprint() -> u64 {
         mem::offset_of!(qjs::JSJitBackendVTable, runtime_detach),
         mem::offset_of!(qjs::JSJitBackendVTable, function_retire),
         mem::offset_of!(qjs::JSJitBackendVTable, memory_used),
+        mem::offset_of!(qjs::JSJitBackendVTable, native_enter),
+        mem::offset_of!(qjs::JSJitBackendVTable, native_exit),
     ] {
         hash = layout_field(hash, offset, mem::size_of::<usize>());
     }

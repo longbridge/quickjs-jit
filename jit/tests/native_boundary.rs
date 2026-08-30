@@ -257,6 +257,8 @@ unsafe fn attempt_backend_change(
                 runtime_detach: None,
                 function_retire: None,
                 memory_used: None,
+                native_enter: None,
+                native_exit: None,
             };
             unsafe { qjs::JS_SetJitBackend(rt, &replacement, std::ptr::null_mut()) }
         }

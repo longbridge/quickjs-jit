@@ -77,6 +77,13 @@ impl Runtime {
         super::RuntimeJitGuard::attach(self, backend)
     }
 
+    /// Returns the engine-assigned identity used by JIT artifacts.
+    #[cfg(feature = "jit-abi")]
+    #[doc(hidden)]
+    pub fn jit_runtime_id(&self) -> u64 {
+        self.inner.lock().jit_runtime_id()
+    }
+
     /// Set a closure which is called when a promise is created, resolved, or chained.
     #[inline]
     pub fn set_promise_hook(&self, tracker: Option<PromiseHook>) {

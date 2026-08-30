@@ -46,10 +46,84 @@ const NATIVE_EXECUTION_SUPPORTED: bool = cfg!(any(
     ),
 ));
 
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+fn artifact_environment(
+    runtime_id: u64,
+    info: &abi::AbiInfo,
+    config: &JitConfig,
+) -> runtime::ArtifactEnvironment {
+    fn mix(hash: u64, value: u64) -> u64 {
+        (hash ^ value).wrapping_mul(0x100000001b3)
+    }
+    let target_isa = if cfg!(target_arch = "x86_64") { 1 } else { 2 };
+    let mut cpu_features = 0_u64;
+    #[cfg(target_arch = "x86_64")]
+    {
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse2"));
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse3")) << 1;
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("ssse3")) << 2;
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse4.1")) << 3;
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("sse4.2")) << 4;
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("avx")) << 5;
+        cpu_features |= u64::from(std::arch::is_x86_feature_detected!("avx2")) << 6;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("neon"));
+        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("aes")) << 1;
+        cpu_features |= u64::from(std::arch::is_aarch64_feature_detected!("crc")) << 2;
+    }
+    let mut config_fingerprint = 0xcbf29ce484222325;
+    for value in [
+        u64::from(config.call_threshold()),
+        u64::from(config.loop_threshold()),
+        config.max_code_bytes() as u64,
+        config.max_metadata_bytes() as u64,
+        config.max_snapshot_bytes() as u64,
+        config.max_ir_bytes() as u64,
+        config.compile_timeout_ms(),
+        config.max_queue_len() as u64,
+        config.workers() as u64,
+        u64::from(config.max_compile_attempts()),
+    ] {
+        config_fingerprint = mix(config_fingerprint, value);
+    }
+    runtime::ArtifactEnvironment {
+        runtime_id,
+        target_isa,
+        cpu_features,
+        abi_fingerprint: mix(
+            mix(info.build_fingerprint(), info.source_revision()),
+            info.opcode_fingerprint(),
+        ),
+        config_fingerprint,
+    }
+}
+
 /// Owns the guard that keeps a JIT backend attached to a runtime.
 #[derive(Debug)]
 pub struct Jit {
     metrics: Arc<Mutex<JitMetrics>>,
+    config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
 }
 
@@ -73,10 +147,52 @@ impl Jit {
         }
 
         let metrics = Arc::new(Mutex::new(JitMetrics::disabled()));
-        config.observe(&metrics.lock().unwrap_or_else(|p| p.into_inner()));
-        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-        let backend = ProductionBackend::new(config.clone(), Arc::clone(&metrics))?;
-        #[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
+        #[cfg(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let backend = ProductionBackend::new(
+            runtime.jit_runtime_id(),
+            &info,
+            config.clone(),
+            Arc::clone(&metrics),
+        )?;
+        #[cfg(not(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        )))]
         let backend = NoopBackend {
             _config: config.clone(),
         };
@@ -89,6 +205,7 @@ impl Jit {
         };
         Ok(Self {
             metrics,
+            config,
             _guard: guard,
         })
     }
@@ -113,30 +230,119 @@ impl Jit {
     /// Performs bounded installation and reclamation work on the runtime thread.
     pub fn poll(&self) {
         self._guard.poll();
+        let snapshot = self.metrics();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.config.observe(&snapshot);
+        }));
     }
 }
 
-#[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
+#[cfg(not(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+)))]
 #[derive(Debug)]
 struct NoopBackend {
     _config: JitConfig,
 }
 
-#[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
+#[cfg(not(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+)))]
 unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 struct ProductionBackend {
     config: JitConfig,
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
     requested: std::collections::HashSet<runtime::FunctionKey>,
     metrics: Arc<Mutex<JitMetrics>>,
+    native_entries: u64,
+    native_exits: u64,
+    native_fallbacks: u64,
+    native_retries: u64,
 }
 
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 impl ProductionBackend {
-    fn new(config: JitConfig, metrics: Arc<Mutex<JitMetrics>>) -> Result<Self, JitError> {
+    fn new(
+        runtime_id: u64,
+        info: &abi::AbiInfo,
+        config: JitConfig,
+        metrics: Arc<Mutex<JitMetrics>>,
+    ) -> Result<Self, JitError> {
         let compiler = Arc::new(compiler::baseline::BaselineCompiler::host());
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
             compiler,
@@ -153,7 +359,7 @@ impl ProductionBackend {
             config.max_compile_attempts(),
             config.max_code_bytes(),
             config.max_metadata_bytes(),
-            runtime::ArtifactEnvironment::default(),
+            artifact_environment(runtime_id, info, &config),
         );
         coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
         Ok(Self {
@@ -162,6 +368,10 @@ impl ProductionBackend {
             workers,
             requested: std::collections::HashSet::new(),
             metrics,
+            native_entries: 0,
+            native_exits: 0,
+            native_fallbacks: 0,
+            native_retries: 0,
         })
     }
 
@@ -174,13 +384,35 @@ impl ProductionBackend {
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
         let (jobs, snapshots, ir) = self.workers.live_usage();
         self.coordinator.set_worker_usage(jobs, snapshots, ir);
-        let snapshot = self.coordinator.metrics();
+        let mut snapshot = self.coordinator.metrics();
+        snapshot.native_entries = self.native_entries;
+        snapshot.native_exits = self.native_exits;
+        snapshot.native_fallbacks = self.native_fallbacks;
+        snapshot.native_retries = self.native_retries;
         *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
-        self.config.observe(&snapshot);
     }
 }
 
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn poll(&mut self) {
         self.maintenance();
@@ -273,6 +505,20 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
     }
 
+    fn native_enter(&mut self, _id: u64, _generation: u64, _pc: u32) {
+        self.native_entries = self.native_entries.saturating_add(1);
+    }
+
+    fn native_exit(&mut self, _id: u64, _generation: u64, _pc: u32, exit_kind: u32) {
+        self.native_exits = self.native_exits.saturating_add(1);
+        if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
+            self.native_retries = self.native_retries.saturating_add(1);
+        } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+            self.native_fallbacks = self.native_fallbacks.saturating_add(1);
+        }
+        self.maintenance();
+    }
+
     fn function_retire(&mut self, id: u64, generation: u64) {
         let key = runtime::FunctionKey::new(id, generation);
         self.requested.remove(&key);
@@ -340,5 +586,52 @@ impl Deref for JitRuntime {
 
     fn deref(&self) -> &Self::Target {
         &self.runtime
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+mod production_environment_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_environment_uses_runtime_abi_target_features_and_config() {
+        let first = Runtime::new().unwrap();
+        let second = Runtime::new().unwrap();
+        let info = abi::AbiInfo::linked().unwrap();
+        let base = artifact_environment(first.jit_runtime_id(), &info, &JitConfig::default());
+        let other_runtime =
+            artifact_environment(second.jit_runtime_id(), &info, &JitConfig::default());
+        let other_config = artifact_environment(
+            first.jit_runtime_id(),
+            &info,
+            &JitConfig::builder().call_threshold(99).build().unwrap(),
+        );
+        assert_ne!(base.runtime_id, other_runtime.runtime_id);
+        assert_ne!(base.runtime_id, 0);
+        assert_ne!(base.target_isa, 0);
+        assert_ne!(base.abi_fingerprint, 0);
+        assert_ne!(base.config_fingerprint, other_config.config_fingerprint);
+        #[cfg(target_arch = "x86_64")]
+        assert_ne!(base.cpu_features & 1, 0, "x86-64 requires SSE2");
     }
 }

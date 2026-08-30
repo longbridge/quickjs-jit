@@ -236,6 +236,10 @@ impl JitConfigBuilder {
         self
     }
 
+    /// Observes the latest metrics after each explicit [`crate::Jit::poll`].
+    ///
+    /// The callback runs after the QuickJS runtime lock is released. Panics are
+    /// contained and do not cross the runtime or C ABI boundary.
     pub fn metrics_observer<F>(mut self, callback: F) -> Self
     where
         F: Fn(&JitMetrics) + Send + Sync + 'static,

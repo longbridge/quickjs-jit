@@ -323,6 +323,11 @@ impl RawRuntime {
     }
 
     #[cfg(feature = "jit-abi")]
+    pub(super) fn jit_runtime_id(&self) -> u64 {
+        unsafe { qjs::JS_GetJitRuntimeId(self.rt.as_ptr()) }
+    }
+
+    #[cfg(feature = "jit-abi")]
     unsafe fn detach_jit_backend_for_runtime_drop(
         &mut self,
     ) -> StdResult<(), super::JitBackendAttachError> {
@@ -361,8 +366,12 @@ impl RawRuntime {
     }
 
     pub fn execute_pending_job(&mut self) -> StdResult<bool, *mut qjs::JSContext> {
+        #[cfg(feature = "jit-abi")]
+        self.poll_jit_backend();
         let mut ctx_ptr = mem::MaybeUninit::<*mut qjs::JSContext>::uninit();
         let result = unsafe { qjs::JS_ExecutePendingJob(self.rt.as_ptr(), ctx_ptr.as_mut_ptr()) };
+        #[cfg(feature = "jit-abi")]
+        self.poll_jit_backend();
         if result == 0 {
             // no jobs executed
             return Ok(false);

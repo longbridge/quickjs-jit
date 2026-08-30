@@ -302,7 +302,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 3);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 4);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 1);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
@@ -329,6 +329,14 @@ fn helper_abi_fields_are_append_only_tails() {
         std::mem::offset_of!(qjs::JSJitExecFrame, frame_cookie) + 8
     );
     assert_eq!(qjs::JS_JIT_HELPER_SCRATCH_SLOTS, 2);
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitBackendVTable, native_enter),
+        std::mem::offset_of!(qjs::JSJitBackendVTable, memory_used) + std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitBackendVTable, native_exit),
+        std::mem::offset_of!(qjs::JSJitBackendVTable, native_enter) + std::mem::size_of::<usize>()
+    );
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitABIInfo, helper_table_fingerprint),
         std::mem::offset_of!(qjs::JSJitABIInfo, runtime_api_layout_fingerprint) + 8
