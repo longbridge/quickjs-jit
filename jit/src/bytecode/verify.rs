@@ -134,6 +134,12 @@ impl VerifiedFunction {
     }
 
     pub fn tier1_eligibility(&self) -> Result<(), super::Tier1Rejection> {
+        if !self.snapshot.exception_map().is_empty() {
+            return Err(super::Tier1Rejection::new(
+                0,
+                super::FallbackReason::ExceptionRegion,
+            ));
+        }
         for instruction in &self.instructions {
             if let super::Tier1Policy::Reject(reason) =
                 super::tier1_policy(instruction.opcode().id())
@@ -349,13 +355,6 @@ pub(crate) fn verify(
             },
         ));
     }
-    if !snapshot.exception_map().is_empty() {
-        return Err(VerifyError::new(
-            0,
-            VerifyErrorKind::UnsupportedExceptionRegion,
-        ));
-    }
-
     let instructions = decode_bounded(snapshot.bytecode(), limits.max_instructions).map_err(
         |error| match error {
             BoundedDecodeError::Decode(error) => {

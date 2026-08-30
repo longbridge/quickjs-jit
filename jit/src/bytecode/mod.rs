@@ -15,8 +15,8 @@ pub use decode::{
     decode_raw, linked_opcode_table, DecodeError, Instruction, Opcode, OperandFormat,
 };
 pub use policy::{
-    tier1_policy, FallbackReason, HelperId, Tier1Policy, Tier1Rejection, GENERATED_OPCODE_COUNT,
-    GENERATED_OPCODE_FINGERPRINT,
+    audited_opcode_policy_table, tier1_policy, AuditedOpcodePolicy, FallbackReason, HelperId,
+    Tier1Policy, Tier1Rejection, GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
 };
 pub use stack::SlotKind;
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
@@ -288,6 +288,12 @@ impl CompileSnapshot {
 
     pub fn with_metadata(mut self, metadata: VerifierMetadata) -> Self {
         Arc::make_mut(&mut self.data).metadata = metadata;
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_exception_map(mut self, exception_map: Vec<u8>) -> Self {
+        Arc::make_mut(&mut self.data).exception_map = exception_map;
         self
     }
 

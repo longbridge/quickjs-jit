@@ -1,6 +1,6 @@
 use rquickjs_jit::bytecode::{
-    linked_opcode_table, tier1_policy, FallbackReason, HelperId, Tier1Policy,
-    GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
+    audited_opcode_policy_table, linked_opcode_table, tier1_policy, FallbackReason, HelperId,
+    Tier1Policy, GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
 };
 
 #[test]
@@ -25,6 +25,18 @@ fn every_authoritative_opcode_has_exactly_one_generated_policy() {
         ));
     }
     assert_eq!(tier1_policy(252), None);
+}
+
+#[test]
+fn audited_policy_is_a_closed_per_id_table_not_a_name_default() {
+    let linked: Vec<_> = linked_opcode_table().collect();
+    let audited = audited_opcode_policy_table();
+    assert_eq!(audited.len(), linked.len());
+    for (id, (opcode, audited_entry)) in linked.iter().zip(audited).enumerate() {
+        assert_eq!(audited_entry.id as usize, id);
+        assert_eq!(audited_entry.name, opcode.name());
+        assert_eq!(tier1_policy(opcode.id()), Some(audited_entry.policy));
+    }
 }
 
 #[test]

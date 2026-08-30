@@ -490,6 +490,17 @@ fn exception_opcodes_are_well_formed_but_tier1_rejected() {
 }
 
 #[test]
+fn structurally_valid_captured_exception_map_is_eligibility_not_verification() {
+    let snapshot = snapshot_from_parts(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
+        .with_exception_map(vec![0, 0, 0, 0]);
+    let verified = snapshot
+        .verify(VerifyLimits::default())
+        .expect("exception metadata is well-formed bytecode metadata");
+    let rejection = verified.tier1_eligibility().unwrap_err();
+    assert_eq!(rejection.reason(), FallbackReason::ExceptionRegion);
+}
+
+#[test]
 fn verifier_rejects_invalid_osr_and_deopt_metadata_before_ir() {
     let osr = verifier_metadata(vec![OsrPoint::new(1, vec![SlotKind::Tagged])], vec![]);
     let error = snapshot_from_parts(vec![opcode::NOP, opcode::RETURN_UNDEF], 0, 0, 0, 0)

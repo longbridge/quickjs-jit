@@ -1,6 +1,20 @@
 # Task 9 report: closed Tier 1 opcode policy and differential matrix
 
-Status: **DONE_WITH_CONCERNS**
+Status: **FIX ROUND 1**
+
+## Review fix round 1
+
+- Replaced the name classifier and wildcard rejection with a checked-in,
+  explicit 252-row `(id, name, policy)` audit. The build script now rejects a
+  missing, duplicate, reordered, or renamed row in addition to count and
+  fingerprint drift.
+- Reclassified the advertised set to match the helper calls actually emitted
+  by current baseline lowering (50 native, 75 helper, 127 categorized reject).
+- A non-empty exception map is no longer a verifier error. Structurally valid
+  bytecode verifies and receives stable `ExceptionRegion` eligibility fallback.
+- The forced-baseline test backend now counts entry in a trampoline around the
+  real published machine-code body, rather than counting acquisition, and
+  fails differential tests if the body returns `RETRY_INTERPRETER`.
 
 ## Result
 
@@ -9,7 +23,7 @@ Status: **DONE_WITH_CONCERNS**
   table remains 252 dense opcode IDs with fingerprint
   `0x05d5c0867521c077`; a QuickJS opcode update therefore requires an explicit
   policy audit.
-- Every linked opcode maps to exactly one closed `Tier1Policy`: `Native`, a
+- Every linked opcode maps to exactly one explicit `Tier1Policy`: `Native`, a
   concrete `Helper(HelperId)`, or a categorized `Reject(FallbackReason)`.
   There is no generic execute-one-opcode helper.
 - The policy advertises only opcode families already implemented by the Task 8
@@ -54,14 +68,10 @@ All corresponding focused tests were then observed GREEN.
   integration, UI, and doc tests).
 - `cargo fmt --all -- --check`: PASS.
 
-## Explicit concern / next instrumentation dependency
+## Remaining review gate
 
-The forced-baseline harness proves that the captured function contains the
-tested opcode family and that the published native function is entered, but it
-does not yet expose a per-bytecode-PC execution trace or per-helper invocation
-counter. Consequently this task does **not** claim per-PC dynamic coverage for
-all eligible opcodes. That instrumentation belongs on the production backend
-and metrics path established by Task 10; Task 13 must use it to turn the family
-matrix into a no-fallback per-opcode execution gate. The static 252-entry policy
-is complete, but it is intentionally not presented as dynamic semantic
-coverage.
+The closed audit, verifier split, and strict real-entry/no-retry checks are now
+implemented. Per-PC execution trace, all-helper counters, and the one-case-per-
+advertised-opcode manifest are still required before Task 9 can be called
+review-clean; this report deliberately does not present captured-bytecode
+presence as execution coverage.

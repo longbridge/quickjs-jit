@@ -212,7 +212,32 @@ struct ForcedBaselineBackend {
     generation: u64,
     code: PublishedBaselineCode,
     entries: Arc<AtomicUsize>,
+    retries: Arc<AtomicUsize>,
     registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
+}
+
+#[cfg(feature = "compiler")]
+struct ForcedEntryPin {
+    code: PublishedBaselineCode,
+    entries: Arc<AtomicUsize>,
+    retries: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "compiler")]
+unsafe extern "C" fn forced_entry_trampoline(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+) -> rquickjs_core::qjs::JSJitExit {
+    type Entry = unsafe extern "C" fn(
+        *mut rquickjs_core::qjs::JSJitExecFrame,
+    ) -> rquickjs_core::qjs::JSJitExit;
+    let pin = unsafe { &*((*frame).entry.pin.cast::<ForcedEntryPin>()) };
+    pin.entries.fetch_add(1, Ordering::SeqCst);
+    let native: Entry = unsafe { mem::transmute(pin.code.as_ptr()) };
+    let exit = unsafe { native(frame) };
+    if exit.kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
+        pin.retries.fetch_add(1, Ordering::SeqCst);
+    }
+    exit
 }
 
 #[cfg(feature = "compiler")]
@@ -233,16 +258,16 @@ unsafe impl JitBackend for ForcedBaselineBackend {
         if id != self.function_id || generation != self.generation || pc != 0 {
             return empty_entry_handle();
         }
-        type Entry = unsafe extern "C" fn(
-            *mut rquickjs_core::qjs::JSJitExecFrame,
-        ) -> rquickjs_core::qjs::JSJitExit;
-        let entry: Entry = unsafe { mem::transmute(self.code.as_ptr()) };
-        self.entries.fetch_add(1, Ordering::SeqCst);
         rquickjs_core::qjs::JSJitEntryHandle {
             struct_size: mem::size_of::<rquickjs_core::qjs::JSJitEntryHandle>() as u32,
             reserved: 0,
-            entry: Some(entry),
-            pin: Box::into_raw(Box::new(self.code.clone())).cast(),
+            entry: Some(forced_entry_trampoline),
+            pin: Box::into_raw(Box::new(ForcedEntryPin {
+                code: self.code.clone(),
+                entries: Arc::clone(&self.entries),
+                retries: Arc::clone(&self.retries),
+            }))
+            .cast(),
             stack_map_count: u32::try_from(self.code.stack_maps().len()).unwrap_or(u32::MAX),
             helper_abi_version: rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION,
         }
@@ -250,7 +275,7 @@ unsafe impl JitBackend for ForcedBaselineBackend {
 
     fn release_entry(&mut self, entry: rquickjs_core::qjs::JSJitEntryHandle) {
         if !entry.pin.is_null() {
-            unsafe { drop(Box::from_raw(entry.pin.cast::<PublishedBaselineCode>())) };
+            unsafe { drop(Box::from_raw(entry.pin.cast::<ForcedEntryPin>())) };
         }
     }
 
@@ -306,16 +331,20 @@ fn eval_canonical(context: &Context, expression: &str) -> Result<String, String>
 }
 
 #[cfg(feature = "compiler")]
+struct ForcedInstallation {
+    guard: RuntimeJitGuard,
+    entries: Arc<AtomicUsize>,
+    retries: Arc<AtomicUsize>,
+    registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
+}
+
+#[cfg(feature = "compiler")]
 fn compile_named_function(
     runtime: &Runtime,
     context: &Context,
     definition: &str,
     function_name: &str,
-) -> (
-    RuntimeJitGuard,
-    Arc<AtomicUsize>,
-    Arc<Mutex<Option<JitFunctionRegistry>>>,
-) {
+) -> ForcedInstallation {
     eval_global_definition(context, definition)
         .unwrap_or_else(|error| panic!("baseline definition failed: {error}"));
     let snapshot = context.with(|ctx| {
@@ -341,6 +370,7 @@ fn compile_named_function(
         .publish()
         .unwrap_or_else(|error| panic!("forced baseline publication failed: {error:?}"));
     let entries = Arc::new(AtomicUsize::new(0));
+    let retries = Arc::new(AtomicUsize::new(0));
     let registry_slot = Arc::new(Mutex::new(None));
     let guard = runtime
         .attach_jit_backend(ForcedBaselineBackend {
@@ -348,6 +378,7 @@ fn compile_named_function(
             generation: snapshot.generation(),
             code,
             entries: Arc::clone(&entries),
+            retries: Arc::clone(&retries),
             registry: Arc::clone(&registry_slot),
         })
         .expect("forced baseline backend attaches");
@@ -368,7 +399,12 @@ fn compile_named_function(
             .expect("forced baseline function retention");
         assert_eq!(registry.retained_len(&ctx).unwrap(), 1);
     });
-    (guard, entries, registry_slot)
+    ForcedInstallation {
+        guard,
+        entries,
+        retries,
+        registry: registry_slot,
+    }
 }
 
 #[cfg(feature = "compiler")]
@@ -404,20 +440,25 @@ impl DifferentialRun {
 
         let runtime = Runtime::new().expect("compiled runtime");
         let context = Context::full(&runtime).expect("compiled context");
-        let (guard, entries, registry_slot) =
-            compile_named_function(&runtime, &context, &self.definition, "f");
+        let installation = compile_named_function(&runtime, &context, &self.definition, "f");
         let actual = eval_canonical(&context, &self.expression);
 
         assert_eq!(actual, expected, "forced baseline changed JS semantics");
         if self.require_baseline {
             assert!(
-                entries.load(Ordering::SeqCst) > 0,
+                installation.entries.load(Ordering::SeqCst) > 0,
                 "forced baseline expression never entered published native code"
             );
+            assert_eq!(
+                installation.retries.load(Ordering::SeqCst),
+                0,
+                "forced baseline silently retried in the interpreter"
+            );
         }
-        drop(guard);
+        drop(installation.guard);
         assert!(
-            registry_slot
+            installation
+                .registry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
@@ -457,8 +498,7 @@ impl ForcedBaselineRun {
     pub fn assert_uncatchable_interrupt(self) {
         let runtime = Runtime::new().expect("compiled interrupt runtime");
         let context = Context::full(&runtime).expect("compiled interrupt context");
-        let (guard, entries, registry_slot) =
-            compile_named_function(&runtime, &context, &self.definition, "f");
+        let installation = compile_named_function(&runtime, &context, &self.definition, "f");
         let polls = Arc::new(AtomicUsize::new(0));
         runtime.set_interrupt_handler({
             let polls = Arc::clone(&polls);
@@ -475,16 +515,17 @@ impl ForcedBaselineRun {
 
         assert!(result.is_err(), "compiled interrupt became catchable");
         assert!(
-            entries.load(Ordering::SeqCst) > 0,
+            installation.entries.load(Ordering::SeqCst) > 0,
             "interrupt test never entered published native code"
         );
         assert!(
             polls.load(Ordering::SeqCst) >= self.interrupt_after,
             "compiled loop did not execute the requested poll budget"
         );
-        drop(guard);
+        drop(installation.guard);
         assert!(
-            registry_slot
+            installation
+                .registry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
