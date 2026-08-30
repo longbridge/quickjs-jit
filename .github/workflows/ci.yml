@@ -134,6 +134,21 @@ jobs:
       - name: Run tests with memory sanitizer
         run: CC=clang RUSTFLAGS=-Zsanitizer=memory cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
 
+  jit-semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Verify native semantic test feature gates
+        run: cargo test -p rquickjs-jit --test required_features
+      - name: Run native semantic tests
+        run: cargo test -p rquickjs-jit --features compiler,test-support --test helpers --test semantics --test gpui_shell_surface -- --test-threads=1
+
   examples:
     runs-on: ubuntu-latest
     steps:

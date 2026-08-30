@@ -36,6 +36,7 @@ target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
 rquickjs = { path = "..", features = ["jit-abi", "loader"] }
+serde_json = "1"
 static_assertions = "1"
 trybuild = "1"
 
@@ -54,3 +55,15 @@ compiler = [
   "dep:target-lexicon",
 ]
 test-support = ["rquickjs-core/jit-test-support"]
+
+[[test]]
+name = "helpers"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "semantics"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "gpui_shell_surface"
+required-features = ["compiler", "test-support"]

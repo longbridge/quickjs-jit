@@ -917,7 +917,7 @@ fn interrupt_stops_compiled_loop() {
 
 - [ ] **Step 2: Run semantics and verify interpreter dispatch never enters code**
 
-Run: `cargo test -p rquickjs-jit --test semantics`
+Run: `cargo test -p rquickjs-jit --test semantics --features compiler,test-support`
 
 Expected: FAIL because compiled entries have no QuickJS helper table.
 
@@ -962,9 +962,9 @@ an artifact if a GC-capable instruction lacks a complete live-slot map.
 
 - [ ] **Step 6: Run semantics, leak dumps, and sanitizer subset**
 
-Run: `cargo test -p rquickjs-jit --test semantics --features rquickjs-core/dump-leaks`
+Run: `cargo test -p rquickjs-jit --test semantics --features compiler,test-support,rquickjs-core/dump-leaks`
 
-Run: `RUSTFLAGS=-Zsanitizer=address cargo +nightly test -p rquickjs-jit --test semantics -Zbuild-std --target x86_64-unknown-linux-gnu`
+Run: `RUSTFLAGS=-Zsanitizer=address cargo +nightly test -p rquickjs-jit --test semantics --features compiler,test-support -Zbuild-std --target x86_64-unknown-linux-gnu`
 
 Expected: PASS, zero leaked test values, no sanitizer findings.
 

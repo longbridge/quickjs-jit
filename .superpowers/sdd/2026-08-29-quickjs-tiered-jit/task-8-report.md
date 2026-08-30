@@ -329,5 +329,37 @@ runs against `JitRuntime`; the sibling checkout was not modified.
 
 - Nested QuickJS: `fc3fdd2 feat(jit): add versioned helper ABI`
 - Root implementation: `6465a12 feat(jit): execute baseline code through QuickJS helpers`
+
+## Independent-review correction: semantic test feature gates
+
+The independent review found that `helpers`, `semantics`, and
+`gpui_shell_surface` used crate-level `cfg` attributes. A command that omitted
+`compiler,test-support` could therefore report success after running zero
+tests. Each target now declares Cargo-native `required-features`, so an
+under-featured targeted command exits with an error instead of succeeding. A
+metadata-based regression test checks the structured Cargo target contract,
+without parsing human-oriented test output, and the Linux CI job runs all three
+targets with `--features compiler,test-support`.
+
+TDD evidence:
+
+```text
+$ cargo test -p rquickjs-jit --test required_features \
+    -- --exact native_semantics_targets_require_their_execution_features
+RED: required-features array was absent
+
+$ cargo test -p rquickjs-jit --test semantics
+error: target `semantics` ... requires the features: `compiler`, `test-support`
+exit status 101 (intentional missing-feature gate)
+
+$ cargo test -p rquickjs-jit --features compiler,test-support \
+    --test required_features --test helpers --test semantics \
+    --test gpui_shell_surface -- --test-threads=1
+21 passed; 0 failed; every named target executed at least one test
+
+$ cargo test -p rquickjs-jit --all-targets \
+    --features compiler,test-support -- --test-threads=1
+192 passed; 0 failed; only target/platform-inapplicable binaries reported zero
+```
 - This report is committed separately so it can record both implementation
   commit IDs.
