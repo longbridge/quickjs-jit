@@ -69,3 +69,7 @@
 
 Host execution was Linux x86_64. macOS and Windows execution remains required
 CI evidence under the existing Task 6 platform ruling.
+
+`jit/benches/tiering.rs` does not exist yet, so Task 11 makes no cold-dispatch,
+first-invocation-time, or speedup claim. Task 14 must add the reproducible bench
+and record this implementation's code-size/compile-cost tradeoff.
