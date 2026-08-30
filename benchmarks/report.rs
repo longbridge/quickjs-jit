@@ -83,12 +83,6 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
     let t2 = mode(data, "tier2");
     let auto = mode(data, "automatic");
     let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`.\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
-    out.push_str(&format!(
-        "\nStripped binary evidence: non-JIT {} bytes; JIT {} bytes; delta {:+} bytes.\n",
-        data.provenance.stripped_no_jit_bytes,
-        data.provenance.stripped_jit_bytes,
-        data.provenance.stripped_jit_delta_bytes
-    ));
     let mut checksums = true;
     let mut strict_native = true;
     let mut automatic_policy = false;
@@ -137,6 +131,12 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
         strict_native = false;
         automatic_policy = false
     }
+    out.push_str(&format!(
+        "\nStripped binary evidence: non-JIT {} bytes; JIT {} bytes; delta {:+} bytes.\n",
+        data.provenance.stripped_no_jit_bytes,
+        data.provenance.stripped_jit_bytes,
+        data.provenance.stripped_jit_delta_bytes
+    ));
     let compute_ci = joint_geomean_ci(interp, t2, "compute");
     let compute_pass = compute_ci.is_some_and(|ci| ci[0] >= 5.0);
     let kernels = interp
