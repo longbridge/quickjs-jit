@@ -28,6 +28,8 @@
 - `cargo test -p rquickjs-jit --test background --features compiler,test-support`:
   14/14 passed, including short callbacks, asynchronous install, quotas,
   generation isolation, and two-runtime execution/drop isolation.
+- `cargo test -p rquickjs-jit --test osr --test background --features
+  compiler,test-support --release`: 19/19 passed.
 - `cargo test -p rquickjs-jit --features compiler,test-support`: 234/234 passed
   across all unit and integration suites on the Linux host.
 
