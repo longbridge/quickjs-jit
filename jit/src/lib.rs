@@ -1469,8 +1469,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                         let feedback = self.feedback.snapshot(self.clock.max(1));
                         if feedback.has_stable_value_for(key)
                             && self.coordinator.prepare_stable_path_recompile(key)
-                        {
-                            if self
+                            && self
                                 .coordinator
                                 .queue_with_feedback(
                                     key,
@@ -1479,10 +1478,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                                     feedback,
                                 )
                                 .is_ok()
-                            {
-                                self.stable_path_compile_requests =
-                                    self.stable_path_compile_requests.saturating_add(1);
-                            }
+                        {
+                            self.stable_path_compile_requests =
+                                self.stable_path_compile_requests.saturating_add(1);
                         }
                     }
                 }
