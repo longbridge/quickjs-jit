@@ -49,6 +49,15 @@
 - OSR metrics distinguish acquisition attempts, trampoline-validated entries,
   frame-validation failures, and generated guard retries. Legacy `osr_entries`
   aliases validated entries rather than pre-validation attempts.
+- Coordinator compile backoff keeps request ownership through the complete
+  retry window. Maintenance clears the request only once its monotonic clock
+  reaches `retry_after`, so a hot backedge cannot copy duplicate snapshots
+  while an attempt is deliberately delayed.
+- The production entry trampoline completes all frame validation before
+  enabling the test stress-GC flag or making any other frame mutation. Each
+  validation rejection also records an explicit, one-shot invocation origin;
+  `native_exit` consumes that marker rather than inferring retry provenance
+  from a nonzero PC.
 
 ## Correctness evidence
 
@@ -64,8 +73,10 @@
   JavaScript on every access; 20,001 getter/reentry events remain ordered, the
   exact helper appears in the native PC trace, references balance, and retry,
   fallback, and validation-failure counts remain zero.
-- Production failure tests prove an unsupported compile performs exactly two
-  configured coordinator attempts before Blacklist, while an over-quota
+- Production failure tests prove an unsupported compile performs exactly four
+  configured coordinator attempts before Blacklist, with exactly four queues
+  and four snapshot requests despite at least three intervening backoff
+  windows, while an over-quota
   snapshot retries through bounded pre-queue backoff without queueing or
   spinning one request per backedge.
 - Multi-loop compilation produces one independent entry per verified header.
@@ -73,7 +84,10 @@
   retire old code safely, and record zero cross-generation retries.
 - The malformed-frame matrix covers wrong runtime, ID, generation, PC, cookie,
   map count, helper version, depth, and slot kind. Every rejection leaves the
-  frame byte-identical and the slot owner/tag unchanged.
+  frame byte-identical and the slot owner/tag unchanged, including when
+  stress-GC is configured. A validation RETRY consumes its explicit origin and
+  cannot increment `osr_generated_retries`; a legal native guard RETRY still
+  does.
 - Existing native-boundary tests prove retry resumes at the polled PC without
   replaying prefix side effects. Existing forced Tier 1 tests prove AddSlow
   `Symbol.toPrimitive`, forced GC, calls, and reentry semantics. Candidate
@@ -82,7 +96,7 @@
 
 ## Commands and results
 
-- `cargo test -p rquickjs-jit --features compiler,test-support`: 246/246 pass.
+- `cargo test -p rquickjs-jit --features compiler,test-support`: 248/248 pass.
 - `cargo test -p rquickjs-jit --test osr --test semantics --test background
   --test lifecycle --release --features compiler,test-support`: 81/81 pass.
 - `cargo clippy -p rquickjs-jit --all-targets --features
@@ -90,7 +104,7 @@
 - `cargo fmt --all -- --check`: pass.
 - `cargo test --workspace --all-targets --features
   rquickjs-jit/compiler,rquickjs-jit/test-support`: pass, including 177 core
-  tests, 240 JIT tests, macro trybuild tests, examples, and workspace crates.
+  tests, 242 JIT tests, macro trybuild tests, examples, and workspace crates.
 - `cargo test --workspace --all-targets` without features does not compile the
   pre-existing JIT integration sources because they import feature-gated test
   APIs; the explicit-feature workspace command above is the valid gate.
