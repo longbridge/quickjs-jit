@@ -448,6 +448,14 @@ impl CompiledArtifact {
         add_slice::<ArtifactDependency>(total, self.dependencies.len())
     }
 
+    pub fn code_bytes(&self) -> usize {
+        self.code.bytes().len()
+    }
+
+    pub fn metadata_bytes(&self) -> Option<usize> {
+        self.charge_bytes()?.checked_sub(self.code_bytes())
+    }
+
     pub(crate) fn record_benefit(&self, score: u64) {
         self.benefit.record(score);
     }

@@ -368,6 +368,39 @@ impl Coordinator {
         max_code_bytes: usize,
         environment: ArtifactEnvironment,
     ) -> Self {
+        Self::with_cache(
+            max_queue_len,
+            max_completion_len,
+            max_attempts,
+            CodeCache::new(max_code_bytes),
+            environment,
+        )
+    }
+
+    pub fn with_environment_and_metadata_limit(
+        max_queue_len: usize,
+        max_completion_len: usize,
+        max_attempts: u8,
+        max_code_bytes: usize,
+        max_metadata_bytes: usize,
+        environment: ArtifactEnvironment,
+    ) -> Self {
+        Self::with_cache(
+            max_queue_len,
+            max_completion_len,
+            max_attempts,
+            CodeCache::new_with_separate_limits(max_code_bytes, max_metadata_bytes),
+            environment,
+        )
+    }
+
+    fn with_cache(
+        max_queue_len: usize,
+        max_completion_len: usize,
+        max_attempts: u8,
+        cache: CodeCache,
+        environment: ArtifactEnvironment,
+    ) -> Self {
         let (completion_sender, completion_receiver) = mpsc::sync_channel(max_completion_len);
         let completion_signals = Arc::new(CompletionQueueSignals::default());
         Self {
@@ -384,7 +417,7 @@ impl Coordinator {
             completion_receiver: Some(completion_receiver),
             completion_signals,
             shutdown: false,
-            cache: CodeCache::new(max_code_bytes),
+            cache,
             installed_keys: HashMap::new(),
             environment,
         }
@@ -688,7 +721,18 @@ impl Coordinator {
         let mut metrics = self.metrics.clone();
         metrics.completion_queue_saturated =
             self.completion_signals.saturated.load(Ordering::Acquire);
+        metrics.code_bytes = self.cache.charged_code_bytes();
+        metrics.metadata_bytes = self.cache.charged_metadata_bytes();
         metrics
+    }
+
+    pub fn set_native_enabled(&mut self, enabled: bool) {
+        self.metrics.set_native_enabled(enabled);
+    }
+
+    pub fn record_resource_limit_rejection(&mut self) {
+        self.metrics.resource_limit_rejections =
+            self.metrics.resource_limit_rejections.saturating_add(1);
     }
 
     pub fn pin(&mut self, key: FunctionKey, tier: Tier) -> Option<ExecutionPin> {

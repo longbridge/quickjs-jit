@@ -32,6 +32,22 @@ impl BackgroundCompiler {
         worker_count: usize,
         max_pending_jobs: usize,
     ) -> Result<Self, BackgroundCompilerError> {
+        Self::new_with_resource_limits(
+            compiler,
+            worker_count,
+            max_pending_jobs,
+            Duration::from_secs(30),
+            usize::MAX,
+        )
+    }
+
+    pub fn new_with_resource_limits(
+        compiler: Arc<dyn Compiler>,
+        worker_count: usize,
+        max_pending_jobs: usize,
+        compile_budget: Duration,
+        max_ir_bytes: usize,
+    ) -> Result<Self, BackgroundCompilerError> {
         if worker_count == 0 || max_pending_jobs == 0 {
             return Err(BackgroundCompilerError::InvalidLimit);
         }
@@ -46,6 +62,7 @@ impl BackgroundCompiler {
             let completion_slot: Arc<Mutex<Option<super::CompletionSender>>> =
                 Arc::clone(&completion_slot);
             let cancelled = Arc::clone(&cancelled);
+            let worker_budget = compile_budget;
             workers.push(
                 thread::Builder::new()
                     .name(format!("rquickjs-jit-{index}"))
@@ -62,9 +79,10 @@ impl BackgroundCompiler {
                                 let tier = request.tier();
                                 let artifact_key = request.artifact_key();
                                 let attempt_id = request.attempt_id();
-                                let control = crate::compiler::CompileControl::new(
+                                let control = crate::compiler::CompileControl::with_ir_limit(
                                     Arc::clone(&cancelled),
-                                    Duration::from_secs(30),
+                                    worker_budget,
+                                    max_ir_bytes,
                                 );
                                 let result =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

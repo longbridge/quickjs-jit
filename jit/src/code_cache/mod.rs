@@ -28,6 +28,8 @@ pub(super) struct CachedArtifact {
     invalidated: AtomicBool,
     _deopt_target: Option<DeoptPin>,
     charge_bytes: usize,
+    code_bytes: usize,
+    metadata_bytes: usize,
 }
 
 impl CachedArtifact {
@@ -36,6 +38,8 @@ impl CachedArtifact {
         last_used: u64,
         deopt_target: Option<DeoptPin>,
         charge_bytes: usize,
+        code_bytes: usize,
+        metadata_bytes: usize,
     ) -> Self {
         Self {
             artifact,
@@ -45,6 +49,8 @@ impl CachedArtifact {
             invalidated: AtomicBool::new(false),
             _deopt_target: deopt_target,
             charge_bytes,
+            code_bytes,
+            metadata_bytes,
         }
     }
 
@@ -128,7 +134,12 @@ impl CacheInsert {
 #[derive(Debug)]
 pub struct CodeCache {
     max_bytes: usize,
+    max_code_bytes: usize,
+    max_metadata_bytes: usize,
+    separate_limits: bool,
     charged_bytes: usize,
+    charged_code_bytes: usize,
+    charged_metadata_bytes: usize,
     clock: u64,
     artifacts: BTreeMap<ArtifactKey, Arc<CachedArtifact>>,
     reclaim_needed: Arc<AtomicBool>,
@@ -138,11 +149,24 @@ impl CodeCache {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
+            max_code_bytes: max_bytes,
+            max_metadata_bytes: max_bytes,
+            separate_limits: false,
             charged_bytes: 0,
+            charged_code_bytes: 0,
+            charged_metadata_bytes: 0,
             clock: 0,
             artifacts: BTreeMap::new(),
             reclaim_needed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn new_with_separate_limits(max_code_bytes: usize, max_metadata_bytes: usize) -> Self {
+        let mut cache = Self::new(max_code_bytes.saturating_add(max_metadata_bytes));
+        cache.max_code_bytes = max_code_bytes;
+        cache.max_metadata_bytes = max_metadata_bytes;
+        cache.separate_limits = true;
+        cache
     }
 
     fn next_tick(&mut self) -> u64 {
@@ -155,6 +179,15 @@ impl CodeCache {
             return Err(CacheError::CapacityZero);
         }
         let charge_bytes = artifact.charge_bytes().ok_or(CacheError::ChargeOverflow)?;
+        let code_bytes = artifact.code_bytes();
+        let metadata_bytes = artifact
+            .metadata_bytes()
+            .ok_or(CacheError::ChargeOverflow)?;
+        if self.separate_limits
+            && (code_bytes > self.max_code_bytes || metadata_bytes > self.max_metadata_bytes)
+        {
+            return Err(CacheError::ArtifactTooLarge);
+        }
         if charge_bytes > self.max_bytes {
             return Err(CacheError::ArtifactTooLarge);
         }
@@ -171,14 +204,19 @@ impl CodeCache {
         } else {
             None
         };
-        let existing_charge = if let Some(existing) = self.artifacts.get(&key) {
-            if !existing.is_evictable() {
-                return Err(CacheError::ArtifactPinned);
-            }
-            existing.charge_bytes
-        } else {
-            0
-        };
+        let (existing_charge, existing_code, existing_metadata) =
+            if let Some(existing) = self.artifacts.get(&key) {
+                if !existing.is_evictable() {
+                    return Err(CacheError::ArtifactPinned);
+                }
+                (
+                    existing.charge_bytes,
+                    existing.code_bytes,
+                    existing.metadata_bytes,
+                )
+            } else {
+                (0, 0, 0)
+            };
         let retained_bytes = self
             .charged_bytes
             .checked_sub(existing_charge)
@@ -186,8 +224,32 @@ impl CodeCache {
         let desired_bytes = retained_bytes
             .checked_add(charge_bytes)
             .ok_or(CacheError::ChargeOverflow)?;
+        let desired_code = self
+            .charged_code_bytes
+            .saturating_sub(existing_code)
+            .checked_add(code_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
+        let desired_metadata = self
+            .charged_metadata_bytes
+            .saturating_sub(existing_metadata)
+            .checked_add(metadata_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
         let needed_bytes = desired_bytes.saturating_sub(self.max_bytes);
-        let selected = evict::plan(&self.artifacts, key, needed_bytes)?;
+        let needed_code = self
+            .separate_limits
+            .then(|| desired_code.saturating_sub(self.max_code_bytes))
+            .unwrap_or(0);
+        let needed_metadata = self
+            .separate_limits
+            .then(|| desired_metadata.saturating_sub(self.max_metadata_bytes))
+            .unwrap_or(0);
+        let selected = evict::plan(
+            &self.artifacts,
+            key,
+            needed_bytes,
+            needed_code,
+            needed_metadata,
+        )?;
         if existing_charge != 0 || self.artifacts.contains_key(&key) {
             self.remove(key);
         }
@@ -199,6 +261,14 @@ impl CodeCache {
             .charged_bytes
             .checked_add(charge_bytes)
             .ok_or(CacheError::ChargeOverflow)?;
+        self.charged_code_bytes = self
+            .charged_code_bytes
+            .checked_add(code_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
+        self.charged_metadata_bytes = self
+            .charged_metadata_bytes
+            .checked_add(metadata_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
         self.artifacts.insert(
             key,
             Arc::new(CachedArtifact::new(
@@ -206,6 +276,8 @@ impl CodeCache {
                 tick,
                 deopt_target,
                 charge_bytes,
+                code_bytes,
+                metadata_bytes,
             )),
         );
         Ok(CacheInsert {
@@ -216,6 +288,10 @@ impl CodeCache {
     fn remove(&mut self, key: ArtifactKey) -> Option<Arc<CachedArtifact>> {
         let artifact = self.artifacts.remove(&key)?;
         self.charged_bytes = self.charged_bytes.saturating_sub(artifact.charge_bytes);
+        self.charged_code_bytes = self.charged_code_bytes.saturating_sub(artifact.code_bytes);
+        self.charged_metadata_bytes = self
+            .charged_metadata_bytes
+            .saturating_sub(artifact.metadata_bytes);
         Some(artifact)
     }
 
@@ -267,6 +343,13 @@ impl CodeCache {
 
     pub const fn charged_bytes(&self) -> usize {
         self.charged_bytes
+    }
+
+    pub const fn charged_code_bytes(&self) -> usize {
+        self.charged_code_bytes
+    }
+    pub const fn charged_metadata_bytes(&self) -> usize {
+        self.charged_metadata_bytes
     }
 
     pub fn deopt_references(&self, key: ArtifactKey) -> Option<usize> {

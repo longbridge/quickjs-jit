@@ -121,6 +121,33 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
     assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
 }
 
+#[test]
+fn thousand_hot_reload_completions_stay_generation_isolated() {
+    let (compiler, control) = FakeCompiler::new(1);
+    let mut workers = BackgroundCompiler::new(Arc::new(compiler), 1, 1).unwrap();
+    let mut coordinator = Coordinator::with_limits(1, 1, 4, 1024);
+    for generation in 1..=1_000 {
+        let key = FunctionKey::new(77, generation);
+        coordinator
+            .queue(key, Tier::Baseline, snapshot(77, generation))
+            .unwrap();
+        workers.dispatch_next(&mut coordinator).unwrap();
+        assert_eq!(control.next_request().unwrap().key(), key);
+        control.complete(CompiledArtifact::fake(Tier::Baseline));
+        while coordinator.drain_completions().drained() == 0 {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            coordinator.state(key),
+            CompileState::Installed(Tier::Baseline)
+        );
+        coordinator.retire(key);
+    }
+    workers.shutdown(&mut coordinator);
+    assert_eq!(coordinator.metrics().installed, 1_000);
+    assert_eq!(coordinator.metrics().retired, 1_000);
+}
+
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 #[test]
 fn production_backend_receives_owned_snapshots_automatically() {
@@ -147,4 +174,22 @@ fn production_backend_receives_owned_snapshots_automatically() {
         let value: i32 = ctx.eval("add(20, 22)").unwrap();
         assert_eq!(value, 42);
     });
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[test]
+fn snapshot_quota_falls_back_without_disabling_runtime() {
+    let runtime = Runtime::new().unwrap();
+    let config = rquickjs_jit::JitConfig::builder()
+        .max_snapshot_bytes(1)
+        .build()
+        .unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let value: i32 = ctx.eval("(function(a) { return a + 1; })(41)").unwrap();
+        assert_eq!(value, 42);
+    });
+    assert_eq!(jit.metrics().queued, 0);
+    assert!(jit.metrics().resource_limit_rejections >= 1);
 }

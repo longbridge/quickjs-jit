@@ -14,6 +14,9 @@ pub struct JitMetrics {
     pub queue_saturated: u64,
     pub completion_queue_saturated: u64,
     pub worker_queue_saturated: u64,
+    pub resource_limit_rejections: u64,
+    pub code_bytes: usize,
+    pub metadata_bytes: usize,
     pub evicted: u64,
 }
 
@@ -31,6 +34,9 @@ impl JitMetrics {
             queue_saturated: 0,
             completion_queue_saturated: 0,
             worker_queue_saturated: 0,
+            resource_limit_rejections: 0,
+            code_bytes: 0,
+            metadata_bytes: 0,
             evicted: 0,
         }
     }
@@ -38,5 +44,9 @@ impl JitMetrics {
     /// Reports whether this runtime can currently enter native JIT code.
     pub const fn native_enabled(&self) -> bool {
         self.native_enabled
+    }
+
+    pub(crate) fn set_native_enabled(&mut self, enabled: bool) {
+        self.native_enabled = enabled;
     }
 }

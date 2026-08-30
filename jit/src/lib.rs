@@ -138,16 +138,25 @@ struct ProductionBackend {
 impl ProductionBackend {
     fn new(config: JitConfig, metrics: Arc<Mutex<JitMetrics>>) -> Result<Self, JitError> {
         let compiler = Arc::new(compiler::baseline::BaselineCompiler::host());
-        let workers =
-            runtime::BackgroundCompiler::new(compiler, config.workers(), config.max_queue_len())
-                .map_err(|_| JitError::InvalidConfig("workers"))?;
+        let workers = runtime::BackgroundCompiler::new_with_resource_limits(
+            compiler,
+            config.workers(),
+            config.max_queue_len(),
+            std::time::Duration::from_millis(config.compile_timeout_ms()),
+            config.max_ir_bytes(),
+        )
+        .map_err(|_| JitError::InvalidConfig("workers"))?;
+        let mut coordinator = runtime::Coordinator::with_environment_and_metadata_limit(
+            config.max_queue_len(),
+            config.max_queue_len(),
+            config.max_compile_attempts(),
+            config.max_code_bytes(),
+            config.max_metadata_bytes(),
+            runtime::ArtifactEnvironment::default(),
+        );
+        coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
         Ok(Self {
-            coordinator: runtime::Coordinator::with_limits(
-                config.max_queue_len(),
-                config.max_queue_len(),
-                config.max_compile_attempts(),
-                config.max_code_bytes(),
-            ),
+            coordinator,
             config,
             workers,
             requested: std::collections::HashSet::new(),
@@ -192,6 +201,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let _free = FreeSnapshot(snapshot);
         let copied = unsafe { bytecode::CompileSnapshot::copy_borrowed_raw(raw.as_ref()) };
         let Ok(snapshot) = copied else { return };
+        if snapshot.owned_bytes() > self.config.max_snapshot_bytes() {
+            self.coordinator.record_resource_limit_rejection();
+            self.maintenance();
+            return;
+        }
         let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
         let Ok(verified) = snapshot.verify(bytecode::VerifyLimits::default()) else {
             return;

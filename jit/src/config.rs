@@ -7,6 +7,10 @@ use crate::{abi::AbiMismatch, JitError, JitMetrics};
 pub const DEFAULT_CALL_THRESHOLD: u32 = 32;
 pub const DEFAULT_LOOP_THRESHOLD: u32 = 56;
 pub const DEFAULT_MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_IR_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_COMPILE_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_MAX_QUEUE_LEN: usize = 256;
 pub const DEFAULT_WORKERS: usize = 1;
 pub const DEFAULT_MAX_COMPILE_ATTEMPTS: u8 = 4;
@@ -37,6 +41,10 @@ pub struct JitConfig {
     call_threshold: u32,
     loop_threshold: u32,
     max_code_bytes: usize,
+    max_metadata_bytes: usize,
+    max_snapshot_bytes: usize,
+    max_ir_bytes: usize,
+    compile_timeout_ms: u64,
     max_queue_len: usize,
     workers: usize,
     max_compile_attempts: u8,
@@ -50,6 +58,10 @@ impl core::fmt::Debug for JitConfig {
             .field("call_threshold", &self.call_threshold)
             .field("loop_threshold", &self.loop_threshold)
             .field("max_code_bytes", &self.max_code_bytes)
+            .field("max_metadata_bytes", &self.max_metadata_bytes)
+            .field("max_snapshot_bytes", &self.max_snapshot_bytes)
+            .field("max_ir_bytes", &self.max_ir_bytes)
+            .field("compile_timeout_ms", &self.compile_timeout_ms)
             .field("max_queue_len", &self.max_queue_len)
             .field("workers", &self.workers)
             .field("max_compile_attempts", &self.max_compile_attempts)
@@ -67,6 +79,10 @@ impl PartialEq for JitConfig {
         self.call_threshold == other.call_threshold
             && self.loop_threshold == other.loop_threshold
             && self.max_code_bytes == other.max_code_bytes
+            && self.max_metadata_bytes == other.max_metadata_bytes
+            && self.max_snapshot_bytes == other.max_snapshot_bytes
+            && self.max_ir_bytes == other.max_ir_bytes
+            && self.compile_timeout_ms == other.compile_timeout_ms
             && self.max_queue_len == other.max_queue_len
             && self.workers == other.workers
             && self.max_compile_attempts == other.max_compile_attempts
@@ -102,6 +118,18 @@ impl JitConfig {
     pub const fn max_code_bytes(&self) -> usize {
         self.max_code_bytes
     }
+    pub const fn max_metadata_bytes(&self) -> usize {
+        self.max_metadata_bytes
+    }
+    pub const fn max_snapshot_bytes(&self) -> usize {
+        self.max_snapshot_bytes
+    }
+    pub const fn max_ir_bytes(&self) -> usize {
+        self.max_ir_bytes
+    }
+    pub const fn compile_timeout_ms(&self) -> u64 {
+        self.compile_timeout_ms
+    }
 
     pub const fn max_queue_len(&self) -> usize {
         self.max_queue_len
@@ -134,6 +162,10 @@ impl Default for JitConfig {
             call_threshold: DEFAULT_CALL_THRESHOLD,
             loop_threshold: DEFAULT_LOOP_THRESHOLD,
             max_code_bytes: DEFAULT_MAX_CODE_BYTES,
+            max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
+            max_snapshot_bytes: DEFAULT_MAX_SNAPSHOT_BYTES,
+            max_ir_bytes: DEFAULT_MAX_IR_BYTES,
+            compile_timeout_ms: DEFAULT_COMPILE_TIMEOUT_MS,
             max_queue_len: DEFAULT_MAX_QUEUE_LEN,
             workers: DEFAULT_WORKERS,
             max_compile_attempts: DEFAULT_MAX_COMPILE_ATTEMPTS,
@@ -162,6 +194,22 @@ impl JitConfigBuilder {
 
     pub fn max_code_bytes(mut self, value: usize) -> Self {
         self.config.max_code_bytes = value;
+        self
+    }
+    pub fn max_metadata_bytes(mut self, value: usize) -> Self {
+        self.config.max_metadata_bytes = value;
+        self
+    }
+    pub fn max_snapshot_bytes(mut self, value: usize) -> Self {
+        self.config.max_snapshot_bytes = value;
+        self
+    }
+    pub fn max_ir_bytes(mut self, value: usize) -> Self {
+        self.config.max_ir_bytes = value;
+        self
+    }
+    pub fn compile_timeout_ms(mut self, value: u64) -> Self {
+        self.config.compile_timeout_ms = value;
         self
     }
 
@@ -205,6 +253,18 @@ impl JitConfigBuilder {
         }
         if self.config.max_code_bytes == 0 {
             return Err(JitError::InvalidConfig("max_code_bytes"));
+        }
+        if self.config.max_metadata_bytes == 0 {
+            return Err(JitError::InvalidConfig("max_metadata_bytes"));
+        }
+        if self.config.max_snapshot_bytes == 0 {
+            return Err(JitError::InvalidConfig("max_snapshot_bytes"));
+        }
+        if self.config.max_ir_bytes == 0 {
+            return Err(JitError::InvalidConfig("max_ir_bytes"));
+        }
+        if self.config.compile_timeout_ms == 0 {
+            return Err(JitError::InvalidConfig("compile_timeout_ms"));
         }
         if self.config.max_queue_len == 0 {
             return Err(JitError::InvalidConfig("max_queue_len"));

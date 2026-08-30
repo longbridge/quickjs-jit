@@ -200,7 +200,8 @@ impl BaselineCompiler {
             }
         };
         if let Some(control) = control {
-            control.check()?;
+            let estimated_ir = function.snapshot().owned_bytes().saturating_mul(32);
+            control.check_ir_bytes(estimated_ir)?;
         }
         let logical_stack_capacity = u32::from(function.snapshot().stack_size());
         let scratch_slots =
@@ -233,6 +234,9 @@ impl BaselineCompiler {
         }
 
         let clif_text = clif.display().to_string();
+        if let Some(control) = control {
+            control.check_ir_bytes(clif_text.len())?;
+        }
         let function_parameters = clif.params.clone();
         let mut context = Context::for_function(clif);
         let compiled = context

@@ -12,6 +12,8 @@ pub(super) fn plan(
     artifacts: &BTreeMap<ArtifactKey, Arc<CachedArtifact>>,
     excluded: ArtifactKey,
     needed_bytes: usize,
+    needed_code_bytes: usize,
+    needed_metadata_bytes: usize,
 ) -> Result<Vec<ArtifactKey>, CacheError> {
     let mut deopt_references = artifacts
         .iter()
@@ -27,7 +29,12 @@ pub(super) fn plan(
     let mut selected = Vec::new();
     let mut selected_keys = BTreeSet::new();
     let mut freed_bytes = 0usize;
-    while freed_bytes < needed_bytes {
+    let mut freed_code_bytes = 0usize;
+    let mut freed_metadata_bytes = 0usize;
+    while freed_bytes < needed_bytes
+        || freed_code_bytes < needed_code_bytes
+        || freed_metadata_bytes < needed_metadata_bytes
+    {
         let candidate = artifacts
             .iter()
             .filter(|(key, artifact)| {
@@ -37,12 +44,25 @@ pub(super) fn plan(
                     && deopt_references.get(key).copied().unwrap_or(0) == 0
             })
             .min_by_key(|(_, artifact)| artifact.eviction_plan_order())
-            .map(|(key, artifact)| (*key, artifact.charge_bytes));
-        let Some((candidate, charge_bytes)) = candidate else {
+            .map(|(key, artifact)| {
+                (
+                    *key,
+                    artifact.charge_bytes,
+                    artifact.code_bytes,
+                    artifact.metadata_bytes,
+                )
+            });
+        let Some((candidate, charge_bytes, code_bytes, metadata_bytes)) = candidate else {
             return Err(CacheError::AllArtifactsPinned);
         };
         freed_bytes = freed_bytes
             .checked_add(charge_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
+        freed_code_bytes = freed_code_bytes
+            .checked_add(code_bytes)
+            .ok_or(CacheError::ChargeOverflow)?;
+        freed_metadata_bytes = freed_metadata_bytes
+            .checked_add(metadata_bytes)
             .ok_or(CacheError::ChargeOverflow)?;
         selected.push(candidate);
         selected_keys.insert(candidate);

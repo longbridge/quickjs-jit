@@ -278,6 +278,20 @@ impl CompileSnapshot {
         &self.data.source_map
     }
 
+    pub fn owned_bytes(&self) -> usize {
+        self.data
+            .bytecode
+            .len()
+            .saturating_add(self.data.exception_map.len())
+            .saturating_add(self.data.source_map.len())
+            .saturating_add(
+                self.data
+                    .constants
+                    .len()
+                    .saturating_mul(core::mem::size_of::<ConstantDescriptor>()),
+            )
+    }
+
     pub fn decode(&self) -> Result<Vec<Instruction>, DecodeError> {
         decode_raw(self.bytecode())
     }

@@ -117,6 +117,32 @@ fn artifact_with_code(key: ArtifactKey, bytes: usize) -> CompiledArtifact {
 }
 
 #[test]
+fn cache_enforces_code_and_metadata_quotas_independently() {
+    let code_key = artifact_key(90, 1, Tier::Baseline);
+    let mut code_limited = CodeCache::new_with_separate_limits(1, 1024);
+    assert!(code_limited
+        .insert(artifact_with_code(code_key, 2))
+        .is_err());
+
+    let metadata_key = artifact_key(91, 1, Tier::Baseline);
+    let metadata_heavy = CompiledArtifact::from_parts(
+        metadata_key,
+        CodeAllocation::inert(Vec::new()),
+        vec![Relocation::new(0, 0, 0)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut metadata_limited = CodeCache::new_with_separate_limits(1024, 1);
+    assert!(metadata_limited.insert(metadata_heavy).is_err());
+
+    let mut accepted = CodeCache::new_with_separate_limits(2, 1024);
+    accepted.insert(artifact_with_code(code_key, 2)).unwrap();
+    assert_eq!(accepted.charged_code_bytes(), 2);
+    assert_eq!(accepted.charged_metadata_bytes(), 0);
+}
+
+#[test]
 fn artifact_identity_distinguishes_every_compatibility_field() {
     let base = artifact_key(11, 12, Tier::Baseline);
     let variants = [
