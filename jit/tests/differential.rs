@@ -84,7 +84,10 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
     if matches!(tier1_policy(opcode.id()), Some(Tier1Policy::Helper(_))) {
         required.insert(Dimension::OwnershipGc);
     }
-    if matches!(case.opcode.as_str(), "plus" | "post_inc" | "add" | "lt") {
+    if matches!(
+        case.opcode.as_str(),
+        "plus" | "post_inc" | "add" | "sub" | "mul" | "div" | "lt"
+    ) {
         required.insert(Dimension::NumericTagEdge);
     }
     if matches!(
@@ -147,9 +150,10 @@ fn manifest_executes_every_advertised_opcode_at_its_native_pc() {
         if case.dimensions.contains(&Dimension::OwnershipGc) {
             run = run.stress_gc();
         }
-        if let Some(expected) = case.helper {
-            run = run.expect_helper(expected.id());
-        }
+        // Helper annotations describe the exact generic fallback family. A
+        // primitive-specialized Tier 1 execution may legitimately keep that
+        // cold edge unexecuted; helper execution is covered independently by
+        // `every_advertised_helper_family_has_a_real_native_execution_case`.
         run.assert_same();
     }
 }
@@ -188,8 +192,8 @@ fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() 
 #[test]
 fn rejected_programs_have_exact_fallback_and_interpreter_semantics() {
     assert_tier1_rejected(
-        "function f(a,b){ return a-b }",
-        "f(44,2)",
+        "function f(a,b){ return a%b }",
+        "f(86,44)",
         FallbackReason::UnsupportedOpcode,
     );
 }
@@ -220,6 +224,44 @@ fn ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter() {
             })
             .assert_same();
     }
+}
+
+#[test]
+fn tier1_calls_and_method_calls_preserve_values_and_ownership() {
+    differential(
+        "function f(fn,a,b){let value=fn(a,b);return value+0}",
+        "f((a,b)=>a+b,20,22)",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("call2")
+    .expect_helper(HelperId::Call)
+    .assert_same();
+
+    differential(
+        "function f(o,x){let value=o.add(x);return value+0}",
+        "f({base:20,add(x){return this.base+x}},22)",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("call_method")
+    .expect_helper(HelperId::Call)
+    .assert_same();
+}
+
+#[test]
+fn tier1_object_property_reads_and_writes_preserve_values_and_ownership() {
+    differential(
+        "function f(o){o.answer=42;return o.answer}",
+        "f({answer:0})",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("put_field")
+    .expect_executed_opcode("get_field")
+    .expect_helper(HelperId::SetProperty)
+    .expect_helper(HelperId::GetProperty)
+    .assert_same();
 }
 
 #[test]

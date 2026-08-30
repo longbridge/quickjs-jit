@@ -2,6 +2,7 @@ use rquickjs_jit::bytecode::{
     decode_raw, linked_opcode_table, opcode, CompileSnapshot, DecodeError, DeoptPoint,
     FallbackReason, OsrPoint, Resource, SlotKind, VerifierMetadata, VerifyErrorKind, VerifyLimits,
 };
+use rquickjs::{Context, Function, Runtime};
 
 fn snapshot_from_parts(
     bytecode: Vec<u8>,
@@ -25,6 +26,31 @@ fn verifier_metadata(osr: Vec<OsrPoint>, deopt: Vec<DeoptPoint>) -> VerifierMeta
 
 fn i32_operand(value: i32) -> [u8; 4] {
     value.to_le_bytes()
+}
+
+#[test]
+fn representative_typed_array_assignment_verifies_before_tier1_policy() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../benchmarks/scripts/arrays-typed.js"
+        ));
+        ctx.eval::<(), _>(source).unwrap();
+        let function: Function = ctx.globals().get("workload").unwrap();
+        let snapshot = unsafe {
+            CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw())
+        }
+        .unwrap();
+        let verified = snapshot
+            .verify(VerifyLimits::default())
+            .expect("representative typed-array bytecode is structurally valid");
+        assert!(matches!(
+            verified.tier1_eligibility(),
+            Err(rejection) if rejection.reason() == FallbackReason::UnsupportedOpcode
+        ));
+    });
 }
 
 #[test]
@@ -188,6 +214,34 @@ fn explicit_boxing_on_both_paths_allows_a_tagged_join() {
 }
 
 #[test]
+fn to_propkey_preserves_numeric_stack_proof_across_null_base_bypass() {
+    let opcode_named = |name: &str| {
+        linked_opcode_table()
+            .find(|opcode| opcode.name() == name)
+            .unwrap_or_else(|| panic!("linked opcode {name}"))
+            .id()
+    };
+    let bytes = vec![
+        opcode::PUSH_I8,
+        1,
+        opcode::PUSH_TRUE,
+        opcode::DUP,
+        opcode_named("is_undefined_or_null"),
+        opcode_named("if_true8"),
+        4, // operand PC 6 + 4 = common SWAP at PC 10
+        opcode_named("swap"),
+        opcode_named("to_propkey"),
+        opcode_named("swap"),
+        opcode_named("swap"),
+        opcode::DROP,
+        opcode::RETURN,
+    ];
+    assert!(snapshot_from_parts(bytes, 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .is_ok());
+}
+
+#[test]
 fn stack_copy_operations_do_not_implicitly_box_specialized_slots() {
     let bytes = vec![
         opcode::PUSH_TRUE,
@@ -210,6 +264,37 @@ fn stack_copy_operations_do_not_implicitly_box_specialized_slots() {
         error.kind(),
         VerifyErrorKind::IncompatibleMergeKind { slot: 0, .. }
     ));
+}
+
+#[test]
+fn local_kind_join_forgets_numeric_proof_at_the_tagged_frame_boundary() {
+    let bytes = vec![
+        opcode::PUSH_TRUE,
+        opcode::IF_FALSE8,
+        8, // operand PC 2 + 8 = NOP at 10
+        opcode::PUSH_I8,
+        1,
+        opcode::PUT_LOC,
+        0,
+        0,
+        opcode::GOTO8,
+        2, // operand PC 9 + 2 = RETURN_UNDEF at 11
+        opcode::NOP,
+        opcode::RETURN_UNDEF,
+    ];
+    let snapshot = snapshot_from_parts(bytes, 0, 1, 0, 0).with_metadata(verifier_metadata(
+        vec![],
+        vec![DeoptPoint::new(
+            11,
+            vec![SlotKind::Tagged],
+            vec![SlotKind::Tagged],
+        )],
+    ));
+
+    // The local is a tagged interpreter-frame cell on both paths. The Int32
+    // kind is only a path-local proof, so the merge must forget that proof and
+    // expose Tagged in the deopt map rather than inventing a stack conversion.
+    assert!(snapshot.verify(VerifyLimits::default()).is_ok());
 }
 
 #[test]

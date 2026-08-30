@@ -54,6 +54,7 @@ pub enum Test262Variant {
     SloppyScript,
     StrictScript,
     RawScript,
+    RawModule,
     Module,
     StrictModule,
     AsyncScript,
@@ -150,11 +151,21 @@ pub fn parse_test262(path: impl Into<String>, source: &str) -> Result<Test262Cas
         }
     }
     let has = |flag: &str| metadata.flags.iter().any(|candidate| candidate == flag);
-    if has("onlyStrict") && has("noStrict") || has("raw") && metadata.flags.len() != 1 {
+    if has("onlyStrict") && has("noStrict")
+        || has("raw")
+            && metadata
+                .flags
+                .iter()
+                .any(|flag| flag != "raw" && flag != "module")
+    {
         return Err(ParseError(format!("{path}: contradictory Test262 flags")));
     }
     let variants = if has("raw") {
-        vec![Test262Variant::RawScript]
+        vec![if has("module") {
+            Test262Variant::RawModule
+        } else {
+            Test262Variant::RawScript
+        }]
     } else {
         let module = has("module");
         let asynchronous = has("async");
@@ -206,7 +217,10 @@ pub fn compose_test262_program(
     variant: Test262Variant,
     harness: &str,
 ) -> String {
-    if variant == Test262Variant::RawScript {
+    if matches!(
+        variant,
+        Test262Variant::RawScript | Test262Variant::RawModule
+    ) {
         // Test262 `raw` means the source text is evaluated verbatim.  The
         // frontmatter is a JavaScript comment; stripping it would also strip
         // license text, hashbang positioning, or any Annex B lexical sentinel
@@ -623,7 +637,16 @@ pub fn classify_features_with_config(
             return Err(format!("unknown Test262 feature {feature}"));
         }
         if skipped.contains(feature.as_str())
-            || matches!(feature.as_str(), "IsHTMLDDA" | "agent" | "cross-realm")
+            || matches!(
+                feature.as_str(),
+                "IsHTMLDDA"
+                    | "agent"
+                    | "Atomics"
+                    | "cross-realm"
+                    | "json-modules"
+                    | "import-text"
+                    | "import-bytes"
+            )
         {
             unsupported.push(feature.clone());
         }
@@ -664,6 +687,57 @@ pub fn discover_test262(root: &Path) -> io::Result<Vec<PathBuf>> {
         ));
     }
     Ok(cases)
+}
+
+/// Returns whether the pinned QuickJS Test262 configuration excludes `path`.
+///
+/// The upstream runner accepts exact file entries and directory prefixes in
+/// `[exclude]`, with later `!` entries re-including a subtree. Keeping this
+/// interpretation here makes the Rust-host corpus match the authoritative
+/// QuickJS baseline without silently turning engine-known failures into JIT
+/// regressions.
+pub fn quickjs_config_excludes_path(config: &str, path: &str) -> bool {
+    let mut in_exclude = false;
+    let mut excluded = false;
+    for raw in config.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_exclude = line == "[exclude]";
+            continue;
+        }
+        if !in_exclude || line.is_empty() {
+            continue;
+        }
+        let (include, rule) = line
+            .strip_prefix('!')
+            .map_or((false, line), |rule| (true, rule));
+        let rule = rule.strip_prefix("test262/").unwrap_or(rule);
+        let matches = if rule.ends_with('/') {
+            path.starts_with(rule)
+        } else {
+            path == rule
+        };
+        if matches {
+            excluded = !include;
+        }
+    }
+    excluded
+}
+
+/// Checks whether `path` is a known failure in the pinned QuickJS reference
+/// runner's generated error file. Each line starts with a test path followed
+/// by a source location and diagnostic; strict/sloppy duplicates collapse to
+/// the same accountable path.
+pub fn quickjs_errorfile_contains_path(errorfile: &str, path: &str) -> bool {
+    errorfile.lines().any(|line| {
+        let line = line.trim();
+        let Some(js_end) = line.find(".js:") else {
+            return false;
+        };
+        line[..js_end + 3]
+            .strip_prefix("test262/")
+            .is_some_and(|known| known == path)
+    })
 }
 
 /// Produces a side-effect-free observation program.

@@ -470,6 +470,7 @@ struct ProductionBackend {
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
+    shape_feedback: runtime::ShapeFeedbackTable,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
     native_exits: u64,
@@ -500,7 +501,14 @@ struct ProductionBackend {
     profitability_approved: u64,
     profitability_rejected: u64,
     profitability_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
+    /// Baseline was measured harmful and unpublished.  This is deliberately
+    /// not a terminal function blacklist: stable feedback may still justify
+    /// one of the coordinator's bounded optimizing-tier trials.
     profitability_blacklisted: std::collections::HashSet<runtime::FunctionKey>,
+    /// Immutable generations for which neither tier can ever produce code.
+    /// `record_hot` reports these to QuickJS so it can turn off all probes and
+    /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
+    feedback_disabled: std::collections::HashSet<runtime::FunctionKey>,
     benefit_recordings: u64,
     measured_benefit_ns: u64,
     compiler_measurements: Arc<CompilerMeasurements>,
@@ -817,11 +825,11 @@ unsafe extern "C" fn production_entry_trampoline(
     }) else {
         return retry_exit();
     };
-    /* Narrow Tier 2 currently emits identity recipes only. Execute their
-     * two-phase contract now: validate the complete transaction first, then
-     * commit the already-materialized frame by publishing the resume state.
-     * Any future non-identity/stack recipe fails closed until it has an owning
-     * duplication implementation. */
+    /* Narrow Tier 2 currently emits identity recipes only. Entry exits alias
+     * arguments/locals; instruction exits first synchronize their live
+     * operand stack into frame storage. Validate the complete transaction
+     * before publishing the resume state. Future non-identity recipes fail
+     * closed until they have an owning duplication implementation. */
     if map.validate_identity_materialization(*shape).is_err() {
         return retry_exit();
     }
@@ -1090,6 +1098,7 @@ impl ProductionBackend {
             optimizing_snapshots: std::collections::HashMap::new(),
             tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
+            shape_feedback: runtime::ShapeFeedbackTable::new(3),
             metrics,
             native_entries: 0,
             native_exits: 0,
@@ -1119,6 +1128,7 @@ impl ProductionBackend {
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
             profitability_blacklisted: std::collections::HashSet::new(),
+            feedback_disabled: std::collections::HashSet::new(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
             compiler_measurements,
@@ -1149,7 +1159,7 @@ impl ProductionBackend {
             .keys()
             .copied()
             .filter(|key| {
-                if self.profitability_blacklisted.contains(key) {
+                if self.feedback_disabled.contains(key) {
                     return false;
                 }
                 if self
@@ -1159,13 +1169,20 @@ impl ProductionBackend {
                 {
                     return false;
                 }
-                matches!(
+                (matches!(
                     self.coordinator.tier_state(*key, runtime::Tier::Baseline),
                     runtime::CompileState::Installed(_)
-                ) && matches!(
-                    self.coordinator.tier_state(*key, runtime::Tier::Optimizing),
-                    runtime::CompileState::Cold
-                )
+                ) || self.profitability_blacklisted.contains(key))
+                    && match self
+                        .coordinator
+                        .tier_state(*key, runtime::Tier::Optimizing)
+                    {
+                        runtime::CompileState::Cold => true,
+                        runtime::CompileState::Backoff { retry_after, .. } => {
+                            self.clock >= retry_after
+                        }
+                        _ => false,
+                    }
             })
             .collect::<Vec<_>>();
         for key in if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
@@ -1173,11 +1190,46 @@ impl ProductionBackend {
         } else {
             ready_for_tier2
         } {
+            let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
+                continue;
+            };
+            let observed = self
+                .feedback
+                .snapshot(self.clock.max(1))
+                .with_properties(self.shape_feedback.snapshot(key));
+            let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
+                matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+            }) && !snapshot.instructions().iter().any(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "call" | "tail_call" | "call_method" | "get_field" | "put_field"
+                )
+            });
+            /* A value-site observation can arrive at the loop hot probe before
+             * the same invocation emits its CALL/RETURN feedback. Compiling at
+             * that point freezes an `Any` numeric version and guarantees a
+             * generic Float64 loop even when the completed invocation proves a
+             * bounded Int32 signature. Keep the immutable bytecode snapshot,
+             * but do not queue Tier2 until the signature is complete. A truly
+             * feedback-free force-optimized test still uses its deterministic
+             * fallback below; call/property candidates have their own bounded
+             * identities and are not gated here. */
+            if numeric_candidate
+                && (observed.call_at(key).is_some() || observed.has_stable_value_for(key))
+                && observed.bounded_specialization(key).is_none()
+            {
+                continue;
+            }
             #[cfg(feature = "test-support")]
             let forced = self.config.force_optimized();
             #[cfg(not(feature = "test-support"))]
             let forced = false;
-            if !forced {
+            /* A rejected baseline does not predict Tier2 profitability: the
+             * baseline can lose to dispatch/callback overhead while a stable
+             * unboxed loop wins by orders of magnitude.  Give such a function
+             * one bounded optimizing trial; coordinator attempt/version caps
+             * still prevent compile or deopt loops. */
+            if !forced && !self.profitability_blacklisted.contains(&key) {
                 let measured = self
                     .execution_profiles
                     .get(&key)
@@ -1212,6 +1264,7 @@ impl ProductionBackend {
                     entry.0 = entry.0.saturating_add(1);
                     if entry.0 >= 5 {
                         self.profitability_blacklisted.insert(key);
+                        self.coordinator.demote_baseline_to_interpreter(key);
                     } else {
                         entry.1 = self.clock.saturating_add(1u64 << entry.0.min(20));
                     }
@@ -1223,19 +1276,40 @@ impl ProductionBackend {
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
                 #[cfg(feature = "test-support")]
                 let feedback = if self.config.force_optimized() {
-                    let mut deterministic = runtime::FeedbackTable::new(1, 1);
-                    deterministic.observe_type(
-                        key,
-                        0,
-                        runtime::FeedbackKind::Value,
-                        runtime::ObservedType::Int32,
-                    );
-                    deterministic.snapshot(self.clock.max(1))
+                    let has_stable_call = snapshot.instructions().iter().any(|instruction| {
+                        observed
+                            .call_specialization_at(key, instruction.pc())
+                            .is_some()
+                    });
+                    let has_property = snapshot
+                        .instructions()
+                        .iter()
+                        .any(|i| observed.property_at(i.pc()).is_some());
+                    if observed.bounded_specialization(key).is_some()
+                        || has_stable_call
+                        || has_property
+                    {
+                        observed
+                    } else {
+                        let mut deterministic = runtime::FeedbackTable::new(1, 1);
+                        deterministic.observe_type(
+                            key,
+                            0,
+                            runtime::FeedbackKind::Value,
+                            runtime::ObservedType::Int32,
+                        );
+                        deterministic.snapshot(self.clock.max(1))
+                    }
                 } else {
-                    self.feedback.snapshot(self.clock)
+                    self.feedback
+                        .snapshot(self.clock)
+                        .with_properties(self.shape_feedback.snapshot(key))
                 };
                 #[cfg(not(feature = "test-support"))]
-                let feedback = self.feedback.snapshot(self.clock);
+                let feedback = self
+                    .feedback
+                    .snapshot(self.clock)
+                    .with_properties(self.shape_feedback.snapshot(key));
                 if self
                     .coordinator
                     .queue_with_feedback(key, runtime::Tier::Optimizing, snapshot.clone(), feedback)
@@ -1353,11 +1427,23 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     }
 
     fn record_hot(&mut self, event: &rquickjs_core::qjs::JSJitHotEvent) -> u32 {
-        self.maintenance();
         if event.count == 0 {
             return 0;
         }
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        /* Bit 1 is an append-only response flag understood by the patched
+         * interpreter: this immutable bytecode generation will never acquire
+         * code, so stop hot and feedback probes locally in C. */
+        if self.feedback_disabled.contains(&key)
+            || matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Blacklisted
+            )
+        {
+            self.feedback_disabled.insert(key);
+            return 2;
+        }
+        self.maintenance();
         let observed = match event.feedback_type {
             rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_INT32 => {
                 Some(runtime::ObservedType::Int32)
@@ -1402,11 +1488,19 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Baseline),
             runtime::CompileState::Installed(_)
-        ) {
-            if !matches!(
-                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
-                runtime::CompileState::Cold | runtime::CompileState::Backoff { .. }
-            ) || self.optimizing_requested.contains(&key)
+        ) || self.profitability_blacklisted.contains(&key)
+        {
+            let optimizing_ready = match self
+                .coordinator
+                .tier_state(key, runtime::Tier::Optimizing)
+            {
+                runtime::CompileState::Cold => true,
+                runtime::CompileState::Backoff { retry_after, .. } => self.clock >= retry_after,
+                _ => false,
+            };
+            if !optimizing_ready
+                || self.optimizing_requested.contains(&key)
+                || self.optimizing_snapshots.contains_key(&key)
             {
                 return 0;
             }
@@ -1490,6 +1584,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             return;
         }
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        if self.feedback_disabled.contains(&key) {
+            return;
+        }
         let raw_types = if event.type_count == 0 {
             &[][..]
         } else {
@@ -1517,7 +1614,27 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     .map(observed)
                     .collect::<Option<Vec<_>>>()
                 {
-                    self.feedback.observe_call(key, &arguments);
+                    if event.flags & qjs::JS_JIT_FEEDBACK_CALL_SITE != 0 {
+                        let Some((&result, arguments)) = arguments.split_last() else {
+                            return;
+                        };
+                        if event.callee.id == 0 || event.callee.generation == 0 {
+                            return;
+                        }
+                        let callee =
+                            runtime::FunctionKey::new(event.callee.id, event.callee.generation);
+                        self.feedback.observe_call_signature_with_identity(
+                            key,
+                            event.pc,
+                            callee,
+                            event.shape_identity as u64,
+                            event.prototype_identity as u64,
+                            arguments,
+                            result,
+                        );
+                    } else {
+                        self.feedback.observe_call(key, &arguments);
+                    }
                 }
             }
             qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_RETURN if raw_types.len() == 1 => {
@@ -1545,6 +1662,41 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                         .observe_binary(key, event.pc, lhs, rhs, result, flags);
                 }
             }
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CONVERSION if raw_types.len() == 2 => {
+                if let (Some(operand), Some(result)) =
+                    (observed(raw_types[0]), observed(raw_types[1]))
+                {
+                    self.feedback
+                        .observe_conversion(key, event.pc, operand, result);
+                }
+            }
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BRANCH if raw_types.len() == 1 => {
+                if let Some(condition) = observed(raw_types[0]) {
+                    self.feedback.observe_branch(
+                        key,
+                        event.pc,
+                        condition,
+                        event.flags & qjs::JS_JIT_FEEDBACK_BRANCH_TAKEN != 0,
+                    );
+                }
+            }
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_PROPERTY
+                if raw_types.len() == 2
+                    && event.shape_identity != 0
+                    && event.shape_generation != 0 =>
+            {
+                let observation = runtime::ShapeObservation::new(
+                    runtime::ShapeToken::new(event.shape_identity, event.shape_generation),
+                    runtime::PrototypeDependencyToken::new(
+                        event.prototype_identity,
+                        event.prototype_generation,
+                    ),
+                    event.property_offset,
+                    runtime::PropertyAttributes::from_bits(event.property_attributes as u8),
+                    observed(raw_types[1]).unwrap_or(runtime::ObservedType::Object),
+                );
+                self.shape_feedback.observe(key, event.pc, observation);
+            }
             _ => {}
         }
     }
@@ -1565,17 +1717,20 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let _free = FreeSnapshot(snapshot);
         let copied = unsafe { bytecode::CompileSnapshot::copy_borrowed_raw(raw.as_ref()) };
         let Ok(snapshot) = copied else {
+            self.feedback_disabled.insert(raw_key);
             self.fail_before_queue(raw_key);
             return;
         };
         let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
         if snapshot.owned_bytes() > self.config.max_snapshot_bytes() {
+            self.feedback_disabled.insert(key);
             self.coordinator.record_resource_limit_rejection();
             self.fail_before_queue(key);
             self.maintenance();
             return;
         }
         let Ok(verified) = snapshot.verify(bytecode::VerifyLimits::default()) else {
+            self.feedback_disabled.insert(key);
             self.fail_before_queue(key);
             return;
         };
@@ -1609,12 +1764,20 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             adaptive.thresholds().rationale,
             runtime::HotReason::NeutralBase
         );
-        let requested_tier = if self.optimizing_requested.contains(&key) {
-            runtime::Tier::Optimizing
-        } else {
-            runtime::Tier::Baseline
-        };
-        let tier2_snapshot = (requested_tier == runtime::Tier::Baseline).then(|| verified.clone());
+        if self.optimizing_requested.remove(&key) {
+            if let Some(hotness) = self.optimizing_hotness.get_mut(&key) {
+                hotness.clear_queued();
+            }
+            /* Optimizing snapshots must acquire the current bounded feedback
+             * in maintenance. Directly queueing this callback result uses the
+             * feedback-free coordinator path and races the RETURN event that
+             * completes the numeric signature. */
+            self.optimizing_snapshots.insert(key, verified);
+            self.maintenance();
+            return;
+        }
+        let requested_tier = runtime::Tier::Baseline;
+        let tier2_snapshot = Some(verified.clone());
         let queued = self.coordinator.queue(key, requested_tier, verified);
         match queued {
             Ok(()) => {
@@ -1660,8 +1823,22 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             stack_map_count: 0,
             helper_abi_version: 0,
         };
-        self.maintenance();
         let key = runtime::FunctionKey::new(id, generation);
+        if self.feedback_disabled.contains(&key) {
+            return empty;
+        }
+        // Profitability-demoted functions have no publishable native entry.
+        // Avoid running global maintenance at every subsequent call/OSR probe;
+        // this keeps the fail-open interpreter path close to unattached cost.
+        if self.profitability_blacklisted.contains(&key)
+            && !matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Installed(_)
+            )
+        {
+            return empty;
+        }
+        self.maintenance();
         let acquired_tier = if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Optimizing),
             runtime::CompileState::Installed(_)

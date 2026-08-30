@@ -175,11 +175,29 @@ jobs:
             target/jit-fuzz-artifacts
 
   jit-platform-compiler:
-    name: ${{ matrix.os }} / JIT compiler graph and native smoke
+    name: ${{ matrix.platform }} / JIT compiler graph and native smoke
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-latest
+            smoke: differential
+          - platform: Linux AArch64
+            os: ubuntu-24.04-arm
+            smoke: differential
+          - platform: macOS x86_64
+            os: macos-13
+            smoke: differential
+          - platform: macOS AArch64
+            os: macos-14
+            smoke: differential
+          - platform: Windows x86_64
+            os: windows-latest
+            smoke: differential
+          - platform: Windows AArch64
+            os: windows-11-arm
+            smoke: windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -191,8 +209,14 @@ jobs:
           toolchain: stable
       - name: Check the complete compiler build graph
         run: cargo check -p rquickjs-jit --all-targets --features compiler,test-support
+      - name: Exercise executable-memory publication on the host
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test platform -- --test-threads=1
       - name: Smoke published native execution on the host
+        if: matrix.smoke == 'differential'
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test differential ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter -- --exact --test-threads=1
+      - name: Exercise native Windows ARM64 unwind publication
+        if: matrix.smoke == 'windows-arm64'
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test baseline_windows_arm64 -- --test-threads=1
 
   examples:
     runs-on: ubuntu-latest

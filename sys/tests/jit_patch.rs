@@ -44,12 +44,72 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
 
     let quickjs = fs::read_to_string(destination.join("quickjs.c")).unwrap();
     let jit_header = fs::read_to_string(destination.join("quickjs-jit.h")).unwrap();
+    let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 5u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 10u"));
+    assert!(quickjs.contains("JS_JitHelperShapeGuard"));
+    assert!(quickjs.contains("JS_JitHelperMaterializeOwner"));
+    assert!(quickjs.contains(
+        "(void)stack_map_id;\n    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)"
+    ));
+    assert_eq!(
+        quickjs
+            .matches(
+                "(void)stack_map_id;\n    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)"
+            )
+            .count(),
+        3
+    );
+    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 3u"));
+    assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
+    assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
+    assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_LOCAL = 1"));
+    assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_OWNED_STACK = 2"));
+    assert!(helper_header.contains("X(MATERIALIZE_OWNER, materialize_owner"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn bundled_jit_bindings_include_materialize_owner_tail() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bindings = manifest.join("src/bindings");
+    let targets = [
+        "aarch64-apple-darwin.rs",
+        "aarch64-pc-windows-msvc.rs",
+        "aarch64-unknown-linux-gnu.rs",
+        "aarch64-unknown-linux-musl.rs",
+        "x86_64-apple-darwin.rs",
+        "x86_64-pc-windows-gnu.rs",
+        "x86_64-pc-windows-msvc.rs",
+        "x86_64-unknown-linux-gnu.rs",
+        "x86_64-unknown-linux-musl.rs",
+    ];
+    for target in targets {
+        let binding = fs::read_to_string(bindings.join(target)).unwrap();
+        assert!(
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 10;"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("JS_JIT_HELPER_MATERIALIZED: _bindgen_ty_4 = 2"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("JS_JIT_HELPER_MATERIALIZE_OWNER: JSJitHelperId = 14"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("pub materialize_owner: ::core::option::Option"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 128usize"),
+            "{target}"
+        );
+    }
 }
 
 #[test]

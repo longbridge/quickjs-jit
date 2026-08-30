@@ -2,8 +2,9 @@ use rquickjs_core::{Context, Runtime};
 use rquickjs_jit::correctness::{
     canonical_observation_source, canonical_observer_prelude, classify_features,
     classify_features_against, classify_features_with_config, compose_test262_program,
-    discover_test262, parse_test262, Exclusion, ExclusionManifest, FeatureDisposition,
-    NegativePhase, RunMode, StructuredProgram, SuiteReport, Test262Variant,
+    discover_test262, parse_test262, quickjs_config_excludes_path, quickjs_errorfile_contains_path,
+    Exclusion, ExclusionManifest, FeatureDisposition, NegativePhase, RunMode, StructuredProgram,
+    SuiteReport, Test262Variant,
 };
 use std::fs;
 use std::path::Path;
@@ -190,6 +191,17 @@ fn ordinary_scripts_run_both_strict_variants_but_raw_runs_once() {
     );
     let raw = parse_test262("raw.js", "/*---\nflags: [raw]\n---*/\n1 + 1;\n").unwrap();
     assert_eq!(raw.variants(), [Test262Variant::RawScript]);
+
+    let raw_module = parse_test262(
+        "raw-module.js",
+        "/*---\nflags: [raw, module]\n---*/\nexport {};",
+    )
+    .unwrap();
+    assert_eq!(raw_module.variants(), [Test262Variant::RawModule]);
+    assert_eq!(
+        compose_test262_program(&raw_module, Test262Variant::RawModule, "HARNESS"),
+        raw_module.source()
+    );
 }
 
 #[test]
@@ -340,6 +352,30 @@ fn pinned_quickjs_config_skips_only_explicit_feature_assignments() {
         classify_features_with_config(&["Reflect".into()], registry, config).unwrap(),
         FeatureDisposition::Supported
     );
+}
+
+#[test]
+fn pinned_quickjs_path_exclusions_honor_exact_prefix_and_reinclude_rules() {
+    let config = "[features]\nfoo=skip\n[exclude]\ntest262/test/exact.js\ntest262/test/staging/\n!test262/test/staging/kept/\n[tests]\n";
+    assert!(quickjs_config_excludes_path(config, "test/exact.js"));
+    assert!(quickjs_config_excludes_path(
+        config,
+        "test/staging/dropped.js"
+    ));
+    assert!(!quickjs_config_excludes_path(
+        config,
+        "test/staging/kept/case.js"
+    ));
+    assert!(!quickjs_config_excludes_path(config, "test/exact.js-extra"));
+}
+
+#[test]
+fn pinned_quickjs_errorfile_matches_only_the_exact_test_path() {
+    let errors = "test262/test/a.js:12: TypeError: expected\n\
+                  test262/test/a.js:12: strict mode: TypeError: expected\n";
+    assert!(quickjs_errorfile_contains_path(errors, "test/a.js"));
+    assert!(!quickjs_errorfile_contains_path(errors, "test/a.js-extra"));
+    assert!(!quickjs_errorfile_contains_path(errors, "test/b.js"));
 }
 
 #[test]

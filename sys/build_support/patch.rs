@@ -2,8 +2,8 @@ use std::{fs, io, path::Path};
 
 const QUICKJS_BASELINE_FNV64: u64 = 0x3302_116a_b0fc_269c;
 const EXPECTED_PATCHES: [(&str, u64); 2] = [
-    ("0001-rquickjs-jit.patch", 0x3d9d_5f25_db81_da31),
-    ("0002-runtime-feedback.patch", 0xa3f8_0922_da13_f41f),
+    ("0001-rquickjs-jit.patch", 0x18d7_40cc_6943_30cf),
+    ("0002-runtime-feedback.patch", 0xbe56_631a_9e19_ffd5),
 ];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
@@ -43,9 +43,9 @@ const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("list.h", 0xb337_70f7_b76d_a3d8),
     ("quickjs-atom.h", 0x30b4_9116_b6a2_aa99),
     ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
-    ("quickjs.c", 0x561d_8713_8604_e9e1),
-    ("quickjs-jit.h", 0x1d2f_dc0b_ee5b_10e4),
-    ("quickjs-jit-helpers.h", 0xfc63_8662_ecd7_71c7),
+    ("quickjs.c", 0x8b96_f015_703c_f8a2),
+    ("quickjs-jit.h", 0x6a85_4918_296f_63bf),
+    ("quickjs-jit-helpers.h", 0x4add_8668_38ff_2096),
     ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
     ("quickjs.h", 0x4831_2cde_9c2f_a5ee),
 ];
@@ -206,7 +206,12 @@ fn apply_unified_patch(root: &Path, patch: &str) -> io::Result<()> {
                 index += 1;
             }
             if removed != old_count || added != new_count {
-                return invalid("patch hunk line counts do not match its header");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "patch hunk at old line {old_start} counted {removed}/{added} lines, expected {old_count}/{new_count}"
+                    ),
+                ));
             }
         }
         for line in &original_lines[cursor..] {
@@ -268,7 +273,22 @@ fn parse_range(range: &str) -> io::Result<(usize, usize)> {
 
 fn require_source_line(original: &[&str], cursor: usize, expected: &str) -> io::Result<()> {
     if original.get(cursor).copied() != Some(expected) {
-        return invalid("patch context does not match the pinned QuickJS baseline");
+        let nearby = original
+            .iter()
+            .enumerate()
+            .skip(cursor.saturating_sub(256))
+            .take(512)
+            .find_map(|(index, line)| (*line == expected).then_some(index.saturating_add(1)));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "patch context mismatch at source line {}: expected {:?}, found {:?}, nearby match {:?}",
+                cursor.saturating_add(1),
+                expected,
+                original.get(cursor).copied(),
+                nearby
+            ),
+        ));
     }
     Ok(())
 }

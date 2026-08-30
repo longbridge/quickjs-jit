@@ -16,6 +16,7 @@ use rquickjs_jit::{
     compiler::{baseline::BaselineCompiler, CompileFailure},
     ir::{BaselineIr, IrOp, PollKind},
     platform::CodeMemoryError,
+    runtime::{FeedbackTable, FunctionKey, ObservedType},
     test_support::{
         compile_implemented_fixture, verified_bytecode, JSValueRepr, SnapshotFixture,
         SyntheticFrame,
@@ -28,6 +29,50 @@ fn named_opcode(name: &str) -> u8 {
         .find(|opcode| opcode.name() == name)
         .unwrap_or_else(|| panic!("linked QuickJS opcode {name}"))
         .id()
+}
+
+#[test]
+fn baseline_monomorphic_call_has_guarded_unboxed_direct_edge_and_helper_miss() {
+    let fixture = SnapshotFixture::compile("(function invoke(f,a){let x=f(a);return x+0})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let caller = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let call_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name().starts_with("call"))
+        .unwrap()
+        .pc();
+    let callee = FunctionKey::new(caller.id + 100, 9);
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call_signature_with_identity(
+            caller,
+            call_pc,
+            callee,
+            0x1234_5678,
+            0x2234_5678,
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+    }
+    let call = feedback
+        .snapshot(68)
+        .call_specialization_at(caller, call_pc)
+        .unwrap();
+    let clif = BaselineCompiler::host()
+        .lower_with_direct_target_for_test(&verified, call_pc, call, 0x7654_3210)
+        .expect("guarded baseline direct call");
+    assert!(clif.contains("(i64, i32) -> i32"), "{clif}");
+    assert!(clif.contains("0x1234_5678"), "{clif}");
+    assert!(clif.contains("0x2234_5678"), "{clif}");
+    assert!(clif.contains("0x7654_3210"), "{clif}");
+    // The guarded miss remains connected to the generic CALL helper while
+    // the matching edge invokes the scalar ABI directly.
+    assert!(clif.matches("call_indirect").count() >= 3, "{clif}");
+    assert!(clif.contains("brif"), "{clif}");
 }
 
 fn compile(
@@ -769,7 +814,7 @@ fn interrupt_is_polled_immediately_before_return() {
 }
 
 #[test]
-fn loop_header_poll_uses_sixty_four_iteration_countdown_and_exact_resume_pc() {
+fn loop_header_poll_uses_bounded_amortized_countdown_and_exact_resume_pc() {
     let push_0 = named_opcode("push_0");
     let push_1 = named_opcode("push_1");
     let plus = named_opcode("plus");
@@ -807,7 +852,9 @@ fn loop_header_poll_uses_sixty_four_iteration_countdown_and_exact_resume_pc() {
         opcode::RETURN,
     ];
     let executable = compile(bytecode.clone(), 1, 2).publish().unwrap();
-    let mut frame = SyntheticFrame::new(&[JSValueRepr::int32(100)], 2, 2);
+    // Exceed the production 1024-backedge cadence.  The second poll must be
+    // the loop-header slow path rather than the mandatory return poll.
+    let mut frame = SyntheticFrame::new(&[JSValueRepr::int32(1_100)], 2, 2);
     frame.set_bytecode(&bytecode);
     let bytecode_start = frame.bytecode_start();
     frame.interrupt_on_poll(2);
@@ -987,8 +1034,8 @@ fn compiles_loop_and_integer_arithmetic() {
     assert_eq!(outcome.result, JSValueRepr::int32(4_950));
     assert_eq!(
         frame.poll_count(),
-        3,
-        "entry + one 64-iteration loop-header slow path + return"
+        2,
+        "entry + return; a sub-1024 loop must not cross the poll helper boundary"
     );
 }
 
@@ -1054,6 +1101,40 @@ fn compiles_quickjs_loop_snapshot_without_rewriting_its_opcodes() {
     let code = BaselineCompiler::host()
         .compile(&verified)
         .unwrap_or_else(|error| panic!("{error:?} lowering {names:?}"));
+    if std::env::var_os("QJSJIT_DUMP_MACHINE").is_some() {
+        eprintln!("{}", code.machine_disassembly());
+    }
+    if cfg!(target_arch = "x86_64") {
+        let machine = code.machine_disassembly();
+        let countdown = machine
+            .find("$1024")
+            .expect("machine loop contains the bounded poll countdown");
+        let header_jump_line = machine[countdown..]
+            .lines()
+            .find(|line| line.trim_start().starts_with("jmp"))
+            .expect("countdown preheader jumps to the machine loop header")
+            .trim();
+        let backedge_jump = machine
+            .rfind(header_jump_line)
+            .expect("numeric loop has a generated machine backedge");
+        let block_start = machine[..backedge_jump]
+            .rfind("block")
+            .expect("machine backedge belongs to a block");
+        let hot_backedge = &machine[block_start..backedge_jump];
+        assert!(
+            !hot_backedge.lines().any(|line| line.contains("call")),
+            "hot backedge crossed a helper boundary:\n{hot_backedge}"
+        );
+        assert!(
+            !hot_backedge.lines().any(|line| {
+                line.contains(", ")
+                    && ["(%rbx)", "(%r15)", "(%r14)"]
+                        .iter()
+                        .any(|frame_base| line.contains(frame_base))
+            }),
+            "hot backedge eagerly synchronized interpreter frame slots:\n{hot_backedge}"
+        );
+    }
     assert!(code
         .frame_states()
         .iter()

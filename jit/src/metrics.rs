@@ -46,6 +46,8 @@ pub struct JitMetrics {
     pub deopt_materializations: u64,
     pub side_exits: u64,
     pub optimized_demotions: u64,
+    /// Baseline artifacts unpublished after automatic profitability rejection.
+    pub interpreter_demotions: u64,
     pub stable_path_compile_requests: u64,
     pub side_path_entries: u64,
     pub boxes_elided: u64,
@@ -107,6 +109,7 @@ impl JitMetrics {
             deopt_materializations: 0,
             side_exits: 0,
             optimized_demotions: 0,
+            interpreter_demotions: 0,
             stable_path_compile_requests: 0,
             side_path_entries: 0,
             boxes_elided: 0,

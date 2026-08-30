@@ -15,6 +15,7 @@ pub use optimized::{
     DeoptMap, DeoptOwnership, DeoptPhase, DeoptSlot, DeoptValidationError, GuardSite,
     Materialization, MaterializedFrame, MaterializedValue, OptimizedBlock, OptimizedEffect,
     OptimizedFrameShape, OptimizedIr, OptimizedMetrics, OptimizedNode, OptimizedNodeKind,
-    OwnedMaterializeError, OwnedMaterializedFrame, OwnedMaterializedValue, ValueRepresentation,
+    OwnedMaterializeError, OwnedMaterializedFrame, OwnedMaterializedValue,
+    OwnershipTransitionError, SsaValueOwnership, ValueRepresentation,
 };
 pub use types::{BinaryOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp};

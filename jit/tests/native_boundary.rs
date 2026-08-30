@@ -709,10 +709,10 @@ fn verified_loop_header_can_enter_native_code_from_an_osr_poll() {
             r#"
             globalThis.target = function target() {
                 globalThis.started = true;
-                while (globalThis.keepGoing) globalThis.keepGoing = false;
+                while (globalThis.keepGoing) globalThis.keepGoing--;
                 return 3;
             };
-            globalThis.keepGoing = true;
+            globalThis.keepGoing = 65;
             "#,
         )
         .unwrap();
@@ -756,10 +756,10 @@ fn osr_retry_restarts_at_the_polled_pc_without_replaying_the_prefix() {
         ctx.eval::<(), _>(
             r#"
             globalThis.started = 0;
-            globalThis.keepGoing = true;
+            globalThis.keepGoing = 65;
             globalThis.target = function target() {
                 globalThis.started++;
-                while (globalThis.keepGoing) globalThis.keepGoing = false;
+                while (globalThis.keepGoing) globalThis.keepGoing--;
                 return globalThis.started;
             };
             "#,

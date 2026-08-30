@@ -396,6 +396,90 @@ fn production_optimized_ir_is_independent_ssa_with_loop_guards() {
 }
 
 #[test]
+fn iterative_fibonacci_multi_local_loop_translates_to_optimized_ir() {
+    let fixture = SnapshotFixture::compile(
+        "(function(_iterations,seed){let a=seed;let b=1;for(let i=seed;i<40;i++){const next=a+b;a=b;b=next;}return a})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    verified.tier1_eligibility().unwrap_or_else(|error| {
+        panic!(
+            "iterative Fibonacci is not advertised for Tier1: {error:?}; opcodes={:?}",
+            verified
+                .instructions()
+                .iter()
+                .map(|instruction| (instruction.pc(), instruction.opcode().name()))
+                .collect::<Vec<_>>()
+        )
+    });
+    let ir = OptimizedIr::translate(&verified, 32)
+        .unwrap_or_else(|error| panic!("iterative Fibonacci did not translate: {error:?}"));
+    assert!(ir.blocks().iter().any(|block| block.is_loop_header()));
+    rquickjs_jit::test_support::compile_implemented_fixture(
+        &rquickjs_jit::compiler::baseline::BaselineCompiler::host(),
+        &verified,
+    )
+    .unwrap_or_else(|error| panic!("iterative Fibonacci did not lower in Tier1: {error:?}"));
+    Tier2Compiler::host(32)
+        .lower_for_test(&verified, 32)
+        .unwrap_or_else(|error| panic!("iterative Fibonacci did not lower: {error:?}"));
+
+    let batched = SnapshotFixture::compile(
+        "(function(iterations,seed){let result=seed;for(let batch=seed;batch<iterations;batch++){let a=seed;let b=1;for(let i=seed;i<40;i++){const next=a+b;a=b;b=next;}result=a;}return result})",
+    );
+    let batched = batched.snapshot().verify(VerifyLimits::default()).unwrap();
+    batched.tier1_eligibility().unwrap_or_else(|error| {
+        panic!(
+            "batched iterative Fibonacci is not Tier1: {error:?}; opcodes={:?}",
+            batched
+                .instructions()
+                .iter()
+                .map(|instruction| (instruction.pc(), instruction.opcode().name()))
+                .collect::<Vec<_>>()
+        )
+    });
+    let key = FunctionKey::new(
+        batched.snapshot().function_id(),
+        batched.snapshot().generation(),
+    );
+    let return_pc = batched
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        for instruction in batched
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.opcode().name() == "add")
+        {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(33)
+        .lower_with_feedback_for_test(&batched, key, &feedback.snapshot(33))
+        .unwrap_or_else(|error| panic!("batched iterative Fibonacci did not lower: {error:?}"));
+    assert!(
+        clif.lines()
+            .any(|line| line.starts_with("block") && line.matches(": i32").count() >= 4),
+        "the a/b/i/batch loop phis must remain raw i32: {clif}"
+    );
+    assert!(clif.contains("sadd_overflow"), "{clif}");
+    assert!(!clif.contains("fadd"), "{clif}");
+    assert!(!clif.contains("fcvt_from_sint"), "{clif}");
+}
+
+#[test]
 fn tier2_rejects_captured_loop_headers_with_live_operand_stack() {
     use rquickjs_core::qjs;
     let bytecode = vec![
@@ -429,6 +513,415 @@ fn independent_optimized_machine_lowers_numeric_loop() {
     Tier2Compiler::host(34)
         .lower_for_test(&verified, 34)
         .unwrap();
+}
+
+#[test]
+fn stable_int32_add_feedback_selects_a_guarded_integer_only_hot_path() {
+    let fixture = SnapshotFixture::compile("(function add(a,b){return a+b})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let add_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "add")
+        .unwrap()
+        .pc();
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(16, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        feedback.observe_binary(
+            key,
+            add_pc,
+            ObservedType::Int32,
+            ObservedType::Int32,
+            ObservedType::Int32,
+            Default::default(),
+        );
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+
+    let clif = Tier2Compiler::host(61)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(61))
+        .expect("stable Int32 add feedback is specialized");
+
+    assert!(clif.contains("sadd_overflow"), "{clif}");
+    assert!(
+        !clif.contains("fadd"),
+        "the Int32 hot path must not compute a float add: {clif}"
+    );
+    assert!(
+        !clif
+            .lines()
+            .any(|line| line.trim_start().starts_with("call ")),
+        "the Int32 add hot path must not call a helper: {clif}"
+    );
+}
+
+#[test]
+fn stable_float64_feedback_selects_strict_direct_float_arithmetic() {
+    let fixture =
+        SnapshotFixture::compile("(function arithmetic(a,b){return (a+b)+(a-b)+(a*b)+(a/b)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Float64, ObservedType::Float64]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Float64,
+                ObservedType::Float64,
+                ObservedType::Float64,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Float64);
+    }
+
+    let clif = Tier2Compiler::host(62)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(62))
+        .expect("stable Float64 arithmetic feedback is specialized");
+
+    for operation in ["fadd", "fsub", "fmul", "fdiv"] {
+        assert!(clif.contains(operation), "missing {operation}: {clif}");
+    }
+    assert!(!clif.contains("fcvt_from_sint"), "{clif}");
+    assert!(!clif.contains("sadd_overflow"), "{clif}");
+    assert!(
+        !clif
+            .lines()
+            .any(|line| line.trim_start().starts_with("call ")),
+        "the Float64 hot path must not call a helper: {clif}"
+    );
+}
+
+#[test]
+fn stable_int32_loop_carries_unboxed_i32_ssa_through_the_header() {
+    let fixture =
+        SnapshotFixture::compile("(function sum(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let opcodes = verified
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.opcode().name())
+        .collect::<Vec<_>>();
+    let clif = Tier2Compiler::host(63)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(63))
+        .unwrap();
+
+    assert!(
+        clif.lines()
+            .any(|line| { line.starts_with("block") && line.matches(": i32").count() >= 2 }),
+        "opcodes={opcodes:?}\n{clif}"
+    );
+    assert!(clif.contains("sadd_overflow"), "{clif}");
+    assert!(!clif.contains("fcvt_from_sint"), "{clif}");
+    assert_eq!(
+        clif.matches("ireduce.i32").count(),
+        2,
+        "only the two entry arguments may be unboxed: {clif}"
+    );
+    assert_eq!(
+        clif.matches("call_indirect").count(),
+        1,
+        "only the amortized interrupt poll helper is permitted: {clif}"
+    );
+}
+
+#[test]
+fn stable_int32_sub_mul_div_use_checked_native_operations() {
+    let fixture =
+        SnapshotFixture::compile("(function arithmetic(a,b){return ((a-b)*(a+b))/(b+1)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(64)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(64))
+        .unwrap();
+
+    for operation in ["ssub_overflow", "smul_overflow", "sdiv", "srem"] {
+        assert!(clif.contains(operation), "missing {operation}: {clif}");
+    }
+    assert!(!clif.contains("fsub"), "{clif}");
+    assert!(!clif.contains("fmul"), "{clif}");
+    assert!(!clif.contains("fdiv"), "{clif}");
+    assert!(
+        clif.matches("brif").count() >= 7,
+        "division guards missing: {clif}"
+    );
+    assert!(clif.contains("-2147483648"), "MIN/-1 guard missing: {clif}");
+    assert!(clif.contains(", -1"), "MIN/-1 guard missing: {clif}");
+    assert!(
+        clif.contains("slt") && clif.contains(", 0"),
+        "negative-zero guard missing: {clif}"
+    );
+}
+
+#[test]
+fn stable_monomorphic_call_lowers_with_visible_owner_provenance() {
+    let fixture = SnapshotFixture::compile("(function invoke(f,a){let x=f(a);return x+0})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let caller = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let call_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name().starts_with("call"))
+        .expect("call opcode")
+        .pc();
+    let callee = FunctionKey::new(caller.id + 100, 1);
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call_signature(
+            caller,
+            call_pc,
+            callee,
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+    }
+
+    let clif = Tier2Compiler::host(65)
+        .lower_with_feedback_for_test(&verified, caller, &feedback.snapshot(65))
+        .expect("owned call bridge");
+    assert!(clif.contains("call_indirect"), "{clif}");
+}
+
+#[test]
+fn monomorphic_call_emits_pointer_guard_and_unboxed_native_abi() {
+    let fixture = SnapshotFixture::compile("(function invoke(f,a){let x=f(a);return x+0})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let caller = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let call_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name().starts_with("call"))
+        .unwrap()
+        .pc();
+    let callee = FunctionKey::new(caller.id + 100, 9);
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call_signature_with_identity(
+            caller,
+            call_pc,
+            callee,
+            0x1234_5678,
+            0x2234_5678,
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+    }
+    let clif = Tier2Compiler::host(68)
+        .lower_with_direct_target_for_test(
+            &verified,
+            caller,
+            &feedback.snapshot(68),
+            call_pc,
+            0x7654_3210,
+        )
+        .expect("direct native caller");
+    assert!(clif.contains("(i64, i32) -> i32"), "{clif}");
+    assert!(
+        clif.contains("0x1234_5678"),
+        "callee identity guard absent: {clif}"
+    );
+    assert!(
+        clif.contains("0x2234_5678"),
+        "callee bytecode guard absent: {clif}"
+    );
+    assert!(
+        clif.contains("0x7654_3210"),
+        "direct entry address absent: {clif}"
+    );
+    assert!(clif.contains("call_indirect"), "{clif}");
+    assert!(
+        clif.contains("brif") && clif.contains("return"),
+        "guard/status mismatch must have exact deopt edge: {clif}"
+    );
+}
+
+#[test]
+fn direct_call_entry_uses_only_unboxed_int32_abi_and_checked_arithmetic() {
+    let fixture = SnapshotFixture::compile("(function(a,b){return a+b})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let add_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "add")
+        .unwrap()
+        .pc();
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        feedback.observe_binary(
+            key,
+            add_pc,
+            ObservedType::Int32,
+            ObservedType::Int32,
+            ObservedType::Int32,
+            Default::default(),
+        );
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(66)
+        .lower_direct_call_with_feedback_for_test(&verified, key, &feedback.snapshot(66))
+        .expect("typed direct-call entry");
+    assert!(clif.contains("(i64, i32, i32) -> i32"), "{clif}");
+    assert!(clif.contains("sadd_overflow"), "{clif}");
+    assert!(
+        !clif.contains("iconst.i64"),
+        "tagged JSValue leaked into scalar body: {clif}"
+    );
+    assert!(
+        !clif.contains("call_indirect"),
+        "helper leaked into direct entry: {clif}"
+    );
+    assert_eq!(
+        Tier2Compiler::host(66)
+            .execute_direct_i32_for_test(&verified, key, &feedback.snapshot(66), &[20, 22])
+            .unwrap(),
+        (0, 42)
+    );
+    assert_eq!(
+        Tier2Compiler::host(66)
+            .execute_direct_i32_for_test(&verified, key, &feedback.snapshot(66), &[i32::MAX, 1])
+            .unwrap()
+            .0,
+        1,
+        "overflow must request exact CALL-site deopt"
+    );
+}
+
+#[test]
+fn direct_call_entry_uses_only_unboxed_float64_abi() {
+    let fixture = SnapshotFixture::compile("(function(a,b){return a+b})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let add_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "add")
+        .unwrap()
+        .pc();
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(32, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Float64, ObservedType::Float64]);
+        feedback.observe_binary(
+            key,
+            add_pc,
+            ObservedType::Float64,
+            ObservedType::Float64,
+            ObservedType::Float64,
+            Default::default(),
+        );
+        feedback.observe_return(key, return_pc, ObservedType::Float64);
+    }
+    let clif = Tier2Compiler::host(67)
+        .lower_direct_call_with_feedback_for_test(&verified, key, &feedback.snapshot(67))
+        .expect("typed direct-call entry");
+    assert!(clif.contains("(i64, f64, f64) -> i32"), "{clif}");
+    assert!(clif.contains("fadd"), "{clif}");
+    assert!(
+        !clif.contains("call_indirect"),
+        "helper leaked into direct entry: {clif}"
+    );
 }
 
 #[test]
@@ -546,6 +1039,278 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
     assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
     assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+    let before_object = jit.metrics();
+    for _ in 0..1_024 {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("truth(globalThis.truthy ||= {})"))
+                .unwrap(),
+            2
+        );
+        jit.poll();
+    }
+    assert!(
+        jit.metrics().deopts > before_object.deopts,
+        "{:?}",
+        jit.metrics()
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_feedback_installs_and_executes_the_int32_add_specialization() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(64)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>("function add(a,b){return a+b}"))
+        .unwrap();
+    for _ in 0..256 {
+        assert_eq!(
+            context.with(|ctx| {
+                let add: rquickjs::Function<'_> = ctx.globals().get("add").unwrap();
+                add.call::<_, i32>((20, 22)).unwrap()
+            }),
+            42
+        );
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    let artifact = jit.test_last_acquired_artifact_key().unwrap();
+    assert_eq!(artifact.tier, Tier::Optimizing);
+    assert_ne!(artifact.specialization_fingerprint, 0);
+
+    let before = jit.metrics();
+    assert_eq!(
+        context.with(|ctx| {
+            let add: rquickjs::Function<'_> = ctx.globals().get("add").unwrap();
+            add.call::<_, i32>((7, 8)).unwrap()
+        }),
+        15
+    );
+    assert_eq!(
+        context.with(|ctx| {
+            let add: rquickjs::Function<'_> = ctx.globals().get("add").unwrap();
+            add.call::<_, f64>((2_147_483_647_i32, 1_i32)).unwrap()
+        }),
+        2_147_483_648.0
+    );
+    assert_eq!(
+        context.with(|ctx| {
+            let add: rquickjs::Function<'_> = ctx.globals().get("add").unwrap();
+            add.call::<_, String>(("a", "b")).unwrap()
+        }),
+        "ab"
+    );
+    jit.poll();
+    let after = jit.metrics();
+    assert!(after.tier2_entries >= before.tier2_entries + 3, "{after:?}");
+    assert!(after.deopts >= before.deopts + 2, "{after:?}");
+    assert!(
+        after.deopt_materializations >= before.deopt_materializations + 2,
+        "{after:?}"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_caller_executes_a_monomorphic_compiled_callee() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(64)
+            .stress_gc(true)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function directAdd(a){return a+1}\n\
+                 function invoke(f,a){let result=f(a);return result+0}\n\
+                 function invokeTwice(f,a){let x=f(a);let y=f(x);return y+0}\n\
+                 function recursiveCount(n){if(n<=0)return 0;return recursiveCount(n-1)+1}",
+            )
+        })
+        .unwrap();
+
+    for _ in 0..512 {
+        assert_eq!(
+            context.with(|ctx| {
+                let add: rquickjs::Function<'_> = ctx.globals().get("directAdd").unwrap();
+                let invoke: rquickjs::Function<'_> = ctx.globals().get("invoke").unwrap();
+                invoke.call::<_, i32>((add, 41)).unwrap()
+            }),
+            42
+        );
+        assert_eq!(
+            context.with(|ctx| {
+                let add: rquickjs::Function<'_> = ctx.globals().get("directAdd").unwrap();
+                let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeTwice").unwrap();
+                invoke.call::<_, i32>((add, 40)).unwrap()
+            }),
+            42
+        );
+        assert_eq!(
+            context.with(|ctx| {
+                let recursive: rquickjs::Function<'_> =
+                    ctx.globals().get("recursiveCount").unwrap();
+                recursive.call::<_, i32>((12,)).unwrap()
+            }),
+            12
+        );
+        jit.poll();
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    assert!(before.installed >= 3, "{before:?}");
+    assert_eq!(
+        context.with(|ctx| {
+            let add: rquickjs::Function<'_> = ctx.globals().get("directAdd").unwrap();
+            let invoke: rquickjs::Function<'_> = ctx.globals().get("invoke").unwrap();
+            invoke.call::<_, i32>((add, 99)).unwrap()
+        }),
+        100
+    );
+    for value in 0..2_048 {
+        assert_eq!(
+            context.with(|ctx| {
+                let add: rquickjs::Function<'_> = ctx.globals().get("directAdd").unwrap();
+                let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeTwice").unwrap();
+                invoke.call::<_, i32>((add, value)).unwrap()
+            }),
+            value + 2
+        );
+        assert_eq!(
+            context.with(|ctx| {
+                let recursive: rquickjs::Function<'_> =
+                    ctx.globals().get("recursiveCount").unwrap();
+                recursive.call::<_, i32>((8,)).unwrap()
+            }),
+            8
+        );
+    }
+    jit.poll();
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(64)
+            .stress_gc(true)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function add1(a){return a+1}\n\
+         function sub1(a){return a-1}\n\
+         function addf(a,b){return a+b}\n\
+         function invokeTarget(f,a){let x=f(a);return x+0}\n\
+         function invokeType(f,a){let x=f(a);return x+0}\n\
+         function invokeOverflow(f,a){let x=f(a);return x+0}\n\
+         function invokef(f,a,b){let x=f(a,b);return x+0}",
+            )
+        })
+        .unwrap();
+
+    // Publish both typed callees before collecting/compiling their callers.
+    for _ in 0..512 {
+        context.with(|ctx| {
+            let add1: rquickjs::Function<'_> = ctx.globals().get("add1").unwrap();
+            assert_eq!(add1.call::<_, i32>((40,)).unwrap(), 41);
+            let addf: rquickjs::Function<'_> = ctx.globals().get("addf").unwrap();
+            assert_eq!(addf.call::<_, f64>((1.25, 2.5)).unwrap(), 3.75);
+        });
+        jit.poll();
+    }
+    for _ in 0..512 {
+        context.with(|ctx| {
+            let add1: rquickjs::Function<'_> = ctx.globals().get("add1").unwrap();
+            for name in ["invokeTarget", "invokeType", "invokeOverflow"] {
+                let invoke: rquickjs::Function<'_> = ctx.globals().get(name).unwrap();
+                assert_eq!(invoke.call::<_, i32>((add1.clone(), 40)).unwrap(), 41);
+            }
+            let addf: rquickjs::Function<'_> = ctx.globals().get("addf").unwrap();
+            let invokef: rquickjs::Function<'_> = ctx.globals().get("invokef").unwrap();
+            assert_eq!(invokef.call::<_, f64>((addf, 1.25, 2.5)).unwrap(), 3.75);
+        });
+        jit.poll();
+    }
+    let before = jit.metrics();
+    context.with(|ctx| {
+        let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeTarget").unwrap();
+        let sub1: rquickjs::Function<'_> = ctx.globals().get("sub1").unwrap();
+        assert_eq!(invoke.call::<_, i32>((sub1, 40)).unwrap(), 39);
+        let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeType").unwrap();
+        let add1: rquickjs::Function<'_> = ctx.globals().get("add1").unwrap();
+        assert_eq!(invoke.call::<_, f64>((add1, 1.5)).unwrap(), 2.5);
+        let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeOverflow").unwrap();
+        let add1: rquickjs::Function<'_> = ctx.globals().get("add1").unwrap();
+        assert_eq!(
+            invoke.call::<_, f64>((add1, i32::MAX)).unwrap(),
+            2_147_483_648.0
+        );
+    });
+    jit.poll();
+    let after = jit.metrics();
+    assert!(after.deopts >= before.deopts + 2, "{before:?} -> {after:?}");
+    assert!(
+        after.deopt_materializations >= before.deopt_materializations + 2,
+        "{before:?} -> {after:?}"
+    );
 }
 
 #[cfg(all(
@@ -563,6 +1328,7 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         .call_threshold(2)
         .loop_threshold(4)
         .stress_gc(true)
+        .force_optimized_for_test(true)
         .build()
         .unwrap();
     let jit = Jit::attach(&runtime, config).unwrap();
@@ -574,12 +1340,12 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         .with(|ctx| ctx.eval::<f64, _>("f(50000,0)"))
         .unwrap();
     assert_eq!(first, 1_249_975_000.0);
-    for _ in 0..2000 {
+    for _ in 0..10_000 {
         jit.poll();
         if jit.metrics().installed >= 2 {
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(50));
     }
     let last = context.with(|ctx| ctx.eval::<f64, _>("f(2000,0)")).unwrap();
     assert_eq!(last, 1_999_000.0);
@@ -591,31 +1357,217 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         rquickjs_jit::runtime::Tier::Optimizing
     );
 
-    let before_mid_loop = jit.metrics().deopts;
+    let before_strict_exits = jit.metrics();
     let overflowed = context
         .with(|ctx| ctx.eval::<f64, _>("f(100000,0)"))
         .unwrap();
     assert_eq!(overflowed, 4_999_950_000.0);
     jit.poll();
+    let mixed = context.with(|ctx| ctx.eval::<f64, _>("f(2,0.5)")).unwrap();
+    assert_eq!(mixed, 2.5);
+    jit.poll();
+    let after_strict_exits = jit.metrics();
     assert!(
-        jit.metrics().deopts > before_mid_loop,
-        "overflow representation guard did not deopt mid-loop: {:?}",
-        jit.metrics()
+        after_strict_exits.deopts >= before_strict_exits.deopts + 2,
+        "{after_strict_exits:?}"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function genericLoop(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s}",
+            )
+        })
+        .unwrap();
+
+    for _ in 0..128 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("genericLoop").unwrap();
+            function.call::<_, f64>((2_000, 0)).unwrap()
+        });
+        assert_eq!(result, 1_999_000.0);
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    assert_ne!(
+        jit.test_last_acquired_artifact_key()
+            .unwrap()
+            .specialization_fingerprint,
+        0,
+        "production numeric Tier2 must carry its bounded feedback signature"
     );
 
-    let deoptimized = context
-        .with(|ctx| ctx.eval::<String, _>("f(2,'x')"))
-        .unwrap();
-    assert_eq!(deoptimized, "x");
-    jit.poll();
-    assert!(jit.metrics().deopts >= 1, "{:?}", jit.metrics());
+    let before = jit.metrics();
+    for _ in 0..10 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("genericLoop").unwrap();
+            function.call::<_, f64>((2_000, 0)).unwrap()
+        });
+        assert_eq!(result, 1_999_000.0);
+        jit.poll();
+    }
+    let after = jit.metrics();
+    assert_eq!(after.deopts, before.deopts, "{after:?}");
     assert!(
-        jit.metrics().tier2_guard_failures >= 1,
-        "{:?}",
-        jit.metrics()
+        after.tier2_entries >= before.tier2_entries + 10,
+        "{after:?}"
     );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn iterative_fibonacci_enters_tier2_with_multi_local_loop_phis() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function fib(_iterations,seed){let a=seed;let b=1;for(let i=seed;i<40;i++){const next=a+b;a=b;b=next;}return a}",
+            )
+        })
+        .unwrap();
+
+    for _ in 0..128 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("fib").unwrap();
+            function.call::<_, i32>((2_000, 0)).unwrap()
+        });
+        assert_eq!(result, 102_334_155);
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    for _ in 0..10_000 {
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let result = context.with(|ctx| {
+        let function: Function = ctx.globals().get("fib").unwrap();
+        function.call::<_, i32>((2_000, 0)).unwrap()
+    });
+    assert_eq!(result, 102_334_155);
+    jit.poll();
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+
+    let before = jit.metrics();
+    for _ in 0..10 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("fib").unwrap();
+            function.call::<_, i32>((2_000, 0)).unwrap()
+        });
+        assert_eq!(result, 102_334_155);
+        jit.poll();
+    }
+    let after = jit.metrics();
+    assert_eq!(after.deopts, before.deopts, "{after:?}");
     assert!(
-        jit.metrics().deopt_materializations >= 1,
+        after.tier2_entries >= before.tier2_entries + 10,
+        "{after:?}"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>("function tiny(a,b){return a+b}"))
+        .unwrap();
+
+    for _ in 0..20_000 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("tiny").unwrap();
+            function.call::<_, i32>((20, 22)).unwrap()
+        });
+        assert_eq!(result, 42);
+        jit.poll();
+        if jit.metrics().interpreter_demotions > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let demoted = jit.metrics();
+    assert_eq!(demoted.interpreter_demotions, 1, "{demoted:?}");
+    assert!(demoted.profitability_rejected >= 5, "{demoted:?}");
+
+    let native_before = demoted.native_entries;
+    for _ in 0..20 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("tiny").unwrap();
+            function.call::<_, i32>((20, 22)).unwrap()
+        });
+        assert_eq!(result, 42);
+        jit.poll();
+    }
+    assert_eq!(
+        jit.metrics().native_entries,
+        native_before,
         "{:?}",
         jit.metrics()
     );
@@ -627,7 +1579,76 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn tenth_stable_float_exit_installs_side_path_and_eleventh_call_does_not_deopt() {
+fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function layoutKernel(batches,seed){\
+                 let checksum=seed;\
+                 for(let batch=0;batch<batches;batch+=1){\
+                   let a=0;let b=1;\
+                   for(let i=0;i<40;i+=1){const next=a+b;a=b;b=next;}\
+                   checksum=b;\
+                 }\
+                 return checksum;\
+                 }\
+                 function terminalHost(value){return JSON.stringify({value:value,kind:'panel'});}",
+            )
+        })
+        .unwrap();
+
+    let mut saw_demotion = false;
+    for _ in 0..64 {
+        let result = context.with(|ctx| {
+            let function: Function = ctx.globals().get("layoutKernel").unwrap();
+            let result = function.call::<_, i32>((2_000, 0)).unwrap();
+            let terminal: Function = ctx.globals().get("terminalHost").unwrap();
+            assert_eq!(
+                terminal.call::<_, String>((42,)).unwrap(),
+                "{\"value\":42,\"kind\":\"panel\"}"
+            );
+            result
+        });
+        assert_eq!(result, 165_580_141);
+        jit.poll();
+        let metrics = jit.metrics();
+        saw_demotion |= metrics.interpreter_demotions > 0;
+        if saw_demotion && metrics.tier2_entries > 0 {
+            assert!(metrics.profitability_rejected >= 5, "{metrics:?}");
+            assert_eq!(metrics.deopts, 0, "{metrics:?}");
+            assert!(metrics.queued >= 3, "Tier2 trial was not queued: {metrics:?}");
+            assert!(
+                metrics.compile_failures > 0,
+                "terminal host function must remain unsupported without blocking the profitable kernel: {metrics:?}"
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    panic!("harmful Tier1 never reached bounded Tier2 trial: {:?}", jit.metrics());
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn stable_float64_loop_stays_native_without_a_side_path() {
     use rquickjs::{Context, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
 
@@ -653,9 +1674,9 @@ fn tenth_stable_float_exit_installs_side_path_and_eleventh_call_does_not_deopt()
     for _ in 0..8 {
         assert_eq!(
             context
-                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100,0)"))
+                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100.5,0.5)"))
                 .unwrap(),
-            4950.0
+            5000.5
         );
     }
     for _ in 0..10_000 {
@@ -666,45 +1687,43 @@ fn tenth_stable_float_exit_installs_side_path_and_eleventh_call_does_not_deopt()
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
     assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+    let before = jit.metrics();
     for _ in 0..10 {
         assert_eq!(
             context
-                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000,0)"))
+                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000.5,0.5)"))
                 .unwrap(),
-            4_999_950_000.0
+            5_000_000_000.5
         );
         jit.poll();
     }
-    for _ in 0..10_000 {
-        jit.poll();
-        if jit.metrics().stable_path_compile_requests > 0 && jit.metrics().installed >= 3 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_micros(50));
-    }
-    let installed = jit.metrics();
-    assert!(installed.stable_path_compile_requests > 0, "{installed:?}");
-    assert!(installed.installed >= 3, "{installed:?}");
-    let deopts = installed.deopts;
-    let entries = installed.side_path_entries;
+    let after_large = jit.metrics();
+    assert_eq!(after_large.deopts, before.deopts, "{after_large:?}");
+    assert_eq!(
+        after_large.stable_path_compile_requests, before.stable_path_compile_requests,
+        "{after_large:?}"
+    );
+    assert_eq!(after_large.side_path_entries, before.side_path_entries);
     assert_eq!(
         context
-            .with(|ctx| ctx.eval::<f64, _>("stableFloat(0,0)"))
+            .with(|ctx| ctx.eval::<f64, _>("stableFloat(0.5,0.5)"))
             .unwrap(),
-        0.0
+        0.5
     );
     jit.poll();
-    assert_eq!(jit.metrics().side_path_entries, entries);
     assert_eq!(
         context
-            .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000,0)"))
+            .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000.5,0.5)"))
             .unwrap(),
-        4_999_950_000.0
+        5_000_000_000.5
     );
     jit.poll();
     let after = jit.metrics();
-    assert_eq!(after.deopts, deopts, "{after:?}");
-    assert!(after.side_path_entries > entries, "{after:?}");
+    assert_eq!(after.deopts, before.deopts, "{after:?}");
+    assert_eq!(
+        after.side_path_entries, before.side_path_entries,
+        "{after:?}"
+    );
 }
 
 #[test]
@@ -791,6 +1810,57 @@ fn stable_side_path_request_owns_exact_guard_profile_without_unloading_target() 
     let request = coordinator.begin_next().unwrap();
     assert_eq!(request.side_path_profile(), Some(profile));
     assert_ne!(request.artifact_key().specialization_fingerprint, 0);
+}
+
+#[test]
+fn primary_optimized_artifact_is_keyed_by_the_bounded_feedback_signature() {
+    let fixture = SnapshotFixture::compile("(function(a,b){return a+b})");
+    let snapshot = fixture.snapshot();
+    let key = FunctionKey::new(snapshot.function_id(), snapshot.generation());
+    let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+    let add_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "add")
+        .unwrap()
+        .pc();
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(8, 2);
+    feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+    feedback.observe_binary(
+        key,
+        add_pc,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        Default::default(),
+    );
+    feedback.observe_return(key, return_pc, ObservedType::Int32);
+    let frozen = feedback.snapshot(77);
+    let expected = frozen.bounded_specialization(key).unwrap().fingerprint();
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+    coordinator
+        .queue(key, Tier::Baseline, verified.clone())
+        .unwrap();
+    let baseline = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: baseline.artifact_key(),
+        attempt_id: baseline.attempt_id(),
+        result: Ok(CompiledArtifact::empty(baseline.artifact_key())),
+    });
+
+    coordinator
+        .queue_with_feedback(key, Tier::Optimizing, verified, frozen)
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    assert_eq!(request.artifact_key().specialization_fingerprint, expected);
 }
 
 #[test]

@@ -112,4 +112,10 @@ jobs:
         with:
           target: wasm32-wasip1
       - name: WASM builds without the native compiler tier
-        run: cargo check -p rquickjs-jit --target wasm32-wasip1 --no-default-features
+        shell: bash
+        run: |
+          cargo check -p rquickjs --target wasm32-wasip1 --no-default-features
+          if cargo tree -p rquickjs --target wasm32-wasip1 --no-default-features -e normal | grep -q cranelift; then
+            echo "Cranelift unexpectedly present in the WebAssembly interpreter graph" >&2
+            exit 1
+          fi

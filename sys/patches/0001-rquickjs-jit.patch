@@ -1858,7 +1858,7 @@ index 11caae0..065896a 100644
 +    JSValue *in;
 +    JSJitHelperStatus status;
 +
-+    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
 +        return JS_JIT_HELPER_EXCEPTION;
 +    qjsjit_count_helper(frame, JS_JIT_HELPER_FREE);
 +    if (!qjsjit_resolve_slot(frame, b, input, &in))

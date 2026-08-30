@@ -18,12 +18,58 @@ pub struct ArtifactKey {
     pub specialization_fingerprint: u64,
 }
 
+/// Identity for an optimized primary version plus one specialized call edge.
+/// Registration does not imply that a direct compiled call path exists.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ArtifactVersionIdentity {
+    primary_fingerprint: u64,
+    call_fingerprint: u64,
+    fingerprint: u64,
+}
+
+impl ArtifactVersionIdentity {
+    pub(crate) fn new(primary_fingerprint: u64, call_fingerprint: u64) -> Self {
+        const SUBSTITUTE: u64 = 0x9e37_79b9_7f4a_7c15;
+        let primary_fingerprint = if primary_fingerprint == 0 {
+            SUBSTITUTE
+        } else {
+            primary_fingerprint
+        };
+        let call_fingerprint = if call_fingerprint == 0 {
+            SUBSTITUTE
+        } else {
+            call_fingerprint
+        };
+        let combined =
+            (primary_fingerprint ^ call_fingerprint.rotate_left(29)).wrapping_mul(0x100_0000_01b3);
+        Self {
+            primary_fingerprint,
+            call_fingerprint,
+            fingerprint: if combined == 0 { SUBSTITUTE } else { combined },
+        }
+    }
+    pub const fn primary_fingerprint(self) -> u64 {
+        self.primary_fingerprint
+    }
+    pub const fn call_fingerprint(self) -> u64 {
+        self.call_fingerprint
+    }
+    pub const fn fingerprint(self) -> u64 {
+        self.fingerprint
+    }
+}
+
 impl ArtifactKey {
     pub const fn with_tier(mut self, tier: Tier) -> Self {
         self.tier = tier;
         if matches!(tier, Tier::Baseline) {
             self.specialization_fingerprint = 0;
         }
+        self
+    }
+
+    pub const fn with_version_identity(mut self, identity: ArtifactVersionIdentity) -> Self {
+        self.specialization_fingerprint = identity.fingerprint();
         self
     }
 }
@@ -300,6 +346,7 @@ pub struct OptimizedArtifactMetadata {
     cse_eliminated: u64,
     dead_nodes_eliminated: u64,
     side_path_profile: Option<crate::runtime::SidePathProfile>,
+    direct_call_signature: Option<crate::runtime::BoundedSpecializationSignature>,
 }
 
 #[cfg(feature = "compiler")]
@@ -318,6 +365,7 @@ impl OptimizedArtifactMetadata {
             cse_eliminated,
             dead_nodes_eliminated,
             side_path_profile: None,
+            direct_call_signature: None,
         }
     }
     pub const fn feedback_epoch(&self) -> u64 {
@@ -341,6 +389,18 @@ impl OptimizedArtifactMetadata {
     pub fn with_side_path_profile(mut self, profile: crate::runtime::SidePathProfile) -> Self {
         self.side_path_profile = Some(profile);
         self
+    }
+    pub fn with_direct_call_signature(
+        mut self,
+        signature: crate::runtime::BoundedSpecializationSignature,
+    ) -> Self {
+        self.direct_call_signature = Some(signature);
+        self
+    }
+    pub const fn direct_call_signature(
+        &self,
+    ) -> Option<&crate::runtime::BoundedSpecializationSignature> {
+        self.direct_call_signature.as_ref()
     }
 }
 
@@ -401,6 +461,12 @@ pub struct CompiledArtifact {
     relocatable: Option<Box<crate::compiler::baseline::RelocatableCode>>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     published: Option<crate::compiler::baseline::PublishedBaselineCode>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    direct_call_relocatable: Option<Box<crate::compiler::baseline::RelocatableCode>>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    direct_call_published: Option<crate::compiler::baseline::PublishedBaselineCode>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    direct_call_dependencies: Box<[crate::compiler::baseline::PublishedBaselineCode]>,
     #[cfg(any(test, feature = "test-support"))]
     fake: bool,
 }
@@ -440,6 +506,12 @@ impl CompiledArtifact {
             relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_dependencies: Box::new([]),
             #[cfg(any(test, feature = "test-support"))]
             fake: false,
         }
@@ -566,9 +638,21 @@ impl CompiledArtifact {
     }
 
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn with_direct_call_relocatable(
+        mut self,
+        code: crate::compiler::baseline::RelocatableCode,
+    ) -> Self {
+        self.direct_call_relocatable = Some(Box::new(code));
+        self
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub(crate) fn publish_relocatable(&mut self) -> Result<(), crate::platform::CodeMemoryError> {
         if let Some(code) = self.relocatable.take() {
             self.published = Some(code.publish()?);
+        }
+        if let Some(code) = self.direct_call_relocatable.take() {
+            self.direct_call_published = Some(code.publish()?);
         }
         Ok(())
     }
@@ -576,6 +660,22 @@ impl CompiledArtifact {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn published(&self) -> Option<&crate::compiler::baseline::PublishedBaselineCode> {
         self.published.as_ref()
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn direct_call_published(
+        &self,
+    ) -> Option<&crate::compiler::baseline::PublishedBaselineCode> {
+        self.direct_call_published.as_ref()
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn with_direct_call_dependencies(
+        mut self,
+        dependencies: Vec<crate::compiler::baseline::PublishedBaselineCode>,
+    ) -> Self {
+        self.direct_call_dependencies = dependencies.into_boxed_slice();
+        self
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -607,6 +707,12 @@ impl CompiledArtifact {
             relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_dependencies: Box::new([]),
             fake: true,
         }
     }

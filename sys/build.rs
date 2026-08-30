@@ -215,15 +215,18 @@ QJSJIT_HELPER_LIST(QJSJIT_EMIT)
             flags,
         });
     }
-    assert_eq!(helpers.len(), 13, "canonical initial helper count");
+    assert_eq!(helpers.len(), 15, "canonical append-only helper count");
 
     let u32_args = |signature: &str| match signature {
         "FRAME" => 0,
         "MAP_IN" | "MAP_OUT" => 2,
         "MAP_OUT_IN" | "MAP_OUT_INDEX" => 3,
-        "MAP_OUT_TWO" | "MAP_OUT_OBJECT_ATOM" | "MAP_OBJECT_ATOM_VALUE" => 4,
+        "MAP_OUT_TWO"
+        | "MAP_OUT_OBJECT_ATOM"
+        | "MAP_OBJECT_ATOM_VALUE"
+        | "MAP_MATERIALIZE_OWNER" => 4,
         "MAP_OUT_TWO_OP" => 5,
-        "MAP_CALL" => 6,
+        "MAP_CALL" | "MAP_SHAPE_GUARD" => 6,
         other => panic!("unknown helper signature {other}"),
     };
     let mut fingerprint = 0xcbf29ce484222325_u64;

@@ -37,6 +37,7 @@ pub struct OptimizedNode {
     branch_target: Option<u32>,
     pops: u8,
     pushes: u8,
+    deopt_guard: Option<u32>,
 }
 
 impl OptimizedNode {
@@ -69,6 +70,9 @@ impl OptimizedNode {
     }
     pub const fn pushes(&self) -> u8 {
         self.pushes
+    }
+    pub const fn deopt_guard(&self) -> Option<u32> {
+        self.deopt_guard
     }
 }
 
@@ -163,13 +167,14 @@ impl OptimizedIr {
         }) {
             return Err(CompileFailure::UnsupportedOpcode);
         }
-        let mut make_guard = |pc: u32,
-                              mid_loop: bool,
-                              nodes: &mut Vec<OptimizedNode>,
-                              guards: &mut Vec<GuardSite>|
+        let make_guard = |pc: u32,
+                          mid_loop: bool,
+                          next_guard: &mut u32,
+                          nodes: &mut Vec<OptimizedNode>,
+                          guards: &mut Vec<GuardSite>|
          -> Result<u32, CompileFailure> {
-            let guard = next_guard;
-            next_guard = next_guard
+            let guard = *next_guard;
+            *next_guard = next_guard
                 .checked_add(1)
                 .ok_or(CompileFailure::ResourceLimit)?;
             let mut recipes = Vec::with_capacity(shape.slot_count());
@@ -210,24 +215,56 @@ impl OptimizedIr {
                 branch_target: None,
                 pops: 0,
                 pushes: 0,
+                deopt_guard: Some(guard),
             });
             guards.push(GuardSite { guard, shape, map });
             Ok(id)
         };
-        make_guard(0, false, &mut nodes, &mut guards)?;
+        make_guard(0, false, &mut next_guard, &mut nodes, &mut guards)?;
         let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
         let mut boxes_elided = 0u64;
+        let mut next_effect = 1u64;
         for block in function.control_flow_graph().blocks() {
             let mut block_nodes = Vec::new();
+            let mut stack_depth = *block_depths
+                .get(&block.start_pc())
+                .ok_or(CompileFailure::InvalidArtifact)?;
             if function
                 .control_flow_graph()
                 .is_loop_header(block.start_pc())
             {
-                block_nodes.push(make_guard(block.start_pc(), true, &mut nodes, &mut guards)?);
+                block_nodes.push(make_guard(
+                    block.start_pc(),
+                    true,
+                    &mut next_guard,
+                    &mut nodes,
+                    &mut guards,
+                )?);
             }
             for instruction in &function.instructions()[block.instruction_range()] {
                 let name = instruction.opcode().name();
                 let (representation, effect) = classify_optimized_opcode(name)?;
+                let deopt_guard = if is_guarded_arithmetic(name) || name.starts_with("call") {
+                    let guard = next_guard;
+                    next_guard = next_guard
+                        .checked_add(1)
+                        .ok_or(CompileFailure::ResourceLimit)?;
+                    let shape = OptimizedFrameShape::new(
+                        snapshot.arg_count(),
+                        snapshot.local_count(),
+                        stack_depth,
+                    );
+                    let map = identity_deopt_map(
+                        guard,
+                        instruction.pc(),
+                        DeoptPhase::BeforeEffect(next_effect),
+                        shape,
+                    )?;
+                    guards.push(GuardSite { guard, shape, map });
+                    Some(guard)
+                } else {
+                    None
+                };
                 boxes_elided = boxes_elided.saturating_add(u64::from(matches!(
                     representation,
                     ValueRepresentation::Int32 | ValueRepresentation::Float64
@@ -251,8 +288,16 @@ impl OptimizedIr {
                         .and_then(|target| u32::try_from(target).ok()),
                     pops: instruction.opcode().n_pop(),
                     pushes: instruction.opcode().n_push(),
+                    deopt_guard,
                 });
                 block_nodes.push(id);
+                stack_depth = stack_depth
+                    .checked_sub(u16::from(instruction.opcode().n_pop()))
+                    .and_then(|depth| depth.checked_add(u16::from(instruction.opcode().n_push())))
+                    .ok_or(CompileFailure::InvalidArtifact)?;
+                if effect != OptimizedEffect::Pure {
+                    next_effect = next_effect.saturating_add(1);
+                }
             }
             blocks.push(OptimizedBlock {
                 start_pc: block.start_pc(),
@@ -307,6 +352,60 @@ impl OptimizedIr {
     pub const fn max_stack(&self) -> u16 {
         self.max_stack
     }
+}
+
+fn is_guarded_arithmetic(name: &str) -> bool {
+    matches!(
+        name,
+        "add"
+            | "sub"
+            | "mul"
+            | "div"
+            | "mod"
+            | "plus"
+            | "neg"
+            | "if_false"
+            | "if_true"
+            | "if_false8"
+            | "if_true8"
+            | "get_field"
+            | "put_field"
+    )
+}
+
+fn identity_deopt_map(
+    guard: u32,
+    resume_pc: u32,
+    phase: DeoptPhase,
+    shape: OptimizedFrameShape,
+) -> Result<DeoptMap, CompileFailure> {
+    let mut recipes = Vec::with_capacity(shape.slot_count());
+    let mut flat = 0u16;
+    for index in 0..shape.arguments() {
+        recipes.push(Materialization::argument(
+            index,
+            MaterializedValue::TaggedSlot(flat),
+        ));
+        flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+    }
+    for index in 0..shape.locals() {
+        recipes.push(Materialization::local(
+            index,
+            MaterializedValue::TaggedSlot(flat),
+        ));
+        flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+    }
+    for index in 0..shape.stack() {
+        recipes.push(Materialization::stack(
+            index,
+            MaterializedValue::TaggedSlot(flat),
+        ));
+        flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+    }
+    let map = DeoptMap::new(guard, resume_pc, phase, recipes);
+    map.validate(shape)
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    Ok(map)
 }
 
 fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBlock]) -> (u64, u64) {
@@ -535,6 +634,11 @@ fn classify_optimized_opcode(
         | "put_loc_check_init"
         | "set_loc_uninitialized"
         | "drop" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
+        "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
+            (ValueRepresentation::Tagged, OptimizedEffect::Reentrant)
+        }
+        "get_field" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "put_field" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
         "if_false" | "if_true" | "if_false8" | "if_true8" | "goto" | "goto8" | "goto16"
         | "return" | "return_undef" | "lt" | "lte" | "gt" | "gte" | "eq" | "neq" | "strict_eq"
         | "strict_neq" | "lnot" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),
@@ -724,9 +828,6 @@ impl DeoptMap {
         shape: OptimizedFrameShape,
     ) -> Result<(), DeoptValidationError> {
         self.validate(shape)?;
-        if shape.stack() != 0 {
-            return Err(DeoptValidationError::UnsupportedRecipe);
-        }
         for recipe in &self.slots {
             let destination = shape
                 .index(recipe.slot)
@@ -873,5 +974,100 @@ impl DeoptMap {
 impl MaterializedValue {
     pub fn is_negative_zero(self) -> bool {
         matches!(self, Self::Float64(value) if value.to_bits() == (-0.0f64).to_bits())
+    }
+}
+
+/// Compile-time ownership carried by a tagged optimized-SSA value.
+///
+/// Frame arguments and locals enter optimized code as borrowed aliases.  A
+/// helper which consumes a `JSValue` owner (for example the interpreter CALL
+/// stack cleanup) must first turn that alias into `Owned` with the DUP helper.
+/// `Moved` is deliberately terminal: it prevents a second cleanup from being
+/// emitted for the same owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsaValueOwnership {
+    Borrowed,
+    Owned,
+    Moved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnershipTransitionError {
+    DuplicateMoved,
+    ConsumeBorrowed,
+    ConsumeMoved,
+}
+
+impl SsaValueOwnership {
+    /// Models JS_DupValue. Both borrowed and owned sources may be copied, and
+    /// the returned SSA value is a distinct owner.
+    pub const fn duplicate(self) -> Result<Self, OwnershipTransitionError> {
+        match self {
+            Self::Borrowed | Self::Owned => Ok(Self::Owned),
+            Self::Moved => Err(OwnershipTransitionError::DuplicateMoved),
+        }
+    }
+
+    /// Transfers this owner's cleanup obligation to a consuming helper.
+    pub fn consume(&mut self) -> Result<(), OwnershipTransitionError> {
+        match *self {
+            Self::Owned => {
+                *self = Self::Moved;
+                Ok(())
+            }
+            Self::Borrowed => Err(OwnershipTransitionError::ConsumeBorrowed),
+            Self::Moved => Err(OwnershipTransitionError::ConsumeMoved),
+        }
+    }
+
+    pub const fn needs_cleanup(self) -> bool {
+        matches!(self, Self::Owned)
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::{OwnershipTransitionError, SsaValueOwnership};
+
+    #[test]
+    fn borrowed_values_cannot_be_consumed_or_duplicated_after_move() {
+        let mut borrowed = SsaValueOwnership::Borrowed;
+        assert_eq!(
+            borrowed.consume(),
+            Err(OwnershipTransitionError::ConsumeBorrowed)
+        );
+
+        let mut owner = borrowed.duplicate().unwrap();
+        assert!(owner.needs_cleanup());
+        owner.consume().unwrap();
+        assert!(!owner.needs_cleanup());
+        assert_eq!(owner.consume(), Err(OwnershipTransitionError::ConsumeMoved));
+        assert_eq!(
+            owner.duplicate(),
+            Err(OwnershipTransitionError::DuplicateMoved)
+        );
+    }
+
+    #[test]
+    fn call_ownership_protocol_balances_refcounts_under_stress() {
+        // Model a refcounted caller argument borrowed by optimized SSA. Each
+        // CALL materializes exactly one temporary owner per input, CALL borrows
+        // those owners, and stack cleanup consumes them once.
+        let caller_owners = 3_i64;
+        let mut refcount = caller_owners;
+        for _ in 0..100_000 {
+            let borrowed = [SsaValueOwnership::Borrowed; 3];
+            let mut call_owners = borrowed.map(|value| {
+                refcount += 1;
+                value.duplicate().unwrap()
+            });
+            assert_eq!(refcount, caller_owners + 3);
+            for owner in &mut call_owners {
+                owner.consume().unwrap();
+                refcount -= 1;
+            }
+            assert_eq!(refcount, caller_owners);
+        }
+        assert_eq!(refcount, caller_owners);
     }
 }

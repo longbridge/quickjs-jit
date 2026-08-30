@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 5;
+pub const QJSJIT_ABI_MINOR: u32 = 10;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -95,11 +95,14 @@ pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
 pub const JS_JIT_FEEDBACK_OVERFLOW: u32 = 1;
 pub const JS_JIT_FEEDBACK_NEGATIVE_ZERO: u32 = 2;
 pub const JS_JIT_FEEDBACK_NAN: u32 = 4;
+pub const JS_JIT_FEEDBACK_BRANCH_TAKEN: u32 = 8;
+pub const JS_JIT_FEEDBACK_CALL_SITE: u32 = 16;
+pub const JS_JIT_FEEDBACK_PROPERTY_STORE: u32 = 32;
 pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;
 pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
 pub const QJSJIT_RUNTIME_API_MAJOR: u32 = 1;
-pub const QJSJIT_RUNTIME_API_MINOR: u32 = 1;
+pub const QJSJIT_RUNTIME_API_MINOR: u32 = 3;
 pub type size_t = ::core::ffi::c_ulong;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2180,6 +2183,9 @@ pub type JSJitValueType = ::core::ffi::c_uint;
 pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL: JSJitFeedbackKind = 0;
 pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_RETURN: JSJitFeedbackKind = 1;
 pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY: JSJitFeedbackKind = 2;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_CONVERSION: JSJitFeedbackKind = 3;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_BRANCH: JSJitFeedbackKind = 4;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_PROPERTY: JSJitFeedbackKind = 5;
 pub type JSJitFeedbackKind = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2187,15 +2193,22 @@ pub struct JSJitFeedbackEvent {
     pub struct_size: u32,
     pub kind: u32,
     pub function: JSJitFunctionId,
+    pub callee: JSJitFunctionId,
     pub pc: u32,
     pub slot: u32,
     pub type_count: u32,
     pub flags: u32,
     pub types: *const u32,
+    pub shape_identity: u64,
+    pub shape_generation: u64,
+    pub prototype_identity: u64,
+    pub prototype_generation: u64,
+    pub property_offset: u32,
+    pub property_attributes: u32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitFeedbackEvent"][::core::mem::size_of::<JSJitFeedbackEvent>() - 56usize];
+    ["Size of JSJitFeedbackEvent"][::core::mem::size_of::<JSJitFeedbackEvent>() - 120usize];
     ["Alignment of JSJitFeedbackEvent"][::core::mem::align_of::<JSJitFeedbackEvent>() - 8usize];
     ["Offset of field: JSJitFeedbackEvent::struct_size"]
         [::core::mem::offset_of!(JSJitFeedbackEvent, struct_size) - 0usize];
@@ -2203,16 +2216,30 @@ const _: () = {
         [::core::mem::offset_of!(JSJitFeedbackEvent, kind) - 4usize];
     ["Offset of field: JSJitFeedbackEvent::function"]
         [::core::mem::offset_of!(JSJitFeedbackEvent, function) - 8usize];
+    ["Offset of field: JSJitFeedbackEvent::callee"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, callee) - 32usize];
     ["Offset of field: JSJitFeedbackEvent::pc"]
-        [::core::mem::offset_of!(JSJitFeedbackEvent, pc) - 32usize];
+        [::core::mem::offset_of!(JSJitFeedbackEvent, pc) - 56usize];
     ["Offset of field: JSJitFeedbackEvent::slot"]
-        [::core::mem::offset_of!(JSJitFeedbackEvent, slot) - 36usize];
+        [::core::mem::offset_of!(JSJitFeedbackEvent, slot) - 60usize];
     ["Offset of field: JSJitFeedbackEvent::type_count"]
-        [::core::mem::offset_of!(JSJitFeedbackEvent, type_count) - 40usize];
+        [::core::mem::offset_of!(JSJitFeedbackEvent, type_count) - 64usize];
     ["Offset of field: JSJitFeedbackEvent::flags"]
-        [::core::mem::offset_of!(JSJitFeedbackEvent, flags) - 44usize];
+        [::core::mem::offset_of!(JSJitFeedbackEvent, flags) - 68usize];
     ["Offset of field: JSJitFeedbackEvent::types"]
-        [::core::mem::offset_of!(JSJitFeedbackEvent, types) - 48usize];
+        [::core::mem::offset_of!(JSJitFeedbackEvent, types) - 72usize];
+    ["Offset of field: JSJitFeedbackEvent::shape_identity"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, shape_identity) - 80usize];
+    ["Offset of field: JSJitFeedbackEvent::shape_generation"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, shape_generation) - 88usize];
+    ["Offset of field: JSJitFeedbackEvent::prototype_identity"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, prototype_identity) - 96usize];
+    ["Offset of field: JSJitFeedbackEvent::prototype_generation"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, prototype_generation) - 104usize];
+    ["Offset of field: JSJitFeedbackEvent::property_offset"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, property_offset) - 112usize];
+    ["Offset of field: JSJitFeedbackEvent::property_attributes"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, property_attributes) - 116usize];
 };
 pub const JSJitOperandFormat_JS_JIT_FMT_none: JSJitOperandFormat = 0;
 pub const JSJitOperandFormat_JS_JIT_FMT_none_int: JSJitOperandFormat = 1;
@@ -2642,8 +2669,14 @@ pub const JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER: JSJitExitKind = 4;
 pub type JSJitExitKind = ::core::ffi::c_uint;
 pub type JSJitHelperStatus = i32;
 pub const JS_JIT_HELPER_OK: _bindgen_ty_4 = 0;
+pub const JS_JIT_HELPER_GUARD_MISS: _bindgen_ty_4 = 1;
+pub const JS_JIT_HELPER_MATERIALIZED: _bindgen_ty_4 = 2;
 pub const JS_JIT_HELPER_EXCEPTION: _bindgen_ty_4 = -1;
 pub type _bindgen_ty_4 = ::core::ffi::c_int;
+pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_ARGUMENT: JSJitOwnerSourceKind = 0;
+pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_LOCAL: JSJitOwnerSourceKind = 1;
+pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_OWNED_STACK: JSJitOwnerSourceKind = 2;
+pub type JSJitOwnerSourceKind = ::core::ffi::c_uint;
 pub const JSJitHelperABIType_JS_JIT_HELPER_ABI_NONE: JSJitHelperABIType = 0;
 pub const JSJitHelperABIType_JS_JIT_HELPER_ABI_STATUS: JSJitHelperABIType = 1;
 pub const JSJitHelperABIType_JS_JIT_HELPER_ABI_FRAME: JSJitHelperABIType = 2;
@@ -2681,7 +2714,9 @@ pub const JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY: JSJitHelperId = 9;
 pub const JSJitHelperId_JS_JIT_HELPER_CALL: JSJitHelperId = 10;
 pub const JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY: JSJitHelperId = 11;
 pub const JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT: JSJitHelperId = 12;
-pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 13;
+pub const JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD: JSJitHelperId = 13;
+pub const JSJitHelperId_JS_JIT_HELPER_MATERIALIZE_OWNER: JSJitHelperId = 14;
+pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 15;
 pub type JSJitHelperId = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2823,7 +2858,27 @@ unsafe extern "C" {
     ) -> JSJitHelperStatus;
 }
 unsafe extern "C" {
+    pub fn JS_JitHelperShapeGuard(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        object: u32,
+        identity_lo: u32,
+        identity_hi: u32,
+        generation_lo: u32,
+        generation_hi: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
     pub fn JS_JitGetHelperTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitHelperInfo;
+}
+unsafe extern "C" {
+    pub fn JS_JitHelperMaterializeOwner(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output_stack_index: u32,
+        source_kind: u32,
+        source_index: u32,
+    ) -> JSJitHelperStatus;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2935,10 +2990,30 @@ pub struct JSJitRuntimeAPI {
             output: u32,
         ) -> JSJitHelperStatus,
     >,
+    pub shape_guard: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            object: u32,
+            identity_lo: u32,
+            identity_hi: u32,
+            generation_lo: u32,
+            generation_hi: u32,
+        ) -> JSJitHelperStatus,
+    >,
+    pub materialize_owner: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output_stack_index: u32,
+            source_kind: u32,
+            source_index: u32,
+        ) -> JSJitHelperStatus,
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 112usize];
+    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 128usize];
     ["Alignment of JSJitRuntimeAPI"][::core::mem::align_of::<JSJitRuntimeAPI>() - 8usize];
     ["Offset of field: JSJitRuntimeAPI::struct_size"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, struct_size) - 0usize];
@@ -2972,6 +3047,10 @@ const _: () = {
         [::core::mem::offset_of!(JSJitRuntimeAPI, new_array) - 96usize];
     ["Offset of field: JSJitRuntimeAPI::new_object"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, new_object) - 104usize];
+    ["Offset of field: JSJitRuntimeAPI::shape_guard"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, shape_guard) - 112usize];
+    ["Offset of field: JSJitRuntimeAPI::materialize_owner"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, materialize_owner) - 120usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

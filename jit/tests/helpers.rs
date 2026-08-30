@@ -5,7 +5,7 @@ use std::{
     mem, ptr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -33,6 +33,11 @@ enum Operation {
     },
     Call {
         stress: bool,
+    },
+    ShapeGuard {
+        identity: u64,
+        generation: u64,
+        verified: Arc<AtomicBool>,
     },
     NewArray,
     NewObject,
@@ -224,6 +229,53 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                     finish_slot(frame, (*frame).stack_base.add(1))
                 }
             }
+            Operation::ShapeGuard {
+                identity,
+                generation,
+                verified,
+            } => {
+                let helper = api.shape_guard.expect("SHAPE_GUARD helper");
+                let before = *(*frame).arg_buf;
+                let invoke =
+                    |frame: *mut qjs::JSJitExecFrame, slot, identity: u64, generation: u64| {
+                        helper(
+                            frame,
+                            0,
+                            slot,
+                            identity as u32,
+                            (identity >> 32) as u32,
+                            generation as u32,
+                            (generation >> 32) as u32,
+                        )
+                    };
+                let exact = invoke(frame, 0, *identity, *generation);
+                let wrong_identity = invoke(frame, 0, identity ^ 1, *generation);
+                let wrong_generation = invoke(frame, 0, *identity, generation ^ 1);
+                let after = *(*frame).arg_buf;
+
+                set_stack_depth(frame, 1);
+                *(*frame).stack_base = qjs::JS_MKVAL(qjs::JS_TAG_INT, 7);
+                let primitive_before = *(*frame).stack_base;
+                let primitive = invoke(frame, stack_slot, *identity, *generation);
+                let primitive_after = *(*frame).stack_base;
+                let no_exception = !qjs::JS_HasException((*frame).ctx);
+
+                let unchanged = before.tag == after.tag
+                    && before.u.ptr == after.u.ptr
+                    && primitive_before.tag == primitive_after.tag
+                    && primitive_before.u.int32 == primitive_after.u.int32;
+                verified.store(
+                    exact == qjs::JS_JIT_HELPER_OK
+                        && wrong_identity == qjs::JS_JIT_HELPER_GUARD_MISS
+                        && wrong_generation == qjs::JS_JIT_HELPER_GUARD_MISS
+                        && primitive == qjs::JS_JIT_HELPER_GUARD_MISS
+                        && no_exception
+                        && unchanged,
+                    Ordering::SeqCst,
+                );
+                (*frame).result = qjs::JS_MKVAL(qjs::JS_TAG_INT, i32::from(unchanged));
+                qjs::JSJitExit::done()
+            }
             Operation::NewArray | Operation::NewObject => {
                 set_stack_depth(frame, 1);
                 let helper = if matches!(spec.operation, Operation::NewArray) {
@@ -309,7 +361,11 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                         (*frame).stack_top = (*frame).stack_capacity.wrapping_add(1);
                         api.free.expect("FREE helper")(frame, 0, 0)
                     }
-                    InvalidKind::StackMap => api.free.expect("FREE helper")(frame, 2, 0),
+                    // FREE intentionally does not require a stack map: it only
+                    // consumes an already-materialized owned slot. Exercise
+                    // stack-map range validation through DUP, which does use
+                    // deopt metadata.
+                    InvalidKind::StackMap => api.dup.expect("DUP helper")(frame, 2, stack_slot, 0),
                     InvalidKind::Slot => api.free.expect("FREE helper")(frame, 0, u32::MAX - 1),
                     InvalidKind::ConstantIndex => {
                         set_stack_depth(frame, 1);
@@ -341,6 +397,19 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                 );
                 qjs::JSJitExit::exception()
             }
+        }
+    }
+}
+
+struct ShapeCaptureBackend(Arc<Mutex<Option<(u64, u64)>>>);
+
+unsafe impl JitBackend for ShapeCaptureBackend {
+    fn record_feedback(&mut self, event: &qjs::JSJitFeedbackEvent) {
+        if event.kind == qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_PROPERTY
+            && event.shape_identity != 0
+            && event.shape_generation != 0
+        {
+            *self.0.lock().unwrap() = Some((event.shape_identity, event.shape_generation));
         }
     }
 }
@@ -543,6 +612,49 @@ fn property_set_consumes_the_value_on_success_and_exception() {
         assert!(consumed.load(Ordering::SeqCst));
         assert_eq!(entries.load(Ordering::SeqCst), 1);
     }
+}
+
+#[test]
+fn shape_guard_matches_exact_rooted_shape_and_misses_without_mutating_values() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let snapshot = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "globalThis.rooted = { x: 42 }; globalThis.target = function target(o) { return o.x }",
+        )
+        .unwrap();
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+
+    let captured = Arc::new(Mutex::new(None));
+    {
+        let _guard = runtime
+            .attach_jit_backend(ShapeCaptureBackend(Arc::clone(&captured)))
+            .unwrap();
+        context.with(|ctx| ctx.eval::<i32, _>("target(rooted)").unwrap());
+    }
+    let (identity, generation) = captured
+        .lock()
+        .unwrap()
+        .expect("property feedback exposes the production shape token");
+
+    runtime.run_gc();
+    let verified = Arc::new(AtomicBool::new(false));
+    let (_guard, entries) = install(
+        &runtime,
+        &snapshot,
+        Operation::ShapeGuard {
+            identity,
+            generation,
+            verified: Arc::clone(&verified),
+        },
+    );
+    let result = context.with(|ctx| ctx.eval::<i32, _>("target(rooted)").unwrap());
+
+    assert_eq!(result, 1);
+    assert!(verified.load(Ordering::SeqCst));
+    assert_eq!(entries.load(Ordering::SeqCst), 1);
 }
 
 #[test]

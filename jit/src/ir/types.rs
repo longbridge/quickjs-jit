@@ -39,6 +39,7 @@ pub enum StackOp {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOp {
+    IsUndefinedOrNull,
     Plus,
     Neg,
     Increment,
@@ -80,6 +81,7 @@ pub enum IrOp {
     NewObject,
     NewArrayFrom(u16),
     GetProperty(u32),
+    GetPropertyKeep(u32),
     SetProperty(u32),
     Call { argc: u16, has_this: bool },
     GetArgument(u16),

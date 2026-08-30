@@ -1,13 +1,14 @@
 use rquickjs_core::{
     context::EvalOptions,
     loader::{ImportAttributes, Loader, Resolver},
-    Context, Ctx, Error, Module, Runtime,
+    qjs, ArrayBuffer, Context, Ctx, Error, Function, Module, Object, Runtime, Value,
 };
 use rquickjs_jit::{
     correctness::{
         classify_features_with_config, compose_test262_program, discover_test262, parse_test262,
-        CaseReport, CaseStatus, ExclusionManifest, FeatureDisposition, NativeEvidence,
-        NegativePhase, RunMode, SuiteReport, Test262Variant,
+        quickjs_config_excludes_path, quickjs_errorfile_contains_path, CaseReport, CaseStatus,
+        ExclusionManifest, FeatureDisposition, NativeEvidence, NegativePhase, RunMode, SuiteReport,
+        Test262Variant,
     },
     JitConfig, JitRuntime,
 };
@@ -63,6 +64,24 @@ type AfterEvaluate<'a> = &'a dyn Fn(&Context) -> Result<(), String>;
 const TEST262_REVISION: &str = "d5e73fc8d2c663554fb72e2380a8c2bc1a318a33";
 
 struct Test262Modules;
+
+fn host_eval_script<'js>(ctx: Ctx<'js>, source: String) -> rquickjs_core::Result<Value<'js>> {
+    let mut options = EvalOptions::default();
+    options.global = true;
+    options.strict = false;
+    options.promise = false;
+    options.filename = ctx.globals().get("__qjsjitFilename").ok();
+    ctx.eval_with_options(source.as_bytes(), options)
+}
+
+fn host_print(_: String) {}
+
+fn host_gc(ctx: Ctx<'_>) {
+    unsafe {
+        qjs::JS_RunGC(qjs::JS_GetRuntime(ctx.as_raw().as_ptr()));
+    }
+}
+
 impl Resolver for Test262Modules {
     fn resolve<'js>(
         &mut self,
@@ -76,7 +95,15 @@ impl Resolver for Test262Modules {
         } else {
             PathBuf::from(name)
         };
-        Ok(path.to_string_lossy().into_owned())
+        // QuickJS keys modules by the resolver string. Canonicalize existing
+        // files so `file.js` and `./file.js` share one module record; without
+        // this, self-import tests are evaluated twice and the second raw load
+        // lacks the harness globals installed in the root module.
+        Ok(path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned())
     }
 }
 impl Loader for Test262Modules {
@@ -211,7 +238,10 @@ fn execute(
             | Test262Variant::ModuleAsync
             | Test262Variant::StrictModuleAsync
     );
-    let harness = if variant == Test262Variant::RawScript {
+    let harness = if matches!(
+        variant,
+        Test262Variant::RawScript | Test262Variant::RawModule
+    ) {
         String::new()
     } else {
         harness(root, case.includes(), asynchronous)?
@@ -219,12 +249,18 @@ fn execute(
     let program = compose_test262_program(case, variant, &harness);
     let module = matches!(
         variant,
-        Test262Variant::Module
+        Test262Variant::RawModule
+            | Test262Variant::Module
             | Test262Variant::StrictModule
             | Test262Variant::ModuleAsync
             | Test262Variant::StrictModuleAsync
     );
-    let filename = root.join(case.path()).to_string_lossy().into_owned();
+    let filename_path = root.join(case.path());
+    let filename = filename_path
+        .canonicalize()
+        .unwrap_or(filename_path)
+        .to_string_lossy()
+        .into_owned();
     let context = Context::full(runtime).map_err(|error| format!("context: {error:?}"))?;
     let strict = matches!(
         variant,
@@ -239,12 +275,51 @@ fn execute(
             caught
                 .into_object()
                 .and_then(|object| {
-                    let name = object.get::<_, String>("name").ok()?;
+                    let name = object.get::<_, String>("name").ok().or_else(|| {
+                        object
+                            .get::<_, Object<'_>>("constructor")
+                            .ok()?
+                            .get::<_, String>("name")
+                            .ok()
+                    })?;
                     let message = object.get::<_, String>("message").ok().unwrap_or_default();
                     Some(format!("{name}: {message}"))
                 })
                 .unwrap_or_else(|| format!("{error:?}"))
         };
+        // Test262's detachArrayBuffer.js harness delegates to the host-defined
+        // `$262.detachArrayBuffer`. QuickJS exposes the operation directly, so
+        // install the smallest host object needed by applicable conformance
+        // cases instead of excluding those cases from the corpus.
+        let host =
+            Object::new(ctx.clone()).map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        let detach = Function::new(ctx.clone(), |mut buffer: ArrayBuffer<'_>| {
+            buffer.detach();
+        })
+        .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        host.set("detachArrayBuffer", detach)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        let eval_script = Function::new(ctx.clone(), host_eval_script)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        host.set("evalScript", eval_script)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        host.set("global", ctx.globals())
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        let gc = Function::new(ctx.clone(), host_gc)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        host.set("gc", gc)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        ctx.globals()
+            .set("$262", host)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        ctx.globals()
+            .set("__qjsjitFilename", filename.clone())
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        let print = Function::new(ctx.clone(), host_print)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
+        ctx.globals()
+            .set("print", print)
+            .map_err(|error| (NegativePhase::Runtime, detail(error)))?;
         if case
             .negative()
             .is_some_and(|negative| negative.phase() == NegativePhase::Parse)
@@ -258,7 +333,11 @@ fn execute(
         }
         if module {
             let declared = Module::declare(ctx.clone(), filename.as_str(), program.as_bytes())
-                .map_err(|error| (NegativePhase::Parse, detail(error)))?;
+                // QuickJS resolves and parses imported modules while declaring
+                // the root module. The root was already handled above for an
+                // expected parse-negative case, so failures reached here are
+                // module-resolution failures (including invalid dependencies).
+                .map_err(|error| (NegativePhase::Resolution, detail(error)))?;
             let (_, promise) = declared
                 .eval()
                 .map_err(|error| (NegativePhase::Resolution, detail(error)))?;
@@ -271,7 +350,7 @@ fn execute(
             options.strict = strict;
             options.promise = false;
             options.filename = Some(filename.clone());
-            ctx.eval_with_options::<(), _>(program.as_str(), options)
+            ctx.eval_with_options::<(), _>(program.as_bytes(), options)
                 .map_err(|error| (NegativePhase::Runtime, detail(error)))
         }
     });
@@ -291,15 +370,19 @@ fn execute(
         return Err(format!("timeout after {} ms", timeout.as_millis()));
     }
     if asynchronous {
-        let completion = context.with(|ctx| {
-            ctx.eval::<String, _>(
-                "JSON.stringify([globalThis.__qjsjitDone,globalThis.__qjsjitAsyncError])",
-            )
-            .map_err(|error| format!("async completion: {error:?}"))
+        let (done, error) = context.with(|ctx| {
+            let globals = ctx.globals();
+            let done = globals
+                .get::<_, bool>("__qjsjitDone")
+                .map_err(|error| format!("async completion flag: {error:?}"))?;
+            let error = globals
+                .get::<_, Option<String>>("__qjsjitAsyncError")
+                .map_err(|error| format!("async completion error: {error:?}"))?;
+            Ok::<_, String>((done, error))
         })?;
-        if completion != "[true,null]" {
+        if !done || error.is_some() {
             return Err(format!(
-                "async $DONE did not complete successfully: {completion}"
+                "async $DONE did not complete successfully: done={done}, error={error:?}"
             ));
         }
     }
@@ -360,6 +443,13 @@ fn run(options: Options) -> Result<SuiteReport, String> {
             .join("sys/quickjs/test262.conf"),
     )
     .map_err(|error| format!("test262.conf: {error}"))?;
+    let quickjs_errors = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("sys/quickjs/test262_errors.txt"),
+    )
+    .map_err(|error| format!("test262_errors.txt: {error}"))?;
     let exclusions: ExclusionManifest =
         serde_json::from_str(include_str!("../../tests/fixtures/test262-exclusions.json"))
             .map_err(|error| format!("invalid exclusion manifest: {error}"))?;
@@ -419,7 +509,18 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                 });
                 continue;
             }
-            if let Some(reason) = exclusions.path_reason(&relative) {
+            let path_exclusion = exclusions
+                .path_reason(&relative)
+                .or_else(|| {
+                    quickjs_config_excludes_path(&quickjs_config, &relative)
+                        .then(|| "excluded by the pinned QuickJS test262.conf baseline".to_owned())
+                })
+                .or_else(|| {
+                    quickjs_errorfile_contains_path(&quickjs_errors, &relative).then(|| {
+                        "known failure in pinned QuickJS test262_errors.txt baseline".to_owned()
+                    })
+                });
+            if let Some(reason) = path_exclusion {
                 reports.push(CaseReport {
                     path: relative.clone(),
                     variant,

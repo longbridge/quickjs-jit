@@ -7,35 +7,249 @@
   "properties": {
     "schema": { "const": "jit-benchmark-v1" },
     "provenance": {
-      "type": "object", "additionalProperties": false,
-      "required": ["source_revision", "quickjs_revision", "source_dirty", "command", "target", "target_triple", "os", "kernel", "cpu", "power_mode", "rustc", "llvm", "executable_bytes", "stripped_jit_bytes", "stripped_no_jit_bytes", "stripped_jit_delta_bytes", "schema_sha256", "suites_lock_sha256"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_revision",
+        "quickjs_revision",
+        "source_dirty",
+        "command",
+        "target",
+        "target_triple",
+        "os",
+        "kernel",
+        "cpu",
+        "power_mode",
+        "rustc",
+        "llvm",
+        "executable_bytes",
+        "stripped_jit_bytes",
+        "stripped_no_jit_bytes",
+        "stripped_jit_delta_bytes",
+        "schema_sha256",
+        "suites_lock_sha256"
+      ],
       "properties": {
-        "source_revision": {"type":"string"}, "quickjs_revision": {"type":"string"},
-        "source_dirty": {"type":"boolean"}, "command": {"type":"array","items":{"type":"string"}},
-        "target": {"type":"string"}, "target_triple": {"type":"string","pattern":"^[^-]+-[^-]+-.+$"}, "os": {"type":"string"}, "kernel": {"type":"string"},
-        "cpu": {"type":"string"}, "power_mode": {"type":"string"}, "rustc": {"type":"string"},
-        "llvm": {"type":"string"}, "executable_bytes": {"type":"integer","minimum":1}, "stripped_jit_bytes":{"type":"integer","minimum":1}, "stripped_no_jit_bytes":{"type":"integer","minimum":1}, "stripped_jit_delta_bytes":{"type":"integer"},
-        "schema_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
-        "suites_lock_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"}
+        "source_revision": { "type": "string" },
+        "quickjs_revision": { "type": "string" },
+        "source_dirty": { "type": "boolean" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "target": { "type": "string" },
+        "target_triple": { "type": "string", "pattern": "^[^-]+-[^-]+-.+$" },
+        "os": { "type": "string" },
+        "kernel": { "type": "string" },
+        "cpu": { "type": "string" },
+        "power_mode": { "type": "string" },
+        "rustc": { "type": "string" },
+        "llvm": { "type": "string" },
+        "executable_bytes": { "type": "integer", "minimum": 1 },
+        "stripped_jit_bytes": { "type": "integer", "minimum": 1 },
+        "stripped_no_jit_bytes": { "type": "integer", "minimum": 1 },
+        "stripped_jit_delta_bytes": { "type": "integer" },
+        "schema_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "suites_lock_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bun_version": { "type": ["string", "null"] },
+        "bun_path": { "type": ["string", "null"] },
+        "bun_sha256": { "type": ["string", "null"] }
       }
     },
     "policy": {
-      "type":"object", "additionalProperties":false,
-      "required":["latency_warmups","latency_processes","throughput_windows","throughput_window_ns","bootstrap_resamples","pairing"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "latency_warmups",
+        "latency_processes",
+        "throughput_windows",
+        "throughput_window_ns",
+        "bootstrap_resamples",
+        "pairing"
+      ],
       "properties": {
-        "latency_warmups":{"type":"integer","minimum":5}, "latency_processes":{"type":"integer","minimum":30},
-        "throughput_windows":{"type":"integer","minimum":10}, "throughput_window_ns":{"type":"integer","minimum":1000000000},
-        "bootstrap_resamples":{"type":"integer","minimum":10000}, "pairing":{"type":"string","minLength":1}
+        "latency_warmups": { "type": "integer", "minimum": 5 },
+        "latency_processes": { "type": "integer", "minimum": 30 },
+        "throughput_windows": { "type": "integer", "minimum": 10 },
+        "throughput_window_ns": { "type": "integer", "minimum": 1000000000 },
+        "bootstrap_resamples": { "type": "integer", "minimum": 10000 },
+        "pairing": { "type": "string", "minLength": 1 }
       }
     },
-    "modes": {"type":"array","minItems":4,"maxItems":4,"items":{"$ref":"#/$defs/mode"}},
-    "exclusions": {"type":"array","items":{"$ref":"#/$defs/exclusion"}}
+    "modes": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 5,
+      "items": { "$ref": "#/$defs/mode" }
+    },
+    "exclusions": { "type": "array", "items": { "$ref": "#/$defs/exclusion" } }
   },
   "$defs": {
-    "mode": {"type":"object","additionalProperties":false,"required":["mode","workloads"],"properties":{"mode":{"enum":["interpreter","tier1","tier2","automatic"]},"workloads":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/workload"}}}},
-    "workload": {"type":"object","additionalProperties":false,"required":["name","suite","group","designated_kernel","samples","raw_latency_ns","raw_throughput_ops","median_ns","mad_ns","p95_ns","p99_ns","ci95_ns","compile_ns","install_ns","break_even_executions"],"properties":{"name":{"type":"string"},"suite":{"type":"string"},"group":{"type":"string"},"designated_kernel":{"type":"boolean"},"samples":{"type":"array","minItems":30,"maxItems":30,"items":{"$ref":"#/$defs/sample"}},"raw_latency_ns":{"type":"array","minItems":30,"maxItems":30,"items":{"type":"integer"}},"raw_throughput_ops":{"type":"array","minItems":10,"maxItems":10,"items":{"type":"integer"}},"median_ns":{"type":"integer"},"mad_ns":{"type":"integer"},"p95_ns":{"type":"integer"},"p99_ns":{"type":"integer"},"ci95_ns":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer"}},"compile_ns":{"type":"integer"},"install_ns":{"type":"integer"},"break_even_executions":{"type":["integer","null"]}}},
-    "sample": {"type":"object","additionalProperties":false,"required":["pair_index","elapsed_ns","checksum","native_entries","native_exits","fallback_count","retry_count","tier1_entries","tier2_entries","osr_attempts","profitability_evaluations","profitability_approved","profitability_rejected","benefit_recordings","measured_benefit_ns","opcode_fingerprint","abi_fingerprint","config_fingerprint","peak_rss_bytes","code_bytes","metadata_bytes","peak_compiler_bytes","phases"],"properties":{"pair_index":{"type":"integer"},"elapsed_ns":{"type":"integer"},"checksum":{"type":"string"},"native_entries":{"type":"integer"},"native_exits":{"type":"integer"},"fallback_count":{"type":"integer"},"retry_count":{"type":"integer"},"tier1_entries":{"type":"integer"},"tier2_entries":{"type":"integer"},"osr_attempts":{"type":"integer"},"profitability_evaluations":{"type":"integer"},"profitability_approved":{"type":"integer"},"profitability_rejected":{"type":"integer"},"benefit_recordings":{"type":"integer"},"measured_benefit_ns":{"type":"integer"},"opcode_fingerprint":{"type":"integer"},"abi_fingerprint":{"type":"integer"},"config_fingerprint":{"type":"integer"},"peak_rss_bytes":{"type":"integer"},"code_bytes":{"type":"integer"},"metadata_bytes":{"type":"integer"},"peak_compiler_bytes":{"type":"integer"},"phases":{"$ref":"#/$defs/phases"}}},
-    "phases":{"type":"object","additionalProperties":false,"required":["total_ns","runtime_create_ns","jit_attach_ns","context_create_ns","definition_eval_ns","first_eval_ns","threshold_crossing_ns","compile_ns","install_ns","osr_ns","steady_state_ns"],"properties":{"total_ns":{"type":"integer"},"runtime_create_ns":{"type":"integer"},"jit_attach_ns":{"type":"integer"},"context_create_ns":{"type":"integer"},"definition_eval_ns":{"type":"integer"},"first_eval_ns":{"type":"integer"},"threshold_crossing_ns":{"type":"integer"},"compile_ns":{"type":"integer"},"install_ns":{"type":"integer"},"osr_ns":{"type":"integer"},"steady_state_ns":{"type":"integer"}}},
-    "exclusion": {"type":"object","additionalProperties":false,"required":["suite","test","reason"],"properties":{"suite":{"type":"string"},"test":{"type":"string"},"reason":{"type":"string"}}}
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "workloads"],
+      "properties": {
+        "mode": {
+          "enum": ["interpreter", "tier1", "tier2", "automatic", "bun"]
+        },
+        "workloads": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/workload" }
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "suite",
+        "group",
+        "designated_kernel",
+        "samples",
+        "raw_latency_ns",
+        "raw_throughput_ops",
+        "median_ns",
+        "mad_ns",
+        "p95_ns",
+        "p99_ns",
+        "ci95_ns",
+        "compile_ns",
+        "install_ns",
+        "break_even_executions"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "suite": { "type": "string" },
+        "group": { "type": "string" },
+        "designated_kernel": { "type": "boolean" },
+        "samples": {
+          "type": "array",
+          "minItems": 30,
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/sample" }
+        },
+        "raw_latency_ns": {
+          "type": "array",
+          "minItems": 30,
+          "maxItems": 30,
+          "items": { "type": "integer" }
+        },
+        "raw_throughput_ops": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": { "type": "integer" }
+        },
+        "median_ns": { "type": "integer" },
+        "mad_ns": { "type": "integer" },
+        "p95_ns": { "type": "integer" },
+        "p99_ns": { "type": "integer" },
+        "ci95_ns": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer" }
+        },
+        "compile_ns": { "type": "integer" },
+        "install_ns": { "type": "integer" },
+        "break_even_executions": { "type": ["integer", "null"] }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pair_index",
+        "elapsed_ns",
+        "checksum",
+        "native_entries",
+        "native_exits",
+        "fallback_count",
+        "retry_count",
+        "tier1_entries",
+        "tier2_entries",
+        "deopt_count",
+        "osr_attempts",
+        "profitability_evaluations",
+        "profitability_approved",
+        "profitability_rejected",
+        "benefit_recordings",
+        "measured_benefit_ns",
+        "opcode_fingerprint",
+        "abi_fingerprint",
+        "config_fingerprint",
+        "peak_rss_bytes",
+        "code_bytes",
+        "metadata_bytes",
+        "peak_compiler_bytes",
+        "phases"
+      ],
+      "properties": {
+        "pair_index": { "type": "integer" },
+        "elapsed_ns": { "type": "integer" },
+        "checksum": { "type": "string" },
+        "native_entries": { "type": ["integer", "null"] },
+        "native_exits": { "type": ["integer", "null"] },
+        "fallback_count": { "type": ["integer", "null"] },
+        "retry_count": { "type": ["integer", "null"] },
+        "tier1_entries": { "type": ["integer", "null"] },
+        "tier2_entries": { "type": ["integer", "null"] },
+        "deopt_count": { "type": ["integer", "null"] },
+        "osr_attempts": { "type": ["integer", "null"] },
+        "profitability_evaluations": { "type": ["integer", "null"] },
+        "profitability_approved": { "type": ["integer", "null"] },
+        "profitability_rejected": { "type": ["integer", "null"] },
+        "benefit_recordings": { "type": ["integer", "null"] },
+        "measured_benefit_ns": { "type": ["integer", "null"] },
+        "opcode_fingerprint": { "type": ["integer", "null"] },
+        "abi_fingerprint": { "type": ["integer", "null"] },
+        "config_fingerprint": { "type": ["integer", "null"] },
+        "peak_rss_bytes": { "type": ["integer", "null"] },
+        "code_bytes": { "type": ["integer", "null"] },
+        "metadata_bytes": { "type": ["integer", "null"] },
+        "peak_compiler_bytes": { "type": ["integer", "null"] },
+        "phases": { "$ref": "#/$defs/phases" }
+      }
+    },
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_ns",
+        "runtime_create_ns",
+        "jit_attach_ns",
+        "context_create_ns",
+        "definition_eval_ns",
+        "first_eval_ns",
+        "threshold_crossing_ns",
+        "compile_ns",
+        "install_ns",
+        "osr_ns",
+        "steady_state_ns"
+      ],
+      "properties": {
+        "total_ns": { "type": "integer" },
+        "runtime_create_ns": { "type": "integer" },
+        "jit_attach_ns": { "type": "integer" },
+        "context_create_ns": { "type": "integer" },
+        "definition_eval_ns": { "type": "integer" },
+        "first_eval_ns": { "type": "integer" },
+        "threshold_crossing_ns": { "type": "integer" },
+        "compile_ns": { "type": "integer" },
+        "install_ns": { "type": "integer" },
+        "osr_ns": { "type": "integer" },
+        "steady_state_ns": { "type": "integer" }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "test", "reason"],
+      "properties": {
+        "suite": { "type": "string" },
+        "test": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
   }
 }

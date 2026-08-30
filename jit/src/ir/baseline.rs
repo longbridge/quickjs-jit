@@ -398,6 +398,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::ResolveConstant(_) | IrOp::NewObject => 1,
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
+        IrOp::GetPropertyKeep(_) => 1,
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
@@ -414,7 +415,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
             | StackOp::Insert4 => 1,
             _ => 0,
         },
-        IrOp::Unary(UnaryOp::Plus | UnaryOp::LogicalNot) => 1,
+        IrOp::Unary(UnaryOp::Plus | UnaryOp::LogicalNot | UnaryOp::IsUndefinedOrNull) => 1,
         IrOp::Binary(
             BinaryOp::Add
             | BinaryOp::LessThan
@@ -444,6 +445,7 @@ fn helper_stack_depth(
      */
     let extra = match operation {
         IrOp::GetProperty(_) | IrOp::Call { .. } => 2,
+        IrOp::GetPropertyKeep(_) => 1,
         IrOp::NewArrayFrom(count) if *count != 0 => 2,
         IrOp::NewArrayFrom(_) => 0,
         _ => 0,
@@ -579,6 +581,8 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "object" => IrOp::NewObject,
         "array_from" => IrOp::NewArrayFrom(instruction.operand_u16(1)),
         "get_field" => IrOp::GetProperty(instruction.operand_u32(1)),
+        "get_length" => IrOp::GetProperty(qjs::JS_ATOM_length),
+        "get_field2" => IrOp::GetPropertyKeep(instruction.operand_u32(1)),
         "put_field" => IrOp::SetProperty(instruction.operand_u32(1)),
         "call" => IrOp::Call {
             argc: instruction.operand_u16(1),
@@ -672,6 +676,7 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
             IrOp::AddLocal(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
         "lnot" => IrOp::Unary(UnaryOp::LogicalNot),
+        "is_undefined_or_null" => IrOp::Unary(UnaryOp::IsUndefinedOrNull),
         "not" => IrOp::Unary(UnaryOp::BitNot),
         "add" => IrOp::Binary(BinaryOp::Add),
         "sub" => IrOp::Binary(BinaryOp::Sub),

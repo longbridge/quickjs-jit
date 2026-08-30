@@ -62,11 +62,17 @@ struct PollLocation {
     source_location: SourceLoc,
 }
 
-const LOOP_POLL_INTERVAL: i64 = 64;
+// Keep interrupt handling bounded without crossing the C helper boundary on
+// every short loop trip.  Tier 1 materializes the complete interpreter frame
+// before a poll, so a 64-backedge cadence made that safepoint work dominate
+// otherwise native numeric kernels.  1024 is still a fixed, deterministic
+// bound (and entry polls remain unconditional).
+const LOOP_POLL_INTERVAL: i64 = 1024;
 
 struct HelperLowering<'a> {
     ir: &'a BaselineIr,
     frame: Value,
+    runtime_api: Value,
     sret: Value,
     arg_buf: Value,
     var_buf: Value,
@@ -93,6 +99,7 @@ impl HelperLowering<'_> {
             builder,
             self.ir,
             self.frame,
+            self.runtime_api,
             self.sret,
             self.arg_buf,
             self.var_buf,
@@ -125,6 +132,13 @@ impl HelperLowering<'_> {
 pub struct BaselineCompiler {
     isa: OwnedTargetIsa,
     host_publishable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct BaselineDirectCallSite {
+    pc: u32,
+    call: crate::runtime::CallSpecializationKey,
+    entry: usize,
 }
 
 /// Stable, complete identity of the Cranelift target used to produce code.
@@ -264,7 +278,51 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
     ) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy_start(function, policy, control, None, GuardExit::Retry)
+        self.compile_with_policy_and_direct_calls(function, policy, control, &[])
+    }
+
+    fn compile_with_policy_and_direct_calls(
+        &self,
+        function: &VerifiedFunction,
+        policy: CompilePolicy,
+        control: Option<&CompileControl>,
+        direct_calls: &[crate::runtime::DirectCallTarget],
+    ) -> Result<RelocatableCode, CompileFailure> {
+        let direct_calls = direct_calls
+            .iter()
+            .map(|target| BaselineDirectCallSite {
+                pc: target.pc(),
+                call: target.call().clone(),
+                entry: target.entry() as usize,
+            })
+            .collect::<Vec<_>>();
+        self.compile_with_policy_start(
+            function,
+            policy,
+            control,
+            None,
+            GuardExit::Retry,
+            &direct_calls,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn lower_with_direct_target_for_test(
+        &self,
+        function: &VerifiedFunction,
+        pc: u32,
+        call: crate::runtime::CallSpecializationKey,
+        entry: usize,
+    ) -> Result<String, CompileFailure> {
+        self.compile_with_policy_start(
+            function,
+            CompilePolicy::AdvertisedOnly,
+            None,
+            None,
+            GuardExit::Retry,
+            &[BaselineDirectCallSite { pc, call, entry }],
+        )
+        .map(|code| code.clif().to_owned())
     }
 
     fn compile_with_policy_start(
@@ -274,6 +332,7 @@ impl BaselineCompiler {
         control: Option<&CompileControl>,
         osr_start: Option<u32>,
         _guard_exit: GuardExit,
+        direct_calls: &[BaselineDirectCallSite],
     ) -> Result<RelocatableCode, CompileFailure> {
         if let Some(control) = control {
             control.check()?;
@@ -328,6 +387,7 @@ impl BaselineCompiler {
                 &entry_analysis,
                 osr_start,
                 GuardExit::Retry,
+                direct_calls,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -342,6 +402,7 @@ impl BaselineCompiler {
         }
         let function_parameters = clif.params.clone();
         let mut context = Context::for_function(clif);
+        context.set_disasm(cfg!(feature = "test-support"));
         let compiled = context
             .compile(&*self.isa, &mut ControlPlane::default())
             .map_err(|_| CompileFailure::InvalidArtifact)?;
@@ -427,6 +488,13 @@ impl BaselineCompiler {
                         .filter(|range| range.loc.bits() == source_location)
                         .collect();
                     let [source_range] = matching_ranges.as_slice() else {
+                        // A type-proven Tier 1 fast path may make its cold
+                        // helper edge unreachable. Cranelift then removes the
+                        // call and its source range; there is no machine
+                        // safepoint to describe for that helper state.
+                        if state.kind == FrameStateKind::Helper && matching_ranges.is_empty() {
+                            return None;
+                        }
                         if osr_start.is_some() && matching_ranges.is_empty() {
                             return None;
                         }
@@ -489,6 +557,7 @@ impl BaselineCompiler {
             target: self.isa.triple().clone(),
             host_publishable: self.host_publishable,
             clif: clif_text,
+            machine_disassembly: compiled.vcode.clone(),
             osr_codes: Vec::new(),
         };
         if osr_start.is_none() && matches!(policy, CompilePolicy::AdvertisedOnly) {
@@ -504,6 +573,7 @@ impl BaselineCompiler {
                     control,
                     Some(point.pc()),
                     GuardExit::Retry,
+                    direct_calls,
                 )?;
                 code.osr_codes.push((map, child));
             }
@@ -559,8 +629,25 @@ mod target_identity_tests {
 
 impl Compiler for BaselineCompiler {
     fn compile(&self, request: CompileRequest) -> Result<CompiledArtifact, CompileFailure> {
-        let code = BaselineCompiler::compile(self, request.snapshot())?;
-        Ok(artifact_from_relocatable(request, code))
+        let dependencies = request
+            .direct_call_targets()
+            .iter()
+            .map(crate::runtime::DirectCallTarget::publication)
+            .collect::<Vec<_>>();
+        let artifact_dependencies = request
+            .direct_call_targets()
+            .iter()
+            .map(|target| crate::code_cache::ArtifactDependency::new(target.call().callee()))
+            .collect::<Vec<_>>();
+        let code = self.compile_with_policy_and_direct_calls(
+            request.snapshot(),
+            CompilePolicy::AdvertisedOnly,
+            None,
+            request.direct_call_targets(),
+        )?;
+        Ok(artifact_from_relocatable(request, code)
+            .with_dependencies(artifact_dependencies)
+            .with_direct_call_dependencies(dependencies))
     }
 
     fn compile_controlled(
@@ -568,13 +655,26 @@ impl Compiler for BaselineCompiler {
         request: CompileRequest,
         control: &CompileControl,
     ) -> Result<CompiledArtifact, CompileFailure> {
-        let code = self.compile_with_policy(
+        let dependencies = request
+            .direct_call_targets()
+            .iter()
+            .map(crate::runtime::DirectCallTarget::publication)
+            .collect::<Vec<_>>();
+        let artifact_dependencies = request
+            .direct_call_targets()
+            .iter()
+            .map(|target| crate::code_cache::ArtifactDependency::new(target.call().callee()))
+            .collect::<Vec<_>>();
+        let code = self.compile_with_policy_and_direct_calls(
             request.snapshot(),
             CompilePolicy::AdvertisedOnly,
             Some(control),
+            request.direct_call_targets(),
         )?;
         control.check()?;
-        Ok(artifact_from_relocatable(request, code))
+        Ok(artifact_from_relocatable(request, code)
+            .with_dependencies(artifact_dependencies)
+            .with_direct_call_dependencies(dependencies))
     }
 }
 
@@ -585,6 +685,7 @@ pub(crate) fn finalize_optimized_machine(
     isa: &OwnedTargetIsa,
     clif: Function,
     control: Option<&CompileControl>,
+    requires_helper_stack_map: bool,
 ) -> Result<RelocatableCode, CompileFailure> {
     if let Some(control) = control {
         control.check()?;
@@ -593,6 +694,7 @@ pub(crate) fn finalize_optimized_machine(
     let clif_text = clif.display().to_string();
     let function_parameters = clif.params.clone();
     let mut context = Context::for_function(clif);
+    context.set_disasm(cfg!(feature = "test-support"));
     let compiled = context
         .compile(&**isa, &mut ControlPlane::default())
         .map_err(|_| CompileFailure::InvalidArtifact)?;
@@ -627,22 +729,43 @@ pub(crate) fn finalize_optimized_machine(
             )
         })
         .collect();
+    let call_return_offsets = compiled
+        .buffer
+        .call_sites()
+        .iter()
+        .map(|site| site.ret_addr)
+        .collect::<Vec<_>>();
+    let (stack_maps, frame_states) = if requires_helper_stack_map {
+        let code_offset = *call_return_offsets
+            .first()
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        (
+            vec![StackMap::new(code_offset, Vec::new())],
+            vec![ArtifactFrameState::with_location(
+                code_offset,
+                0,
+                Vec::new(),
+                FrameStateLocationKind::CallReturn,
+                0,
+                code_offset.saturating_sub(1),
+                code_offset,
+            )],
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(RelocatableCode {
         bytes,
         relocations,
         unwind_metadata,
         native_unwind,
-        stack_maps: Vec::new(),
-        frame_states: Vec::new(),
-        call_return_offsets: compiled
-            .buffer
-            .call_sites()
-            .iter()
-            .map(|site| site.ret_addr)
-            .collect(),
+        stack_maps,
+        frame_states,
+        call_return_offsets,
         target: isa.triple().clone(),
         host_publishable: isa_is_host_compatible(&**isa),
         clif: clif_text,
+        machine_disassembly: compiled.vcode.clone(),
         osr_codes: Vec::new(),
     })
 }
@@ -686,6 +809,7 @@ pub struct RelocatableCode {
     target: Triple,
     host_publishable: bool,
     clif: String,
+    machine_disassembly: Option<String>,
     osr_codes: Vec<(crate::runtime::OsrMap, RelocatableCode)>,
 }
 
@@ -724,6 +848,11 @@ impl RelocatableCode {
 
     pub fn relocations(&self) -> &[Relocation] {
         &self.relocations
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn machine_disassembly(&self) -> &str {
+        self.machine_disassembly.as_deref().unwrap_or("")
     }
 
     pub fn unwind_metadata(&self) -> Option<&UnwindMetadata> {
@@ -955,6 +1084,8 @@ struct NativeUnwindPlan {
     windows_function_len: Option<u32>,
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     windows_unwind_offset: Option<u32>,
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    windows_arm64_unwind_offset: Option<u32>,
 }
 
 impl NativeUnwindPlan {
@@ -974,6 +1105,8 @@ impl NativeUnwindPlan {
             windows_function_len: None,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             windows_unwind_offset: None,
+            #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+            windows_arm64_unwind_offset: None,
         })
     }
 
@@ -1002,8 +1135,60 @@ impl NativeUnwindPlan {
     }
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    fn prepare(self, _bytes: &mut Vec<u8>) -> Result<Self, CodeMemoryError> {
-        Err(CodeMemoryError::UnwindRegistrationUnsupported)
+    fn prepare(mut self, bytes: &mut Vec<u8>) -> Result<Self, CodeMemoryError> {
+        let CraneliftUnwindInfo::WindowsArm64(info) = &self.info else {
+            return Err(CodeMemoryError::UnwindRegistrationUnsupported);
+        };
+        let function_len = bytes.len();
+        if function_len == 0 || function_len % 4 != 0 || function_len / 4 >= (1 << 18) {
+            return Err(CodeMemoryError::SizeOverflow);
+        }
+        let aligned_len = function_len
+            .checked_add(3)
+            .map(|len| len & !3)
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        bytes.resize(aligned_len, 0);
+        let unwind_offset =
+            u32::try_from(aligned_len).map_err(|_| CodeMemoryError::SizeOverflow)?;
+
+        // Cranelift emits the operation codes but not the terminating `end`.
+        // Reserve one additional word pre-filled with `end` (0xe4), so the
+        // first byte after Cranelift's sequence terminates it even when the
+        // sequence itself ends on a word boundary.
+        let code_words = usize::from(info.code_words())
+            .checked_add(1)
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        if code_words > u8::MAX as usize {
+            return Err(CodeMemoryError::SizeOverflow);
+        }
+        let extended = code_words > 31;
+        let header_words = if extended { 2 } else { 1 };
+        let xdata_len = header_words
+            .checked_add(code_words)
+            .and_then(|words| words.checked_mul(4))
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        let xdata_end = aligned_len
+            .checked_add(xdata_len)
+            .ok_or(CodeMemoryError::SizeOverflow)?;
+        bytes.resize(xdata_end, 0xe4);
+
+        let function_instructions =
+            u32::try_from(function_len / 4).map_err(|_| CodeMemoryError::SizeOverflow)?;
+        // E=1 describes the single mirrored epilog at the end of the function;
+        // its unwind sequence starts at byte index zero.
+        let mut header = function_instructions | (1 << 21);
+        if !extended {
+            header |= u32::try_from(code_words).unwrap() << 27;
+        }
+        bytes[aligned_len..aligned_len + 4].copy_from_slice(&header.to_le_bytes());
+        let codes_offset = aligned_len + header_words * 4;
+        if extended {
+            let extension = u32::try_from(code_words).unwrap() << 16;
+            bytes[aligned_len + 4..aligned_len + 8].copy_from_slice(&extension.to_le_bytes());
+        }
+        info.emit(&mut bytes[codes_offset..xdata_end]);
+        self.windows_arm64_unwind_offset = Some(unwind_offset);
+        Ok(self)
     }
 
     #[cfg(not(all(
@@ -1093,6 +1278,36 @@ impl NativeUnwindPlan {
             });
         }
 
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        if matches!(&self.info, CraneliftUnwindInfo::WindowsArm64(_)) {
+            use windows_sys::Win32::System::Diagnostics::Debug::{
+                RtlAddFunctionTable, IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY,
+                IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_0,
+            };
+
+            let mut function_table = Box::new(IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY {
+                BeginAddress: 0,
+                Anonymous: IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_0 {
+                    UnwindData: self
+                        .windows_arm64_unwind_offset
+                        .ok_or(CodeMemoryError::UnwindRegistrationUnsupported)?,
+                },
+            });
+            let registered = unsafe {
+                RtlAddFunctionTable(function_table.as_mut(), 1, executable.as_ptr() as usize)
+            };
+            if !registered {
+                return Err(CodeMemoryError::UnwindRegistrationFailed {
+                    operation: "register Windows ARM64 function table",
+                });
+            }
+            return Ok(NativeUnwindRegistration {
+                systemv_eh_frame: None,
+                systemv_registration_offset: 0,
+                windows_arm64_function_table: Some(function_table),
+            });
+        }
+
         let _ = executable;
         Err(CodeMemoryError::UnwindRegistrationUnsupported)
     }
@@ -1104,6 +1319,10 @@ struct NativeUnwindRegistration {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     windows_function_table:
         Option<Box<windows_sys::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY>>,
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    windows_arm64_function_table: Option<
+        Box<windows_sys::Win32::System::Diagnostics::Debug::IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY>,
+    >,
 }
 
 impl std::fmt::Debug for NativeUnwindRegistration {
@@ -1139,6 +1358,15 @@ impl Drop for NativeUnwindRegistration {
 
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         if let Some(function_table) = self.windows_function_table.as_ref() {
+            use windows_sys::Win32::System::Diagnostics::Debug::RtlDeleteFunctionTable;
+
+            unsafe {
+                let _ = RtlDeleteFunctionTable(function_table.as_ref());
+            }
+        }
+
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        if let Some(function_table) = self.windows_arm64_function_table.as_ref() {
             use windows_sys::Win32::System::Diagnostics::Debug::RtlDeleteFunctionTable;
 
             unsafe {
@@ -1327,6 +1555,13 @@ struct AbstractValue {
 }
 
 impl AbstractValue {
+    fn unknown() -> Self {
+        Self {
+            roots: BTreeSet::new(),
+            known: BTreeSet::new(),
+        }
+    }
+
     fn root(root: EntryRoot) -> Self {
         Self {
             roots: BTreeSet::from([root]),
@@ -1488,7 +1723,16 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
             match &instruction.op {
                 IrOp::Poll { .. } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
                 IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
-                IrOp::ResolveConstant(_) | IrOp::NewObject => {
+                // Constant-pool descriptors are pointer-free but intentionally
+                // do not carry the full runtime value. Keep their abstract
+                // domain unknown: the lowering performs the exact tag guard
+                // after ResolveConst. Classifying every constant as `Other`
+                // made valid Float64 constants force an unconditional entry
+                // retry, so nominal native entries never executed code.
+                IrOp::ResolveConstant(_) => {
+                    frame.stack.push(AbstractValue::unknown());
+                }
+                IrOp::NewObject => {
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
                 IrOp::NewArrayFrom(count) => {
@@ -1502,6 +1746,10 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 }
                 IrOp::GetProperty(_) => {
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                IrOp::GetPropertyKeep(_) => {
+                    frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
                 IrOp::SetProperty(_) => {
@@ -1761,7 +2009,9 @@ fn analyze_unary(
     operation: UnaryOp,
 ) -> Result<AbstractValue, CompileFailure> {
     let (required, result) = match operation {
-        UnaryOp::LogicalNot => return Ok(AbstractValue::known(KnownKind::Boolean)),
+        UnaryOp::LogicalNot | UnaryOp::IsUndefinedOrNull => {
+            return Ok(AbstractValue::known(KnownKind::Boolean));
+        }
         UnaryOp::Plus => return Ok(AbstractValue::known(KnownKind::Other)),
         UnaryOp::Neg | UnaryOp::Increment | UnaryOp::Decrement | UnaryOp::BitNot => {
             (RequiredDomain::Numeric, KnownKind::Number)
@@ -1783,6 +2033,13 @@ fn binary_returns_boolean(operation: BinaryOp) -> bool {
             | BinaryOp::StrictEqual
             | BinaryOp::StrictNotEqual
     )
+}
+
+fn ir_op_produces_boolean(operation: &IrOp) -> bool {
+    match operation {
+        IrOp::Binary(operation) => binary_returns_boolean(*operation),
+        _ => false,
+    }
 }
 
 fn apply_abstract_stack_operation(
@@ -1808,6 +2065,7 @@ fn lower_function(
     analysis: &EntryAnalysis,
     osr_start: Option<u32>,
     _guard_exit: GuardExit,
+    direct_calls: &[BaselineDirectCallSite],
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -1879,6 +2137,18 @@ fn lower_function(
     let stack_base = builder
         .ins()
         .load(pointer_type, flags, frame, layout.stack_base);
+    // Runtime helper tables are immutable for the lifetime of an execution
+    // frame.  Hoist the poll target out of the backedge slow path so periodic
+    // safepoints do not pay two dependent pointer loads each time.
+    let runtime_api = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.runtime_api);
+    let poll_helper = builder.ins().load(
+        pointer_type,
+        flags,
+        runtime_api,
+        layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
+    );
     for (index, pair) in arguments.iter().copied().enumerate() {
         let value = load_jsvalue(builder, arg_buf, index, layout);
         define_pair(builder, pair, value);
@@ -1912,6 +2182,7 @@ fn lower_function(
     let helper_lowering = HelperLowering {
         ir,
         frame,
+        runtime_api,
         sret,
         arg_buf,
         var_buf,
@@ -1948,8 +2219,16 @@ fn lower_function(
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
         let mut entered_osr_continuation = false;
+        let mut previous_effectful_op_was_boolean = false;
         for instruction in &block.instructions {
             let mut helper_states = instruction.helper_states.iter().copied();
+            let prior_op_was_boolean = previous_effectful_op_was_boolean;
+            if !matches!(
+                instruction.op,
+                IrOp::Poll { .. } | IrOp::Nop | IrOp::OsrLabel { .. }
+            ) {
+                previous_effectful_op_was_boolean = ir_op_produces_boolean(&instruction.op);
+            }
             builder.set_srcloc(SourceLoc::default());
             if !matches!(&instruction.op, IrOp::Poll { .. }) {
                 if let Some(state) = instruction.frame_state {
@@ -1993,6 +2272,7 @@ fn lower_function(
                         builder,
                         frame,
                         sret,
+                        poll_helper,
                         helper_signatures[qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
                         PollLocation {
                             bytecode_pc: instruction.pc,
@@ -2060,6 +2340,13 @@ fn lower_function(
                 IrOp::GetProperty(atom) => {
                     lower_get_property(builder, &helper_lowering, &mut helper_states, depth, atom)?
                 }
+                IrOp::GetPropertyKeep(atom) => lower_get_property_keep(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    atom,
+                )?,
                 IrOp::SetProperty(atom) => lower_set_property(
                     builder,
                     &helper_lowering,
@@ -2074,19 +2361,25 @@ fn lower_function(
                     &mut depth,
                     argc,
                     has_this,
+                    direct_calls
+                        .iter()
+                        .find(|target| target.pc == instruction.pc),
                 )?,
                 IrOp::GetArgument(index) => {
                     let state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    let output = flat_stack_slot(ir, depth)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                    let source = use_pair(builder, arguments[index as usize]);
+                    lower_dup_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         state,
                         depth,
-                        &[output, flat_argument_slot(index)]
-                    );
-                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                        depth,
+                        source,
+                        flat_argument_slot(index),
+                        false,
+                    )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
@@ -2094,14 +2387,17 @@ fn lower_function(
                     let state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    let output = flat_stack_slot(ir, depth)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                    let source = use_pair(builder, locals[index as usize]);
+                    lower_dup_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         state,
                         depth,
-                        &[output, flat_local_slot(ir, index)]
-                    );
-                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                        depth,
+                        source,
+                        flat_local_slot(ir, index),
+                        false,
+                    )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
@@ -2109,14 +2405,17 @@ fn lower_function(
                     let state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    let output = flat_stack_slot(ir, depth)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                    let source = use_pair(builder, locals[index as usize]);
+                    lower_dup_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         state,
                         depth,
-                        &[output, flat_local_slot(ir, index)]
-                    );
-                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                        depth,
+                        source,
+                        flat_local_slot(ir, index),
+                        true,
+                    )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
@@ -2152,19 +2451,18 @@ fn lower_function(
                     let free_state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                    let destination_value = use_pair(builder, arguments[index as usize]);
+                    lower_free_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         free_state,
                         depth,
-                        &[destination]
-                    );
-                    reload_pair(
-                        builder,
+                        destination_value,
+                        destination,
                         arguments[index as usize],
                         arg_buf,
                         index as usize,
-                        layout,
-                    );
+                    )?;
                     if keep {
                         let dup_state = helper_states
                             .next()
@@ -2185,7 +2483,6 @@ fn lower_function(
                     } else {
                         let value = use_pair(builder, stack[source_index]);
                         define_pair(builder, arguments[index as usize], value);
-                        store_jsvalue_slot(builder, arg_buf, index as usize, value, layout)?;
                         clear_pair(
                             builder,
                             stack[source_index],
@@ -2205,19 +2502,18 @@ fn lower_function(
                     let free_state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                    let destination_value = use_pair(builder, locals[index as usize]);
+                    lower_free_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         free_state,
                         depth,
-                        &[destination]
-                    );
-                    reload_pair(
-                        builder,
+                        destination_value,
+                        destination,
                         locals[index as usize],
                         var_buf,
                         index as usize,
-                        layout,
-                    );
+                    )?;
                     if keep {
                         let dup_state = helper_states
                             .next()
@@ -2238,7 +2534,6 @@ fn lower_function(
                     } else {
                         let value = use_pair(builder, stack[source_index]);
                         define_pair(builder, locals[index as usize], value);
-                        store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
                         clear_pair(
                             builder,
                             stack[source_index],
@@ -2259,22 +2554,20 @@ fn lower_function(
                     let free_state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                    let destination_value = use_pair(builder, locals[index as usize]);
+                    lower_free_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         free_state,
                         depth,
-                        &[destination]
-                    );
-                    reload_pair(
-                        builder,
+                        destination_value,
+                        destination,
                         locals[index as usize],
                         var_buf,
                         index as usize,
-                        layout,
-                    );
+                    )?;
                     let value = use_pair(builder, stack[source_index]);
                     define_pair(builder, locals[index as usize], value);
-                    store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
                     clear_pair(
                         builder,
                         stack[source_index],
@@ -2290,18 +2583,23 @@ fn lower_function(
                     let free_state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                    let destination_value = use_pair(builder, locals[index as usize]);
+                    lower_free_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         free_state,
                         depth,
-                        &[destination]
-                    );
+                        destination_value,
+                        destination,
+                        locals[index as usize],
+                        var_buf,
+                        index as usize,
+                    )?;
                     let value = constant_pair(
                         builder,
                         TaggedValue::new(0, qjs::JS_TAG_UNINITIALIZED as i64),
                     );
                     define_pair(builder, locals[index as usize], value);
-                    store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
                 }
                 IrOp::Drop => {
                     let index = depth
@@ -2310,13 +2608,19 @@ fn lower_function(
                     let state = helper_states
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                    let slot = flat_stack_slot(ir, index)?;
+                    let value = use_pair(builder, stack[index]);
+                    lower_free_if_refcounted(
+                        builder,
+                        &helper_lowering,
                         state,
                         depth,
-                        &[flat_stack_slot(ir, index)?]
-                    );
-                    reload_pair(builder, stack[index], stack_base, index, layout);
+                        value,
+                        slot,
+                        stack[index],
+                        stack_base,
+                        index,
+                    )?;
                     depth = index;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
@@ -2375,22 +2679,17 @@ fn lower_function(
                                     .next()
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let output_index = old_depth + created;
-                                invoke_helper!(
-                                    qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                                let source_pair = use_pair(builder, stack[start + source]);
+                                lower_dup_if_refcounted(
+                                    builder,
+                                    &helper_lowering,
                                     state,
                                     output_index,
-                                    &[
-                                        flat_stack_slot(ir, output_index)?,
-                                        flat_stack_slot(ir, start + source)?,
-                                    ]
-                                );
-                                reload_pair(
-                                    builder,
-                                    stack[output_index],
-                                    stack_base,
                                     output_index,
-                                    layout,
-                                );
+                                    source_pair,
+                                    flat_stack_slot(ir, start + source)?,
+                                    false,
+                                )?;
                             }
                             debug_assert_eq!(
                                 order.len(),
@@ -2399,21 +2698,6 @@ fn lower_function(
                             apply_stack_operation(builder, &stack, &mut depth, operation);
                         }
                         _ => apply_stack_operation(builder, &stack, &mut depth, operation),
-                    }
-                    let (take, _) = stack_operation_order(operation);
-                    let start = old_depth
-                        .checked_sub(take)
-                        .ok_or(CompileFailure::InvalidArtifact)?;
-                    for (offset, variables) in stack
-                        .get(start..depth)
-                        .ok_or(CompileFailure::InvalidArtifact)?
-                        .iter()
-                        .copied()
-                        .enumerate()
-                    {
-                        let index = start + offset;
-                        let value = use_pair(builder, variables);
-                        store_jsvalue_slot(builder, stack_base, index, value, layout)?;
                     }
                     if depth < old_depth {
                         for (offset, variables) in stack
@@ -2432,7 +2716,25 @@ fn lower_function(
                     let index = depth
                         .checked_sub(1)
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    if matches!(operation, UnaryOp::Plus | UnaryOp::LogicalNot) {
+                    if operation == UnaryOp::IsUndefinedOrNull {
+                        let state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let slot = flat_stack_slot(ir, index)?;
+                        let value = use_pair(builder, stack[index]);
+                        let is_undefined = tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
+                        let is_null = tag_is(builder, value.tag, qjs::JS_TAG_NULL);
+                        let result = builder.ins().bor(is_undefined, is_null);
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                            state,
+                            depth,
+                            &[slot]
+                        );
+                        reload_pair(builder, stack[index], stack_base, index, layout);
+                        let boolean = pair_from_bool(builder, result);
+                        define_pair(builder, stack[index], boolean);
+                    } else if matches!(operation, UnaryOp::Plus | UnaryOp::LogicalNot) {
                         let state = helper_states
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
@@ -2452,7 +2754,6 @@ fn lower_function(
                                 tag: boolean.tag,
                             };
                             define_pair(builder, stack[index], result);
-                            store_jsvalue_slot(builder, stack_base, index, result, layout)?;
                         }
                     } else {
                         let value = use_pair(builder, stack[index]);
@@ -2528,6 +2829,24 @@ fn lower_function(
                             .ok_or(CompileFailure::InvalidArtifact)?;
                         let left = flat_stack_slot(ir, left_index)?;
                         let right = flat_stack_slot(ir, right_index)?;
+                        let left_value = use_pair(builder, stack[left_index]);
+                        let right_value = use_pair(builder, stack[right_index]);
+                        let left_numeric = emit_numeric_tag(builder, left_value.tag);
+                        let right_numeric = emit_numeric_tag(builder, right_value.tag);
+                        let both_numeric = builder.ins().band(left_numeric, right_numeric);
+                        let numeric = builder.create_block();
+                        let generic = builder.create_block();
+                        let continuation = builder.create_block();
+                        builder.ins().brif(both_numeric, numeric, &[], generic, &[]);
+
+                        builder.seal_block(numeric);
+                        builder.switch_to_block(numeric);
+                        let result = emit_binary(builder, left_value, right_value, operation);
+                        define_pair(builder, stack[left_index], result);
+                        builder.ins().jump(continuation, &[]);
+
+                        builder.seal_block(generic);
+                        builder.switch_to_block(generic);
                         if let Some(comparison) = comparison {
                             invoke_helper!(helper, state, depth, &[left, left, right, comparison]);
                         } else {
@@ -2535,6 +2854,10 @@ fn lower_function(
                         }
                         reload_pair(builder, stack[left_index], stack_base, left_index, layout);
                         reload_pair(builder, stack[right_index], stack_base, right_index, layout);
+                        builder.ins().jump(continuation, &[]);
+
+                        builder.seal_block(continuation);
+                        builder.switch_to_block(continuation);
                         depth -= 1;
                         set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                     } else {
@@ -2557,19 +2880,21 @@ fn lower_function(
                         .next()
                         .ok_or(CompileFailure::InvalidArtifact)?;
                     let condition_slot = flat_stack_slot(ir, condition_index)?;
-                    invoke_helper!(
-                        qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
-                        state,
-                        depth,
-                        &[condition_slot, condition_slot]
-                    );
-                    reload_pair(
-                        builder,
-                        stack[condition_index],
-                        stack_base,
-                        condition_index,
-                        layout,
-                    );
+                    if !prior_op_was_boolean {
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
+                            state,
+                            depth,
+                            &[condition_slot, condition_slot]
+                        );
+                        reload_pair(
+                            builder,
+                            stack[condition_index],
+                            stack_base,
+                            condition_index,
+                            layout,
+                        );
+                    }
                     let condition = use_pair(builder, stack[condition_index]);
                     depth -= 1;
                     let truthy = builder.ins().ireduce(types::I8, condition.payload);
@@ -2624,7 +2949,7 @@ fn lower_function(
                         result_index,
                         layout,
                     )?;
-                    set_visible_stack_depth(builder, frame, stack_base, result_index, layout)?;
+                    force_visible_stack_depth(builder, frame, stack_base, result_index, layout)?;
                     emit_exit(
                         builder,
                         sret,
@@ -2697,6 +3022,93 @@ fn next_helper_state(
     states: &mut impl Iterator<Item = FrameStateId>,
 ) -> Result<FrameStateId, CompileFailure> {
     states.next().ok_or(CompileFailure::InvalidArtifact)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_dup_if_refcounted(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    output_index: usize,
+    source: Pair,
+    source_slot: u32,
+    checked: bool,
+) -> Result<(), CompileFailure> {
+    let output_slot = flat_stack_slot(helpers.ir, output_index)?;
+    let mut needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
+    if checked {
+        let uninitialized = tag_is(builder, source.tag, qjs::JS_TAG_UNINITIALIZED);
+        needs_helper = builder.ins().bor(needs_helper, uninitialized);
+    }
+    let primitive = builder.create_block();
+    let slow = builder.create_block();
+    let continuation = builder.create_block();
+    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    builder.seal_block(primitive);
+    builder.switch_to_block(primitive);
+    define_pair(builder, helpers.stack[output_index], source);
+    builder.ins().jump(continuation, &[]);
+    builder.seal_block(slow);
+    builder.switch_to_block(slow);
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+        state,
+        live_depth,
+        live_depth,
+        &[output_slot, source_slot],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[output_index],
+        helpers.stack_base,
+        output_index,
+        helpers.layout,
+    );
+    builder.ins().jump(continuation, &[]);
+    builder.seal_block(continuation);
+    builder.switch_to_block(continuation);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_free_if_refcounted(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    value: Pair,
+    value_slot: u32,
+    variables: PairVars,
+    backing_base: Value,
+    backing_index: usize,
+) -> Result<(), CompileFailure> {
+    let refcounted = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
+    let slow = builder.create_block();
+    let continuation = builder.create_block();
+    builder.ins().brif(refcounted, slow, &[], continuation, &[]);
+    builder.seal_block(slow);
+    builder.switch_to_block(slow);
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        state,
+        live_depth,
+        live_depth,
+        &[value_slot],
+    )?;
+    reload_pair(
+        builder,
+        variables,
+        backing_base,
+        backing_index,
+        helpers.layout,
+    );
+    builder.ins().jump(continuation, &[]);
+    builder.seal_block(continuation);
+    builder.switch_to_block(continuation);
+    Ok(())
 }
 
 fn lower_new_array(
@@ -2868,6 +3280,41 @@ fn lower_get_property(
     helpers.set_depth(builder, depth)
 }
 
+/// Lower QuickJS `get_field2`: unlike `get_field`, the receiver remains on
+/// the operand stack so the following `call_method` can use it as `this`.
+/// GET_PROPERTY borrows the receiver and owns only its output, therefore no
+/// refcount operation is required for the retained stack owner.
+fn lower_get_property_keep(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    atom: u32,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let output = flat_stack_slot(helpers.ir, *depth)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[output, object, atom],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[*depth],
+        helpers.stack_base,
+        *depth,
+        helpers.layout,
+    );
+    *depth += 1;
+    helpers.set_depth(builder, *depth)
+}
+
 fn lower_set_property(
     builder: &mut FunctionBuilder<'_>,
     helpers: &HelperLowering<'_>,
@@ -2922,6 +3369,7 @@ fn lower_call(
     depth: &mut usize,
     argc: u16,
     has_this: bool,
+    direct: Option<&BaselineDirectCallSite>,
 ) -> Result<(), CompileFailure> {
     let argc = usize::from(argc);
     let pop = argc + 1 + usize::from(has_this);
@@ -2945,27 +3393,180 @@ fn lower_call(
         flat_stack_slot(helpers.ir, argv_index)?
     };
     let call_live_depth = output_index;
-    helpers.invoke(
-        builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
-        next_helper_state(states)?,
-        call_live_depth,
-        *depth,
-        &[
-            output,
-            function,
-            this_value,
-            argv,
-            u32::try_from(argc).map_err(|_| CompileFailure::ResourceLimit)?,
-        ],
-    )?;
-    reload_pair(
-        builder,
-        helpers.stack[output_index],
-        helpers.stack_base,
-        output_index,
-        helpers.layout,
-    );
+    let call_state = next_helper_state(states)?;
+    if let Some(direct) = direct.filter(|target| {
+        !has_this
+            && target.call.arity() == argc
+            && target.call.callee_identity() != 0
+            && target.call.callee_bytecode_identity() != 0
+    }) {
+        use crate::runtime::FeedbackRepresentation;
+        use cranelift_codegen::ir::condcodes::IntCC;
+        use cranelift_codegen::ir::{AbiParam, Signature, StackSlotData, StackSlotKind};
+
+        let slow = builder.create_block();
+        let identity = builder.create_block();
+        let bytecode = builder.create_block();
+        let invoke = builder.create_block();
+        let direct_done = builder.create_block();
+        let joined = builder.create_block();
+        let callable = use_pair(builder, helpers.stack[function_index]);
+        let object_tag =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, callable.tag, i64::from(qjs::JS_TAG_OBJECT));
+        builder.ins().brif(object_tag, identity, &[], slow, &[]);
+
+        // Do not dereference the payload until both the object tag and exact
+        // rooted JSObject identity have matched. Primitive misses therefore
+        // remain memory-safe and take the ordinary CALL helper path.
+        builder.switch_to_block(identity);
+        let identity_matches = builder.ins().icmp_imm(
+            IntCC::Equal,
+            callable.payload,
+            direct.call.callee_identity() as i64,
+        );
+        builder
+            .ins()
+            .brif(identity_matches, bytecode, &[], slow, &[]);
+
+        builder.switch_to_block(bytecode);
+        let function_bytecode =
+            builder
+                .ins()
+                .load(helpers.pointer_type, MemFlags::new(), callable.payload, 48);
+        let mut signature_matches = builder.ins().icmp_imm(
+            IntCC::Equal,
+            function_bytecode,
+            direct.call.callee_bytecode_identity() as i64,
+        );
+        for (index, representation) in direct.call.arguments().iter().enumerate() {
+            let argument = use_pair(builder, helpers.stack[argv_index + index]);
+            let tag = match representation {
+                FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
+                FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
+            };
+            let typed = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, argument.tag, i64::from(tag));
+            signature_matches = builder.ins().band(signature_matches, typed);
+        }
+        builder
+            .ins()
+            .brif(signature_matches, invoke, &[], slow, &[]);
+
+        builder.switch_to_block(invoke);
+        let scalar = match direct.call.result() {
+            FeedbackRepresentation::Int32 => types::I32,
+            FeedbackRepresentation::Float64 => types::F64,
+        };
+        let mut signature = Signature::new(builder.func.signature.call_conv);
+        signature.params.push(AbiParam::new(helpers.pointer_type));
+        for representation in direct.call.arguments() {
+            signature.params.push(AbiParam::new(match representation {
+                FeedbackRepresentation::Int32 => types::I32,
+                FeedbackRepresentation::Float64 => types::F64,
+            }));
+        }
+        signature.returns.push(AbiParam::new(types::I32));
+        let signature = builder.import_signature(signature);
+        let target = builder
+            .ins()
+            .iconst(helpers.pointer_type, direct.entry as i64);
+        let scalar_output = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            scalar.bytes(),
+            0,
+        ));
+        let scalar_output = builder
+            .ins()
+            .stack_addr(helpers.pointer_type, scalar_output, 0);
+        let mut params = Vec::with_capacity(argc + 1);
+        params.push(scalar_output);
+        for (index, representation) in direct.call.arguments().iter().enumerate() {
+            let argument = use_pair(builder, helpers.stack[argv_index + index]);
+            params.push(match representation {
+                FeedbackRepresentation::Int32 => {
+                    builder.ins().ireduce(types::I32, argument.payload)
+                }
+                FeedbackRepresentation::Float64 => {
+                    builder
+                        .ins()
+                        .bitcast(types::F64, MemFlags::new(), argument.payload)
+                }
+            });
+        }
+        let call = builder.ins().call_indirect(signature, target, &params);
+        let status = builder.inst_results(call)[0];
+        let success = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+        builder.ins().brif(success, direct_done, &[], slow, &[]);
+
+        builder.switch_to_block(direct_done);
+        let raw = builder
+            .ins()
+            .load(scalar, MemFlags::new(), scalar_output, 0);
+        let result = match direct.call.result() {
+            FeedbackRepresentation::Int32 => Pair {
+                payload: builder.ins().sextend(types::I64, raw),
+                tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+            },
+            FeedbackRepresentation::Float64 => Pair {
+                payload: builder.ins().bitcast(types::I64, MemFlags::new(), raw),
+                tag: builder
+                    .ins()
+                    .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
+            },
+        };
+        define_pair(builder, helpers.stack[output_index], result);
+        builder.ins().jump(joined, &[]);
+
+        builder.switch_to_block(slow);
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+            call_state,
+            call_live_depth,
+            *depth,
+            &[
+                output,
+                function,
+                this_value,
+                argv,
+                u32::try_from(argc).map_err(|_| CompileFailure::ResourceLimit)?,
+            ],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[output_index],
+            helpers.stack_base,
+            output_index,
+            helpers.layout,
+        );
+        builder.ins().jump(joined, &[]);
+        builder.switch_to_block(joined);
+    } else {
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+            call_state,
+            call_live_depth,
+            *depth,
+            &[
+                output,
+                function,
+                this_value,
+                argv,
+                u32::try_from(argc).map_err(|_| CompileFailure::ResourceLimit)?,
+            ],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[output_index],
+            helpers.stack_base,
+            output_index,
+            helpers.layout,
+        );
+    }
     // CALL borrows every input. The bytecode stack effect is separate and is
     // implemented with explicit FREE calls in QuickJS interpreter order.
     // Move the first input aside and install the result in its logical slot
@@ -3143,6 +3744,24 @@ fn materialize_frame(
 }
 
 fn set_visible_stack_depth(
+    _builder: &mut FunctionBuilder<'_>,
+    _frame: Value,
+    _stack_base: Value,
+    depth: usize,
+    _layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    // Native SSA variables are authoritative between safepoints. Helpers and
+    // polls call `materialize_frame`, while DONE/EXCEPTION use the forced
+    // variant below; eagerly publishing every bytecode stack effect here
+    // would put interpreter-frame stores back into the hot loop.
+    depth
+        .checked_mul(mem::size_of::<qjs::JSValue>())
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or(CompileFailure::ResourceLimit)?;
+    Ok(())
+}
+
+fn force_visible_stack_depth(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
     stack_base: Value,
@@ -3164,6 +3783,7 @@ fn set_visible_stack_depth(
 fn emit_helper_call(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
+    runtime_api: Value,
     sret: Value,
     stack_base: Value,
     exception_depth: usize,
@@ -3182,10 +3802,7 @@ fn emit_helper_call(
         .get(helper_id)
         .ok_or(CompileFailure::InvalidArtifact)?;
     let flags = MemFlags::new();
-    let api = builder
-        .ins()
-        .load(pointer_type, flags, frame, layout.runtime_api);
-    let helper = builder.ins().load(pointer_type, flags, api, offset);
+    let helper = builder.ins().load(pointer_type, flags, runtime_api, offset);
     let mut params = Vec::with_capacity(arguments.len() + 1);
     params.push(frame);
     params.extend_from_slice(arguments);
@@ -3202,7 +3819,7 @@ fn emit_helper_call(
     builder.seal_block(exception);
     builder.seal_block(continuation);
     builder.switch_to_block(exception);
-    set_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
+    force_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
     emit_exit(
         builder,
         sret,
@@ -3219,6 +3836,7 @@ fn invoke_frame_helper(
     builder: &mut FunctionBuilder<'_>,
     ir: &BaselineIr,
     frame: Value,
+    runtime_api: Value,
     sret: Value,
     arg_buf: Value,
     var_buf: Value,
@@ -3271,6 +3889,7 @@ fn invoke_frame_helper(
     emit_helper_call(
         builder,
         frame,
+        runtime_api,
         sret,
         stack_base,
         exception_depth,
@@ -3327,7 +3946,7 @@ fn move_stack_pair(
     }
     let value = use_pair(builder, stack[source]);
     define_pair(builder, stack[destination], value);
-    store_jsvalue_slot(builder, base, destination, value, layout)?;
+    let _ = (base, layout);
     clear_pair(builder, stack[source], base, source, layout)
 }
 
@@ -3340,7 +3959,8 @@ fn clear_pair(
 ) -> Result<(), CompileFailure> {
     let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
     define_pair(builder, variables, undefined);
-    store_jsvalue_slot(builder, base, index, undefined, layout)
+    let _ = (base, index, layout);
+    Ok(())
 }
 
 fn constant_pair(builder: &mut FunctionBuilder<'_>, value: TaggedValue) -> Pair {
@@ -3487,21 +4107,13 @@ fn emit_poll(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
     sret: Value,
+    poll: Value,
     signature: cranelift_codegen::ir::SigRef,
     location: PollLocation,
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
 ) {
     let flags = MemFlags::new();
-    let api = builder
-        .ins()
-        .load(pointer_type, flags, frame, layout.runtime_api);
-    let poll = builder.ins().load(
-        pointer_type,
-        flags,
-        api,
-        layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
-    );
     builder.set_srcloc(location.source_location);
     let call = builder.ins().call_indirect(signature, poll, &[frame]);
     builder.set_srcloc(SourceLoc::default());
@@ -3588,6 +4200,7 @@ fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair) -> Value {
 
 fn emit_unary(builder: &mut FunctionBuilder<'_>, value: Pair, operation: UnaryOp) -> Pair {
     match operation {
+        UnaryOp::IsUndefinedOrNull => unreachable!("lowered with exact ownership handling"),
         UnaryOp::LogicalNot => {
             let truthy = emit_truthy(builder, value);
             let inverse = builder.ins().bxor_imm(truthy, 1);
@@ -3913,6 +4526,7 @@ mod tests {
             IrOp::NewObject => "new_object",
             IrOp::NewArrayFrom(_) => "new_array_from",
             IrOp::GetProperty(_) => "get_property",
+            IrOp::GetPropertyKeep(_) => "get_property_keep",
             IrOp::SetProperty(_) => "set_property",
             IrOp::Call { .. } => "call",
             IrOp::GetArgument(_) => "get_argument",
@@ -3938,6 +4552,17 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_numeric_constant_is_guarded_at_use_instead_of_retrying_at_entry() {
+        let ir = linear_ir(
+            vec![instruction(0, IrOp::ResolveConstant(0)), numeric_push()],
+            IrOp::Binary(BinaryOp::Mul),
+        );
+        let analysis = analyze_entry_domains(&ir).expect("constant arithmetic IR is valid");
+        assert!(!analysis.retry_before_entry);
+        assert!(analysis.requirements.is_empty());
+    }
+
+    #[test]
     fn entry_domain_analysis_exhaustively_handles_every_ir_op_variant() {
         let state = FrameStateId::from_index(0).unwrap();
         let mut cases = vec![
@@ -3958,6 +4583,7 @@ mod tests {
             linear_ir(Vec::new(), IrOp::NewObject),
             linear_ir(vec![numeric_push(), numeric_push()], IrOp::NewArrayFrom(2)),
             linear_ir(vec![numeric_push()], IrOp::GetProperty(1)),
+            linear_ir(vec![numeric_push()], IrOp::GetPropertyKeep(1)),
             linear_ir(vec![numeric_push(), numeric_push()], IrOp::SetProperty(1)),
             linear_ir(
                 vec![numeric_push(), numeric_push()],

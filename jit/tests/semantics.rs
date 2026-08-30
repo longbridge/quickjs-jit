@@ -105,3 +105,36 @@ fn interrupt_stops_compiled_loop() {
         .interrupt_after(100)
         .assert_uncatchable_interrupt();
 }
+
+#[test]
+fn primitive_numeric_loop_avoids_ownership_helpers() {
+    differential(
+        "function f(n) { let sum = 0; for (let i = 0; i < n; i++) sum = sum + i; return sum; }",
+        "f(100)",
+    )
+    .force_baseline()
+    .expect_ownership_helper_counts(0, 0)
+    .assert_same();
+}
+
+#[test]
+fn iterative_fibonacci_avoids_ownership_helpers() {
+    differential(
+        "function f(batches) { let result = 0; for (let batch = 0; batch < batches; batch++) { let a = 0; let b = 1; for (let i = 0; i < 40; i++) { const next = a + b; a = b; b = next; } result = a; } return result; }",
+        "f(1)",
+    )
+    .force_baseline()
+    .expect_ownership_helper_counts(0, 0)
+    .assert_same();
+}
+
+#[test]
+fn float64_fast_add_preserves_nan_negative_zero_and_infinity() {
+    differential(
+        "function f(x, y) { return x + y; }",
+        "[Number.isNaN(f(NaN, 1.5)), Object.is(f(-0, -0), -0), f(Infinity, 2.5), f(1.25, 2.5)]",
+    )
+    .force_baseline()
+    .expect_ownership_helper_counts(0, 0)
+    .assert_same();
+}

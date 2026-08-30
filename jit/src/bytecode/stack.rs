@@ -246,6 +246,18 @@ fn transfer(
         return check_stack_size(snapshot, instruction, state);
     }
 
+    if name == "to_propkey" {
+        // QuickJS leaves Int32 property keys unchanged; other numeric values
+        // may become strings. Preserve only that exact fast-path proof so the
+        // null-base bypass can rejoin without inventing a boxing operation.
+        state.stack.push(if popped_top == SlotKind::Int32 {
+            SlotKind::Int32
+        } else {
+            SlotKind::Tagged
+        });
+        return check_stack_size(snapshot, instruction, state);
+    }
+
     if instruction.opcode().n_push() == 1
         && (name.starts_with("set_loc")
             || name.starts_with("set_arg")
@@ -277,13 +289,11 @@ fn merge_state(
             },
         ));
     }
-    for (slot, (expected, actual)) in expected
-        .stack
-        .iter()
-        .zip(&actual.stack)
-        .chain(expected.locals.iter().zip(&actual.locals))
-        .enumerate()
-    {
+    // Operand-stack representations must agree exactly. Unlike locals, these
+    // are transient values consumed directly by the following bytecode. A
+    // merge is not an operation and therefore cannot silently insert the
+    // boxing/conversion that would be needed to change their representation.
+    for (slot, (expected, actual)) in expected.stack.iter().zip(&actual.stack).enumerate() {
         if expected != actual {
             return Err(VerifyError::new(
                 pc,
@@ -295,7 +305,43 @@ fn merge_state(
             ));
         }
     }
-    Ok(false)
+
+    let mut changed = false;
+    let stack_slots = expected.stack.len();
+    for (local, (expected, actual)) in expected.locals.iter_mut().zip(&actual.locals).enumerate() {
+        if expected == actual {
+            continue;
+        }
+        let prior = *expected;
+        let joined = match (prior, *actual) {
+            // Locals are authoritative tagged JSValue cells in the interpreter
+            // frame. SlotKind records what the current path proves about their
+            // contents; losing that proof at a join does not box a value. This
+            // conservative join is needed for loop phis whose entry value is
+            // unknown and whose backedge has established a numeric kind.
+            (SlotKind::Tagged, SlotKind::Int32 | SlotKind::Float64)
+            | (SlotKind::Int32 | SlotKind::Float64, SlotKind::Tagged)
+            | (SlotKind::Int32, SlotKind::Float64)
+            | (SlotKind::Float64, SlotKind::Int32) => SlotKind::Tagged,
+            // Catch offsets and uninitialized cells are verifier-only states,
+            // not interchangeable JS value representations.
+            _ => {
+                return Err(VerifyError::new(
+                    pc,
+                    VerifyErrorKind::IncompatibleMergeKind {
+                        slot: stack_slots + local,
+                        expected: prior,
+                        actual: *actual,
+                    },
+                ));
+            }
+        };
+        if joined != prior {
+            *expected = joined;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 pub(crate) fn prove(
@@ -376,12 +422,28 @@ pub(crate) fn prove(
             }
         }
         for successor in block.successors() {
+            let mut incoming = state.clone();
+            if cfg.is_loop_header(*successor) {
+                // Establish the conservative frame-domain fixed point before
+                // propagating values out of a loop header. Otherwise the
+                // first forward visit can publish Int32-derived operand-stack
+                // states, then a later backedge widens the source local to
+                // Tagged and looks like an incompatible stack merge even
+                // though no bytecode control-flow join changed representation.
+                for local in &mut incoming.locals {
+                    if matches!(*local, SlotKind::Int32 | SlotKind::Float64) {
+                        *local = SlotKind::Tagged;
+                    }
+                }
+            }
             if let Some(expected) = block_entries.get_mut(successor) {
-                budget.charge(*successor, state.cell_count())?;
-                merge_state(*successor, expected, &state)?;
+                budget.charge(*successor, incoming.cell_count())?;
+                if merge_state(*successor, expected, &incoming)? {
+                    queue.push_back(*successor);
+                }
             } else {
-                budget.charge(*successor, state.cell_count())?;
-                block_entries.insert(*successor, state.clone());
+                budget.charge(*successor, incoming.cell_count())?;
+                block_entries.insert(*successor, incoming);
                 queue.push_back(*successor);
             }
         }

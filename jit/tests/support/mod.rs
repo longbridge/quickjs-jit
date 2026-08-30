@@ -441,6 +441,7 @@ pub struct DifferentialRun {
     require_baseline: bool,
     expected_opcode: Option<String>,
     expected_helper: Option<HelperId>,
+    expected_ownership_helper_counts: Option<(u64, u64)>,
     stress_gc: bool,
 }
 
@@ -452,6 +453,7 @@ pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
         require_baseline: true,
         expected_opcode: None,
         expected_helper: None,
+        expected_ownership_helper_counts: None,
         stress_gc: false,
     }
 }
@@ -503,6 +505,11 @@ impl DifferentialRun {
         self
     }
 
+    pub fn expect_ownership_helper_counts(mut self, dup: u64, free: u64) -> Self {
+        self.expected_ownership_helper_counts = Some((dup, free));
+        self
+    }
+
     pub fn stress_gc(mut self) -> Self {
         self.stress_gc = true;
         self
@@ -533,6 +540,23 @@ impl DifferentialRun {
             0
         );
         let actual = eval_canonical(&context, &self.expression);
+
+        if let Some((expected_dup, expected_free)) = self.expected_ownership_helper_counts {
+            let mut counters = rquickjs_core::qjs::JSJitHelperCounters {
+                struct_size: std::mem::size_of::<rquickjs_core::qjs::JSJitHelperCounters>() as u32,
+                reserved: 0,
+                dup_count: 0,
+                free_count: 0,
+            };
+            assert_eq!(
+                unsafe { rquickjs_core::qjs::JS_JitGetHelperCounters(rt, &mut counters) },
+                0
+            );
+            assert_eq!(
+                (counters.dup_count, counters.free_count),
+                (expected_dup, expected_free)
+            );
+        }
 
         let mut trace_len = 0;
         let mut overflowed = 0;
@@ -1082,6 +1106,28 @@ unsafe extern "C" fn synthetic_new_unavailable(
     -1
 }
 
+unsafe extern "C" fn synthetic_shape_guard_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _object: u32,
+    _identity_lo: u32,
+    _identity_hi: u32,
+    _generation_lo: u32,
+    _generation_hi: u32,
+) -> i32 {
+    rquickjs_core::qjs::JS_JIT_HELPER_GUARD_MISS
+}
+
+unsafe extern "C" fn synthetic_materialize_owner_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output_stack_index: u32,
+    _source_kind: u32,
+    _source_index: u32,
+) -> i32 {
+    rquickjs_core::qjs::JS_JIT_HELPER_EXCEPTION
+}
+
 unsafe extern "C" fn synthetic_interrupt_poll(
     frame: *mut rquickjs_core::qjs::JSJitExecFrame,
 ) -> i32 {
@@ -1124,6 +1170,8 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         call: Some(synthetic_call_unavailable),
         new_array: Some(synthetic_new_unavailable),
         new_object: Some(synthetic_new_unavailable),
+        shape_guard: Some(synthetic_shape_guard_unavailable),
+        materialize_owner: Some(synthetic_materialize_owner_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

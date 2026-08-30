@@ -388,6 +388,11 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
         });
     let runtime = Runtime::new().unwrap();
     let config = rquickjs_jit::JitConfig::builder()
+        // This is a Tier1 OSR correctness test, not an Automatic profitability
+        // test.  Keep the baseline artifact published while the first long
+        // invocation reaches its loop probe; Automatic may legitimately
+        // demote helper-heavy code after its bounded profitability trials.
+        .tier_policy(rquickjs_jit::JitTierPolicy::BaselineOnly)
         .stress_gc(true)
         .build()
         .unwrap();

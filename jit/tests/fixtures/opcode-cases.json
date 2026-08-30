@@ -2,6 +2,20 @@
   "schema": 2,
   "cases": [
     {
+      "opcode": "undefined",
+      "definition": "function f(a){ return a?.x }",
+      "expression": "f(null)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "return_undef",
+      "definition": "function f(){}",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
       "opcode": "push_const8",
       "definition": "function f(){ return 123456789012345678901234567890n }",
       "expression": "String(f())",
@@ -18,6 +32,27 @@
     {
       "opcode": "put_loc1",
       "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
+      "expression": "f(10,0)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "put_loc2",
+      "definition": "function f(a,b){let x=b;let y=1;for(let i=b;i<a;i++){let next=x+y;x=y;y=next;}return x}",
+      "expression": "f(10,0)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "put_loc3",
+      "definition": "function f(a,b){let x=b;let y=1;for(let i=b;i<a;i++){let next=x+y;x=y;y=next;}return x}",
+      "expression": "f(10,0)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "put_loc8",
+      "definition": "function f(a,b){let r=b;for(let j=b;j<a;j++){let x=b;let y=1;for(let i=b;i<10;i++){let next=x+y;x=y;y=next;}r=x;}return r}",
       "expression": "f(10,0)",
       "helper": "Free",
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
@@ -167,6 +202,27 @@
       ]
     },
     {
+      "opcode": "sub",
+      "definition": "function f(a,b){ return a-b }",
+      "expression": "[f(20,3),f(-2147483648,1)]",
+      "helper": null,
+      "dimensions": ["normal", "numeric-tag-edge", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "mul",
+      "definition": "function f(a,b){ return a*b }",
+      "expression": "[f(6,7),f(0,-1),f(2147483647,2)]",
+      "helper": null,
+      "dimensions": ["normal", "numeric-tag-edge", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "div",
+      "definition": "function f(a,b){ return a/b }",
+      "expression": "[f(84,2),f(7,2),f(1,0),f(0,-1)]",
+      "helper": null,
+      "dimensions": ["normal", "numeric-tag-edge", "exception-or-nonthrow"]
+    },
+    {
       "opcode": "lt",
       "definition": "function f(a,b){ return a < b }",
       "expression": "(()=>{const events=[];const value=f({[Symbol.toPrimitive](){events.push('left');return 20}},{[Symbol.toPrimitive](){events.push('right');return 22}});return [value,events]})()",
@@ -274,6 +330,118 @@
         "ownership-gc",
         "coercion-reentrancy"
       ]
+    },
+    {
+      "opcode": "get_arg2",
+      "definition": "function f(g,a,b){ let x=g(a,b); return x+0 }",
+      "expression": "f((a,b)=>a+b,20,22)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_arg3",
+      "definition": "function f(g,a,b,c){ let x=g(a,b,c); return x+0 }",
+      "expression": "f((a,b,c)=>a+b+c,10,12,20)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_arg",
+      "definition": "function f(g,a,b,c,d){ let x=g(a,b,c,d); return x+0 }",
+      "expression": "f((a,b,c,d)=>a+b+c+d,5,10,12,15)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_field2",
+      "definition": "function f(o,x){ let value=o.add(x); return value+0 }",
+      "expression": "f({base:20,add(x){return this.base+x}},22)",
+      "helper": "GetProperty",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "call0",
+      "definition": "function f(g){ let x=g(); return x+0 }",
+      "expression": "f(()=>42)",
+      "helper": "Call",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "call2",
+      "definition": "function f(g,a,b){ let x=g(a,b); return x+0 }",
+      "expression": "f((a,b)=>a+b,20,22)",
+      "helper": "Call",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "call3",
+      "definition": "function f(g,a,b,c){ let x=g(a,b,c); return x+0 }",
+      "expression": "f((a,b,c)=>a+b+c,10,12,20)",
+      "helper": "Call",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "call",
+      "definition": "function f(g,a,b,c,d){ let x=g(a,b,c,d); return x+0 }",
+      "expression": "f((a,b,c,d)=>a+b+c+d,5,10,12,15)",
+      "helper": "Call",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "push_i32",
+      "definition": "function f(){ return 65535 }",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "and",
+      "definition": "function f(a,b){ return a & b }",
+      "expression": "f(255,42)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "or",
+      "definition": "function f(a,b){ return a | b }",
+      "expression": "f(32,10)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "push_3",
+      "definition": "function f(){ return 3 }",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "if_true8",
+      "definition": "function f(a,b){ return a || b }",
+      "expression": "[f(0,42),f(7,42)]",
+      "helper": "ToBool",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_length",
+      "definition": "function f(a){ return a.length }",
+      "expression": "f([10,20,30])",
+      "helper": "GetProperty",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "is_undefined_or_null",
+      "definition": "function f(a){ return a?.x }",
+      "expression": "[f({x:42}),f(null)]",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "call_method",
+      "definition": "function f(o,x){ let value=o.add(x); return value+0 }",
+      "expression": "f({base:20,add(x){return this.base+x}},22)",
+      "helper": "Call",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
     }
   ]
 }

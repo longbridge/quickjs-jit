@@ -7,8 +7,10 @@ use std::collections::BTreeSet;
 
 #[test]
 fn synthetic_function_identity_cannot_bypass_the_closed_policy() {
-    let mut bytecode = vec![rquickjs_jit::bytecode::opcode::PUSH_I32];
-    bytecode.extend_from_slice(&42_i32.to_le_bytes());
+    let mut bytecode = vec![linked_opcode_table()
+        .find(|opcode| opcode.name() == "push_minus1")
+        .expect("linked push_minus1 opcode")
+        .id()];
     bytecode.push(rquickjs_jit::bytecode::opcode::RETURN);
     let verified = rquickjs_jit::test_support::verified_bytecode(bytecode, 0, 0);
     let rejection = verified

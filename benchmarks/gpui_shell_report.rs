@@ -1,0 +1,360 @@
+use serde::Deserialize;
+use std::{env, fs};
+
+const REQUIRED_SAMPLES: usize = 30;
+const REQUIRED_BOOTSTRAPS: usize = 10_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Report {
+    schema: String,
+    provenance: Provenance,
+    policy: Policy,
+    workloads: Vec<Workload>,
+    lifecycle: Lifecycle,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Provenance {
+    shell_revision: String,
+    rquickjs_revision: String,
+    shell_dirty: bool,
+    rquickjs_dirty: bool,
+    target_triple: String,
+    command: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Policy {
+    warmup_processes: usize,
+    paired_processes: usize,
+    bootstrap_resamples: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Workload {
+    name: String,
+    suitable_for_jit: bool,
+    regression_guard: bool,
+    interpreter: Vec<Sample>,
+    automatic: Vec<Sample>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Sample {
+    pair_index: usize,
+    steady_state_ns: u64,
+    p99_script_render_ns: u64,
+    checksum: String,
+    snapshot_sha256: String,
+    script_renders: u64,
+    native_entries: u64,
+    fallback_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Lifecycle {
+    interpreter: Vec<LifecycleSample>,
+    automatic: Vec<LifecycleSample>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LifecycleSample {
+    pair_index: usize,
+    first_window_ns: u64,
+    hot_reload_ns: u64,
+    snapshot_sha256: String,
+    script_renders: u64,
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("gpui-shell acceptance: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let mut args = env::args().skip(1);
+    let input = args
+        .next()
+        .ok_or("usage: jit-gpui-shell-report INPUT OUTPUT")?;
+    let output = args
+        .next()
+        .ok_or("usage: jit-gpui-shell-report INPUT OUTPUT")?;
+    if args.next().is_some() {
+        return Err("usage: jit-gpui-shell-report INPUT OUTPUT".into());
+    }
+    let report: Report = serde_json::from_slice(&fs::read(&input).map_err(err)?).map_err(err)?;
+    let (markdown, pass) = validate_and_render(&report)?;
+    if let Some(parent) = std::path::Path::new(&output).parent() {
+        fs::create_dir_all(parent).map_err(err)?;
+    }
+    fs::write(output, markdown).map_err(err)?;
+    if pass {
+        Ok(())
+    } else {
+        Err("acceptance gates failed; see the generated Markdown report".into())
+    }
+}
+
+fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
+    if report.schema != "gpui-shell-jit-v1" {
+        return Err("unsupported schema; expected gpui-shell-jit-v1".into());
+    }
+    if report.policy.warmup_processes < 5
+        || report.policy.paired_processes != REQUIRED_SAMPLES
+        || report.policy.bootstrap_resamples < REQUIRED_BOOTSTRAPS
+    {
+        return Err(
+            "sampling policy requires >=5 warmups, 30 pairs, and >=10000 bootstraps".into(),
+        );
+    }
+    if report.provenance.shell_revision.len() != 40
+        || report.provenance.rquickjs_revision.len() != 40
+        || report.provenance.target_triple.split('-').count() < 3
+        || report.provenance.command.is_empty()
+        || report.provenance.shell_dirty
+        || report.provenance.rquickjs_dirty
+    {
+        return Err("incomplete or dirty provenance".into());
+    }
+    validate_lifecycle(&report.lifecycle)?;
+    if report.workloads.is_empty() {
+        return Err("no real gpui-shell workloads supplied".into());
+    }
+
+    let mut markdown = format!(
+        "# gpui-shell JIT acceptance\n\nShell `{}`, rquickjs `{}`, target `{}`. {} paired fresh processes after {} discarded warmups.\n\n| workload | steady-state speedup CI | P99 regression CI | native entries | fallback | status |\n|---|---:|---:|---:|---:|---|\n",
+        report.provenance.shell_revision,
+        report.provenance.rquickjs_revision,
+        report.provenance.target_triple,
+        report.policy.paired_processes,
+        report.policy.warmup_processes,
+    );
+    let mut suitable = 0;
+    let mut suitable_pass = 0;
+    for workload in &report.workloads {
+        validate_pairs(&workload.name, &workload.interpreter, &workload.automatic)?;
+        let speedup = paired_bootstrap(&workload.interpreter, &workload.automatic, |i, a| {
+            i.steady_state_ns as f64 / a.steady_state_ns as f64
+        });
+        let tail = paired_bootstrap(&workload.interpreter, &workload.automatic, |i, a| {
+            a.p99_script_render_ns as f64 / i.p99_script_render_ns as f64
+        });
+        let native = workload
+            .automatic
+            .iter()
+            .map(|x| x.native_entries)
+            .sum::<u64>();
+        let every_sample_native = workload.automatic.iter().all(|x| x.native_entries > 0);
+        let fallback = workload
+            .automatic
+            .iter()
+            .map(|x| x.fallback_count)
+            .sum::<u64>();
+        let suitable_gate = !workload.suitable_for_jit
+            || (speedup[0] + f64::EPSILON * 8.0 >= 2.0 && every_sample_native);
+        let regression_gate = !workload.regression_guard
+            || (speedup[0] + f64::EPSILON * 8.0 >= 1.0 / 1.05 && tail[1] <= 1.05);
+        let pass = suitable_gate && regression_gate;
+        if workload.suitable_for_jit {
+            suitable += 1;
+            suitable_pass += usize::from(pass);
+        }
+        markdown.push_str(&format!(
+            "| {} | {:.2}x..{:.2}x | {:+.2}%..{:+.2}% | {} | {} | {} |\n",
+            workload.name,
+            speedup[0],
+            speedup[1],
+            (tail[0] - 1.0) * 100.0,
+            (tail[1] - 1.0) * 100.0,
+            native,
+            fallback,
+            if pass { "PASS" } else { "FAIL" },
+        ));
+    }
+    let first = lifecycle_ci(&report.lifecycle, |x| x.first_window_ns);
+    let reload = lifecycle_ci(&report.lifecycle, |x| x.hot_reload_ns);
+    let lifecycle_pass = first[1] <= 1.05 && reload[1] <= 1.05;
+    let all_pass = suitable > 0 && suitable == suitable_pass && lifecycle_pass;
+    markdown.push_str(&format!(
+        "\nLifecycle regression CIs: first window {:+.2}%..{:+.2}%; hot reload {:+.2}%..{:+.2}%. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
+        (first[0] - 1.0) * 100.0,
+        (first[1] - 1.0) * 100.0,
+        (reload[0] - 1.0) * 100.0,
+        (reload[1] - 1.0) * 100.0,
+        if all_pass { "PASS" } else { "FAIL" },
+    ));
+    Ok((markdown, all_pass))
+}
+
+fn validate_pairs(name: &str, interpreter: &[Sample], automatic: &[Sample]) -> Result<(), String> {
+    if interpreter.len() != REQUIRED_SAMPLES || automatic.len() != REQUIRED_SAMPLES {
+        return Err(format!("{name}: expected 30 samples per mode"));
+    }
+    for (index, (i, a)) in interpreter.iter().zip(automatic).enumerate() {
+        if i.pair_index != index || a.pair_index != index {
+            return Err(format!("{name}: invalid pair index at {index}"));
+        }
+        if i.steady_state_ns == 0
+            || i.p99_script_render_ns == 0
+            || a.steady_state_ns == 0
+            || a.p99_script_render_ns == 0
+        {
+            return Err(format!("{name}: zero timing at pair {index}"));
+        }
+        if i.checksum != a.checksum
+            || i.snapshot_sha256 != a.snapshot_sha256
+            || i.script_renders != a.script_renders
+        {
+            return Err(format!("{name}: semantic mismatch at pair {index}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_lifecycle(lifecycle: &Lifecycle) -> Result<(), String> {
+    if lifecycle.interpreter.len() != REQUIRED_SAMPLES
+        || lifecycle.automatic.len() != REQUIRED_SAMPLES
+    {
+        return Err("lifecycle: expected 30 samples per mode".into());
+    }
+    for (index, (i, a)) in lifecycle
+        .interpreter
+        .iter()
+        .zip(&lifecycle.automatic)
+        .enumerate()
+    {
+        if i.pair_index != index
+            || a.pair_index != index
+            || i.first_window_ns == 0
+            || a.first_window_ns == 0
+            || i.hot_reload_ns == 0
+            || a.hot_reload_ns == 0
+        {
+            return Err(format!("lifecycle: invalid sample {index}"));
+        }
+        if i.snapshot_sha256 != a.snapshot_sha256 || i.script_renders != a.script_renders {
+            return Err(format!("lifecycle: semantic mismatch at pair {index}"));
+        }
+    }
+    Ok(())
+}
+
+fn lifecycle_ci(lifecycle: &Lifecycle, field: impl Fn(&LifecycleSample) -> u64 + Copy) -> [f64; 2] {
+    paired_bootstrap(&lifecycle.interpreter, &lifecycle.automatic, |i, a| {
+        field(a) as f64 / field(i) as f64
+    })
+}
+
+fn paired_bootstrap<T>(left: &[T], right: &[T], ratio: impl Fn(&T, &T) -> f64) -> [f64; 2] {
+    let mut state = 0x9e3779b97f4a7c15u64;
+    let mut values = Vec::with_capacity(REQUIRED_BOOTSTRAPS);
+    for _ in 0..REQUIRED_BOOTSTRAPS {
+        let mut logs = 0.0;
+        for _ in 0..left.len() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let index = state as usize % left.len();
+            logs += ratio(&left[index], &right[index]).ln();
+        }
+        values.push((logs / left.len() as f64).exp());
+    }
+    values.sort_by(f64::total_cmp);
+    [values[249], values[9_749]]
+}
+
+fn err(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(speedup: u64, automatic_native_entries: u64) -> Report {
+        let samples = |time, native_entries| {
+            (0..REQUIRED_SAMPLES)
+                .map(|pair_index| Sample {
+                    pair_index,
+                    steady_state_ns: time,
+                    p99_script_render_ns: 100,
+                    checksum: "same".into(),
+                    snapshot_sha256: "snapshot".into(),
+                    script_renders: 1,
+                    native_entries,
+                    fallback_count: 0,
+                })
+                .collect()
+        };
+        let lifecycle = |time| {
+            (0..REQUIRED_SAMPLES)
+                .map(|pair_index| LifecycleSample {
+                    pair_index,
+                    first_window_ns: time,
+                    hot_reload_ns: time,
+                    snapshot_sha256: "snapshot".into(),
+                    script_renders: 1,
+                })
+                .collect()
+        };
+        Report {
+            schema: "gpui-shell-jit-v1".into(),
+            provenance: Provenance {
+                shell_revision: "a".repeat(40),
+                rquickjs_revision: "b".repeat(40),
+                shell_dirty: false,
+                rquickjs_dirty: false,
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                command: vec!["real-shell-benchmark".into()],
+            },
+            policy: Policy {
+                warmup_processes: 5,
+                paired_processes: 30,
+                bootstrap_resamples: 10_000,
+            },
+            workloads: vec![Workload {
+                name: "real panel".into(),
+                suitable_for_jit: true,
+                regression_guard: true,
+                interpreter: samples(100 * speedup, 0),
+                automatic: samples(100, automatic_native_entries),
+            }],
+            lifecycle: Lifecycle {
+                interpreter: lifecycle(100),
+                automatic: lifecycle(100),
+            },
+        }
+    }
+
+    #[test]
+    fn paired_bootstrap_preserves_constant_ratio() {
+        let left = vec![200_u64; 30];
+        let right = vec![100_u64; 30];
+        let ci = paired_bootstrap(&left, &right, |a, b| *a as f64 / *b as f64);
+        assert!((ci[0] - 2.0).abs() < 1e-12);
+        assert!((ci[1] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn real_semantic_pairs_and_two_x_native_speedup_pass() {
+        let (markdown, pass) = validate_and_render(&report(2, 1)).unwrap();
+        assert!(pass);
+        assert!(markdown.contains("Overall: **PASS**"));
+    }
+
+    #[test]
+    fn fixture_like_timing_without_native_entries_fails() {
+        let (markdown, pass) = validate_and_render(&report(3, 0)).unwrap();
+        assert!(!pass);
+        assert!(markdown.contains("Overall: **FAIL**"));
+    }
+}

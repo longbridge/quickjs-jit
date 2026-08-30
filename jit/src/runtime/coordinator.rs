@@ -9,12 +9,40 @@ use std::{
 
 use crate::{
     bytecode::VerifiedFunction,
-    code_cache::{ArtifactKey, CodeCache, CompiledArtifact, ExecutionPin},
+    code_cache::{ArtifactKey, ArtifactVersionIdentity, CodeCache, CompiledArtifact, ExecutionPin},
     compiler::CompileFailure,
     JitMetrics,
 };
 
-use super::{install, invalidate, DependencyGraph, DependencyKey, FeedbackSnapshot, ObservedType};
+use super::{
+    install, invalidate, BoundedSpecializationSignature, CallSpecializationKey, DependencyGraph,
+    DependencyKey, FeedbackRepresentation, FeedbackSnapshot, ObservedType,
+};
+
+fn call_specialization_fingerprint(key: &CallSpecializationKey) -> u64 {
+    fn mix(state: u64, value: u64) -> u64 {
+        (state ^ value).wrapping_mul(0x100_0000_01b3)
+    }
+    fn representation_tag(representation: FeedbackRepresentation) -> u64 {
+        match representation {
+            FeedbackRepresentation::Int32 => 1,
+            FeedbackRepresentation::Float64 => 2,
+        }
+    }
+    let mut state = 0xcbf2_9ce4_8422_2325;
+    state = mix(state, key.caller().id);
+    state = mix(state, key.caller().generation);
+    state = mix(state, key.callee().id);
+    state = mix(state, key.callee().generation);
+    state = mix(state, key.callee_identity());
+    state = mix(state, key.callee_bytecode_identity());
+    state = mix(state, key.arity() as u64);
+    for argument in key.arguments() {
+        state = mix(state, representation_tag(*argument));
+    }
+    state = mix(state, representation_tag(key.result()));
+    mix(state, key.feedback_epoch())
+}
 
 pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
     compiler: &C,
@@ -41,6 +69,70 @@ pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
 pub struct FunctionKey {
     pub id: u64,
     pub generation: u64,
+}
+
+/// A version-pinned callee selected for a monomorphic compiled call edge.
+///
+/// Holding this value keeps the callee's code alive across concurrent
+/// invalidation. New resolutions still fail as soon as the generation is
+/// retired, so stale callers cannot acquire another target.
+#[derive(Debug)]
+pub struct CompiledCallTarget {
+    identity: ArtifactVersionIdentity,
+    call: CallSpecializationKey,
+    pin: ExecutionPin,
+}
+
+/// Executable scalar entry retained by a caller compilation request.  The
+/// cloned publication owns the executable allocation, closing the race where
+/// a callee is retired while its caller is still compiling.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Debug)]
+pub struct DirectCallTarget {
+    pc: u32,
+    call: CallSpecializationKey,
+    signature: BoundedSpecializationSignature,
+    published: crate::compiler::baseline::PublishedBaselineCode,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl DirectCallTarget {
+    pub const fn pc(&self) -> u32 {
+        self.pc
+    }
+    pub const fn call(&self) -> &CallSpecializationKey {
+        &self.call
+    }
+    pub const fn signature(&self) -> &BoundedSpecializationSignature {
+        &self.signature
+    }
+    pub fn entry(&self) -> *const u8 {
+        self.published.as_ptr()
+    }
+    pub(crate) fn publication(&self) -> crate::compiler::baseline::PublishedBaselineCode {
+        self.published.clone()
+    }
+}
+
+impl CompiledCallTarget {
+    pub const fn identity(&self) -> ArtifactVersionIdentity {
+        self.identity
+    }
+
+    pub const fn call(&self) -> &CallSpecializationKey {
+        &self.call
+    }
+
+    pub fn artifact(&self) -> &CompiledArtifact {
+        self.pin.artifact()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompiledCallTargetError {
+    InvalidSpecialization(QueueError),
+    StaleCallee,
+    CalleeNotInstalled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -115,6 +207,12 @@ impl SidePathProfile {
             ^ observed
             ^ self.feedback_epoch.rotate_left(41)
     }
+
+    fn signature_fingerprint(self) -> u64 {
+        let mut signature = self;
+        signature.feedback_epoch = 0;
+        signature.fingerprint()
+    }
 }
 
 impl FunctionKey {
@@ -181,6 +279,8 @@ pub struct CompileRequest {
     feedback_epoch: u64,
     feedback: Arc<FeedbackSnapshot>,
     side_path_profile: Option<SidePathProfile>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    direct_call_targets: Arc<[DirectCallTarget]>,
 }
 
 impl CompileRequest {
@@ -213,6 +313,16 @@ impl CompileRequest {
     }
     pub const fn side_path_profile(&self) -> Option<SidePathProfile> {
         self.side_path_profile
+    }
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn direct_call_target(&self, pc: u32) -> Option<&DirectCallTarget> {
+        self.direct_call_targets.iter().find(|target| {
+            self.feedback.call_specialization_at(self.key, pc).as_ref() == Some(target.call())
+        })
+    }
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn direct_call_targets(&self) -> &[DirectCallTarget] {
+        &self.direct_call_targets
     }
 }
 
@@ -365,6 +475,7 @@ struct FunctionState {
     optimizing: TierRecord,
     published: Option<Tier>,
     retired: bool,
+    instability_attempts: u8,
 }
 
 impl FunctionState {
@@ -437,6 +548,8 @@ pub struct Coordinator {
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
     side_exits: HashMap<FunctionKey, HashMap<u32, u8>>,
     side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
+    specialization_versions: HashMap<(FunctionKey, u64), u8>,
+    call_specialization_versions: HashMap<FunctionKey, HashMap<u64, u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -525,7 +638,87 @@ impl Coordinator {
             latest_feedback_epochs: HashMap::new(),
             side_exits: HashMap::new(),
             side_exit_observations: HashMap::new(),
+            specialization_versions: HashMap::new(),
+            call_specialization_versions: HashMap::new(),
         }
+    }
+
+    /// Registers bounded version identity without claiming a direct-call path.
+    pub fn register_call_specialization(
+        &mut self,
+        primary: &BoundedSpecializationSignature,
+        call: &CallSpecializationKey,
+    ) -> Result<ArtifactVersionIdentity, QueueError> {
+        if primary.function() != call.caller()
+            || primary.feedback_epoch() == 0
+            || primary.feedback_epoch() != call.feedback_epoch()
+        {
+            return Err(QueueError::SnapshotIdentity);
+        }
+        let identity = ArtifactVersionIdentity::new(
+            primary.fingerprint(),
+            call_specialization_fingerprint(call),
+        );
+        let versions = self
+            .call_specialization_versions
+            .entry(call.caller())
+            .or_default();
+        if let Some(attempts) = versions.get_mut(&identity.fingerprint()) {
+            if *attempts >= self.max_attempts {
+                return Err(QueueError::Blacklisted);
+            }
+            *attempts = attempts.saturating_add(1);
+            return Ok(identity);
+        }
+        if versions.len() >= usize::from(self.max_attempts) {
+            return Err(QueueError::Blacklisted);
+        }
+        versions.insert(identity.fingerprint(), 1);
+        Ok(identity)
+    }
+
+    /// Resolves a stable call specialization to a pinned optimizing artifact.
+    ///
+    /// This is the safety boundary needed by compiled-to-compiled lowering:
+    /// identity validation and bounded versioning happen before the callee is
+    /// looked up, and the returned execution pin prevents reclamation while a
+    /// caller is using the target. The current compiler still uses the generic
+    /// CALL helper until its native frame ABI can consume this target.
+    pub fn resolve_compiled_call_target(
+        &mut self,
+        primary: &BoundedSpecializationSignature,
+        call: &CallSpecializationKey,
+    ) -> Result<CompiledCallTarget, CompiledCallTargetError> {
+        if primary.function() != call.caller()
+            || primary.feedback_epoch() == 0
+            || primary.feedback_epoch() != call.feedback_epoch()
+        {
+            return Err(CompiledCallTargetError::InvalidSpecialization(
+                QueueError::SnapshotIdentity,
+            ));
+        }
+        if self.current_generations.get(&call.callee().id) != Some(&call.callee().generation)
+            || self
+                .functions
+                .get(&call.callee())
+                .is_some_and(|function| function.retired)
+        {
+            return Err(CompiledCallTargetError::StaleCallee);
+        }
+        let pin = self
+            .pin(call.callee(), Tier::Optimizing)
+            .ok_or(CompiledCallTargetError::CalleeNotInstalled)?;
+        // Missing or stale callees are availability failures, not unstable
+        // specialization attempts, so consume the bounded version budget only
+        // once an executable target has actually been acquired.
+        let identity = self
+            .register_call_specialization(primary, call)
+            .map_err(CompiledCallTargetError::InvalidSpecialization)?;
+        Ok(CompiledCallTarget {
+            identity,
+            call: call.clone(),
+            pin,
+        })
     }
 
     pub fn queue(
@@ -577,6 +770,16 @@ impl Coordinator {
         if self.shutdown {
             return Err(QueueError::Shutdown);
         }
+        let side_path_signature = side_path_profile.map(SidePathProfile::signature_fingerprint);
+        if side_path_signature.is_some_and(|signature| {
+            self.specialization_versions
+                .get(&(key, signature))
+                .copied()
+                .unwrap_or(0)
+                >= self.max_attempts
+        }) {
+            return Err(QueueError::Blacklisted);
+        }
         if self
             .current_generations
             .get(&key.id)
@@ -600,13 +803,18 @@ impl Coordinator {
             return Err(QueueError::NotReady);
         }
         let installed_baseline = self.installed_keys.contains_key(&(key, Tier::Baseline));
+        let interpreter_deopt_target = self
+            .functions
+            .get(&key)
+            .is_some_and(|function| function.baseline.state == CompileState::Blacklisted);
         let installed_optimizing = self.installed_keys.contains_key(&(key, Tier::Optimizing));
         match tier {
             Tier::Baseline if installed_baseline || installed_optimizing => {
                 return Err(QueueError::NotReady)
             }
             Tier::Optimizing
-                if !installed_baseline || (installed_optimizing && side_path_profile.is_none()) =>
+                if (!installed_baseline && !interpreter_deopt_target)
+                    || (installed_optimizing && side_path_profile.is_none()) =>
             {
                 return Err(QueueError::NotReady)
             }
@@ -629,6 +837,30 @@ impl Coordinator {
         {
             return Err(QueueError::SnapshotIdentity);
         }
+        let primary_feedback_signature = (tier == Tier::Optimizing && side_path_profile.is_none())
+            .then(|| feedback.bounded_specialization(key))
+            .flatten()
+            .map(|signature| signature.fingerprint());
+        let call_feedback_signature = (tier == Tier::Optimizing && side_path_profile.is_none())
+            .then(|| {
+                snapshot
+                    .instructions()
+                    .iter()
+                    .filter_map(|instruction| {
+                        feedback.call_specialization_at(key, instruction.pc())
+                    })
+                    .map(|call| call_specialization_fingerprint(&call))
+                    .reduce(|prior, fingerprint| prior.rotate_left(17) ^ fingerprint)
+            })
+            .flatten();
+        let feedback_signature = match (primary_feedback_signature, call_feedback_signature) {
+            (Some(primary), Some(call)) => {
+                Some(ArtifactVersionIdentity::new(primary, call).fingerprint())
+            }
+            (Some(primary), None) => Some(primary),
+            (None, Some(call)) => Some(ArtifactVersionIdentity::new(0, call).fingerprint()),
+            (None, None) => None,
+        };
         let artifact_key = ArtifactKey {
             runtime_id: self.environment.runtime_id,
             function_id: key.id,
@@ -640,7 +872,10 @@ impl Coordinator {
             source_revision: source.source_revision(),
             opcode_fingerprint: source.opcode_fingerprint(),
             config_fingerprint: self.environment.config_fingerprint,
-            specialization_fingerprint: side_path_profile.map_or(0, SidePathProfile::fingerprint),
+            specialization_fingerprint: side_path_profile
+                .map(SidePathProfile::fingerprint)
+                .or(feedback_signature)
+                .unwrap_or(0),
         };
         if self
             .current_generations
@@ -665,6 +900,39 @@ impl Coordinator {
                 .and_modify(|epoch| *epoch = (*epoch).max(feedback_epoch))
                 .or_insert(feedback_epoch);
         }
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let direct_call_targets =
+            if matches!(tier, Tier::Baseline | Tier::Optimizing) && side_path_profile.is_none() {
+                snapshot
+                    .instructions()
+                    .iter()
+                    .filter_map(|instruction| {
+                        let call = feedback.call_specialization_at(key, instruction.pc())?;
+                        let pin = self.pin(call.callee(), Tier::Optimizing)?;
+                        let artifact = pin.artifact();
+                        let signature = artifact
+                            .optimized_metadata()?
+                            .direct_call_signature()?
+                            .clone();
+                        if signature.function() != call.callee()
+                            || signature.arguments() != call.arguments()
+                            || signature.result() != call.result()
+                        {
+                            return None;
+                        }
+                        let published = artifact.direct_call_published()?.clone();
+                        Some(DirectCallTarget {
+                            pc: instruction.pc(),
+                            call,
+                            signature,
+                            published,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            } else {
+                Arc::from([])
+            };
         self.queue.push_back(CompileRequest {
             key,
             tier,
@@ -674,7 +942,16 @@ impl Coordinator {
             feedback_epoch,
             feedback: Arc::new(feedback),
             side_path_profile,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            direct_call_targets,
         });
+        if let Some(signature) = side_path_signature {
+            let versions = self
+                .specialization_versions
+                .entry((key, signature))
+                .or_default();
+            *versions = versions.saturating_add(1);
+        }
         let function = self.functions.entry(key).or_default();
         function.tier_mut(tier).state = CompileState::Queued(tier);
         self.metrics.queued = self.metrics.queued.saturating_add(1);
@@ -793,11 +1070,16 @@ impl Coordinator {
                         )
                     })
                     .collect::<Vec<_>>();
-                if dependency_versions.iter().any(|(dependency, generation)| {
-                    let DependencyKey::Function(function) = *dependency;
-                    function.generation != *generation
-                        || self.current_generations.get(&function.id) != Some(generation)
-                }) {
+                if dependency_versions
+                    .iter()
+                    .any(|(dependency, generation)| match *dependency {
+                        DependencyKey::Function(function) => {
+                            function.generation != *generation
+                                || self.current_generations.get(&function.id) != Some(generation)
+                        }
+                        DependencyKey::Shape(_) | DependencyKey::Prototype(_) => false,
+                    })
+                {
                     self.record_failure(completion.key, completion.requested_tier);
                     return;
                 }
@@ -941,9 +1223,33 @@ impl Coordinator {
             .dependency_invalidations
             .saturating_add(invalidated.len() as u64);
         for dependency in invalidated {
-            let DependencyKey::Function(function) = dependency;
-            self.retire_state(function);
+            if let DependencyKey::Function(function) = dependency {
+                self.retire_state(function);
+            }
         }
+    }
+
+    /// Unpublishes a harmful baseline version so future entries stay in the
+    /// interpreter. Automatic tiering uses this only after its bounded
+    /// profitability retries are exhausted; BaselineOnly never calls it.
+    pub fn demote_baseline_to_interpreter(&mut self, key: FunctionKey) -> bool {
+        let Some(function) = self.functions.get_mut(&key) else {
+            return false;
+        };
+        if self.installed_keys.remove(&(key, Tier::Baseline)).is_none() {
+            return false;
+        }
+        function.baseline.state = CompileState::Blacklisted;
+        if function.published == Some(Tier::Baseline) {
+            function.published = None;
+        }
+        /* Keep the unpublished Baseline artifact resident as the cache's
+         * lifetime pin while a bounded Tier2 trial is compiled. It is no
+         * longer addressable through `installed_keys` or `published`, so it
+         * cannot execute; optimized side exits resume the interpreter. */
+        self.metrics.interpreter_demotions = self.metrics.interpreter_demotions.saturating_add(1);
+        self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+        true
     }
 
     pub fn state(&self, key: FunctionKey) -> CompileState {
@@ -1044,22 +1350,22 @@ impl Coordinator {
         *count = count.saturating_add(1);
         let count = *count;
         if exits.len() > 1 || observation_changed {
-            let attempts = self
-                .functions
-                .entry(key)
-                .or_default()
-                .optimizing
-                .attempts
-                .saturating_add(1);
+            let function = self.functions.entry(key).or_default();
+            function.instability_attempts = function.instability_attempts.saturating_add(1);
+            let attempts = function.instability_attempts;
             let delay = 1u64
                 .checked_shl(u32::from(attempts.min(20)))
                 .unwrap_or(u64::MAX);
             let retry_after = self.clock.saturating_add(delay);
-            self.functions.entry(key).or_default().optimizing.state = CompileState::Backoff {
-                attempts,
-                retry_after,
+            function.optimizing.state = if attempts >= self.max_attempts {
+                self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+                CompileState::Blacklisted
+            } else {
+                CompileState::Backoff {
+                    attempts,
+                    retry_after,
+                }
             };
-            self.functions.entry(key).or_default().optimizing.attempts = attempts;
             self.installed_keys.remove(&(key, Tier::Optimizing));
             if let Some(function) = self.functions.get_mut(&key) {
                 function.published = Some(Tier::Baseline);

@@ -6,9 +6,10 @@ mod evict;
 #[cfg(feature = "compiler")]
 pub use artifact::OptimizedArtifactMetadata;
 pub use artifact::{
-    ArtifactDependency, ArtifactKey, BenefitSnapshot, CodeAllocation, CompiledArtifact, FrameState,
-    FrameStateLocationKind, Relocation, RelocationKind, RelocationResolveError, RelocationTarget,
-    ResolvedRelocation, StackMap, UnwindKind, UnwindMetadata,
+    ArtifactDependency, ArtifactKey, ArtifactVersionIdentity, BenefitSnapshot, CodeAllocation,
+    CompiledArtifact, FrameState, FrameStateLocationKind, Relocation, RelocationKind,
+    RelocationResolveError, RelocationTarget, ResolvedRelocation, StackMap, UnwindKind,
+    UnwindMetadata,
 };
 
 use std::{

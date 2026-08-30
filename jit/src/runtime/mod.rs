@@ -7,17 +7,22 @@ mod hotness;
 mod install;
 mod invalidate;
 mod osr;
+mod shape_feedback;
 
 pub use crate::compiler::CompileFailure;
 pub use background::{BackgroundCompiler, BackgroundCompilerError};
 pub use coordinator::{
     compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
-    CompileState, CompletionDrain, CompletionSendError, CompletionSender, Coordinator, FunctionKey,
-    GuardId, QueueError, SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
+    CompileState, CompiledCallTarget, CompiledCallTargetError, CompletionDrain,
+    CompletionSendError, CompletionSender, Coordinator, DirectCallTarget, FunctionKey, GuardId,
+    QueueError, SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 pub use feedback::{
-    BinaryFeedbackFlags, BinaryFeedbackSnapshot, CallFeedbackSnapshot, FeedbackKind,
+    BinaryFeedbackFlags, BinaryFeedbackSnapshot, BoundedSpecializationSignature,
+    BranchFeedbackSnapshot, CallFeedbackSnapshot, CallSignatureFeedbackSnapshot,
+    CallSpecializationKey, ConversionFeedbackSnapshot, FeedbackKind, FeedbackRepresentation,
     FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable, ObservedType,
+    MAX_SPECIALIZED_ARGUMENTS,
 };
 pub use hotness::{
     AdaptiveInputs, Decision, HotDecision, HotReason, HotThresholds, HotnessState, Profile,
@@ -26,6 +31,10 @@ pub use hotness::{
 };
 pub use invalidate::{DependencyError, DependencyGraph, DependencyKey};
 pub use osr::{OsrKey, OsrMap};
+pub use shape_feedback::{
+    PropertyAttributes, PrototypeDependencyToken, ShapeFeedbackSite, ShapeFeedbackState,
+    ShapeFeedbackTable, ShapeObservation, ShapeToken,
+};
 
 #[cfg(test)]
 mod hotness_tests {

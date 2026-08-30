@@ -2,6 +2,10 @@ use rquickjs_jit::ir::{
     DeoptMap, DeoptOwnership, DeoptPhase, Materialization, MaterializedValue, OptimizedFrameShape,
     TaggedValue,
 };
+use rquickjs_jit::{
+    bytecode::{opcode, CompileSnapshot, VerifyLimits},
+    ir::OptimizedIr,
+};
 
 #[test]
 fn complete_deopt_map_materializes_every_slot_once() {
@@ -124,4 +128,96 @@ fn production_identity_recipes_execute_arguments_and_locals_in_place() {
     assert!(non_identity
         .validate_identity_materialization(shape)
         .is_err());
+}
+
+#[test]
+fn arithmetic_guard_resumes_at_operation_with_both_operands_materialized() {
+    let verified = CompileSnapshot::from_untrusted_bytecode(
+        vec![
+            opcode::GET_ARG,
+            0,
+            0,
+            opcode::GET_ARG,
+            1,
+            0,
+            opcode::ADD,
+            opcode::RETURN,
+        ],
+        2,
+        0,
+        0,
+        0,
+    )
+    .verify(VerifyLimits::default())
+    .unwrap();
+    let ir = OptimizedIr::translate(&verified, 1).unwrap();
+    let site = ir
+        .guard_maps()
+        .iter()
+        .find(|site| site.map().resume_pc() == 6)
+        .expect("add overflow has an instruction-local deopt site");
+    let add = ir.nodes().iter().find(|node| node.pc() == 6).unwrap();
+
+    assert_eq!(add.deopt_guard(), Some(site.guard()));
+    assert_ne!(site.guard(), ir.guard_maps()[0].guard());
+    assert_eq!(site.map().phase(), DeoptPhase::BeforeEffect(1));
+    assert_eq!(site.shape(), OptimizedFrameShape::new(2, 0, 2));
+    assert!(site
+        .map()
+        .validate_identity_materialization(site.shape())
+        .is_ok());
+    let frame = site.map().materialize(site.shape()).unwrap();
+    assert_eq!(frame.resume_pc(), 6);
+    assert_eq!(
+        frame.slots(),
+        &[
+            MaterializedValue::TaggedSlot(0),
+            MaterializedValue::TaggedSlot(1),
+            MaterializedValue::TaggedSlot(2),
+            MaterializedValue::TaggedSlot(3),
+        ]
+    );
+}
+
+#[test]
+fn checked_integer_arithmetic_sites_have_exact_pre_effect_deopt_maps() {
+    for arithmetic_opcode in [
+        rquickjs_core::qjs::QJS_JIT_OP_SUB,
+        rquickjs_core::qjs::QJS_JIT_OP_MUL,
+        rquickjs_core::qjs::QJS_JIT_OP_DIV,
+    ] {
+        let verified = CompileSnapshot::from_untrusted_bytecode(
+            vec![
+                opcode::GET_ARG,
+                0,
+                0,
+                opcode::GET_ARG,
+                1,
+                0,
+                arithmetic_opcode,
+                opcode::RETURN,
+            ],
+            2,
+            0,
+            0,
+            0,
+        )
+        .verify(VerifyLimits::default())
+        .unwrap();
+        let ir = OptimizedIr::translate(&verified, 2).unwrap();
+        let node = ir.nodes().iter().find(|node| node.pc() == 6).unwrap();
+        let site = ir
+            .guard_maps()
+            .iter()
+            .find(|site| Some(site.guard()) == node.deopt_guard())
+            .unwrap();
+
+        assert_eq!(site.map().resume_pc(), 6);
+        assert_eq!(site.map().phase(), DeoptPhase::BeforeEffect(1));
+        assert_eq!(site.shape(), OptimizedFrameShape::new(2, 0, 2));
+        assert!(site
+            .map()
+            .validate_identity_materialization(site.shape())
+            .is_ok());
+    }
 }

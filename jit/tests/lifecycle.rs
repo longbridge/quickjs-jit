@@ -20,8 +20,10 @@ use rquickjs_jit::{
         Relocation, StackMap,
     },
     runtime::{
-        ArtifactEnvironment, CompileCompletion, CompileFailure, CompileState, CompletionSendError,
-        Coordinator, FunctionKey, QueueError, Tier,
+        ArtifactEnvironment, BinaryFeedbackFlags, CallSpecializationKey, CompileCompletion,
+        CompileFailure, CompileState, CompiledCallTargetError, CompletionSendError, Coordinator,
+        FeedbackKind, FeedbackTable, FunctionKey, GuardId, ObservedType, QueueError,
+        SideExitAction, SidePathProfile, Tier,
     },
 };
 
@@ -160,6 +162,95 @@ fn repeated_failures_blacklist_only_the_generation() {
     );
 }
 
+fn install_empty(
+    coordinator: &mut Coordinator,
+    key: FunctionKey,
+    tier: Tier,
+    snapshot: VerifiedFunction,
+) {
+    coordinator.queue(key, tier, snapshot).unwrap();
+    let request = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: tier,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Ok(CompiledArtifact::empty(request.artifact_key())),
+    });
+}
+
+#[test]
+fn same_generation_and_specialization_signature_has_a_version_limit() {
+    let mut coordinator = coordinator(2);
+    let key = FunctionKey::new(19, 1);
+    let snapshot = coordinator_snapshot();
+    install_empty(&mut coordinator, key, Tier::Baseline, snapshot.clone());
+    install_empty(&mut coordinator, key, Tier::Optimizing, snapshot.clone());
+
+    for epoch in [11, 12] {
+        let mut table = FeedbackTable::new(4, 2);
+        table.observe_type(key, 7, FeedbackKind::Exit, ObservedType::Float64);
+        let feedback = table.snapshot(epoch);
+        let profile = SidePathProfile::new(key, GuardId::new(7), 7, ObservedType::Float64, epoch);
+        coordinator
+            .queue_side_path(key, snapshot.clone(), feedback, profile)
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        coordinator.complete(CompileCompletion {
+            key,
+            requested_tier: Tier::Optimizing,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
+            result: Ok(CompiledArtifact::empty(request.artifact_key())),
+        });
+    }
+
+    let mut table = FeedbackTable::new(4, 2);
+    table.observe_type(key, 7, FeedbackKind::Exit, ObservedType::Float64);
+    let feedback = table.snapshot(13);
+    let profile = SidePathProfile::new(key, GuardId::new(7), 7, ObservedType::Float64, 13);
+    assert_eq!(
+        coordinator.queue_side_path(key, snapshot, feedback, profile),
+        Err(QueueError::Blacklisted)
+    );
+    assert!(coordinator.begin_next().is_none());
+}
+
+#[test]
+fn repeated_instability_cannot_reset_its_budget_by_recompiling_successfully() {
+    let mut coordinator = coordinator(2);
+    let key = FunctionKey::new(20, 1);
+    let snapshot = coordinator_snapshot();
+    install_empty(&mut coordinator, key, Tier::Baseline, snapshot.clone());
+    install_empty(&mut coordinator, key, Tier::Optimizing, snapshot.clone());
+
+    assert_eq!(
+        coordinator.record_optimized_side_exit_profile(key, 3, Some(ObservedType::Int32)),
+        SideExitAction::Counted
+    );
+    let SideExitAction::Demote { retry_after } =
+        coordinator.record_optimized_side_exit_profile(key, 3, Some(ObservedType::Float64))
+    else {
+        panic!("changed observation must demote")
+    };
+    coordinator.advance_clock(retry_after);
+    install_empty(&mut coordinator, key, Tier::Optimizing, snapshot.clone());
+
+    assert!(matches!(
+        coordinator.record_optimized_side_exit_profile(key, 3, Some(ObservedType::String)),
+        SideExitAction::Demote { .. }
+    ));
+    assert_eq!(
+        coordinator.tier_state(key, Tier::Optimizing),
+        CompileState::Blacklisted
+    );
+    assert_eq!(
+        coordinator.queue(key, Tier::Optimizing, snapshot),
+        Err(QueueError::Blacklisted)
+    );
+    assert!(coordinator.begin_next().is_none());
+}
+
 fn artifact_key(function_id: u64, generation: u64, tier: Tier) -> ArtifactKey {
     ArtifactKey {
         runtime_id: 1,
@@ -267,6 +358,164 @@ fn artifact_identity_distinguishes_every_compatibility_field() {
         .chain(variants)
         .collect::<HashSet<_>>();
     assert_eq!(identities.len(), 12);
+}
+
+fn specialization_keys(
+    caller: FunctionKey,
+    callee: FunctionKey,
+    epoch: u64,
+    observed: ObservedType,
+) -> (
+    rquickjs_jit::runtime::BoundedSpecializationSignature,
+    CallSpecializationKey,
+) {
+    let mut feedback = FeedbackTable::new(32, 2);
+    feedback.observe_call(caller, &[observed]);
+    feedback.observe_return(caller, 9, observed);
+    feedback.observe_binary(
+        caller,
+        3,
+        observed,
+        observed,
+        observed,
+        BinaryFeedbackFlags::NONE,
+    );
+    feedback.observe_call_signature(caller, 5, callee, &[observed], observed);
+    let snapshot = feedback.snapshot(epoch);
+    (
+        snapshot.bounded_specialization(caller).unwrap(),
+        snapshot.call_specialization_at(caller, 5).unwrap(),
+    )
+}
+
+#[test]
+fn call_specialization_registry_builds_stable_bounded_artifact_identity() {
+    let caller = FunctionKey::new(501, 4);
+    let callee = FunctionKey::new(601, 7);
+    let (primary, call) = specialization_keys(caller, callee, 61, ObservedType::Int32);
+    let mut coordinator = coordinator(3);
+
+    let identity = coordinator
+        .register_call_specialization(&primary, &call)
+        .expect("bounded call version identity");
+    assert_ne!(identity.primary_fingerprint(), 0);
+    assert_ne!(identity.call_fingerprint(), 0);
+    assert_ne!(identity.fingerprint(), 0);
+    assert_eq!(
+        identity,
+        coordinator
+            .register_call_specialization(&primary, &call)
+            .expect("same identity is stable")
+    );
+    let artifact = artifact_key(caller.id, caller.generation, Tier::Optimizing)
+        .with_version_identity(identity);
+    assert_eq!(artifact.specialization_fingerprint, identity.fingerprint());
+}
+
+#[test]
+fn call_version_identity_distinguishes_generation_target_signature_and_epoch() {
+    let caller = FunctionKey::new(502, 2);
+    let cases = [
+        specialization_keys(caller, FunctionKey::new(602, 1), 70, ObservedType::Int32),
+        specialization_keys(
+            FunctionKey::new(502, 3),
+            FunctionKey::new(602, 1),
+            70,
+            ObservedType::Int32,
+        ),
+        specialization_keys(caller, FunctionKey::new(602, 2), 70, ObservedType::Int32),
+        specialization_keys(caller, FunctionKey::new(603, 1), 70, ObservedType::Int32),
+        specialization_keys(caller, FunctionKey::new(602, 1), 70, ObservedType::Float64),
+        specialization_keys(caller, FunctionKey::new(602, 1), 71, ObservedType::Int32),
+    ];
+    let mut identities = HashSet::new();
+    for (primary, call) in cases {
+        identities.insert(
+            coordinator(8)
+                .register_call_specialization(&primary, &call)
+                .unwrap()
+                .fingerprint(),
+        );
+    }
+    assert_eq!(identities.len(), 6);
+}
+
+#[test]
+fn call_version_registry_bounds_distinct_versions_and_attempts() {
+    let caller = FunctionKey::new(503, 1);
+    let mut coordinator = coordinator(2);
+    let first = specialization_keys(caller, FunctionKey::new(610, 1), 80, ObservedType::Int32);
+    let second = specialization_keys(caller, FunctionKey::new(611, 1), 80, ObservedType::Int32);
+    let third = specialization_keys(caller, FunctionKey::new(612, 1), 80, ObservedType::Int32);
+
+    coordinator
+        .register_call_specialization(&first.0, &first.1)
+        .unwrap();
+    coordinator
+        .register_call_specialization(&first.0, &first.1)
+        .unwrap();
+    assert_eq!(
+        coordinator.register_call_specialization(&first.0, &first.1),
+        Err(QueueError::Blacklisted)
+    );
+    coordinator
+        .register_call_specialization(&second.0, &second.1)
+        .unwrap();
+    assert_eq!(
+        coordinator.register_call_specialization(&third.0, &third.1),
+        Err(QueueError::Blacklisted)
+    );
+}
+
+#[test]
+fn compiled_call_target_requires_an_installed_optimizing_callee() {
+    let caller = FunctionKey::new(504, 1);
+    let callee = FunctionKey::new(613, 2);
+    let (primary, call) = specialization_keys(caller, callee, 81, ObservedType::Int32);
+    let mut coordinator = coordinator(4);
+    install_empty(
+        &mut coordinator,
+        callee,
+        Tier::Baseline,
+        coordinator_snapshot(),
+    );
+
+    assert_eq!(
+        coordinator
+            .resolve_compiled_call_target(&primary, &call)
+            .unwrap_err(),
+        CompiledCallTargetError::CalleeNotInstalled
+    );
+}
+
+#[test]
+fn compiled_call_target_is_generation_pinned_and_rejects_new_stale_resolutions() {
+    let caller = FunctionKey::new(505, 3);
+    let callee = FunctionKey::new(614, 7);
+    let (primary, call) = specialization_keys(caller, callee, 82, ObservedType::Int32);
+    let mut coordinator = coordinator(4);
+    let snapshot = coordinator_snapshot();
+    install_empty(&mut coordinator, callee, Tier::Baseline, snapshot.clone());
+    install_empty(&mut coordinator, callee, Tier::Optimizing, snapshot);
+
+    let target = coordinator
+        .resolve_compiled_call_target(&primary, &call)
+        .expect("installed monomorphic callee resolves");
+    assert_eq!(target.call(), &call);
+    assert_eq!(target.artifact().key().tier, Tier::Optimizing);
+    assert_eq!(target.artifact().key().generation, call.callee().generation);
+    assert_ne!(target.identity().fingerprint(), 0);
+
+    coordinator.retire(callee);
+    assert_eq!(target.artifact().key().generation, callee.generation);
+    assert_eq!(
+        coordinator
+            .resolve_compiled_call_target(&primary, &call)
+            .unwrap_err(),
+        CompiledCallTargetError::StaleCallee
+    );
+    drop(target);
+    assert!(coordinator.poll_cache_reclamation() >= 1);
 }
 
 #[test]

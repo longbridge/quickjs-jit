@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 5;
+pub const ABI_MINOR: u16 = 10;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -531,6 +531,14 @@ fn runtime_api_layout_fingerprint() -> u64 {
         ),
         (
             mem::offset_of!(qjs::JSJitRuntimeAPI, new_object),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, shape_guard),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, materialize_owner),
             mem::size_of::<usize>(),
         ),
     ] {

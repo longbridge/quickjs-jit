@@ -45,7 +45,9 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
         .map(|m| m.mode.as_str())
         .collect::<Vec<_>>();
     names.sort_unstable();
-    if names != ["automatic", "interpreter", "tier1", "tier2"] {
+    if names != ["automatic", "interpreter", "tier1", "tier2"]
+        && names != ["automatic", "bun", "interpreter", "tier1", "tier2"]
+    {
         return Err(
             "modes must contain each of automatic/interpreter/tier1/tier2 exactly once".into(),
         );
@@ -81,7 +83,10 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
     let mut global_abi = None;
     for mode in &data.modes {
         if workload_shape(mode) != reference_shape {
-            return Err(format!("{} workload set/suite/group/designated metadata differs", mode.mode));
+            return Err(format!(
+                "{} workload set/suite/group/designated metadata differs",
+                mode.mode
+            ));
         }
         let mut mode_config = None;
         for w in &mode.workloads {
@@ -99,24 +104,58 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
                     return Err(format!("{} / {} invalid pair index", mode.mode, w.name));
                 }
                 if s.elapsed_ns != w.raw_latency_ns[i] {
-                    return Err(format!("{} / {} raw latency differs from sample", mode.mode, w.name));
+                    return Err(format!(
+                        "{} / {} raw latency differs from sample",
+                        mode.mode, w.name
+                    ));
                 }
-                match global_opcode { Some(v) if v != s.opcode_fingerprint => return Err("opcode fingerprint drift".into()), None => global_opcode = Some(s.opcode_fingerprint), _ => {} }
-                match global_abi { Some(v) if v != s.abi_fingerprint => return Err("ABI fingerprint drift".into()), None => global_abi = Some(s.abi_fingerprint), _ => {} }
-                match mode_config { Some(v) if v != s.config_fingerprint => return Err(format!("{} config fingerprint drift", mode.mode)), None => mode_config = Some(s.config_fingerprint), _ => {} }
+                if mode.mode != "bun" {
+                    match global_opcode {
+                        Some(v) if v != s.opcode_fingerprint => {
+                            return Err("opcode fingerprint drift".into())
+                        }
+                        None => global_opcode = Some(s.opcode_fingerprint),
+                        _ => {}
+                    }
+                    match global_abi {
+                        Some(v) if v != s.abi_fingerprint => {
+                            return Err("ABI fingerprint drift".into())
+                        }
+                        None => global_abi = Some(s.abi_fingerprint),
+                        _ => {}
+                    }
+                    match mode_config {
+                        Some(v) if v != s.config_fingerprint => {
+                            return Err(format!("{} config fingerprint drift", mode.mode))
+                        }
+                        None => mode_config = Some(s.config_fingerprint),
+                        _ => {}
+                    }
+                }
             }
-            let expected_checksum = reference.workloads.iter().find(|x| x.name == w.name)
-                .and_then(|x| x.samples.first()).map(|x| x.checksum.as_str()).ok_or("missing reference checksum")?;
-            if !w.samples.iter().all(|sample| sample.checksum == expected_checksum) {
+            let expected_checksum = reference
+                .workloads
+                .iter()
+                .find(|x| x.name == w.name)
+                .and_then(|x| x.samples.first())
+                .map(|x| x.checksum.as_str())
+                .ok_or("missing reference checksum")?;
+            if !w
+                .samples
+                .iter()
+                .all(|sample| sample.checksum == expected_checksum)
+            {
                 return Err(format!("{} / {} checksum mismatch", mode.mode, w.name));
             }
             let (median, mad, p95, p99, ci) = model::summarize(w.raw_latency_ns.clone());
-            if (w.median_ns, w.mad_ns, w.p95_ns, w.p99_ns, w.ci95_ns)
-                != (median, mad, p95, p99, ci)
+            if (w.median_ns, w.mad_ns, w.p95_ns, w.p99_ns, w.ci95_ns) != (median, mad, p95, p99, ci)
                 || w.compile_ns != median_field(&w.samples, |s| s.phases.compile_ns)
                 || w.install_ns != median_field(&w.samples, |s| s.phases.install_ns)
             {
-                return Err(format!("{} / {} recomputed summary mismatch", mode.mode, w.name));
+                return Err(format!(
+                    "{} / {} recomputed summary mismatch",
+                    mode.mode, w.name
+                ));
             }
         }
     }
@@ -124,7 +163,17 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
 }
 
 fn workload_shape(mode: &ModeResult) -> Vec<(&str, &str, &str, bool)> {
-    mode.workloads.iter().map(|w| (w.name.as_str(), w.suite.as_str(), w.group.as_str(), w.designated_kernel)).collect()
+    mode.workloads
+        .iter()
+        .map(|w| {
+            (
+                w.name.as_str(),
+                w.suite.as_str(),
+                w.group.as_str(),
+                w.designated_kernel,
+            )
+        })
+        .collect()
 }
 
 fn median_field(samples: &[SampleEvidence], field: impl Fn(&SampleEvidence) -> u64) -> u64 {
@@ -134,15 +183,23 @@ fn median_field(samples: &[SampleEvidence], field: impl Fn(&SampleEvidence) -> u
 }
 
 fn command(program: &str, args: &[&str]) -> String {
-    Command::new(program).args(args).current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output().ok().filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
+    Command::new(program)
+        .args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn current_sha256(relative: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     command("sha256sum", &[path.to_string_lossy().as_ref()])
-        .split_whitespace().next().unwrap_or_default().to_owned()
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn render(data: &BenchmarkFile) -> (String, bool) {
@@ -150,7 +207,8 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
     let t1 = mode(data, "tier1");
     let t2 = mode(data, "tier2");
     let auto = mode(data, "automatic");
-    let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`.\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
+    let bun = mode(data, "bun");
+    let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`. Bun: `{}` at `{}` (SHA-256 `{}`).\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\nA JIT ratio is reported only when that mode actually entered native code; fallback-only timing is shown as `N/A (no native entry)`. Bun remains an external engine comparison.\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | Bun | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.bun_version.as_deref().unwrap_or("N/A"),data.provenance.bun_path.as_deref().unwrap_or("N/A"),data.provenance.bun_sha256.as_deref().unwrap_or("N/A"),data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
     let mut checksums = true;
     let mut strict_native = true;
     let mut automatic_policy = false;
@@ -159,34 +217,55 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
             let a = matching(auto, w);
             let one = matching(t1, w);
             let two = matching(t2, w);
+            let external = matching(bun, w);
             checksums &= one.is_some_and(|x| all_checksums(x, checksum(w)))
                 && two.is_some_and(|x| all_checksums(x, checksum(w)))
                 && a.is_some_and(|x| all_checksums(x, checksum(w)));
-            strict_native &= one.is_some_and(|x| {
+            if bun.is_some() {
+                checksums &= external.is_some_and(|x| all_checksums(x, checksum(w)));
+            }
+            if w.designated_kernel {
+                strict_native &= one.is_some_and(|x| {
+                    x.samples
+                        .iter()
+                        .all(|s| s.tier1_entries.unwrap_or(0) > 0 && s.tier2_entries == Some(0))
+                }) && two
+                    .is_some_and(|x| x.samples.iter().all(|s| s.tier2_entries.unwrap_or(0) > 0));
+            }
+            automatic_policy |= a.is_some_and(|x| {
                 x.samples
                     .iter()
-                    .all(|s| s.tier1_entries > 0 && s.tier2_entries == 0)
-            }) && two
-                .is_some_and(|x| x.samples.iter().all(|s| s.tier2_entries > 0));
-            automatic_policy |= a.is_some_and(|x| {
-                x.samples.iter().all(|s| s.profitability_evaluations > 0)
-                    && x.samples.iter().any(|s| s.profitability_approved > 0)
+                    .all(|s| s.profitability_evaluations.unwrap_or(0) > 0)
+                    && x.samples
+                        .iter()
+                        .any(|s| s.profitability_approved.unwrap_or(0) > 0)
             });
             let proof = two.or(a);
             let entries = proof
-                .map(|x| (sum(x, |s| s.tier1_entries), sum(x, |s| s.tier2_entries)))
+                .map(|x| {
+                    (
+                        sum(x, |s| s.tier1_entries.unwrap_or(0)),
+                        sum(x, |s| s.tier2_entries.unwrap_or(0)),
+                    )
+                })
                 .unwrap_or_default();
             let exits = proof
-                .map(|x| (sum(x, |s| s.fallback_count), sum(x, |s| s.retry_count)))
+                .map(|x| {
+                    (
+                        sum(x, |s| s.fallback_count.unwrap_or(0)),
+                        sum(x, |s| s.retry_count.unwrap_or(0)),
+                    )
+                })
                 .unwrap_or_default();
             out.push_str(&format!(
-                "| {} ({}) | {} | {} | {} | {} | {}/{} | {}/{} | `{}` |\n",
+                "| {} ({}) | {} | {} | {} | {} | {} | {}/{} | {}/{} | `{}` |\n",
                 w.name,
                 w.suite,
                 w.median_ns,
-                fmt(speedup(w, one)),
-                fmt(speedup(w, two)),
-                fmt(speedup(w, a)),
+                fmt_jit_speedup(w, one, |s| s.tier1_entries.unwrap_or(0)),
+                fmt_jit_speedup(w, two, |s| s.tier2_entries.unwrap_or(0)),
+                fmt_jit_speedup(w, a, |s| s.native_entries.unwrap_or(0)),
+                fmt(speedup(w, external)),
                 entries.0,
                 entries.1,
                 exits.0,
@@ -478,6 +557,19 @@ fn mode<'a>(d: &'a BenchmarkFile, name: &str) -> Option<&'a ModeResult> {
 fn fmt(v: Option<f64>) -> String {
     v.map(|x| format!("{x:.2}×")).unwrap_or_else(|| "—".into())
 }
+fn fmt_jit_speedup(
+    base: &WorkloadResult,
+    candidate: Option<&WorkloadResult>,
+    entries: impl Fn(&SampleEvidence) -> u64,
+) -> String {
+    match candidate {
+        Some(candidate) if candidate.samples.iter().any(|sample| entries(sample) > 0) => {
+            fmt(speedup(base, Some(candidate)))
+        }
+        Some(_) => "N/A (no native entry)".into(),
+        None => "—".into(),
+    }
+}
 fn gate(out: &mut String, name: &str, pass: bool, evidence: String) -> bool {
     out.push_str(&format!(
         "- {} — **{}**: {}\n",
@@ -506,25 +598,26 @@ mod tests {
             pair_index: pair,
             elapsed_ns: b,
             checksum: c.into(),
-            native_entries: 1,
-            native_exits: 1,
-            fallback_count: 0,
-            retry_count: 0,
-            tier1_entries: 1,
-            tier2_entries: 0,
-            osr_attempts: 0,
-            profitability_evaluations: 1,
-            profitability_approved: 1,
-            profitability_rejected: 0,
-            benefit_recordings: 1,
-            measured_benefit_ns: 1,
-            opcode_fingerprint: 1,
-            abi_fingerprint: 1,
-            config_fingerprint: 1,
-            peak_rss_bytes: 1,
-            code_bytes: 1,
-            metadata_bytes: 1,
-            peak_compiler_bytes: 1,
+            native_entries: Some(1),
+            native_exits: Some(1),
+            fallback_count: Some(0),
+            retry_count: Some(0),
+            tier1_entries: Some(1),
+            tier2_entries: Some(0),
+            deopt_count: Some(0),
+            osr_attempts: Some(0),
+            profitability_evaluations: Some(1),
+            profitability_approved: Some(1),
+            profitability_rejected: Some(0),
+            benefit_recordings: Some(1),
+            measured_benefit_ns: Some(1),
+            opcode_fingerprint: Some(1),
+            abi_fingerprint: Some(1),
+            config_fingerprint: Some(1),
+            peak_rss_bytes: Some(1),
+            code_bytes: Some(1),
+            metadata_bytes: Some(1),
+            peak_compiler_bytes: Some(1),
             phases: model::PhaseTiming {
                 steady_state_ns: b,
                 ..Default::default()
@@ -562,20 +655,36 @@ mod tests {
                 command: vec!["jit-bench".into()],
                 target: "x86_64".into(),
                 target_triple: "x86_64-unknown-linux-gnu".into(),
-                os: "linux".into(), kernel: "test".into(), cpu: "test".into(),
-                power_mode: "test".into(), rustc: "test".into(), llvm: "test".into(),
-                executable_bytes: 1, stripped_jit_bytes: 2, stripped_no_jit_bytes: 1,
+                os: "linux".into(),
+                kernel: "test".into(),
+                cpu: "test".into(),
+                power_mode: "test".into(),
+                rustc: "test".into(),
+                llvm: "test".into(),
+                executable_bytes: 1,
+                stripped_jit_bytes: 2,
+                stripped_no_jit_bytes: 1,
                 stripped_jit_delta_bytes: 1,
                 schema_sha256: current_sha256("schema/jit-benchmark-v1.json"),
                 suites_lock_sha256: current_sha256("suites.lock"),
+                bun_version: None,
+                bun_path: None,
+                bun_sha256: None,
             },
             policy: model::SamplingPolicy {
-                latency_warmups: 5, latency_processes: 30, throughput_windows: 10,
-                throughput_window_ns: 1_000_000_000, bootstrap_resamples: 10_000,
+                latency_warmups: 5,
+                latency_processes: 30,
+                throughput_windows: 10,
+                throughput_window_ns: 1_000_000_000,
+                bootstrap_resamples: 10_000,
                 pairing: "paired".into(),
             },
-            modes: ["interpreter", "tier1", "tier2", "automatic"].into_iter()
-                .map(|mode| ModeResult { mode: mode.into(), workloads: workloads.clone() })
+            modes: ["interpreter", "tier1", "tier2", "automatic"]
+                .into_iter()
+                .map(|mode| ModeResult {
+                    mode: mode.into(),
+                    workloads: workloads.clone(),
+                })
                 .collect(),
             exclusions: vec![],
         }
@@ -602,7 +711,7 @@ mod tests {
         data.modes[2].workloads[0].samples[3].checksum = "wrong".into();
         assert!(validate(&data).unwrap_err().contains("checksum"));
         let mut data = valid_file();
-        data.modes[3].workloads[1].samples[4].opcode_fingerprint = 2;
+        data.modes[3].workloads[1].samples[4].opcode_fingerprint = Some(2);
         assert!(validate(&data).unwrap_err().contains("fingerprint"));
     }
     #[test]
@@ -626,5 +735,26 @@ mod tests {
         };
         let ci = joint_geomean_ci(Some(&b), Some(&c), "compute").unwrap();
         assert!(ci[0] > 1.99 && ci[1] < 2.01)
+    }
+
+    #[test]
+    fn fallback_only_timing_is_not_rendered_as_jit_speedup() {
+        let base = work("matrix", 200);
+        let mut fallback = work("matrix", 100);
+        fallback.designated_kernel = false;
+        for sample in &mut fallback.samples {
+            sample.native_entries = Some(0);
+            sample.tier1_entries = Some(0);
+            sample.tier2_entries = Some(0);
+        }
+        assert_eq!(
+            fmt_jit_speedup(&base, Some(&fallback), |s| s.native_entries.unwrap_or(0)),
+            "N/A (no native entry)"
+        );
+        fallback.samples[0].native_entries = Some(1);
+        assert_eq!(
+            fmt_jit_speedup(&base, Some(&fallback), |s| s.native_entries.unwrap_or(0)),
+            "2.00×"
+        );
     }
 }

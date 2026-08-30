@@ -13,6 +13,10 @@ name = "jit-bench-report"
 path = "report.rs"
 
 [[bin]]
+name = "jit-gpui-shell-report"
+path = "gpui_shell_report.rs"
+
+[[bin]]
 name = "jit-size-no-jit"
 path = "size-no-jit.rs"
 

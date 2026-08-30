@@ -6,6 +6,7 @@ use rquickjs_jit::{
     code_cache::CompiledArtifact,
     compiler::mock::FakeCompiler,
     runtime::{BackgroundCompiler, CompileState, Coordinator, FunctionKey, Tier},
+    JitTierPolicy,
 };
 
 fn snapshot(id: u64, generation: u64) -> rquickjs_jit::bytecode::VerifiedFunction {
@@ -251,7 +252,14 @@ fn eight_short_callbacks_do_not_request_a_snapshot() {
 ))]
 #[test]
 fn two_production_runtimes_compile_install_execute_and_retire_independently() {
-    let config = rquickjs_jit::JitConfig::default();
+    // This is a runtime/cache isolation test, so keep the installed baseline
+    // artifacts resident while their ownership and retirement are inspected.
+    // The default automatic policy may demote an unprofitable baseline after
+    // bounded Tier2 trials, making residency workload-dependent.
+    let config = rquickjs_jit::JitConfig::builder()
+        .tier_policy(JitTierPolicy::BaselineOnly)
+        .build()
+        .unwrap();
     let runtime_a = Runtime::new().unwrap();
     let jit_a = rquickjs_jit::Jit::attach(&runtime_a, config.clone()).unwrap();
     let context_a = Context::full(&runtime_a).unwrap();
@@ -298,7 +306,10 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
     }
     let a_metrics = jit_a.metrics();
     let b_metrics = jit_b.metrics();
-    assert!(a_metrics.code_bytes > 0 && b_metrics.code_bytes > 0);
+    assert!(
+        a_metrics.code_bytes > 0 && b_metrics.code_bytes > 0,
+        "A: {a_metrics:?}, B: {b_metrics:?}"
+    );
     assert!(a_metrics.native_entries > 0 && b_metrics.native_entries > 0);
     assert_eq!(a_metrics.native_entries, a_metrics.native_exits);
     assert_eq!(b_metrics.native_entries, b_metrics.native_exits);
