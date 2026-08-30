@@ -104,6 +104,23 @@ fn shutdown_cooperatively_cancels_a_blocked_compiler() {
     assert_eq!(coordinator.metrics().compile_failures, 1);
 }
 
+#[test]
+fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
+    let (compiler, control) = FakeCompiler::new(2);
+    let mut workers = BackgroundCompiler::new(Arc::new(compiler), 1, 2).unwrap();
+    let mut coordinator = Coordinator::with_limits(2, 1, 4, 1024);
+    for id in 31..=32 {
+        coordinator
+            .queue(FunctionKey::new(id, 1), Tier::Baseline, snapshot(id, 1))
+            .unwrap();
+        workers.dispatch_next(&mut coordinator).unwrap();
+        assert!(control.next_request().is_some());
+        control.complete(CompiledArtifact::fake(Tier::Baseline));
+    }
+    workers.shutdown(&mut coordinator);
+    assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
+}
+
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 #[test]
 fn production_backend_receives_owned_snapshots_automatically() {

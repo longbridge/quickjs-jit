@@ -73,7 +73,7 @@ impl BackgroundCompiler {
                                     .unwrap_or(Err(
                                         crate::compiler::CompileFailure::CompilerPanicked,
                                     ));
-                                let _ = sender.send(super::CompileCompletion {
+                                let _ = sender.try_send(super::CompileCompletion {
                                     key,
                                     requested_tier: tier,
                                     artifact_key,
@@ -129,6 +129,11 @@ impl BackgroundCompiler {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
-        while coordinator.drain_completions().may_have_remaining() {}
+        loop {
+            let drain = coordinator.drain_completions();
+            if drain.drained() == 0 {
+                break;
+            }
+        }
     }
 }
