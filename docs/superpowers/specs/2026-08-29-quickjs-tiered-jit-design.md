@@ -4,6 +4,7 @@
 **Date:** 2026-08-29  
 **Repository:** `rquickjs`  
 **Primary consumer:** `gpui-shell`
+**Speculative specialization requirements:** by @sunli829
 
 ## 1. Purpose
 
@@ -267,6 +268,155 @@ stack, bytecode position, and exception state. A failed guard reconstructs the
 exact interpreter state after all preceding side effects and before any later
 side effect. Frequently taken exits may receive compiled side paths; unstable
 sites are demoted and protected by retry limits.
+
+### 6.4 Runtime type prediction and speculative specialization
+
+Tier 2 must optimize the types that a function actually receives while the
+program is running. JavaScript source and initialization do not provide a
+sound, permanent type declaration. Compiling `add(a, b) { return a + b; }` as
+a generic tagged-value helper call is therefore not an optimizing JIT, even if
+the helper itself is native code.
+
+The required execution chain is:
+
+```text
+unoptimized execution
+    -> collect argument, return, operation, call-target, and shape feedback
+    -> classify stable monomorphic or bounded-polymorphic sites
+    -> compile a version specialized for that feedback
+    -> guard assumptions at entry or the earliest dominating point
+    -> keep specialized SSA values unboxed across the optimized region
+    -> deoptimize exactly when a guard or dependency fails
+    -> widen feedback, compile another version, or blacklist unstable sites
+```
+
+For a function repeatedly called as `add(Int32, Int32) -> Int32`, the optimized
+version must not call a generic add helper on its hot path. It must:
+
+1. guard both parameters once at function entry;
+2. unbox or decode them into machine integer registers;
+3. use a native integer add instruction;
+4. guard overflow with the target's overflow condition;
+5. return through an Int32-specialized representation, boxing only when the
+   caller or interpreter boundary requires a tagged `JSValue`;
+6. deoptimize to the exact bytecode position if an argument, result, or
+   overflow assumption fails.
+
+Conceptually, the hot path is equivalent to:
+
+```asm
+guard_int32 a, deopt
+guard_int32 b, deopt
+add result, a, b
+overflow deopt
+return_int32 result
+```
+
+The actual encoding follows QuickJS's pinned `JSValue` representation. The JIT
+must not change the public QuickJS/rquickjs value ABI merely to imitate V8's
+Smi encoding. Values may remain tagged at interpreter, heap, helper, and public
+API boundaries while optimized SSA values use `Int32`, `Float64`, or another
+proven representation internally.
+
+#### 6.4.1 Feedback model
+
+Feedback belongs to an exact function identity and generation. The minimum
+feedback collected is:
+
+- each formal parameter's observed type set and stability;
+- each return site's observed result type;
+- operand and result types for arithmetic, comparison, conversion, and branch
+  bytecodes;
+- call target identity plus argument and return signatures;
+- object shape/prototype identity and property offset where the versioned ABI
+  can expose them safely;
+- guard failures, overflows, exceptional exits, and deoptimization reasons.
+
+Feedback states widen monotonically. Numeric sites distinguish at least
+unseen, stable Int32, numeric Int32/Float64, and generic. Call and shape sites
+progress from unseen to monomorphic, bounded polymorphic, then megamorphic.
+Feedback is never treated as a source-language guarantee.
+
+#### 6.4.2 Function versioning
+
+The code cache may hold multiple optimized versions of one function generation,
+keyed by a bounded specialization signature such as:
+
+```text
+(arg0=Int32, arg1=Int32) -> Int32
+(arg0=Float64, arg1=Float64) -> Float64
+generic baseline fallback
+```
+
+Dispatch checks the cheapest profitable versions first. Version count, compile
+attempts, and memory are bounded. A site that repeatedly violates a
+specialization widens to a more general version or stops optimizing; it must
+not enter an unbounded compile/deopt loop.
+
+#### 6.4.3 SSA representation selection
+
+`Tagged`, `Int32`, `Float64`, and future object/reference representations are
+properties of SSA values, not helper implementation details. Guards and
+conversions are explicit IR nodes. Representation selection must:
+
+- keep parameter checks outside loops when they dominate all uses;
+- create representation-correct Phi nodes, including loop-carried values;
+- keep induction variables and accumulators unboxed across loop iterations;
+- eliminate redundant guards, boxing, and unboxing through dominance/GVN;
+- materialize tagged values only for GC-visible storage, generic helpers,
+  interpreter exits, or public/runtime boundaries;
+- preserve negative zero, NaN, infinities, Int32 overflow, coercion, BigInt
+  mixing, strings, exceptions, and observable side effects exactly.
+
+Range analysis may remove overflow and bounds guards only when the proof is
+encoded in IR and covered by a dependency or dominating guard.
+
+#### 6.4.4 Deoptimization contract
+
+Speculation is permitted only because deoptimization is exact. Every eager or
+lazy deopt point records bytecode PC, side-effect phase, logical arguments,
+locals, operand stack, exception state, and the physical location and
+representation of every live value. Deoptimization reconstructs the ordinary
+QuickJS interpreter frame without throwing a JavaScript exception.
+
+Repeated deoptimization widens the affected feedback, may install a bounded
+side path or new specialization, and eventually blacklists an unstable
+specialization. Old versions remain lifetime-safe until their final execution
+reference is released.
+
+#### 6.4.5 Objects and calls
+
+After numeric specialization, the next required specializations are:
+
+- monomorphic call-target guards with compiled-to-compiled calls;
+- object shape/prototype guards followed by fixed-offset property loads/stores;
+- bounded polymorphic inline caches for a small number of targets or shapes;
+- a megamorphic generic fallback rather than unbounded code growth.
+
+Unknown calls, proxies, accessors, prototype mutations, and GC-capable effects
+are explicit optimization barriers unless a versioned dependency proves the
+assumption remains valid.
+
+#### 6.4.6 Mandatory acceptance tests
+
+The optimized tier is not complete until all of these are proven:
+
+- `add(a, b)` repeatedly called with Int32 values installs an Int32-specialized
+  version whose hot path contains a native integer add and no generic-add
+  helper call;
+- changing an argument to Float64, String, BigInt, object, Proxy, or a throwing
+  coercion preserves exact interpreter semantics through deopt/fallback;
+- overflow, negative zero, NaN, Infinity, and Int32 boundary cases match the
+  interpreter;
+- an Int32 loop guards parameters outside the loop and keeps its Phi, induction
+  variable, and accumulator unboxed inside the loop;
+- return feedback is used by a specialized caller without boxing between
+  compiled functions while both versions' guards hold;
+- repeated instability produces bounded widening/backoff rather than a compile
+  loop;
+- disassembly or Cranelift IR assertions prove the native operation and absence
+  of generic helper calls; timing alone is insufficient evidence;
+- differential, deopt, GC, exception, reload, and Test262 gates remain green.
 
 ## 7. Hotness, compilation, and installation
 
@@ -690,4 +840,3 @@ allowed to weaken an earlier tier's correctness evidence.
   <https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon>
 - Microsoft Control Flow Guard:
   <https://learn.microsoft.com/en-us/windows/win32/secbp/control-flow-guard>
-
