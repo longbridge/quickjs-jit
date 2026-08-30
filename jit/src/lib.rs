@@ -74,7 +74,19 @@ fn artifact_environment(
     fn mix(hash: u64, value: u64) -> u64 {
         (hash ^ value).wrapping_mul(0x100000001b3)
     }
-    let target_isa = if cfg!(target_arch = "x86_64") { 1 } else { 2 };
+    let os_abi = if cfg!(target_os = "linux") {
+        1_u64
+    } else if cfg!(target_os = "macos") {
+        2
+    } else {
+        3
+    };
+    let architecture = if cfg!(target_arch = "x86_64") {
+        1_u64
+    } else {
+        2
+    };
+    let target_isa = (os_abi << 32) | architecture;
     let mut cpu_features = 0_u64;
     #[cfg(target_arch = "x86_64")]
     {
@@ -629,6 +641,7 @@ mod production_environment_tests {
         assert_ne!(base.runtime_id, other_runtime.runtime_id);
         assert_ne!(base.runtime_id, 0);
         assert_ne!(base.target_isa, 0);
+        assert_ne!(base.target_isa >> 32, 0, "target ISA includes the OS ABI");
         assert_ne!(base.abi_fingerprint, 0);
         assert_ne!(base.config_fingerprint, other_config.config_fingerprint);
         #[cfg(target_arch = "x86_64")]
