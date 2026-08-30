@@ -2,6 +2,7 @@
 
 mod baseline;
 mod frame_state;
+mod optimized;
 mod types;
 
 #[cfg(feature = "test-support")]
@@ -10,4 +11,9 @@ pub(crate) use baseline::MAX_HELPER_SCRATCH_SLOTS;
 pub use baseline::{BaselineIr, IrBlock, IrInstruction};
 pub(crate) use frame_state::FrameStateKind;
 pub use frame_state::{FrameSlot, FrameState, FrameStateId, FrameStateTable};
+pub use optimized::{
+    DeoptMap, DeoptOwnership, DeoptPhase, DeoptSlot, DeoptValidationError, Materialization,
+    MaterializedFrame, MaterializedValue, OptimizedFrameShape, OwnedMaterializeError,
+    OwnedMaterializedFrame, OwnedMaterializedValue,
+};
 pub use types::{BinaryOp, IrOp, StackOp, TaggedValue, UnaryOp};

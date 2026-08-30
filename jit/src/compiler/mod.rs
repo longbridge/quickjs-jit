@@ -54,6 +54,8 @@ impl CompileControl {
 pub mod baseline;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod helpers;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub mod optimized;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;

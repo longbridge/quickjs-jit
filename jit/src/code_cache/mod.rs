@@ -3,6 +3,8 @@
 mod artifact;
 mod evict;
 
+#[cfg(feature = "compiler")]
+pub use artifact::OptimizedArtifactMetadata;
 pub use artifact::{
     ArtifactDependency, ArtifactKey, BenefitSnapshot, CodeAllocation, CompiledArtifact, FrameState,
     FrameStateLocationKind, Relocation, RelocationKind, RelocationResolveError, RelocationTarget,

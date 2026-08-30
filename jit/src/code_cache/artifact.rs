@@ -287,6 +287,50 @@ pub struct ArtifactDependency {
     pub function: FunctionKey,
 }
 
+#[cfg(feature = "compiler")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptimizedArtifactMetadata {
+    feedback_epoch: u64,
+    deopt_sites: Box<[(crate::ir::OptimizedFrameShape, crate::ir::DeoptMap)]>,
+    boxes_elided: u64,
+    cse_eliminated: u64,
+    dead_nodes_eliminated: u64,
+}
+
+#[cfg(feature = "compiler")]
+impl OptimizedArtifactMetadata {
+    pub fn new(
+        feedback_epoch: u64,
+        deopt_sites: Vec<(crate::ir::OptimizedFrameShape, crate::ir::DeoptMap)>,
+        boxes_elided: u64,
+        cse_eliminated: u64,
+        dead_nodes_eliminated: u64,
+    ) -> Self {
+        Self {
+            feedback_epoch,
+            deopt_sites: deopt_sites.into_boxed_slice(),
+            boxes_elided,
+            cse_eliminated,
+            dead_nodes_eliminated,
+        }
+    }
+    pub const fn feedback_epoch(&self) -> u64 {
+        self.feedback_epoch
+    }
+    pub fn deopt_sites(&self) -> &[(crate::ir::OptimizedFrameShape, crate::ir::DeoptMap)] {
+        &self.deopt_sites
+    }
+    pub const fn boxes_elided(&self) -> u64 {
+        self.boxes_elided
+    }
+    pub const fn cse_eliminated(&self) -> u64 {
+        self.cse_eliminated
+    }
+    pub const fn dead_nodes_eliminated(&self) -> u64 {
+        self.dead_nodes_eliminated
+    }
+}
+
 impl ArtifactDependency {
     pub const fn new(function: FunctionKey) -> Self {
         Self { function }
@@ -338,6 +382,8 @@ pub struct CompiledArtifact {
     frame_states: Box<[FrameState]>,
     dependencies: Box<[ArtifactDependency]>,
     benefit: BenefitCounters,
+    #[cfg(feature = "compiler")]
+    optimized: Option<OptimizedArtifactMetadata>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     relocatable: Option<Box<crate::compiler::baseline::RelocatableCode>>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -375,6 +421,8 @@ impl CompiledArtifact {
             frame_states: frame_states.into_boxed_slice(),
             dependencies: dependencies.into_boxed_slice(),
             benefit: BenefitCounters::default(),
+            #[cfg(feature = "compiler")]
+            optimized: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -417,6 +465,22 @@ impl CompiledArtifact {
         &self.dependencies
     }
 
+    pub fn with_dependencies(mut self, dependencies: Vec<ArtifactDependency>) -> Self {
+        self.dependencies = dependencies.into_boxed_slice();
+        self
+    }
+
+    #[cfg(feature = "compiler")]
+    pub fn optimized_metadata(&self) -> Option<&OptimizedArtifactMetadata> {
+        self.optimized.as_ref()
+    }
+
+    #[cfg(feature = "compiler")]
+    pub fn with_optimized_metadata(mut self, metadata: OptimizedArtifactMetadata) -> Self {
+        self.optimized = Some(metadata);
+        self
+    }
+
     pub fn benefit(&self) -> BenefitSnapshot {
         self.benefit.snapshot()
     }
@@ -445,7 +509,22 @@ impl CompiledArtifact {
         for state in &self.frame_states {
             total = add_slice::<u16>(total, state.slots.len())?;
         }
-        add_slice::<ArtifactDependency>(total, self.dependencies.len())
+        total = add_slice::<ArtifactDependency>(total, self.dependencies.len())?;
+        #[cfg(feature = "compiler")]
+        if let Some(optimized) = &self.optimized {
+            total = total.checked_add(core::mem::size_of::<OptimizedArtifactMetadata>())?;
+            total = add_slice::<(crate::ir::OptimizedFrameShape, crate::ir::DeoptMap)>(
+                total,
+                optimized.deopt_sites.len(),
+            )?;
+            for (_, map) in &optimized.deopt_sites {
+                total = total.checked_add(
+                    map.materialization_count()
+                        .checked_mul(core::mem::size_of::<crate::ir::Materialization>())?,
+                )?;
+            }
+        }
+        Some(total)
     }
 
     pub fn code_bytes(&self) -> usize {
@@ -508,6 +587,8 @@ impl CompiledArtifact {
             frame_states: Box::new([]),
             dependencies: Box::new([]),
             benefit: BenefitCounters::default(),
+            #[cfg(feature = "compiler")]
+            optimized: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]

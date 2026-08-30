@@ -14,7 +14,7 @@ use crate::{
     JitMetrics,
 };
 
-use super::{install, invalidate};
+use super::{install, invalidate, DependencyGraph, DependencyKey};
 
 pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
     compiler: &C,
@@ -343,6 +343,7 @@ pub struct Coordinator {
     cache: CodeCache,
     installed_keys: HashMap<(FunctionKey, Tier), ArtifactKey>,
     environment: ArtifactEnvironment,
+    dependencies: DependencyGraph,
 }
 
 impl Coordinator {
@@ -420,6 +421,7 @@ impl Coordinator {
             cache,
             installed_keys: HashMap::new(),
             environment,
+            dependencies: DependencyGraph::default(),
         }
     }
 
@@ -600,6 +602,32 @@ impl Coordinator {
                     return;
                 }
                 let artifact_key = artifact.key();
+                #[cfg(feature = "compiler")]
+                let optimization_metrics = artifact.optimized_metadata().map(|metadata| {
+                    (
+                        metadata.boxes_elided(),
+                        metadata.cse_eliminated(),
+                        metadata.dead_nodes_eliminated(),
+                    )
+                });
+                let dependency_versions = artifact
+                    .dependencies()
+                    .iter()
+                    .map(|dependency| {
+                        (
+                            DependencyKey::function(dependency.function),
+                            dependency.function.generation,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if dependency_versions.iter().any(|(dependency, generation)| {
+                    let DependencyKey::Function(function) = *dependency;
+                    function.generation != *generation
+                        || self.current_generations.get(&function.id) != Some(generation)
+                }) {
+                    self.record_failure(completion.key, completion.requested_tier);
+                    return;
+                }
                 match install::publish(&mut self.cache, artifact) {
                     Ok(insert) => {
                         for evicted in insert.evictions() {
@@ -614,6 +642,22 @@ impl Coordinator {
                             record.published = Some(completion.requested_tier);
                         }
                         self.metrics.installed = self.metrics.installed.saturating_add(1);
+                        #[cfg(feature = "compiler")]
+                        if let Some((boxes, cse, dead)) = optimization_metrics {
+                            self.metrics.boxes_elided =
+                                self.metrics.boxes_elided.saturating_add(boxes);
+                            self.metrics.cse_eliminated =
+                                self.metrics.cse_eliminated.saturating_add(cse);
+                            self.metrics.dead_nodes_eliminated =
+                                self.metrics.dead_nodes_eliminated.saturating_add(dead);
+                        }
+                        let _ = self.dependencies.install(
+                            DependencyKey::function(completion.key),
+                            completion.key.generation,
+                            dependency_versions
+                                .iter()
+                                .map(|(dependency, _)| *dependency),
+                        );
                     }
                     Err(_) => self.record_failure(completion.key, completion.requested_tier),
                 }
@@ -699,7 +743,15 @@ impl Coordinator {
             self.retire_older_generations(key);
             self.current_generations.insert(key.id, key.generation);
         }
-        self.retire_state(key);
+        let invalidated = self.dependencies.invalidate(DependencyKey::function(key));
+        self.metrics.dependency_invalidations = self
+            .metrics
+            .dependency_invalidations
+            .saturating_add(invalidated.len() as u64);
+        for dependency in invalidated {
+            let DependencyKey::Function(function) = dependency;
+            self.retire_state(function);
+        }
     }
 
     pub fn state(&self, key: FunctionKey) -> CompileState {
@@ -752,6 +804,17 @@ impl Coordinator {
     pub fn record_resource_limit_rejection(&mut self) {
         self.metrics.resource_limit_rejections =
             self.metrics.resource_limit_rejections.saturating_add(1);
+    }
+
+    pub fn record_tier2_entry(&mut self) {
+        self.metrics.tier2_entries = self.metrics.tier2_entries.saturating_add(1);
+    }
+    pub fn record_deopt(&mut self, guard_failure: bool) {
+        self.metrics.deopts = self.metrics.deopts.saturating_add(1);
+        self.metrics.side_exits = self.metrics.side_exits.saturating_add(1);
+        if guard_failure {
+            self.metrics.tier2_guard_failures = self.metrics.tier2_guard_failures.saturating_add(1);
+        }
     }
 
     pub fn pin(&mut self, key: FunctionKey, tier: Tier) -> Option<ExecutionPin> {

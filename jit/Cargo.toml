@@ -80,3 +80,11 @@ required-features = ["compiler", "test-support"]
 [[test]]
 name = "differential"
 required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "optimized"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "deopt"
+required-features = ["compiler", "test-support"]

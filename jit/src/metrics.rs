@@ -39,6 +39,15 @@ pub struct JitMetrics {
     pub osr_not_ready: u64,
     pub osr_map_misses: u64,
     pub osr_validation_failures: u64,
+    pub tier2_entries: u64,
+    pub tier2_guard_failures: u64,
+    pub deopts: u64,
+    pub side_exits: u64,
+    pub optimized_demotions: u64,
+    pub boxes_elided: u64,
+    pub cse_eliminated: u64,
+    pub dead_nodes_eliminated: u64,
+    pub dependency_invalidations: u64,
 }
 
 impl JitMetrics {
@@ -80,6 +89,15 @@ impl JitMetrics {
             osr_not_ready: 0,
             osr_map_misses: 0,
             osr_validation_failures: 0,
+            tier2_entries: 0,
+            tier2_guard_failures: 0,
+            deopts: 0,
+            side_exits: 0,
+            optimized_demotions: 0,
+            boxes_elided: 0,
+            cse_eliminated: 0,
+            dead_nodes_eliminated: 0,
+            dependency_invalidations: 0,
         }
     }
 

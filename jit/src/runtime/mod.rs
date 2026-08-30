@@ -2,6 +2,7 @@
 
 mod background;
 mod coordinator;
+mod feedback;
 mod hotness;
 mod install;
 mod invalidate;
@@ -14,10 +15,15 @@ pub use coordinator::{
     CompileState, CompletionDrain, CompletionSendError, CompletionSender, Coordinator, FunctionKey,
     QueueError, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
+pub use feedback::{
+    FeedbackKind, FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable,
+    ObservedType,
+};
 pub use hotness::{
     AdaptiveInputs, HotDecision, HotReason, HotThresholds, HotnessState, BASE_CALL_THRESHOLD,
     BASE_LOOP_THRESHOLD,
 };
+pub use invalidate::{DependencyError, DependencyGraph, DependencyKey};
 pub use osr::{OsrKey, OsrMap};
 
 #[cfg(test)]

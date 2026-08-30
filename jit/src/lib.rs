@@ -458,6 +458,10 @@ struct ProductionBackend {
     workers: runtime::BackgroundCompiler,
     requested: std::collections::HashSet<runtime::FunctionKey>,
     hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
+    optimizing_requested: std::collections::HashSet<runtime::FunctionKey>,
+    optimizing_hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
+    optimizing_snapshots:
+        std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
     native_exits: u64,
@@ -864,8 +868,9 @@ impl ProductionBackend {
         config: JitConfig,
         metrics: Arc<Mutex<JitMetrics>>,
     ) -> Result<Self, JitError> {
-        let compiler = Arc::new(compiler::baseline::BaselineCompiler::host());
-        let environment = artifact_environment(runtime_id, info, &config, &compiler);
+        let identity_compiler = compiler::baseline::BaselineCompiler::host();
+        let environment = artifact_environment(runtime_id, info, &config, &identity_compiler);
+        let compiler = Arc::new(compiler::optimized::TieredCompiler::host());
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
             compiler,
             config.workers(),
@@ -891,6 +896,9 @@ impl ProductionBackend {
             workers,
             requested: std::collections::HashSet::new(),
             hotness: std::collections::HashMap::new(),
+            optimizing_requested: std::collections::HashSet::new(),
+            optimizing_hotness: std::collections::HashMap::new(),
+            optimizing_snapshots: std::collections::HashMap::new(),
             metrics,
             native_entries: 0,
             native_exits: 0,
@@ -920,6 +928,31 @@ impl ProductionBackend {
         self.clock = self.clock.saturating_add(1);
         self.coordinator.advance_clock(self.clock);
         self.coordinator.drain_completions();
+        let ready_for_tier2 = self
+            .optimizing_snapshots
+            .keys()
+            .copied()
+            .filter(|key| {
+                matches!(
+                    self.coordinator.tier_state(*key, runtime::Tier::Baseline),
+                    runtime::CompileState::Installed(_)
+                ) && matches!(
+                    self.coordinator.tier_state(*key, runtime::Tier::Optimizing),
+                    runtime::CompileState::Cold
+                )
+            })
+            .collect::<Vec<_>>();
+        for key in ready_for_tier2 {
+            if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
+                if self
+                    .coordinator
+                    .queue(key, runtime::Tier::Optimizing, snapshot.clone())
+                    .is_err()
+                {
+                    self.optimizing_snapshots.insert(key, snapshot);
+                }
+            }
+        }
         self.workers.drain_overflow(
             &mut self.coordinator,
             runtime::DEFAULT_COMPLETION_DRAIN_BUDGET,
@@ -1014,6 +1047,41 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
         if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Baseline),
+            runtime::CompileState::Installed(_)
+        ) {
+            if !matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Cold | runtime::CompileState::Backoff { .. }
+            ) || self.optimizing_requested.contains(&key)
+            {
+                return 0;
+            }
+            let thresholds = runtime::HotThresholds {
+                calls: self.config.call_threshold(),
+                loops: self.config.loop_threshold(),
+                rationale: runtime::HotReason::NeutralBase,
+            };
+            let hotness = self.optimizing_hotness.entry(key).or_default();
+            let decision = if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_CALL
+                && event.pc == 0
+            {
+                hotness.record_call_event_with_thresholds(event.count, thresholds)
+            } else if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_LOOP
+                && event.pc != 0
+            {
+                hotness.record_loop_event_with_thresholds(event.count, thresholds)
+            } else {
+                return 0;
+            };
+            if matches!(decision, runtime::HotDecision::Queue(_)) {
+                self.optimizing_requested.insert(key);
+                self.snapshot_requests = self.snapshot_requests.saturating_add(1);
+                return 1;
+            }
+            return 0;
+        }
+        if matches!(
+            self.coordinator.tier_state(key, runtime::Tier::Baseline),
             runtime::CompileState::Blacklisted | runtime::CompileState::Installed(_)
         ) {
             self.requested.insert(key);
@@ -1103,10 +1171,13 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             adaptive.thresholds().rationale,
             runtime::HotReason::NeutralBase
         );
-        match self
-            .coordinator
-            .queue(key, runtime::Tier::Baseline, verified)
-        {
+        let requested_tier = if self.optimizing_requested.contains(&key) {
+            runtime::Tier::Optimizing
+        } else {
+            runtime::Tier::Baseline
+        };
+        let tier2_snapshot = (requested_tier == runtime::Tier::Baseline).then(|| verified.clone());
+        match self.coordinator.queue(key, requested_tier, verified) {
             Ok(()) => {
                 match self.queue_reasons.get(&key).copied() {
                     Some(runtime::HotReason::CallThreshold) => {
@@ -1119,6 +1190,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 }
                 self.adaptive_neutral_queues = self.adaptive_neutral_queues.saturating_add(1);
                 self.prequeue_backoff.remove(&key);
+                if let Some(snapshot) = tier2_snapshot {
+                    self.optimizing_snapshots.insert(key, snapshot);
+                }
             }
             Err(runtime::QueueError::Blacklisted | runtime::QueueError::NotReady) => {
                 // An active/installed/blacklisted coordinator state owns the
@@ -1150,7 +1224,17 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.maintenance();
         let Some(pin) = self.coordinator.pin(
             runtime::FunctionKey::new(id, generation),
-            runtime::Tier::Baseline,
+            if matches!(
+                self.coordinator.tier_state(
+                    runtime::FunctionKey::new(id, generation),
+                    runtime::Tier::Optimizing
+                ),
+                runtime::CompileState::Installed(_)
+            ) {
+                runtime::Tier::Optimizing
+            } else {
+                runtime::Tier::Baseline
+            },
         ) else {
             if pc != 0 {
                 self.osr_not_ready = self.osr_not_ready.saturating_add(1);
@@ -1214,6 +1298,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
 
     fn native_enter(&mut self, _id: u64, _generation: u64, pc: u32) {
         self.native_entries = self.native_entries.saturating_add(1);
+        if matches!(
+            self.coordinator.tier_state(
+                runtime::FunctionKey::new(_id, _generation),
+                runtime::Tier::Optimizing
+            ),
+            runtime::CompileState::Installed(_)
+        ) {
+            self.coordinator.record_tier2_entry();
+        }
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
@@ -1231,6 +1324,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
+            self.coordinator.record_deopt(true);
         }
         self.maintenance();
     }
@@ -1241,6 +1335,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.queue_reasons.remove(&key);
         self.prequeue_backoff.remove(&key);
         self.hotness.remove(&key);
+        self.optimizing_requested.remove(&key);
+        self.optimizing_hotness.remove(&key);
+        self.optimizing_snapshots.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();
     }

@@ -205,6 +205,12 @@ enum CompilePolicy {
     ImplementedForCompilerTest,
 }
 
+#[derive(Clone, Copy)]
+enum GuardExit {
+    Retry,
+    Deopt,
+}
+
 impl BaselineCompiler {
     pub fn host() -> Self {
         let mut flag_builder = settings::builder();
@@ -257,7 +263,21 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
     ) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy_start(function, policy, control, None)
+        self.compile_with_policy_start(function, policy, control, None, GuardExit::Retry)
+    }
+
+    pub(crate) fn compile_optimizing(
+        &self,
+        function: &VerifiedFunction,
+        control: Option<&CompileControl>,
+    ) -> Result<RelocatableCode, CompileFailure> {
+        self.compile_with_policy_start(
+            function,
+            CompilePolicy::AdvertisedOnly,
+            control,
+            None,
+            GuardExit::Deopt,
+        )
     }
 
     fn compile_with_policy_start(
@@ -266,6 +286,7 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
         osr_start: Option<u32>,
+        guard_exit: GuardExit,
     ) -> Result<RelocatableCode, CompileFailure> {
         if let Some(control) = control {
             control.check()?;
@@ -319,6 +340,7 @@ impl BaselineCompiler {
                 layout,
                 &entry_analysis,
                 osr_start,
+                guard_exit,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -489,8 +511,13 @@ impl BaselineCompiler {
                 else {
                     continue;
                 };
-                let child =
-                    self.compile_with_policy_start(function, policy, control, Some(point.pc()))?;
+                let child = self.compile_with_policy_start(
+                    function,
+                    policy,
+                    control,
+                    Some(point.pc()),
+                    guard_exit,
+                )?;
                 code.osr_codes.push((map, child));
             }
         }
@@ -564,7 +591,10 @@ impl Compiler for BaselineCompiler {
     }
 }
 
-fn artifact_from_relocatable(request: CompileRequest, code: RelocatableCode) -> CompiledArtifact {
+pub(crate) fn artifact_from_relocatable(
+    request: CompileRequest,
+    code: RelocatableCode,
+) -> CompiledArtifact {
     let mut charged_code = Vec::with_capacity(code.total_code_bytes());
     let mut charged_relocations = Vec::new();
     let mut charged_stack_maps = Vec::new();
@@ -1721,6 +1751,7 @@ fn lower_function(
     layout: FrameLayout,
     analysis: &EntryAnalysis,
     osr_start: Option<u32>,
+    guard_exit: GuardExit,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -1751,11 +1782,19 @@ fn lower_function(
     let frame = params[1];
 
     if analysis.retry_before_entry {
+        let resume_pc = matches!(guard_exit, GuardExit::Deopt).then(|| {
+            builder
+                .ins()
+                .load(pointer_type, MemFlags::new(), frame, layout.pc)
+        });
         emit_exit(
             builder,
             sret,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
-            None,
+            match guard_exit {
+                GuardExit::Retry => qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+                GuardExit::Deopt => qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+            },
+            resume_pc,
             pointer_type,
         );
         return Ok(());
@@ -2569,11 +2608,19 @@ fn lower_function(
 
     builder.set_srcloc(SourceLoc::default());
     builder.switch_to_block(retry);
+    let resume_pc = matches!(guard_exit, GuardExit::Deopt).then(|| {
+        builder
+            .ins()
+            .load(pointer_type, MemFlags::new(), frame, layout.pc)
+    });
     emit_exit(
         builder,
         sret,
-        qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
-        None,
+        match guard_exit {
+            GuardExit::Retry => qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            GuardExit::Deopt => qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        },
+        resume_pc,
         pointer_type,
     );
     builder.switch_to_block(invariant_trap);
