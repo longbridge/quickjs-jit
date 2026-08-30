@@ -73,7 +73,30 @@ The release build repeats existing upstream QuickJS C compiler warnings about
 
 There are no property/shape/global/callee-specialized mid-instruction guards in
 this first tier. Those paths reject Tier 2 and retain Tier 1/interpreter
-semantics. Consequently, the only production deopt currently emitted is the
-pre-mutation numeric entry guard; the complete two-phase materializer is
-retained and tested for later mid-function guards but is not invoked by an
-unsupported specialization.
+semantics. The supported numeric/local subset now has both entry and
+loop-header guards; unsupported effectful specialization still rejects Tier 2.
+
+## Critical follow-up: independent machine lowering and mid-loop deopt
+
+The production optimizing compiler no longer translates, accepts, or lowers
+`BaselineIr`. `OptimizedIr::translate` builds its own CFG blocks, typed value
+representations, effects, guard identities, live frame shapes, and rewritten
+machine plan directly from verified bytecode. A separate Cranelift builder
+consumes only that optimizing IR. Tier 1 and Tier 2 share only target encoding,
+unwind packaging, and the stable frame ABI.
+
+The native numeric loop keeps int32 additions unboxed with Cranelift's checked
+`sadd_overflow`, widens overflow to float64, and checks the selected int32
+representation at the next real loop header. Guard zero is the entry map;
+loop guards use their deterministic optimized-IR map identities. At loop
+boundaries the operand stack is empty, every live local has already been
+committed to QuickJS's `var_buf`, and arguments remain in `arg_buf`, so the
+deopt transaction has no owning temporary roots and cannot partially publish.
+The exit writes the exact loop-header PC and resumes after the completed
+overflowing add, avoiding side-effect replay.
+
+Production verification executes `f(100000, 0)`: the accumulator crosses the
+int32 domain during native Tier 2 execution, the next loop guard deoptimizes,
+QuickJS resumes at that header, and the final result is exactly
+`4_999_950_000`. The same run separately verifies entry deopt for a string
+argument. The optimized test suite is now 15/15 and the deopt suite 4/4.
