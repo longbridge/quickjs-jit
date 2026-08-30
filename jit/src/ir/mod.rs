@@ -12,8 +12,9 @@ pub use baseline::{BaselineIr, IrBlock, IrInstruction};
 pub(crate) use frame_state::FrameStateKind;
 pub use frame_state::{FrameSlot, FrameState, FrameStateId, FrameStateTable};
 pub use optimized::{
-    DeoptMap, DeoptOwnership, DeoptPhase, DeoptSlot, DeoptValidationError, Materialization,
-    MaterializedFrame, MaterializedValue, OptimizedFrameShape, OwnedMaterializeError,
-    OwnedMaterializedFrame, OwnedMaterializedValue,
+    DeoptMap, DeoptOwnership, DeoptPhase, DeoptSlot, DeoptValidationError, GuardSite,
+    Materialization, MaterializedFrame, MaterializedValue, OptimizedBlock, OptimizedEffect,
+    OptimizedFrameShape, OptimizedIr, OptimizedMetrics, OptimizedNode, OptimizedNodeKind,
+    OwnedMaterializeError, OwnedMaterializedFrame, OwnedMaterializedValue, ValueRepresentation,
 };
 pub use types::{BinaryOp, IrOp, StackOp, TaggedValue, UnaryOp};

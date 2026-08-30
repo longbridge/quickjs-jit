@@ -1,4 +1,301 @@
 use super::TaggedValue;
+use crate::{bytecode::VerifiedFunction, compiler::CompileFailure};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueRepresentation {
+    Tagged,
+    Int32,
+    Float64,
+    Effect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptimizedEffect {
+    Pure,
+    FrameWrite,
+    Control,
+    Poll,
+    Reentrant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptimizedNodeKind {
+    GuardNumeric { guard: u32, mid_loop: bool },
+    Bytecode { opcode: Box<str> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptimizedNode {
+    id: u32,
+    pc: u32,
+    kind: OptimizedNodeKind,
+    representation: ValueRepresentation,
+    effect: OptimizedEffect,
+    eliminated: bool,
+}
+
+impl OptimizedNode {
+    pub const fn id(&self) -> u32 {
+        self.id
+    }
+    pub const fn pc(&self) -> u32 {
+        self.pc
+    }
+    pub fn kind(&self) -> &OptimizedNodeKind {
+        &self.kind
+    }
+    pub const fn representation(&self) -> ValueRepresentation {
+        self.representation
+    }
+    pub const fn effect(&self) -> OptimizedEffect {
+        self.effect
+    }
+    pub const fn eliminated(&self) -> bool {
+        self.eliminated
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptimizedBlock {
+    start_pc: u32,
+    successors: Box<[u32]>,
+    loop_header: bool,
+    nodes: Box<[u32]>,
+}
+
+impl OptimizedBlock {
+    pub const fn start_pc(&self) -> u32 {
+        self.start_pc
+    }
+    pub fn successors(&self) -> &[u32] {
+        &self.successors
+    }
+    pub const fn is_loop_header(&self) -> bool {
+        self.loop_header
+    }
+    pub fn nodes(&self) -> &[u32] {
+        &self.nodes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OptimizedMetrics {
+    pub boxes_elided: u64,
+    pub cse_eliminated: u64,
+    pub dead_nodes_eliminated: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuardSite {
+    guard: u32,
+    shape: OptimizedFrameShape,
+    map: DeoptMap,
+}
+
+impl GuardSite {
+    pub const fn guard(&self) -> u32 {
+        self.guard
+    }
+    pub const fn shape(&self) -> OptimizedFrameShape {
+        self.shape
+    }
+    pub const fn map(&self) -> &DeoptMap {
+        &self.map
+    }
+}
+
+/// QuickJS-specific optimizing IR. It is translated directly from verified
+/// bytecode and never accepts or contains the baseline IR.
+#[derive(Clone, Debug)]
+pub struct OptimizedIr {
+    blocks: Box<[OptimizedBlock]>,
+    nodes: Box<[OptimizedNode]>,
+    machine_plan: Box<[OptimizedNode]>,
+    guards: Box<[GuardSite]>,
+    metrics: OptimizedMetrics,
+    feedback_epoch: u64,
+}
+
+impl OptimizedIr {
+    pub fn translate(
+        function: &VerifiedFunction,
+        feedback_epoch: u64,
+    ) -> Result<Self, CompileFailure> {
+        if feedback_epoch == 0 {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+        let snapshot = function.snapshot();
+        let shape = OptimizedFrameShape::new(
+            snapshot.arg_count(),
+            snapshot.local_count(),
+            snapshot.stack_size(),
+        );
+        let mut nodes = Vec::new();
+        let mut guards = Vec::new();
+        let mut next_guard = 0u32;
+        let mut make_guard = |pc: u32,
+                              mid_loop: bool,
+                              nodes: &mut Vec<OptimizedNode>,
+                              guards: &mut Vec<GuardSite>|
+         -> Result<u32, CompileFailure> {
+            let guard = next_guard;
+            next_guard = next_guard
+                .checked_add(1)
+                .ok_or(CompileFailure::ResourceLimit)?;
+            let mut recipes = Vec::with_capacity(shape.slot_count());
+            let mut flat = 0u16;
+            for index in 0..snapshot.arg_count() {
+                recipes.push(Materialization::argument(
+                    index,
+                    MaterializedValue::TaggedSlot(flat),
+                ));
+                flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+            }
+            for index in 0..snapshot.local_count() {
+                recipes.push(Materialization::local(
+                    index,
+                    MaterializedValue::TaggedSlot(flat),
+                ));
+                flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+            }
+            for index in 0..snapshot.stack_size() {
+                recipes.push(Materialization::stack(
+                    index,
+                    MaterializedValue::TaggedSlot(flat),
+                ));
+                flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+            }
+            let map = DeoptMap::new(guard, pc, DeoptPhase::BeforeEffect(0), recipes);
+            map.validate(shape)
+                .map_err(|_| CompileFailure::InvalidArtifact)?;
+            let id = u32::try_from(nodes.len()).map_err(|_| CompileFailure::ResourceLimit)?;
+            nodes.push(OptimizedNode {
+                id,
+                pc,
+                kind: OptimizedNodeKind::GuardNumeric { guard, mid_loop },
+                representation: ValueRepresentation::Effect,
+                effect: OptimizedEffect::Control,
+                eliminated: false,
+            });
+            guards.push(GuardSite { guard, shape, map });
+            Ok(id)
+        };
+        make_guard(0, false, &mut nodes, &mut guards)?;
+        let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
+        let mut boxes_elided = 0u64;
+        for block in function.control_flow_graph().blocks() {
+            let mut block_nodes = Vec::new();
+            if function
+                .control_flow_graph()
+                .is_loop_header(block.start_pc())
+            {
+                block_nodes.push(make_guard(block.start_pc(), true, &mut nodes, &mut guards)?);
+            }
+            for instruction in &function.instructions()[block.instruction_range()] {
+                let name = instruction.opcode().name();
+                let (representation, effect) = classify_optimized_opcode(name)?;
+                boxes_elided = boxes_elided.saturating_add(u64::from(matches!(
+                    representation,
+                    ValueRepresentation::Int32 | ValueRepresentation::Float64
+                )));
+                let id = u32::try_from(nodes.len()).map_err(|_| CompileFailure::ResourceLimit)?;
+                // Stack drops and bytecode nops have no machine operation once
+                // their SSA uses are dead; producers are removed by the
+                // backwards liveness pass in the lowering stage.
+                nodes.push(OptimizedNode {
+                    id,
+                    pc: instruction.pc(),
+                    kind: OptimizedNodeKind::Bytecode {
+                        opcode: name.into(),
+                    },
+                    representation,
+                    effect,
+                    eliminated: matches!(name, "nop" | "drop"),
+                });
+                block_nodes.push(id);
+            }
+            blocks.push(OptimizedBlock {
+                start_pc: block.start_pc(),
+                successors: block.successors().into(),
+                loop_header: function
+                    .control_flow_graph()
+                    .is_loop_header(block.start_pc()),
+                nodes: block_nodes.into(),
+            });
+        }
+        let dead_nodes_eliminated = nodes.iter().filter(|node| node.eliminated).count() as u64;
+        let machine_plan = nodes
+            .iter()
+            .filter(|node| !node.eliminated)
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(Self {
+            blocks: blocks.into(),
+            nodes: nodes.into(),
+            machine_plan: machine_plan.into(),
+            guards: guards.into(),
+            metrics: OptimizedMetrics {
+                boxes_elided,
+                cse_eliminated: 0,
+                dead_nodes_eliminated,
+            },
+            feedback_epoch,
+        })
+    }
+    pub fn blocks(&self) -> &[OptimizedBlock] {
+        &self.blocks
+    }
+    pub fn nodes(&self) -> &[OptimizedNode] {
+        &self.nodes
+    }
+    pub fn machine_plan(&self) -> &[OptimizedNode] {
+        &self.machine_plan
+    }
+    pub fn guard_maps(&self) -> &[GuardSite] {
+        &self.guards
+    }
+    pub const fn metrics(&self) -> OptimizedMetrics {
+        self.metrics
+    }
+    pub const fn feedback_epoch(&self) -> u64 {
+        self.feedback_epoch
+    }
+}
+
+fn classify_optimized_opcode(
+    name: &str,
+) -> Result<(ValueRepresentation, OptimizedEffect), CompileFailure> {
+    let result = match name {
+        "push_i8" | "push_i16" | "push_i32" | "push_0" | "push_1" | "push_2" | "push_3"
+        | "push_4" | "push_5" | "push_6" | "push_7" | "add_loc" | "inc_loc" | "dec_loc"
+        | "post_inc" | "post_dec" | "inc" | "dec" | "shl" | "sar" | "shr" | "and" | "or"
+        | "xor" => (ValueRepresentation::Int32, OptimizedEffect::Pure),
+        "add" | "sub" | "mul" | "div" | "mod" | "plus" | "neg" => {
+            (ValueRepresentation::Float64, OptimizedEffect::Pure)
+        }
+        "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" | "get_loc" | "get_loc8"
+        | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3" | "get_loc_check" | "get_loc0_loc1"
+        | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3" => {
+            (ValueRepresentation::Tagged, OptimizedEffect::Pure)
+        }
+        "put_arg"
+        | "put_loc"
+        | "put_loc8"
+        | "put_loc0"
+        | "put_loc1"
+        | "put_loc2"
+        | "put_loc3"
+        | "put_loc_check"
+        | "put_loc_check_init"
+        | "set_loc_uninitialized"
+        | "drop" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
+        "if_false" | "if_true" | "if_false8" | "if_true8" | "goto" | "goto8" | "goto16"
+        | "return" | "return_undef" | "lt" | "lte" | "gt" | "gte" | "eq" | "neq" | "strict_eq"
+        | "strict_neq" | "lnot" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),
+        _ => return Err(CompileFailure::UnsupportedOpcode),
+    };
+    Ok(result)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DeoptSlot {

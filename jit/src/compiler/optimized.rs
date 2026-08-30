@@ -252,98 +252,19 @@ impl Tier2Compiler {
         function: &VerifiedFunction,
         feedback_epoch: u64,
     ) -> Result<OptimizedArtifactMetadata, CompileFailure> {
-        let ir = BaselineIr::translate(function)?;
-        if ir
-            .blocks
+        let ir = OptimizedIr::translate(function, feedback_epoch)?;
+        let sites = ir
+            .guard_maps()
             .iter()
-            .flat_map(|block| &block.instructions)
-            .any(|instruction| {
-                !matches!(
-                    instruction.op,
-                    IrOp::Poll { .. }
-                        | IrOp::OsrLabel { .. }
-                        | IrOp::Nop
-                        | IrOp::Push(_)
-                        | IrOp::GetArgument(_)
-                        | IrOp::GetLocal(_)
-                        | IrOp::GetLocalChecked(_)
-                        | IrOp::PutArgument { .. }
-                        | IrOp::PutLocal { .. }
-                        | IrOp::PutLocalChecked { .. }
-                        | IrOp::SetLocalUninitialized(_)
-                        | IrOp::Drop
-                        | IrOp::Stack(_)
-                        | IrOp::AddLocal(_)
-                        | IrOp::Binary(_)
-                        | IrOp::Unary(_)
-                        | IrOp::PostUnary(_)
-                        | IrOp::LocalUnary { .. }
-                        | IrOp::Jump(_)
-                        | IrOp::Branch { .. }
-                        | IrOp::Return
-                        | IrOp::ReturnUndefined
-                )
-            })
-        {
-            return Err(CompileFailure::UnsupportedOpcode);
-        }
-        let mut sites = Vec::new();
-        let boxes_elided = ir
-            .blocks
-            .iter()
-            .flat_map(|block| &block.instructions)
-            .filter(|instruction| {
-                matches!(
-                    instruction.op,
-                    IrOp::AddLocal(_)
-                        | IrOp::Binary(_)
-                        | IrOp::Unary(_)
-                        | IrOp::PostUnary(_)
-                        | IrOp::LocalUnary { .. }
-                )
-            })
-            .count() as u64;
-        for (guard, state) in ir.frame_states.iter().enumerate() {
-            let mut arguments = 0u16;
-            let mut locals = 0u16;
-            let mut stack = 0u16;
-            let mut recipes = Vec::with_capacity(state.slots.len());
-            for (flat, slot) in state.slots.iter().copied().enumerate() {
-                let value = MaterializedValue::TaggedSlot(
-                    u16::try_from(flat).map_err(|_| CompileFailure::ResourceLimit)?,
-                );
-                recipes.push(match slot {
-                    FrameSlot::Argument(index) => {
-                        arguments = arguments.max(index.saturating_add(1));
-                        Materialization::argument(index, value)
-                    }
-                    FrameSlot::Local(index) => {
-                        locals = locals.max(index.saturating_add(1));
-                        Materialization::local(index, value)
-                    }
-                    FrameSlot::Stack(index) => {
-                        stack = stack.max(index.saturating_add(1));
-                        Materialization::stack(index, value)
-                    }
-                });
-            }
-            let shape = OptimizedFrameShape::new(arguments, locals, stack);
-            let map = DeoptMap::new(
-                u32::try_from(guard).map_err(|_| CompileFailure::ResourceLimit)?,
-                state.pc,
-                DeoptPhase::BeforeEffect(0),
-                recipes,
-            );
-            map.validate(shape)
-                .map_err(|_| CompileFailure::InvalidArtifact)?;
-            sites.push((shape, map));
-        }
+            .map(|site| (site.shape(), site.map().clone()))
+            .collect();
+        let metrics = ir.metrics();
         Ok(OptimizedArtifactMetadata::new(
             feedback_epoch,
             sites,
-            boxes_elided,
-            0,
-            0,
+            metrics.boxes_elided,
+            metrics.cse_eliminated,
+            metrics.dead_nodes_eliminated,
         ))
     }
 }
@@ -443,10 +364,7 @@ impl Compiler for Tier2Compiler {
 use crate::{
     bytecode::VerifiedFunction,
     code_cache::OptimizedArtifactMetadata,
-    ir::{
-        BaselineIr, DeoptMap, DeoptPhase, FrameSlot, IrOp, Materialization, MaterializedValue,
-        OptimizedFrameShape,
-    },
+    ir::{DeoptMap, OptimizedIr},
     runtime::{CompileRequest, Tier},
 };
 

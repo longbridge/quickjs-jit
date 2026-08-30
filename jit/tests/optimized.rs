@@ -2,6 +2,7 @@ use rquickjs_jit::bytecode::VerifyLimits;
 use rquickjs_jit::compiler::optimized::{
     NumericBinaryOp, OptimizedCompiler, OptimizedInput, Tier2Compiler,
 };
+use rquickjs_jit::ir::{OptimizedEffect, OptimizedIr, OptimizedNodeKind, ValueRepresentation};
 use rquickjs_jit::runtime::{
     Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackState, FeedbackTable,
     FunctionKey, ObservedType, Tier,
@@ -227,6 +228,52 @@ fn tier2_plan_is_exact_for_numeric_locals_and_rejects_property_semantics() {
     let property = SnapshotFixture::compile("(function(){return globalThis.answer})");
     let property = property.snapshot().verify(VerifyLimits::default()).unwrap();
     assert!(Tier2Compiler::plan(&property, 24).is_err());
+}
+
+#[test]
+fn production_optimized_ir_is_independent_ssa_with_loop_guards() {
+    let fixture = SnapshotFixture::compile(
+        "(function(n,zero){let dead=40+2;let s=zero;for(let i=zero;i<n;i++)s=s+i;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 31).expect("numeric loop is optimized directly");
+
+    assert!(ir.blocks().iter().any(|block| block.is_loop_header()));
+    assert!(ir
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), OptimizedNodeKind::GuardNumeric { .. })));
+    assert!(ir
+        .nodes()
+        .iter()
+        .any(|node| node.representation() == ValueRepresentation::Float64));
+    assert!(ir
+        .nodes()
+        .iter()
+        .all(|node| node.effect() != OptimizedEffect::Reentrant));
+    assert!(
+        ir.guard_maps().len() >= 2,
+        "entry and mid-loop maps are required"
+    );
+    assert!(ir
+        .guard_maps()
+        .iter()
+        .all(|site| site.map().guard() == site.guard()));
+    assert!(ir
+        .guard_maps()
+        .iter()
+        .all(|site| site.map().validate(site.shape()).is_ok()));
+}
+
+#[test]
+fn optimized_passes_rewrite_the_emitted_machine_plan() {
+    let fixture = SnapshotFixture::compile("(function(a,b){a+b;return (a+b)+(a+b)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 32).expect("pure numeric function");
+
+    assert!(ir.metrics().cse_eliminated > 0 || ir.metrics().dead_nodes_eliminated > 0);
+    assert!(ir.machine_plan().iter().all(|node| !node.eliminated()));
+    assert!(ir.machine_plan().len() < ir.nodes().len());
 }
 
 #[cfg(all(
