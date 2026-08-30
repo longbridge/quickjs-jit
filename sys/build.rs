@@ -5,6 +5,9 @@ use std::{
     process,
 };
 
+#[path = "build_support/patch.rs"]
+mod quickjs_patch;
+
 // WASI logic lifted from https://github.com/bytecodealliance/javy/blob/61616e1507d2bf896f46dc8d72687273438b58b2/crates/quickjs-wasm-sys/build.rs#L18
 
 const WASI_SDK_VERSION_MAJOR: usize = 24;
@@ -402,12 +405,6 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("No OUT_DIR env var is set by cargo");
     let out_dir = Path::new(&out_dir);
 
-    #[cfg(feature = "jit-abi")]
-    generate_jit_opcode_metadata(src_dir, out_dir);
-
-    #[cfg(feature = "jit-abi")]
-    generate_jit_helper_metadata(src_dir, out_dir);
-
     let header_files = [
         "builtin-array-fromasync.h",
         "builtin-iterator-zip-keyed.h",
@@ -423,14 +420,18 @@ fn main() {
         "quickjs-opcode.h",
         "quickjs-c-atomics.h",
         "quickjs.h",
-        "quickjs-jit.h",
-        "quickjs-jit-helpers.h",
     ];
 
     let source_files = ["libregexp.c", "libunicode.c", "quickjs.c", "dtoa.c"];
+    let integration_files = ["api-test.c"];
 
     println!("cargo:rerun-if-changed=quickjs.bind.h");
-    for file in source_files.iter().chain(header_files.iter()) {
+    println!("cargo:rerun-if-changed=patches");
+    for file in source_files
+        .iter()
+        .chain(header_files.iter())
+        .chain(integration_files.iter())
+    {
         println!("cargo:rerun-if-changed={}", src_dir.join(file).display());
     }
 
@@ -499,11 +500,23 @@ fn main() {
         defines.push(("FE_UPWARD".into(), Some("0")));
     }
 
-    for file in source_files.iter().chain(header_files.iter()) {
+    for file in source_files
+        .iter()
+        .chain(header_files.iter())
+        .chain(integration_files.iter())
+    {
         fs::copy(src_dir.join(file), out_dir.join(file))
             .expect("Unable to copy source; try 'git submodule update --init'");
     }
+    quickjs_patch::apply_patch_set(out_dir, Path::new("patches"))
+        .expect("QuickJS integration patch must apply to the pinned public baseline");
     fs::copy("quickjs.bind.h", out_dir.join("quickjs.bind.h")).expect("Unable to copy source");
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_opcode_metadata(out_dir, out_dir);
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_helper_metadata(out_dir, out_dir);
 
     if target_os == "wasi" && !matches!(env::var("RQUICKJS_SYS_NO_WASI_SDK").as_deref(), Ok("1")) {
         let wasi_sdk_path = get_wasi_sdk_path();
