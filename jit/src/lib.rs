@@ -1629,14 +1629,17 @@ impl JitRuntimeBuilder {
     pub fn build(self) -> Result<JitRuntime, JitError> {
         let runtime = Runtime::new()?;
         let jit = Jit::attach(&runtime, self.config)?;
-        Ok(JitRuntime { runtime, jit })
+        Ok(JitRuntime {
+            jit: Some(jit),
+            runtime: Some(runtime),
+        })
     }
 }
 
 /// An owning QuickJS runtime paired with its JIT guard.
 pub struct JitRuntime {
-    runtime: Runtime,
-    jit: Jit,
+    jit: Option<Jit>,
+    runtime: Option<Runtime>,
 }
 
 impl JitRuntime {
@@ -1647,12 +1650,15 @@ impl JitRuntime {
 
     /// Returns the disabled JIT guard.
     pub const fn jit(&self) -> &Jit {
-        &self.jit
+        match &self.jit {
+            Some(jit) => jit,
+            None => panic!("JIT guard is present until drop"),
+        }
     }
 
     /// Returns runtime metrics.
     pub fn metrics(&self) -> JitMetrics {
-        self.jit.metrics()
+        self.jit().metrics()
     }
 }
 
@@ -1660,7 +1666,54 @@ impl Deref for JitRuntime {
     type Target = Runtime;
 
     fn deref(&self) -> &Self::Target {
-        &self.runtime
+        self.runtime
+            .as_ref()
+            .expect("QuickJS runtime is present until drop")
+    }
+}
+
+fn drop_jit_before_runtime<J, R>(jit: &mut Option<J>, runtime: &mut Option<R>) {
+    drop(jit.take());
+    drop(runtime.take());
+}
+
+impl Drop for JitRuntime {
+    fn drop(&mut self) {
+        drop_jit_before_runtime(&mut self.jit, &mut self.runtime);
+    }
+}
+
+#[cfg(test)]
+mod jit_runtime_drop_tests {
+    use super::drop_jit_before_runtime;
+    use std::sync::{Arc, Mutex};
+
+    struct DropProbe {
+        label: &'static str,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push(self.label);
+        }
+    }
+
+    #[test]
+    fn owning_runtime_drops_jit_guard_before_quickjs_runtime() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut jit = Some(DropProbe {
+            label: "jit",
+            events: Arc::clone(&events),
+        });
+        let mut runtime = Some(DropProbe {
+            label: "runtime",
+            events: Arc::clone(&events),
+        });
+
+        drop_jit_before_runtime(&mut jit, &mut runtime);
+
+        assert_eq!(*events.lock().unwrap(), ["jit", "runtime"]);
     }
 }
 
