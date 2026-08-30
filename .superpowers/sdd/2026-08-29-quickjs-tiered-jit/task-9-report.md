@@ -1,6 +1,26 @@
 # Task 9 report: closed Tier 1 opcode policy and differential matrix
 
-Status: **FIX ROUND 2 COMPLETE**
+Status: **FIX ROUND 3 COMPLETE**
+
+## Review fix round 3
+
+- Replaced independent opcode trace and global helper-counter assertions with
+  test-only correlated events. Each helper event carries its exact bytecode
+  `pc`, opcode ID, and helper ID, and the manifest gate requires a matching
+  opcode event at the same PC. All storage and event emission remain excluded
+  from production builds.
+- Made coverage dimensions a closed typed schema. Required dimensions are
+  derived from the linked opcode policy and explicit opcode semantics; missing,
+  invented, inapplicable, or policy-mismatched evidence fails validation.
+  Ownership cases execute with helper stress-GC, numeric cases include an
+  int32 overflow edge, and coercing/property/call cases return observable
+  re-entrancy event order for interpreter/Tier 1 comparison.
+- Removed the `function_id == 0` policy exception. The public verifier and
+  compiler always enforce the advertised policy; compiler-only synthetic tests
+  use a private compile-policy variant through the feature-gated test harness.
+- Added macOS and Windows CI jobs that check the complete compiler/test graph
+  and run a published-native differential smoke on the actual host. Linux
+  retains the complete release opcode/differential dynamic gate.
 
 ## Review fix round 1
 
@@ -89,6 +109,18 @@ All corresponding focused tests were then observed GREEN.
 - `cargo test --workspace -- --test-threads=1`: PASS (workspace unit,
   integration, UI, and doc tests).
 - `cargo fmt --all -- --check`: PASS.
+
+Fix round 3 additionally verified:
+
+- `cargo test -p rquickjs-jit --release --features compiler,test-support --test opcodes --test differential --test baseline -- --test-threads=1`: PASS (6 opcode, 6 differential, 28 baseline tests).
+- `cargo test -p rquickjs-jit --features compiler,test-support -- --test-threads=1`: PASS (complete JIT crate).
+- `cargo check -p rquickjs-jit --all-targets --features compiler`: PASS (production graph without test telemetry).
+- `cargo test --workspace -- --test-threads=1`: PASS.
+- `cargo clippy -p rquickjs-jit --all-targets --features compiler,test-support -- -D warnings`: PASS.
+- `cargo fmt --all -- --check` and `git diff --check`: PASS.
+
+The macOS and Windows jobs were added to CI but were not run on this Linux
+host; their results must be taken from CI rather than inferred locally.
 
 ## Coverage statement
 
