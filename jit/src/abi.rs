@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 4;
+pub const ABI_MINOR: u16 = 5;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -556,6 +556,7 @@ fn backend_vtable_layout_fingerprint() -> u64 {
         mem::offset_of!(qjs::JSJitBackendVTable, memory_used),
         mem::offset_of!(qjs::JSJitBackendVTable, native_enter),
         mem::offset_of!(qjs::JSJitBackendVTable, native_exit),
+        mem::offset_of!(qjs::JSJitBackendVTable, record_feedback),
     ] {
         hash = layout_field(hash, offset, mem::size_of::<usize>());
     }

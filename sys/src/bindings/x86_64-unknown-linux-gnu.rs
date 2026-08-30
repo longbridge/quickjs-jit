@@ -86,12 +86,15 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 4;
+pub const QJSJIT_ABI_MINOR: u32 = 5;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
 pub const JS_JIT_SLOT_NONE: u32 = 4294967295;
 pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
+pub const JS_JIT_FEEDBACK_OVERFLOW: u32 = 1;
+pub const JS_JIT_FEEDBACK_NEGATIVE_ZERO: u32 = 2;
+pub const JS_JIT_FEEDBACK_NAN: u32 = 4;
 pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;
 pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
@@ -2163,6 +2166,54 @@ const _: () = {
     ["Offset of field: JSJitHotEvent::callee"]
         [::core::mem::offset_of!(JSJitHotEvent, callee) - 48usize];
 };
+pub const JSJitValueType_JS_JIT_VALUE_NONE: JSJitValueType = 0;
+pub const JSJitValueType_JS_JIT_VALUE_INT32: JSJitValueType = 1;
+pub const JSJitValueType_JS_JIT_VALUE_FLOAT64: JSJitValueType = 2;
+pub const JSJitValueType_JS_JIT_VALUE_BOOL: JSJitValueType = 3;
+pub const JSJitValueType_JS_JIT_VALUE_NULL: JSJitValueType = 4;
+pub const JSJitValueType_JS_JIT_VALUE_UNDEFINED: JSJitValueType = 5;
+pub const JSJitValueType_JS_JIT_VALUE_STRING: JSJitValueType = 6;
+pub const JSJitValueType_JS_JIT_VALUE_OBJECT: JSJitValueType = 7;
+pub const JSJitValueType_JS_JIT_VALUE_BIGINT: JSJitValueType = 8;
+pub const JSJitValueType_JS_JIT_VALUE_SYMBOL: JSJitValueType = 9;
+pub type JSJitValueType = ::core::ffi::c_uint;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL: JSJitFeedbackKind = 0;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_RETURN: JSJitFeedbackKind = 1;
+pub const JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY: JSJitFeedbackKind = 2;
+pub type JSJitFeedbackKind = ::core::ffi::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitFeedbackEvent {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub function: JSJitFunctionId,
+    pub pc: u32,
+    pub slot: u32,
+    pub type_count: u32,
+    pub flags: u32,
+    pub types: *const u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitFeedbackEvent"][::core::mem::size_of::<JSJitFeedbackEvent>() - 56usize];
+    ["Alignment of JSJitFeedbackEvent"][::core::mem::align_of::<JSJitFeedbackEvent>() - 8usize];
+    ["Offset of field: JSJitFeedbackEvent::struct_size"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, struct_size) - 0usize];
+    ["Offset of field: JSJitFeedbackEvent::kind"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, kind) - 4usize];
+    ["Offset of field: JSJitFeedbackEvent::function"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, function) - 8usize];
+    ["Offset of field: JSJitFeedbackEvent::pc"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, pc) - 32usize];
+    ["Offset of field: JSJitFeedbackEvent::slot"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, slot) - 36usize];
+    ["Offset of field: JSJitFeedbackEvent::type_count"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, type_count) - 40usize];
+    ["Offset of field: JSJitFeedbackEvent::flags"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, flags) - 44usize];
+    ["Offset of field: JSJitFeedbackEvent::types"]
+        [::core::mem::offset_of!(JSJitFeedbackEvent, types) - 48usize];
+};
 pub const JSJitOperandFormat_JS_JIT_FMT_none: JSJitOperandFormat = 0;
 pub const JSJitOperandFormat_JS_JIT_FMT_none_int: JSJitOperandFormat = 1;
 pub const JSJitOperandFormat_JS_JIT_FMT_none_loc: JSJitOperandFormat = 2;
@@ -3166,10 +3217,13 @@ pub struct JSJitBackendVTable {
             exit_kind: u32,
         ),
     >,
+    pub record_feedback: ::core::option::Option<
+        unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void, event: *const JSJitFeedbackEvent),
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 80usize];
+    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 88usize];
     ["Alignment of JSJitBackendVTable"][::core::mem::align_of::<JSJitBackendVTable>() - 8usize];
     ["Offset of field: JSJitBackendVTable::struct_size"]
         [::core::mem::offset_of!(JSJitBackendVTable, struct_size) - 0usize];
@@ -3191,6 +3245,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitBackendVTable, native_enter) - 64usize];
     ["Offset of field: JSJitBackendVTable::native_exit"]
         [::core::mem::offset_of!(JSJitBackendVTable, native_exit) - 72usize];
+    ["Offset of field: JSJitBackendVTable::record_feedback"]
+        [::core::mem::offset_of!(JSJitBackendVTable, record_feedback) - 80usize];
 };
 pub const JS_JIT_BACKEND_OK: _bindgen_ty_6 = 0;
 pub const JS_JIT_BACKEND_INVALID_ARGUMENT: _bindgen_ty_6 = -1;

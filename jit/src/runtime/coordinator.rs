@@ -105,6 +105,8 @@ impl SidePathProfile {
             ObservedType::String => 6,
             ObservedType::Object => 7,
             ObservedType::Function(key) => 8 ^ key.id ^ key.generation.rotate_left(17),
+            ObservedType::BigInt => 9,
+            ObservedType::Symbol => 10,
         };
         self.function.id
             ^ self.function.generation.rotate_left(7)

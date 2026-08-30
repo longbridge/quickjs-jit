@@ -5,8 +5,9 @@ use rquickjs_jit::compiler::optimized::{
 };
 use rquickjs_jit::ir::{OptimizedEffect, OptimizedIr, OptimizedNodeKind, ValueRepresentation};
 use rquickjs_jit::runtime::{
-    CompileCompletion, Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackSnapshot,
-    FeedbackState, FeedbackTable, FunctionKey, ObservedType, SideExitAction, Tier,
+    BinaryFeedbackFlags, CompileCompletion, Coordinator, DependencyGraph, DependencyKey,
+    FeedbackKind, FeedbackSnapshot, FeedbackState, FeedbackTable, FunctionKey, ObservedType,
+    SideExitAction, Tier,
 };
 use rquickjs_jit::test_support::SnapshotFixture;
 
@@ -36,6 +37,119 @@ fn feedback_is_bounded_and_transitions_monotonically() {
     table.observe_type(function, 13, FeedbackKind::Value, ObservedType::Int32);
     assert_eq!(table.len(), 2);
     assert_eq!(table.dropped_observations(), 1);
+}
+
+#[test]
+fn feedback_models_all_arguments_return_sites_and_binary_operands() {
+    let function = FunctionKey::new(17, 9);
+    let mut table = FeedbackTable::new(32, 3);
+    table.observe_call(
+        function,
+        &[
+            ObservedType::Int32,
+            ObservedType::Float64,
+            ObservedType::String,
+        ],
+    );
+    table.observe_return(function, 41, ObservedType::Int32);
+    table.observe_return(function, 57, ObservedType::String);
+    table.observe_binary(
+        function,
+        23,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Float64,
+        BinaryFeedbackFlags::OVERFLOW,
+    );
+
+    let snapshot = table.snapshot(11);
+    assert_eq!(
+        snapshot.call_argument_types(function),
+        Some(
+            &[
+                ObservedType::Int32,
+                ObservedType::Float64,
+                ObservedType::String,
+            ][..]
+        )
+    );
+    assert_eq!(
+        snapshot.stable_return_at(function, 41),
+        Some(ObservedType::Int32)
+    );
+    assert_eq!(
+        snapshot.stable_return_at(function, 57),
+        Some(ObservedType::String)
+    );
+    let binary = snapshot.binary_at(function, 23).expect("binary slot");
+    assert_eq!(binary.lhs(), &[ObservedType::Int32]);
+    assert_eq!(binary.rhs(), &[ObservedType::Int32]);
+    assert_eq!(binary.result(), &[ObservedType::Float64]);
+    assert!(binary.flags().contains(BinaryFeedbackFlags::OVERFLOW));
+}
+
+#[test]
+fn feedback_lattice_only_widens_and_flags_accumulate() {
+    let function = FunctionKey::new(23, 4);
+    let mut table = FeedbackTable::new(32, 2);
+    table.observe_binary(
+        function,
+        7,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        BinaryFeedbackFlags::NONE,
+    );
+    table.observe_binary(
+        function,
+        7,
+        ObservedType::Float64,
+        ObservedType::Int32,
+        ObservedType::Float64,
+        BinaryFeedbackFlags::NEGATIVE_ZERO,
+    );
+    table.observe_binary(
+        function,
+        7,
+        ObservedType::String,
+        ObservedType::Object,
+        ObservedType::String,
+        BinaryFeedbackFlags::NAN,
+    );
+    table.observe_binary(
+        function,
+        7,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        BinaryFeedbackFlags::NONE,
+    );
+
+    let snapshot = table.snapshot(12);
+    let binary = snapshot.binary_at(function, 7).unwrap();
+    assert_eq!(binary.state(), FeedbackState::Megamorphic);
+    assert!(binary.flags().contains(BinaryFeedbackFlags::NEGATIVE_ZERO));
+    assert!(binary.flags().contains(BinaryFeedbackFlags::NAN));
+    assert_eq!(snapshot.function(), Some(function));
+    assert_eq!(snapshot.epoch(), 12);
+    assert!(snapshot.binary_at(FunctionKey::new(23, 5), 7).is_none());
+}
+
+#[test]
+fn alternating_argument_types_widen_each_call_slot_without_shifting_positions() {
+    let function = FunctionKey::new(31, 2);
+    let mut table = FeedbackTable::new(32, 2);
+    table.observe_call(function, &[ObservedType::Int32, ObservedType::String]);
+    table.observe_call(function, &[ObservedType::Float64, ObservedType::String]);
+    table.observe_call(function, &[ObservedType::Object, ObservedType::String]);
+
+    let snapshot = table.snapshot(19);
+    let call = snapshot.call_at(function).unwrap();
+    assert_eq!(call.state(), FeedbackState::Megamorphic);
+    assert_eq!(call.argument(0), &[]);
+    assert_eq!(call.argument(1), &[ObservedType::String]);
+    assert_eq!(call.argc(), 2);
+    assert_eq!(snapshot.call_argument_types(function), None);
 }
 
 #[test]

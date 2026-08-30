@@ -1,0 +1,363 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 4u
++#define QJSJIT_ABI_MINOR 5u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -71,6 +71,36 @@
+     JSJitFunctionId callee;
+ } JSJitHotEvent;
+ 
++typedef enum JSJitValueType {
++    JS_JIT_VALUE_NONE = 0, JS_JIT_VALUE_INT32 = 1,
++    JS_JIT_VALUE_FLOAT64 = 2, JS_JIT_VALUE_BOOL = 3,
++    JS_JIT_VALUE_NULL = 4, JS_JIT_VALUE_UNDEFINED = 5,
++    JS_JIT_VALUE_STRING = 6, JS_JIT_VALUE_OBJECT = 7,
++    JS_JIT_VALUE_BIGINT = 8, JS_JIT_VALUE_SYMBOL = 9,
++} JSJitValueType;
++
++typedef enum JSJitFeedbackKind {
++    JS_JIT_FEEDBACK_CALL = 0, JS_JIT_FEEDBACK_RETURN = 1,
++    JS_JIT_FEEDBACK_BINARY = 2,
++} JSJitFeedbackKind;
++
++#define JS_JIT_FEEDBACK_OVERFLOW (1U << 0)
++#define JS_JIT_FEEDBACK_NEGATIVE_ZERO (1U << 1)
++#define JS_JIT_FEEDBACK_NAN (1U << 2)
++
++/* `types` is borrowed only for the duration of record_feedback. CALL stores
++ * argc types, RETURN one type, and BINARY lhs/rhs/result in that order. */
++typedef struct JSJitFeedbackEvent {
++    uint32_t struct_size;
++    uint32_t kind;
++    JSJitFunctionId function;
++    uint32_t pc;
++    uint32_t slot;
++    uint32_t type_count;
++    uint32_t flags;
++    const uint32_t *types;
++} JSJitFeedbackEvent;
++
+ typedef enum JSJitOperandFormat {
+ #define FMT(format) JS_JIT_FMT_##format,
+ #define DEF(id, size, n_pop, n_push, format)
+@@ -335,6 +365,7 @@
+                          uint32_t pc);
+     void (*native_exit)(void *opaque, uint64_t id, uint64_t generation,
+                         uint32_t pc, uint32_t exit_kind);
++    void (*record_feedback)(void *opaque, const JSJitFeedbackEvent *event);
+ } JSJitBackendVTable;
+ 
+ enum {
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2252,7 +2252,8 @@
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, function_retire);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, memory_used);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_enter);
+-    return QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_exit);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_exit);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, record_feedback);
+ }
+ 
+ static uint64_t qjsjit_abi_info_layout(void)
+@@ -2317,6 +2318,75 @@
+     return 0;
+ }
+ 
++static uint32_t qjsjit_feedback_type(JSValueConst value)
++{
++    int tag = JS_VALUE_GET_TAG(value);
++    switch (tag) {
++    case JS_TAG_INT: return JS_JIT_VALUE_INT32;
++    case JS_TAG_FLOAT64: return JS_JIT_VALUE_FLOAT64;
++    case JS_TAG_BOOL: return JS_JIT_VALUE_BOOL;
++    case JS_TAG_NULL: return JS_JIT_VALUE_NULL;
++    case JS_TAG_UNDEFINED: return JS_JIT_VALUE_UNDEFINED;
++    case JS_TAG_STRING:
++    case JS_TAG_STRING_ROPE: return JS_JIT_VALUE_STRING;
++    case JS_TAG_OBJECT: return JS_JIT_VALUE_OBJECT;
++    case JS_TAG_BIG_INT:
++    case JS_TAG_SHORT_BIG_INT: return JS_JIT_VALUE_BIGINT;
++    case JS_TAG_SYMBOL: return JS_JIT_VALUE_SYMBOL;
++    default: return JS_JIT_VALUE_NONE;
++    }
++}
++
++static void qjsjit_record_feedback(JSRuntime *rt, JSFunctionBytecode *b,
++                                   uint32_t kind, uint32_t pc,
++                                   uint32_t slot, const uint32_t *types,
++                                   uint32_t type_count, uint32_t flags)
++{
++    JSJitFeedbackEvent event;
++    const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
++    if (!vtable || !vtable->record_feedback ||
++        qjsjit_ensure_function_identity(rt, b))
++        return;
++    memset(&event, 0, sizeof(event));
++    event.struct_size = sizeof(event);
++    event.kind = kind;
++    event.function.struct_size = sizeof(event.function);
++    event.function.id = b->jit_function_id;
++    event.function.generation = b->jit_generation;
++    event.pc = pc;
++    event.slot = slot;
++    event.type_count = type_count;
++    event.flags = flags;
++    event.types = types;
++    rt->jit_backend_active_depth++;
++    vtable->record_feedback(rt->jit_backend_opaque, &event);
++    rt->jit_backend_active_depth--;
++}
++
++static void qjsjit_record_binary_feedback(JSRuntime *rt, JSFunctionBytecode *b,
++                                          uint32_t pc, uint32_t lhs_type,
++                                          uint32_t rhs_type,
++                                          JSValueConst result)
++{
++    uint32_t types[3], flags = 0;
++    int result_tag = JS_VALUE_GET_TAG(result);
++    types[0] = lhs_type;
++    types[1] = rhs_type;
++    types[2] = qjsjit_feedback_type(result);
++    if (lhs_type == JS_JIT_VALUE_INT32 && rhs_type == JS_JIT_VALUE_INT32 &&
++        result_tag == JS_TAG_FLOAT64)
++        flags |= JS_JIT_FEEDBACK_OVERFLOW;
++    if (result_tag == JS_TAG_FLOAT64) {
++        double value = JS_VALUE_GET_FLOAT64(result);
++        if (value == 0.0 && signbit(value))
++            flags |= JS_JIT_FEEDBACK_NEGATIVE_ZERO;
++        if (isnan(value))
++            flags |= JS_JIT_FEEDBACK_NAN;
++    }
++    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BINARY, pc, pc,
++                           types, 3, flags);
++}
++
+ static void qjsjit_retire_identity(JSRuntime *rt, uint64_t id,
+                                    uint64_t generation)
+ {
+@@ -19179,6 +19249,13 @@
+ #endif
+ 
+ #ifdef CONFIG_JIT_ABI
++    if (rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
++        uint32_t call_types[argc > 0 ? argc : 1];
++        for (i = 0; i < argc; i++)
++            call_types[i] = qjsjit_feedback_type(arg_buf[i]);
++        qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
++                               call_types, (uint32_t)argc, 0);
++    }
+  jit_poll:
+     jit_probe_budget = 64; if (rt->jit_backend_vtable)
+         JS_SetUncatchableError(ctx, rt->jit_uncatchable_exception);
+@@ -19899,9 +19976,25 @@
+             BREAK;
+         CASE(OP_return):
+             ret_val = *--sp;
++#ifdef CONFIG_JIT_ABI
++            {
++                uint32_t return_type = qjsjit_feedback_type(ret_val);
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    &return_type, 1, 0);
++            }
++#endif
+             goto done;
+         CASE(OP_return_undef):
+             ret_val = JS_UNDEFINED;
++#ifdef CONFIG_JIT_ABI
++            {
++                uint32_t return_type = JS_JIT_VALUE_UNDEFINED;
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    &return_type, 1, 0);
++            }
++#endif
+             goto done;
+ 
+         CASE(OP_check_ctor_return):
+@@ -21433,8 +21526,15 @@
+         CASE(OP_add):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+                     r = (int64_t)JS_VALUE_GET_INT(op1) + JS_VALUE_GET_INT(op2);
+@@ -21455,6 +21555,11 @@
+                         goto exception;
+                     sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_add_loc):
+@@ -21503,8 +21608,15 @@
+         CASE(OP_sub):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+                     r = (int64_t)JS_VALUE_GET_INT(op1) - JS_VALUE_GET_INT(op2);
+@@ -21520,16 +21632,31 @@
+                     JS_X87_FPCW_RESTORE(fpcw);
+                     sp--;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_mul):
+             {
+                 JSValue op1, op2;
+                 double d;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int32_t v1, v2;
+                     int64_t r;
+@@ -21555,15 +21682,30 @@
+                     sp[-2] = js_float64(d);
+                     sp--;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_div):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int v1, v2;
+                     v1 = JS_VALUE_GET_INT(op1);
+@@ -21571,8 +21713,16 @@
+                     sp[-2] = js_number((double)v1 / (double)v2);
+                     sp--;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_mod):
+@@ -21897,13 +22047,29 @@
+             }
+             BREAK;
+ 
++#ifdef CONFIG_JIT_ABI
++#define QJSJIT_CMP_DECLARE uint32_t jit_lhs_type, jit_rhs_type;
++#define QJSJIT_CMP_CAPTURE(op1, op2)                       \
++                jit_lhs_type = qjsjit_feedback_type(op1); \
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#define QJSJIT_CMP_RECORD()                                \
++                qjsjit_record_binary_feedback(rt, b,      \
++                    (uint32_t)(pc - b->byte_code_buf - 1),\
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#else
++#define QJSJIT_CMP_DECLARE
++#define QJSJIT_CMP_CAPTURE(op1, op2)
++#define QJSJIT_CMP_RECORD()
++#endif
+ 
+ #define OP_CMP(opcode, binary_op, slow_call)              \
+             CASE(opcode):                                 \
+                 {                                         \
+                 JSValue op1, op2;                         \
++                QJSJIT_CMP_DECLARE                        \
+                 op1 = sp[-2];                             \
+-                op2 = sp[-1];                                   \
++                op2 = sp[-1];                             \
++                QJSJIT_CMP_CAPTURE(op1, op2)              \
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {           \
+                     sp[-2] = js_bool(JS_VALUE_GET_INT(op1) binary_op JS_VALUE_GET_INT(op2)); \
+                     sp--;                                               \
+@@ -21913,6 +22079,7 @@
+                         goto exception;                                 \
+                     sp--;                                               \
+                 }                                                       \
++                QJSJIT_CMP_RECORD()                                     \
+                 }                                                       \
+             BREAK
+ 
+@@ -21925,6 +22092,10 @@
+             OP_CMP(OP_strict_eq, ==, js_strict_eq_slow(ctx, sp, 0));
+             OP_CMP(OP_strict_neq, !=, js_strict_eq_slow(ctx, sp, 1));
+ 
++#undef QJSJIT_CMP_RECORD
++#undef QJSJIT_CMP_CAPTURE
++#undef QJSJIT_CMP_DECLARE
++
+         CASE(OP_in):
+             sf->cur_pc = pc;
+             if (js_operator_in(ctx, sp))

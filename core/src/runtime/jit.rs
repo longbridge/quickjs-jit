@@ -298,6 +298,10 @@ pub unsafe trait JitBackend: Send + 'static {
         0
     }
 
+    /// Records interpreter-produced type feedback. Any pointed-to type array
+    /// is borrowed only for this callback and must not be retained.
+    fn record_feedback(&mut self, _event: &qjs::JSJitFeedbackEvent) {}
+
     fn submit_snapshot(&mut self, _snapshot: *mut qjs::JSJitFunctionSnapshot) {}
 
     fn acquire_entry(&mut self, _id: u64, _generation: u64, _pc: u32) -> qjs::JSJitEntryHandle {
@@ -379,6 +383,14 @@ unsafe extern "C" fn record_hot(opaque: *mut c_void, event: *const qjs::JSJitHot
     state.backend.record_hot(unsafe { &*event })
 }
 
+unsafe extern "C" fn record_feedback(opaque: *mut c_void, event: *const qjs::JSJitFeedbackEvent) {
+    if event.is_null() {
+        return;
+    }
+    let state = unsafe { BackendState::from_opaque(opaque) };
+    state.backend.record_feedback(unsafe { &*event });
+}
+
 unsafe extern "C" fn submit_snapshot(
     opaque: *mut c_void,
     snapshot: *mut qjs::JSJitFunctionSnapshot,
@@ -450,6 +462,7 @@ static BACKEND_VTABLE: qjs::JSJitBackendVTable = qjs::JSJitBackendVTable {
     memory_used: Some(memory_used),
     native_enter: Some(native_enter),
     native_exit: Some(native_exit),
+    record_feedback: Some(record_feedback),
 };
 
 /// Owns the token for one backend allocation stored by the raw runtime.

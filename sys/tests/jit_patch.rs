@@ -27,6 +27,11 @@ fn copy_patches(destination: &std::path::Path) {
         destination.join("0001-rquickjs-jit.patch"),
     )
     .unwrap();
+    fs::copy(
+        source.join("0002-runtime-feedback.patch"),
+        destination.join("0002-runtime-feedback.patch"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -41,7 +46,8 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let jit_header = fs::read_to_string(destination.join("quickjs-jit.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 4u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 5u"));
+    assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
 }
@@ -71,9 +77,9 @@ fn patch_set_rejects_missing_extra_and_modified_patches_before_writing() {
     assert!(!source.join("quickjs-jit.h").exists());
 
     copy_patches(&patches);
-    fs::write(patches.join("0002-extra.patch"), "not allowed\n").unwrap();
+    fs::write(patches.join("0003-extra.patch"), "not allowed\n").unwrap();
     assert!(patch::apply_patch_set(&source, &patches).is_err());
-    fs::remove_file(patches.join("0002-extra.patch")).unwrap();
+    fs::remove_file(patches.join("0003-extra.patch")).unwrap();
 
     let expected = patches.join("0001-rquickjs-jit.patch");
     let mut contents = fs::read_to_string(&expected).unwrap();

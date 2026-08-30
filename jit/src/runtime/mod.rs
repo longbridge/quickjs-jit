@@ -16,8 +16,8 @@ pub use coordinator::{
     GuardId, QueueError, SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 pub use feedback::{
-    FeedbackKind, FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable,
-    ObservedType,
+    BinaryFeedbackFlags, BinaryFeedbackSnapshot, CallFeedbackSnapshot, FeedbackKind,
+    FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable, ObservedType,
 };
 pub use hotness::{
     AdaptiveInputs, Decision, HotDecision, HotReason, HotThresholds, HotnessState, Profile,

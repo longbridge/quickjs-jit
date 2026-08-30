@@ -1479,6 +1479,76 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
     }
 
+    fn record_feedback(&mut self, event: &rquickjs_core::qjs::JSJitFeedbackEvent) {
+        use rquickjs_core::qjs;
+
+        if event.struct_size < core::mem::size_of::<qjs::JSJitFeedbackEvent>() as u32
+            || event.function.id == 0
+            || event.function.generation == 0
+            || (event.type_count != 0 && event.types.is_null())
+        {
+            return;
+        }
+        let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        let raw_types = if event.type_count == 0 {
+            &[][..]
+        } else {
+            // QuickJS guarantees this borrowed array remains live for the callback.
+            unsafe { core::slice::from_raw_parts(event.types, event.type_count as usize) }
+        };
+        let observed = |raw| match raw {
+            qjs::JSJitValueType_JS_JIT_VALUE_INT32 => Some(runtime::ObservedType::Int32),
+            qjs::JSJitValueType_JS_JIT_VALUE_FLOAT64 => Some(runtime::ObservedType::Float64),
+            qjs::JSJitValueType_JS_JIT_VALUE_BOOL => Some(runtime::ObservedType::Bool),
+            qjs::JSJitValueType_JS_JIT_VALUE_NULL => Some(runtime::ObservedType::Null),
+            qjs::JSJitValueType_JS_JIT_VALUE_UNDEFINED => Some(runtime::ObservedType::Undefined),
+            qjs::JSJitValueType_JS_JIT_VALUE_STRING => Some(runtime::ObservedType::String),
+            qjs::JSJitValueType_JS_JIT_VALUE_OBJECT => Some(runtime::ObservedType::Object),
+            qjs::JSJitValueType_JS_JIT_VALUE_BIGINT => Some(runtime::ObservedType::BigInt),
+            qjs::JSJitValueType_JS_JIT_VALUE_SYMBOL => Some(runtime::ObservedType::Symbol),
+            _ => None,
+        };
+        self.clock = self.clock.saturating_add(1).max(1);
+        match event.kind {
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL => {
+                if let Some(arguments) = raw_types
+                    .iter()
+                    .copied()
+                    .map(observed)
+                    .collect::<Option<Vec<_>>>()
+                {
+                    self.feedback.observe_call(key, &arguments);
+                }
+            }
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_RETURN if raw_types.len() == 1 => {
+                if let Some(result) = observed(raw_types[0]) {
+                    self.feedback.observe_return(key, event.pc, result);
+                }
+            }
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY if raw_types.len() == 3 => {
+                if let (Some(lhs), Some(rhs), Some(result)) = (
+                    observed(raw_types[0]),
+                    observed(raw_types[1]),
+                    observed(raw_types[2]),
+                ) {
+                    let mut flags = runtime::BinaryFeedbackFlags::NONE;
+                    if event.flags & qjs::JS_JIT_FEEDBACK_OVERFLOW != 0 {
+                        flags |= runtime::BinaryFeedbackFlags::OVERFLOW;
+                    }
+                    if event.flags & qjs::JS_JIT_FEEDBACK_NEGATIVE_ZERO != 0 {
+                        flags |= runtime::BinaryFeedbackFlags::NEGATIVE_ZERO;
+                    }
+                    if event.flags & qjs::JS_JIT_FEEDBACK_NAN != 0 {
+                        flags |= runtime::BinaryFeedbackFlags::NAN;
+                    }
+                    self.feedback
+                        .observe_binary(key, event.pc, lhs, rhs, result, flags);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn submit_snapshot(&mut self, snapshot: *mut rquickjs_core::qjs::JSJitFunctionSnapshot) {
         struct FreeSnapshot(*mut rquickjs_core::qjs::JSJitFunctionSnapshot);
         impl Drop for FreeSnapshot {

@@ -302,7 +302,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 4);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 5);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 1);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
@@ -336,6 +336,10 @@ fn helper_abi_fields_are_append_only_tails() {
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitBackendVTable, native_exit),
         std::mem::offset_of!(qjs::JSJitBackendVTable, native_enter) + std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitBackendVTable, record_feedback),
+        std::mem::offset_of!(qjs::JSJitBackendVTable, native_exit) + std::mem::size_of::<usize>()
     );
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitABIInfo, helper_table_fingerprint),
