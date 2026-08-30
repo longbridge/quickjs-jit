@@ -96,6 +96,12 @@ pub struct FeedbackSnapshot {
 }
 
 impl FeedbackSnapshot {
+    pub fn empty(epoch: u64) -> Self {
+        Self {
+            epoch,
+            entries: Box::new([]),
+        }
+    }
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }

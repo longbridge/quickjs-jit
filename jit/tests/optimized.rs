@@ -49,6 +49,30 @@ fn compile_request_carries_the_runtime_epoch_to_the_worker() {
 }
 
 #[test]
+fn compile_request_owns_an_immutable_feedback_snapshot() {
+    let fixture = SnapshotFixture::compile("(function(n){return n+1})");
+    let snapshot = fixture.snapshot();
+    let key = FunctionKey::new(snapshot.function_id(), snapshot.generation());
+    let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+    let mut feedback = FeedbackTable::new(8, 2);
+    feedback.observe_type(key, 0, FeedbackKind::Value, ObservedType::Int32);
+    let frozen = feedback.snapshot(9);
+    let mut coordinator = Coordinator::with_limits(2, 2, 2, 1 << 20);
+
+    coordinator
+        .queue_with_feedback(key, Tier::Baseline, verified, frozen)
+        .unwrap();
+    feedback.observe_type(key, 0, FeedbackKind::Value, ObservedType::String);
+
+    let request = coordinator.begin_next().unwrap();
+    assert_eq!(request.feedback().epoch(), 9);
+    assert_eq!(
+        request.feedback().entries()[0].observations(),
+        &[ObservedType::Int32]
+    );
+}
+
+#[test]
 fn narrow_optimizer_preserves_javascript_numeric_edges() {
     let mut compiler = OptimizedCompiler;
     let negative_zero = compiler

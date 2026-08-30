@@ -14,7 +14,7 @@ use crate::{
     JitMetrics,
 };
 
-use super::{install, invalidate, DependencyGraph, DependencyKey};
+use super::{install, invalidate, DependencyGraph, DependencyKey, FeedbackSnapshot};
 
 pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
     compiler: &C,
@@ -105,6 +105,7 @@ pub struct CompileRequest {
     artifact_key: ArtifactKey,
     attempt_id: AttemptId,
     feedback_epoch: u64,
+    feedback: Arc<FeedbackSnapshot>,
 }
 
 impl CompileRequest {
@@ -130,6 +131,10 @@ impl CompileRequest {
 
     pub const fn feedback_epoch(&self) -> u64 {
         self.feedback_epoch
+    }
+
+    pub fn feedback(&self) -> &FeedbackSnapshot {
+        &self.feedback
     }
 }
 
@@ -436,6 +441,16 @@ impl Coordinator {
         tier: Tier,
         snapshot: VerifiedFunction,
     ) -> Result<(), QueueError> {
+        self.queue_with_feedback(key, tier, snapshot, FeedbackSnapshot::empty(self.clock))
+    }
+
+    pub fn queue_with_feedback(
+        &mut self,
+        key: FunctionKey,
+        tier: Tier,
+        snapshot: VerifiedFunction,
+        feedback: FeedbackSnapshot,
+    ) -> Result<(), QueueError> {
         if self.shutdown {
             return Err(QueueError::Shutdown);
         }
@@ -516,13 +531,15 @@ impl Coordinator {
             return Err(QueueError::AttemptIdsExhausted);
         };
         self.next_attempt_id = next_attempt_id;
+        let feedback_epoch = feedback.epoch();
         self.queue.push_back(CompileRequest {
             key,
             tier,
             snapshot,
             artifact_key,
             attempt_id: AttemptId(next_attempt_id),
-            feedback_epoch: self.clock,
+            feedback_epoch,
+            feedback: Arc::new(feedback),
         });
         let function = self.functions.entry(key).or_default();
         function.tier_mut(tier).state = CompileState::Queued(tier);
