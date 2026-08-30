@@ -104,6 +104,7 @@ pub struct CompileRequest {
     snapshot: VerifiedFunction,
     artifact_key: ArtifactKey,
     attempt_id: AttemptId,
+    feedback_epoch: u64,
 }
 
 impl CompileRequest {
@@ -125,6 +126,10 @@ impl CompileRequest {
 
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
+    }
+
+    pub const fn feedback_epoch(&self) -> u64 {
+        self.feedback_epoch
     }
 }
 
@@ -517,6 +522,7 @@ impl Coordinator {
             snapshot,
             artifact_key,
             attempt_id: AttemptId(next_attempt_id),
+            feedback_epoch: self.clock,
         });
         let function = self.functions.entry(key).or_default();
         function.tier_mut(tier).state = CompileState::Queued(tier);

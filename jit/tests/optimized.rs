@@ -3,8 +3,8 @@ use rquickjs_jit::compiler::optimized::{
     NumericBinaryOp, OptimizedCompiler, OptimizedInput, Tier2Compiler,
 };
 use rquickjs_jit::runtime::{
-    DependencyGraph, DependencyKey, FeedbackKind, FeedbackState, FeedbackTable, FunctionKey,
-    ObservedType,
+    Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackState, FeedbackTable,
+    FunctionKey, ObservedType, Tier,
 };
 use rquickjs_jit::test_support::SnapshotFixture;
 
@@ -34,6 +34,18 @@ fn feedback_is_bounded_and_transitions_monotonically() {
     table.observe_type(function, 13, FeedbackKind::Value, ObservedType::Int32);
     assert_eq!(table.len(), 2);
     assert_eq!(table.dropped_observations(), 1);
+}
+
+#[test]
+fn compile_request_carries_the_runtime_epoch_to_the_worker() {
+    let fixture = SnapshotFixture::compile("(function(){return 1})");
+    let snapshot = fixture.snapshot();
+    let key = FunctionKey::new(snapshot.function_id(), snapshot.generation());
+    let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+    let mut coordinator = Coordinator::with_limits(2, 2, 2, 1 << 20);
+    coordinator.advance_clock(77);
+    coordinator.queue(key, Tier::Baseline, verified).unwrap();
+    assert_eq!(coordinator.begin_next().unwrap().feedback_epoch(), 77);
 }
 
 #[test]

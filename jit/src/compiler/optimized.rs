@@ -357,7 +357,10 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
-        let metadata = Self::plan(request.snapshot(), self.feedback_epoch)?;
+        let metadata = Self::plan(
+            request.snapshot(),
+            request.feedback_epoch().max(self.feedback_epoch),
+        )?;
         let code = self.baseline.compile_optimizing(request.snapshot(), None)?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
@@ -374,7 +377,10 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
-        let metadata = Self::plan(request.snapshot(), self.feedback_epoch)?;
+        let metadata = Self::plan(
+            request.snapshot(),
+            request.feedback_epoch().max(self.feedback_epoch),
+        )?;
         control.check_ir_bytes(
             metadata
                 .deopt_sites()
