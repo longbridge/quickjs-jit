@@ -508,6 +508,7 @@ struct OsrValidationMetrics {
     successes: AtomicU64,
     failures: AtomicU64,
     validation_retries: Mutex<std::collections::HashMap<(u64, u64, u32), u64>>,
+    deopt_guards: Mutex<std::collections::HashMap<(u64, u64), std::collections::VecDeque<u32>>>,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -535,6 +536,28 @@ impl OsrValidationMetrics {
             retries.remove(&key);
         }
         true
+    }
+
+    fn mark_deopt_guard(&self, id: u64, generation: u64, guard: u32) {
+        self.deopt_guards
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry((id, generation))
+            .or_default()
+            .push_back(guard);
+    }
+
+    fn take_deopt_guard(&self, id: u64, generation: u64) -> Option<u32> {
+        let mut guards = self
+            .deopt_guards
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let queue = guards.get_mut(&(id, generation))?;
+        let guard = queue.pop_front();
+        if queue.is_empty() {
+            guards.remove(&(id, generation));
+        }
+        guard
     }
 }
 
@@ -704,6 +727,8 @@ unsafe extern "C" fn production_entry_trampoline(
     }) {
         return retry_exit();
     }
+    pin.validation
+        .mark_deopt_guard(pin.key.id, pin.key.generation, guard);
     /* The one-based identity is internal to the pinned backend artifact. C's
      * stable ABI keeps this field reserved and receives only validated zero. */
     exit.reserved = 0;
@@ -1397,7 +1422,12 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
-            self.coordinator.record_deopt(true);
+            let key = runtime::FunctionKey::new(id, generation);
+            if let Some(guard) = self.osr_validation.take_deopt_guard(id, generation) {
+                let _ = self.coordinator.record_optimized_side_exit(key, guard);
+            } else {
+                self.coordinator.record_deopt(true);
+            }
         }
         self.maintenance();
     }

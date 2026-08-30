@@ -356,6 +356,14 @@ pub struct Coordinator {
     environment: ArtifactEnvironment,
     dependencies: DependencyGraph,
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
+    side_exits: HashMap<FunctionKey, HashMap<u32, u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SideExitAction {
+    Counted,
+    CompileStablePath,
+    Demote { retry_after: u64 },
 }
 
 impl Coordinator {
@@ -435,6 +443,7 @@ impl Coordinator {
             environment,
             dependencies: DependencyGraph::default(),
             latest_feedback_epochs: HashMap::new(),
+            side_exits: HashMap::new(),
         }
     }
 
@@ -875,6 +884,42 @@ impl Coordinator {
         self.metrics.side_exits = self.metrics.side_exits.saturating_add(1);
         if guard_failure {
             self.metrics.tier2_guard_failures = self.metrics.tier2_guard_failures.saturating_add(1);
+        }
+    }
+
+    pub fn record_optimized_side_exit(&mut self, key: FunctionKey, guard: u32) -> SideExitAction {
+        self.record_deopt(true);
+        let exits = self.side_exits.entry(key).or_default();
+        let count = exits.entry(guard).or_default();
+        *count = count.saturating_add(1);
+        let count = *count;
+        if exits.len() > 1 {
+            let attempts = self
+                .functions
+                .entry(key)
+                .or_default()
+                .optimizing
+                .attempts
+                .saturating_add(1);
+            let delay = 1u64
+                .checked_shl(u32::from(attempts.min(20)))
+                .unwrap_or(u64::MAX);
+            let retry_after = self.clock.saturating_add(delay);
+            self.functions.entry(key).or_default().optimizing.state = CompileState::Backoff {
+                attempts,
+                retry_after,
+            };
+            self.functions.entry(key).or_default().optimizing.attempts = attempts;
+            self.installed_keys.remove(&(key, Tier::Optimizing));
+            if let Some(function) = self.functions.get_mut(&key) {
+                function.published = Some(Tier::Baseline);
+            }
+            self.metrics.optimized_demotions = self.metrics.optimized_demotions.saturating_add(1);
+            SideExitAction::Demote { retry_after }
+        } else if count == 10 {
+            SideExitAction::CompileStablePath
+        } else {
+            SideExitAction::Counted
         }
     }
 

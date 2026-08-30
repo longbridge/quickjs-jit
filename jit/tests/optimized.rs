@@ -5,7 +5,7 @@ use rquickjs_jit::compiler::optimized::{
 use rquickjs_jit::ir::{OptimizedEffect, OptimizedIr, OptimizedNodeKind, ValueRepresentation};
 use rquickjs_jit::runtime::{
     Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackState, FeedbackTable,
-    FunctionKey, ObservedType, Tier,
+    FunctionKey, ObservedType, SideExitAction, Tier,
 };
 use rquickjs_jit::test_support::SnapshotFixture;
 
@@ -375,4 +375,27 @@ fn worker_snapshot_contains_stable_tokens_not_runtime_pointers() {
     assert_eq!(snapshot.entries()[0].function(), function);
     assert_eq!(snapshot.entries()[0].pc(), 21);
     assert_eq!(snapshot.entries()[0].observations(), &[ObservedType::Int32]);
+}
+
+#[test]
+fn stable_side_exit_compiles_at_ten_hits_and_unstable_exit_demotes_with_backoff() {
+    let key = FunctionKey::new(88, 1);
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+    for _ in 0..9 {
+        assert_eq!(
+            coordinator.record_optimized_side_exit(key, 7),
+            SideExitAction::Counted
+        );
+    }
+    assert_eq!(
+        coordinator.record_optimized_side_exit(key, 7),
+        SideExitAction::CompileStablePath
+    );
+    coordinator.advance_clock(50);
+    let SideExitAction::Demote { retry_after } = coordinator.record_optimized_side_exit(key, 8)
+    else {
+        panic!("a second guard is unstable")
+    };
+    assert!(retry_after > 50);
+    assert_eq!(coordinator.metrics().optimized_demotions, 1);
 }

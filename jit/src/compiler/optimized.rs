@@ -272,6 +272,11 @@ fn lower_optimized_machine(
     let mut context = FunctionBuilderContext::new();
     {
         let mut builder = FunctionBuilder::new(&mut clif, &mut context);
+        let poll_signature = super::helpers::generated_signatures(&**isa)?
+            .into_iter()
+            .nth(rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let poll_signature = builder.import_signature(poll_signature);
         let prologue = builder.create_block();
         builder.append_block_params_for_function_params(prologue);
         builder.switch_to_block(prologue);
@@ -359,6 +364,15 @@ fn lower_optimized_machine(
                 match node.kind() {
                     crate::ir::OptimizedNodeKind::GuardNumeric { guard, mid_loop } => {
                         if *mid_loop {
+                            emit_opt_poll(
+                                &mut builder,
+                                frame,
+                                sret,
+                                poll_signature,
+                                pointer_type,
+                                layout,
+                                node.pc(),
+                            );
                             let pass = builder.create_block();
                             emit_opt_numeric_guard(
                                 &mut builder,
@@ -879,6 +893,50 @@ fn emit_opt_numeric_guard(
         pointer_type,
         guard,
     );
+}
+
+fn emit_opt_poll(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    signature: cranelift_codegen::ir::SigRef,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    pc: u32,
+) {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder, MemFlags};
+    let flags = MemFlags::new();
+    let api = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.runtime_api);
+    let poll = builder.ins().load(
+        pointer_type,
+        flags,
+        api,
+        layout.helper_offsets[rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
+    );
+    let call = builder.ins().call_indirect(signature, poll, &[frame]);
+    let interrupted = builder.inst_results(call)[0];
+    let interrupted = builder.ins().icmp_imm(IntCC::NotEqual, interrupted, 0);
+    let interrupt = builder.create_block();
+    let continuation = builder.create_block();
+    builder
+        .ins()
+        .brif(interrupted, interrupt, &[], continuation, &[]);
+    builder.switch_to_block(interrupt);
+    let start = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    emit_opt_exit(
+        builder,
+        sret,
+        rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT,
+        Some(resume),
+        pointer_type,
+        0,
+    );
+    builder.switch_to_block(continuation);
 }
 
 impl Tier2Compiler {
