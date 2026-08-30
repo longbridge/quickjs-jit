@@ -189,4 +189,21 @@ mod hotness_tests {
             ProfitabilityRationale::PositiveAmortizedBenefit
         );
     }
+
+    #[test]
+    fn cumulative_timings_are_normalized_once() {
+        let profile = Profile {
+            bytecodes: 10_000,
+            compile_ns: 100,
+            executions: 10,
+            interpreter_ns: 1_000,
+            baseline_ns: 800,
+            optimized_ns: 400,
+            code_bytes: 10,
+            ..Profile::default()
+        };
+        let decision = Profitability::default().evaluate(profile);
+        assert_eq!(decision.gross_benefit_ns, 400);
+        assert_eq!(decision.net_benefit_ns, 300);
+    }
 }

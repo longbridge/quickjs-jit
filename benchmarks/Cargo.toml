@@ -12,6 +12,14 @@ path = "run.rs"
 name = "jit-bench-report"
 path = "report.rs"
 
+[[bin]]
+name = "jit-size-no-jit"
+path = "size-no-jit.rs"
+
+[[bin]]
+name = "jit-size-jit"
+path = "size-jit.rs"
+
 [dependencies]
 rquickjs = { path = "..", features = ["jit-abi"] }
 rquickjs-jit = { path = "../jit", features = ["compiler", "test-support"] }

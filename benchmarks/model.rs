@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BenchmarkFile {
     pub schema: String,
     pub provenance: Provenance,
@@ -10,12 +11,14 @@ pub struct BenchmarkFile {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub source_revision: String,
     pub quickjs_revision: String,
     pub source_dirty: bool,
     pub command: Vec<String>,
     pub target: String,
+    pub target_triple: String,
     pub os: String,
     pub kernel: String,
     pub cpu: String,
@@ -23,11 +26,15 @@ pub struct Provenance {
     pub rustc: String,
     pub llvm: String,
     pub executable_bytes: u64,
+    pub stripped_jit_bytes: u64,
+    pub stripped_no_jit_bytes: u64,
+    pub stripped_jit_delta_bytes: i64,
     pub schema_sha256: String,
     pub suites_lock_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SamplingPolicy {
     pub latency_warmups: u32,
     pub latency_processes: u32,
@@ -38,12 +45,14 @@ pub struct SamplingPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModeResult {
     pub mode: String,
     pub workloads: Vec<WorkloadResult>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PhaseTiming {
     pub total_ns: u64,
     pub runtime_create_ns: u64,
@@ -59,6 +68,7 @@ pub struct PhaseTiming {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SampleEvidence {
     pub pair_index: u32,
     pub elapsed_ns: u64,
@@ -69,8 +79,7 @@ pub struct SampleEvidence {
     pub retry_count: u64,
     pub tier1_entries: u64,
     pub tier2_entries: u64,
-    pub pc_entries: u64,
-    pub helper_exits: u64,
+    pub osr_attempts: u64,
     pub profitability_evaluations: u64,
     pub profitability_approved: u64,
     pub profitability_rejected: u64,
@@ -87,6 +96,7 @@ pub struct SampleEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkloadResult {
     pub name: String,
     pub suite: String,
@@ -106,6 +116,7 @@ pub struct WorkloadResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Exclusion {
     pub suite: String,
     pub test: String,

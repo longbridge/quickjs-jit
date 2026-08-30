@@ -491,15 +491,21 @@ struct ProductionBackend {
     adaptive_inputs_recorded: u64,
     snapshot_requests: u64,
     stable_path_compile_requests: u64,
-    execution_starts: std::collections::HashMap<runtime::FunctionKey, Vec<std::time::Instant>>,
+    pending_entry_tiers:
+        std::collections::HashMap<runtime::FunctionKey, std::collections::VecDeque<runtime::Tier>>,
+    execution_starts:
+        std::collections::HashMap<runtime::FunctionKey, Vec<(std::time::Instant, runtime::Tier)>>,
     execution_profiles: std::collections::HashMap<runtime::FunctionKey, ProductionProfile>,
     profitability_evaluations: u64,
     profitability_approved: u64,
     profitability_rejected: u64,
+    profitability_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
+    profitability_blacklisted: std::collections::HashSet<runtime::FunctionKey>,
     benefit_recordings: u64,
     measured_benefit_ns: u64,
     compiler_measurements: Arc<CompilerMeasurements>,
     install_ns: u64,
+    peak_compiler_bytes: usize,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
@@ -1106,14 +1112,18 @@ impl ProductionBackend {
             snapshot_requests: 0,
             stable_path_compile_requests: 0,
             execution_starts: std::collections::HashMap::new(),
+            pending_entry_tiers: std::collections::HashMap::new(),
             execution_profiles: std::collections::HashMap::new(),
             profitability_evaluations: 0,
             profitability_approved: 0,
             profitability_rejected: 0,
+            profitability_backoff: std::collections::HashMap::new(),
+            profitability_blacklisted: std::collections::HashSet::new(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
             compiler_measurements,
             install_ns: 0,
+            peak_compiler_bytes: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
@@ -1139,6 +1149,16 @@ impl ProductionBackend {
             .keys()
             .copied()
             .filter(|key| {
+                if self.profitability_blacklisted.contains(key) {
+                    return false;
+                }
+                if self
+                    .profitability_backoff
+                    .get(key)
+                    .is_some_and(|(_, retry_at)| self.clock < *retry_at)
+                {
+                    return false;
+                }
                 matches!(
                     self.coordinator.tier_state(*key, runtime::Tier::Baseline),
                     runtime::CompileState::Installed(_)
@@ -1163,13 +1183,16 @@ impl ProductionBackend {
                     .get(&key)
                     .copied()
                     .unwrap_or_default();
+                let installed = self.coordinator.metrics().installed.max(1);
                 let profile = runtime::Profile {
                     bytecodes: measured.bytecodes,
                     helper_calls: measured.helper_calls,
-                    compile_ns: measured
-                        .bytecodes
-                        .saturating_mul(100)
-                        .saturating_add(10_000),
+                    compile_ns: self
+                        .compiler_measurements
+                        .elapsed_ns
+                        .load(Ordering::Relaxed)
+                        / installed,
+                    install_ns: self.install_ns / installed,
                     executions: measured.baseline_executions,
                     baseline_ns: measured.baseline_ns,
                     code_bytes: measured.bytecodes.saturating_mul(8),
@@ -1182,8 +1205,19 @@ impl ProductionBackend {
                     != runtime::Decision::Optimize
                 {
                     self.profitability_rejected = self.profitability_rejected.saturating_add(1);
+                    let entry = self
+                        .profitability_backoff
+                        .entry(key)
+                        .or_insert((0, self.clock));
+                    entry.0 = entry.0.saturating_add(1);
+                    if entry.0 >= 5 {
+                        self.profitability_blacklisted.insert(key);
+                    } else {
+                        entry.1 = self.clock.saturating_add(1u64 << entry.0.min(20));
+                    }
                     continue;
                 }
+                self.profitability_backoff.remove(&key);
                 self.profitability_approved = self.profitability_approved.saturating_add(1);
             }
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
@@ -1219,6 +1253,7 @@ impl ProductionBackend {
         );
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
         let (jobs, snapshots, ir) = self.workers.live_usage();
+        self.peak_compiler_bytes = self.peak_compiler_bytes.max(snapshots.saturating_add(ir));
         self.coordinator.set_worker_usage(jobs, snapshots, ir);
         let mut snapshot = self.coordinator.metrics();
         snapshot.native_entries = self.native_entries;
@@ -1248,6 +1283,7 @@ impl ProductionBackend {
             .elapsed_ns
             .load(Ordering::Relaxed);
         snapshot.install_ns = self.install_ns;
+        snapshot.peak_compiler_bytes = self.peak_compiler_bytes;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
@@ -1553,20 +1589,16 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             helper_abi_version: 0,
         };
         self.maintenance();
-        let Some(pin) = self.coordinator.pin(
-            runtime::FunctionKey::new(id, generation),
-            if matches!(
-                self.coordinator.tier_state(
-                    runtime::FunctionKey::new(id, generation),
-                    runtime::Tier::Optimizing
-                ),
-                runtime::CompileState::Installed(_)
-            ) {
-                runtime::Tier::Optimizing
-            } else {
-                runtime::Tier::Baseline
-            },
-        ) else {
+        let key = runtime::FunctionKey::new(id, generation);
+        let acquired_tier = if matches!(
+            self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+            runtime::CompileState::Installed(_)
+        ) {
+            runtime::Tier::Optimizing
+        } else {
+            runtime::Tier::Baseline
+        };
+        let Some(pin) = self.coordinator.pin(key, acquired_tier) else {
             if pc != 0 {
                 self.osr_not_ready = self.osr_not_ready.saturating_add(1);
             }
@@ -1624,6 +1656,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         empty.pin = pin;
         empty.stack_map_count = stack_map_count;
         empty.helper_abi_version = rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION;
+        self.pending_entry_tiers
+            .entry(key)
+            .or_default()
+            .push_back(acquired_tier);
         empty
     }
 
@@ -1635,48 +1671,50 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
 
     fn native_enter(&mut self, _id: u64, _generation: u64, pc: u32) {
         self.native_entries = self.native_entries.saturating_add(1);
-        if matches!(
-            self.coordinator.tier_state(
-                runtime::FunctionKey::new(_id, _generation),
-                runtime::Tier::Optimizing
-            ),
-            runtime::CompileState::Installed(_)
-        ) {
+        let key = runtime::FunctionKey::new(_id, _generation);
+        let tier = self
+            .pending_entry_tiers
+            .get_mut(&key)
+            .and_then(std::collections::VecDeque::pop_front)
+            .unwrap_or(runtime::Tier::Baseline);
+        if tier == runtime::Tier::Optimizing {
             self.coordinator.record_tier2_entry();
         }
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
         self.execution_starts
-            .entry(runtime::FunctionKey::new(_id, _generation))
+            .entry(key)
             .or_default()
-            .push(std::time::Instant::now());
+            .push((std::time::Instant::now(), tier));
     }
 
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
         let key = runtime::FunctionKey::new(id, generation);
-        if let Some(start) = self.execution_starts.get_mut(&key).and_then(Vec::pop) {
+        if let Some((start, tier)) = self.execution_starts.get_mut(&key).and_then(Vec::pop) {
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
-            let optimized = matches!(
-                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
-                runtime::CompileState::Installed(_)
-            );
+            let optimized = tier == runtime::Tier::Optimizing;
             let profile = self.execution_profiles.entry(key).or_default();
             if optimized {
                 profile.optimized_executions = profile.optimized_executions.saturating_add(1);
                 profile.optimized_ns = profile.optimized_ns.saturating_add(elapsed);
-                if let Some(baseline_average) =
-                    profile.baseline_ns.checked_div(profile.baseline_executions)
-                {
-                    let saved = baseline_average.saturating_sub(elapsed);
-                    if saved != 0
-                        && self
-                            .coordinator
-                            .record_benefit(key, runtime::Tier::Optimizing, saved)
+                if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
+                    if let Some(baseline_average) =
+                        profile.baseline_ns.checked_div(profile.baseline_executions)
                     {
-                        self.benefit_recordings = self.benefit_recordings.saturating_add(1);
-                        self.measured_benefit_ns = self.measured_benefit_ns.saturating_add(saved);
+                        let saved = baseline_average.saturating_sub(elapsed);
+                        if saved != 0
+                            && self.coordinator.record_benefit(
+                                key,
+                                runtime::Tier::Optimizing,
+                                saved,
+                            )
+                        {
+                            self.benefit_recordings = self.benefit_recordings.saturating_add(1);
+                            self.measured_benefit_ns =
+                                self.measured_benefit_ns.saturating_add(saved);
+                        }
                     }
                 }
             } else {

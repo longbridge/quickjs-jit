@@ -31,17 +31,41 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
     if data.schema != "jit-benchmark-v1" {
         return Err("unsupported schema".into());
     }
-    if data.policy.latency_warmups < 5
-        || data.policy.latency_processes < 30
-        || data.policy.throughput_windows < 10
+    if data.policy.latency_warmups != 5
+        || data.policy.latency_processes != 30
+        || data.policy.throughput_windows != 10
+        || data.policy.throughput_window_ns != 1_000_000_000
         || data.policy.bootstrap_resamples < 10_000
     {
         return Err("sampling policy below required minimum".into());
+    }
+    let mut names = data
+        .modes
+        .iter()
+        .map(|m| m.mode.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    if names != ["automatic", "interpreter", "tier1", "tier2"] {
+        return Err(
+            "modes must contain each of automatic/interpreter/tier1/tier2 exactly once".into(),
+        );
+    }
+    if data.provenance.source_revision.len() != 40
+        || data.provenance.quickjs_revision.len() != 40
+        || data.provenance.target_triple.split('-').count() < 3
+    {
+        return Err("incomplete source hashes or target triple".into());
     }
     for mode in &data.modes {
         for w in &mode.workloads {
             if w.samples.len() != data.policy.latency_processes as usize {
                 return Err(format!("{} / {} sample count mismatch", mode.mode, w.name));
+            }
+            if w.raw_latency_ns.len() != 30 || w.raw_throughput_ops.len() != 10 {
+                return Err(format!(
+                    "{} / {} raw sample count mismatch",
+                    mode.mode, w.name
+                ));
             }
             for (i, s) in w.samples.iter().enumerate() {
                 if s.pair_index as usize != i {
@@ -414,8 +438,7 @@ mod tests {
             retry_count: 0,
             tier1_entries: 1,
             tier2_entries: 0,
-            pc_entries: 0,
-            helper_exits: 0,
+            osr_attempts: 0,
             profitability_evaluations: 1,
             profitability_approved: 1,
             profitability_rejected: 0,

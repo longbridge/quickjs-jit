@@ -82,8 +82,7 @@ struct WorkerResult {
     fallbacks: u64,
     retries: u64,
     tier2_entries: u64,
-    pc_entries: u64,
-    helper_exits: u64,
+    osr_attempts: u64,
     profitability_evaluations: u64,
     profitability_approved: u64,
     profitability_rejected: u64,
@@ -303,10 +302,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         fallbacks: metrics.native_fallbacks,
         retries: metrics.native_retries,
         tier2_entries: metrics.tier2_entries,
-        pc_entries: metrics.osr_attempts,
-        helper_exits: metrics
-            .native_retries
-            .saturating_add(metrics.native_fallbacks),
+        osr_attempts: metrics.osr_attempts,
         profitability_evaluations: metrics.profitability_evaluations,
         profitability_approved: metrics.profitability_approved,
         profitability_rejected: metrics.profitability_rejected,
@@ -318,7 +314,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         peak_rss_bytes: worker_peak_rss(),
         code_bytes: metrics.code_bytes as u64,
         metadata_bytes: metrics.metadata_bytes as u64,
-        active_ir_bytes: metrics.active_ir_bytes as u64,
+        active_ir_bytes: metrics.peak_compiler_bytes as u64,
         phases,
     };
     println!("{}", serde_json::to_string(&result).map_err(err)?);
@@ -393,8 +389,7 @@ fn evidence(pair: usize, r: WorkerResult) -> SampleEvidence {
         retry_count: r.retries,
         tier1_entries: r.native_entries.saturating_sub(r.tier2_entries),
         tier2_entries: r.tier2_entries,
-        pc_entries: r.pc_entries,
-        helper_exits: r.helper_exits,
+        osr_attempts: r.osr_attempts,
         profitability_evaluations: r.profitability_evaluations,
         profitability_approved: r.profitability_approved,
         profitability_rejected: r.profitability_rejected,
@@ -444,6 +439,11 @@ fn child(executable: &Path, mode: &str, script: &Path) -> Result<WorkerResult, S
     serde_json::from_slice(&output.stdout).map_err(err)
 }
 fn write_file(path: &str, modes: Vec<ModeResult>) -> Result<(), String> {
+    let mut mode_names = modes.iter().map(|m| m.mode.as_str()).collect::<Vec<_>>();
+    mode_names.sort_unstable();
+    if mode_names != ["automatic", "interpreter", "tier1", "tier2"] {
+        return Err("benchmark evidence requires four unique modes".into());
+    }
     let file = BenchmarkFile {
         schema: "jit-benchmark-v1".into(),
         provenance: provenance()?,
@@ -477,12 +477,14 @@ fn write_file(path: &str, modes: Vec<ModeResult>) -> Result<(), String> {
     fs::write(path, serde_json::to_vec_pretty(&file).map_err(err)?).map_err(err)
 }
 fn provenance() -> Result<Provenance, String> {
+    let (stripped_no_jit_bytes, stripped_jit_bytes) = stripped_probe_sizes()?;
     Ok(Provenance {
         source_revision: command("git", &["rev-parse", "HEAD"]),
         quickjs_revision: command("git", &["-C", "sys/quickjs", "rev-parse", "HEAD"]),
         source_dirty: !command("git", &["status", "--porcelain"]).is_empty(),
         command: env::args().collect(),
         target: option_env!("TARGET").unwrap_or(env::consts::ARCH).into(),
+        target_triple: rustc_host_triple(),
         os: env::consts::OS.into(),
         kernel: command("uname", &["-sr"]),
         cpu: fs::read_to_string("/proc/cpuinfo")
@@ -502,9 +504,43 @@ fn provenance() -> Result<Provenance, String> {
         executable_bytes: fs::metadata(env::current_exe().map_err(err)?)
             .map_err(err)?
             .len(),
+        stripped_jit_bytes,
+        stripped_no_jit_bytes,
+        stripped_jit_delta_bytes: i64::try_from(stripped_jit_bytes)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::try_from(stripped_no_jit_bytes).unwrap_or(i64::MAX)),
         schema_sha256: sha256("schema/jit-benchmark-v1.json"),
         suites_lock_sha256: sha256("suites.lock"),
     })
+}
+fn rustc_host_triple() -> String {
+    command("rustc", &["-vV"])
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .unwrap_or("unknown-unknown-unknown")
+        .to_owned()
+}
+fn stripped_probe_sizes() -> Result<(u64, u64), String> {
+    let exe = env::current_exe().map_err(err)?;
+    let dir = exe.parent().ok_or("benchmark executable has no parent")?;
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let no_jit = dir.join(format!("jit-size-no-jit{suffix}"));
+    let jit = dir.join(format!("jit-size-jit{suffix}"));
+    if !no_jit.is_file() || !jit.is_file() {
+        return Err("build --release --bins first: stripped size probes are missing".into());
+    }
+    Ok((stripped_size(&no_jit)?, stripped_size(&jit)?))
+}
+fn stripped_size(path: &Path) -> Result<u64, String> {
+    let temp = env::temp_dir().join(format!("rquickjs-jit-size-{}", std::process::id()));
+    fs::copy(path, &temp).map_err(err)?;
+    let status = Command::new("strip").arg(&temp).status().map_err(err)?;
+    if !status.success() {
+        return Err("strip failed for binary size probe".into());
+    }
+    let size = fs::metadata(&temp).map_err(err)?.len();
+    let _ = fs::remove_file(temp);
+    Ok(size)
 }
 fn worker_peak_rss() -> u64 {
     fs::read_to_string("/proc/self/status")
@@ -580,8 +616,7 @@ mod tests {
             fallbacks: 0,
             retries: 0,
             tier2_entries: 0,
-            pc_entries: 0,
-            helper_exits: 0,
+            osr_attempts: 0,
             profitability_evaluations: 0,
             profitability_approved: 0,
             profitability_rejected: 0,

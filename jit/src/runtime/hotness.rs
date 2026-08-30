@@ -82,7 +82,12 @@ impl Profitability {
                 0,
             );
         }
-        if profile.baseline_ns >= profile.interpreter_ns {
+        // All three timing fields are cumulative over `executions`. Normalize
+        // exactly once here; callers must never pre-multiply an average.
+        let interpreter_per_execution = profile.interpreter_ns / profile.executions;
+        let baseline_per_execution = profile.baseline_ns / profile.executions;
+        let optimized_per_execution = profile.optimized_ns / profile.executions;
+        if baseline_per_execution >= interpreter_per_execution {
             return decision(
                 Decision::Interpret,
                 ProfitabilityRationale::NoBaselineBenefit,
@@ -93,7 +98,7 @@ impl Profitability {
             );
         }
 
-        let baseline_per_execution = profile.interpreter_ns.saturating_sub(profile.baseline_ns);
+        let baseline_saving = interpreter_per_execution.saturating_sub(baseline_per_execution);
         if profile.bytecodes != 0
             && profile.helper_calls.saturating_mul(1_000)
                 >= profile
@@ -103,28 +108,28 @@ impl Profitability {
             return measured_decision(
                 Decision::Baseline,
                 ProfitabilityRationale::HelperDominated,
-                baseline_per_execution,
+                baseline_saving,
                 profile,
             );
         }
 
-        let optimized_per_execution = profile.baseline_ns.saturating_sub(profile.optimized_ns);
+        let optimized_saving = baseline_per_execution.saturating_sub(optimized_per_execution);
         let compile_cost = profile.compile_ns.saturating_add(profile.install_ns);
-        let break_even = ceil_div(compile_cost, optimized_per_execution);
-        let gross = optimized_per_execution.saturating_mul(profile.executions);
+        let break_even = ceil_div(compile_cost, optimized_saving);
+        let gross = optimized_saving.saturating_mul(profile.executions);
         let net = i128::from(gross) - i128::from(compile_cost);
-        if optimized_per_execution == 0 || net <= 0 {
+        if optimized_saving == 0 || net <= 0 {
             measured_decision(
                 Decision::Baseline,
                 ProfitabilityRationale::BeforeBreakEven,
-                optimized_per_execution,
+                optimized_saving,
                 profile,
             )
         } else {
             measured_decision(
                 Decision::Optimize,
                 ProfitabilityRationale::PositiveAmortizedBenefit,
-                optimized_per_execution,
+                optimized_saving,
                 profile,
             )
         }
@@ -152,7 +157,9 @@ impl Profitability {
         }
         let baseline_per_execution = profile.baseline_ns / profile.executions;
         let modeled_optimized = baseline_per_execution.saturating_mul(3) / 4;
-        profile.interpreter_ns = profile.baseline_ns.saturating_mul(2);
+        profile.interpreter_ns = baseline_per_execution
+            .saturating_mul(2)
+            .saturating_mul(profile.executions);
         profile.optimized_ns = modeled_optimized.saturating_mul(profile.executions);
         // The trial-specific helper gate above has already classified this
         // profile; avoid applying the stricter post-trial gate a second time.
