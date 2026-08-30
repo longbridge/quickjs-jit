@@ -32,6 +32,10 @@ pub struct OptimizedNode {
     representation: ValueRepresentation,
     effect: OptimizedEffect,
     eliminated: bool,
+    bytes: Box<[u8]>,
+    branch_target: Option<u32>,
+    pops: u8,
+    pushes: u8,
 }
 
 impl OptimizedNode {
@@ -53,11 +57,24 @@ impl OptimizedNode {
     pub const fn eliminated(&self) -> bool {
         self.eliminated
     }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub const fn branch_target(&self) -> Option<u32> {
+        self.branch_target
+    }
+    pub const fn pops(&self) -> u8 {
+        self.pops
+    }
+    pub const fn pushes(&self) -> u8 {
+        self.pushes
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OptimizedBlock {
     start_pc: u32,
+    stack_depth: u16,
     successors: Box<[u32]>,
     loop_header: bool,
     nodes: Box<[u32]>,
@@ -66,6 +83,9 @@ pub struct OptimizedBlock {
 impl OptimizedBlock {
     pub const fn start_pc(&self) -> u32 {
         self.start_pc
+    }
+    pub const fn stack_depth(&self) -> u16 {
+        self.stack_depth
     }
     pub fn successors(&self) -> &[u32] {
         &self.successors
@@ -114,6 +134,7 @@ pub struct OptimizedIr {
     guards: Box<[GuardSite]>,
     metrics: OptimizedMetrics,
     feedback_epoch: u64,
+    max_stack: u16,
 }
 
 impl OptimizedIr {
@@ -125,14 +146,14 @@ impl OptimizedIr {
             return Err(CompileFailure::InvalidArtifact);
         }
         let snapshot = function.snapshot();
-        let shape = OptimizedFrameShape::new(
-            snapshot.arg_count(),
-            snapshot.local_count(),
-            snapshot.stack_size(),
-        );
+        // Entry and loop-header guards are instruction boundaries with an
+        // empty operand stack. Only live arguments/locals participate in the
+        // deopt transaction; capacity-only stack slots are not roots.
+        let shape = OptimizedFrameShape::new(snapshot.arg_count(), snapshot.local_count(), 0);
         let mut nodes = Vec::new();
         let mut guards = Vec::new();
         let mut next_guard = 0u32;
+        let block_depths = optimized_block_depths(function)?;
         let mut make_guard = |pc: u32,
                               mid_loop: bool,
                               nodes: &mut Vec<OptimizedNode>,
@@ -158,7 +179,7 @@ impl OptimizedIr {
                 ));
                 flat = flat.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
             }
-            for index in 0..snapshot.stack_size() {
+            for index in 0..shape.stack() {
                 recipes.push(Materialization::stack(
                     index,
                     MaterializedValue::TaggedSlot(flat),
@@ -176,6 +197,10 @@ impl OptimizedIr {
                 representation: ValueRepresentation::Effect,
                 effect: OptimizedEffect::Control,
                 eliminated: false,
+                bytes: Box::new([]),
+                branch_target: None,
+                pops: 0,
+                pushes: 0,
             });
             guards.push(GuardSite { guard, shape, map });
             Ok(id)
@@ -211,11 +236,20 @@ impl OptimizedIr {
                     representation,
                     effect,
                     eliminated: matches!(name, "nop" | "drop"),
+                    bytes: instruction.bytes().into(),
+                    branch_target: instruction
+                        .branch_target()
+                        .and_then(|target| u32::try_from(target).ok()),
+                    pops: instruction.opcode().n_pop(),
+                    pushes: instruction.opcode().n_push(),
                 });
                 block_nodes.push(id);
             }
             blocks.push(OptimizedBlock {
                 start_pc: block.start_pc(),
+                stack_depth: *block_depths
+                    .get(&block.start_pc())
+                    .ok_or(CompileFailure::InvalidArtifact)?,
                 successors: block.successors().into(),
                 loop_header: function
                     .control_flow_graph()
@@ -240,6 +274,7 @@ impl OptimizedIr {
                 dead_nodes_eliminated,
             },
             feedback_epoch,
+            max_stack: snapshot.stack_size(),
         })
     }
     pub fn blocks(&self) -> &[OptimizedBlock] {
@@ -260,6 +295,45 @@ impl OptimizedIr {
     pub const fn feedback_epoch(&self) -> u64 {
         self.feedback_epoch
     }
+    pub const fn max_stack(&self) -> u16 {
+        self.max_stack
+    }
+}
+
+fn optimized_block_depths(
+    function: &VerifiedFunction,
+) -> Result<std::collections::BTreeMap<u32, u16>, CompileFailure> {
+    use std::collections::{BTreeMap, VecDeque};
+    let mut depths = BTreeMap::from([(0u32, 0u16)]);
+    let mut queue = VecDeque::from([0u32]);
+    while let Some(pc) = queue.pop_front() {
+        let block = function
+            .control_flow_graph()
+            .block(pc)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let mut depth = *depths.get(&pc).ok_or(CompileFailure::InvalidArtifact)?;
+        for instruction in &function.instructions()[block.instruction_range()] {
+            depth = depth
+                .checked_sub(u16::from(instruction.opcode().n_pop()))
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            depth = depth
+                .checked_add(u16::from(instruction.opcode().n_push()))
+                .ok_or(CompileFailure::ResourceLimit)?;
+        }
+        for successor in block.successors() {
+            match depths.get(successor) {
+                Some(existing) if *existing != depth => {
+                    return Err(CompileFailure::InvalidArtifact)
+                }
+                Some(_) => {}
+                None => {
+                    depths.insert(*successor, depth);
+                    queue.push_back(*successor);
+                }
+            }
+        }
+    }
+    Ok(depths)
 }
 
 fn classify_optimized_opcode(
@@ -347,6 +421,15 @@ impl OptimizedFrameShape {
     }
     pub const fn slot_count(self) -> usize {
         self.arguments as usize + self.locals as usize + self.stack as usize
+    }
+    pub const fn arguments(self) -> u16 {
+        self.arguments
+    }
+    pub const fn locals(self) -> u16 {
+        self.locals
+    }
+    pub const fn stack(self) -> u16 {
+        self.stack
     }
     fn index(self, slot: DeoptSlot) -> Option<usize> {
         match slot {

@@ -231,6 +231,656 @@ pub struct Tier2Compiler {
     feedback_epoch: u64,
 }
 
+#[derive(Clone, Copy)]
+struct OptPair {
+    payload: cranelift_codegen::ir::Value,
+    tag: cranelift_codegen::ir::Value,
+}
+
+#[derive(Clone, Copy)]
+struct OptVars {
+    payload: cranelift_frontend::Variable,
+    tag: cranelift_frontend::Variable,
+}
+
+fn lower_optimized_machine(
+    isa: &cranelift_codegen::isa::OwnedTargetIsa,
+    ir: &OptimizedIr,
+    control: Option<&CompileControl>,
+) -> Result<super::baseline::RelocatableCode, CompileFailure> {
+    use cranelift_codegen::ir::{
+        types, AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlags, Signature,
+    };
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+    use rquickjs_core::qjs;
+    let pointer_type = isa.pointer_type();
+    if pointer_type.bytes() != 8 {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let layout = super::helpers::FrameLayout::validated(8)?;
+    let Some(entry_site) = ir.guard_maps().first() else {
+        return Err(CompileFailure::InvalidArtifact);
+    };
+    let shape = entry_site.shape();
+    let mut signature = Signature::new(isa.default_call_conv());
+    signature.params.push(AbiParam::special(
+        pointer_type,
+        ArgumentPurpose::StructReturn,
+    ));
+    signature.params.push(AbiParam::new(pointer_type));
+    let mut clif = Function::with_name_signature(Default::default(), signature);
+    let mut context = FunctionBuilderContext::new();
+    {
+        let mut builder = FunctionBuilder::new(&mut clif, &mut context);
+        let prologue = builder.create_block();
+        builder.append_block_params_for_function_params(prologue);
+        builder.switch_to_block(prologue);
+        let params = builder.block_params(prologue);
+        let sret = params[0];
+        let frame = params[1];
+        let flags = MemFlags::new();
+        let arg_buf = builder
+            .ins()
+            .load(pointer_type, flags, frame, layout.arg_buf);
+        let var_buf = builder
+            .ins()
+            .load(pointer_type, flags, frame, layout.var_buf);
+        let stack_base = builder
+            .ins()
+            .load(pointer_type, flags, frame, layout.stack_base);
+        let mut next_var = 0u32;
+        let mut alloc = || {
+            let pair = OptVars {
+                payload: Variable::from_u32(next_var),
+                tag: Variable::from_u32(next_var + 1),
+            };
+            next_var += 2;
+            pair
+        };
+        let arguments = (0..shape.arguments()).map(|_| alloc()).collect::<Vec<_>>();
+        let locals = (0..shape.locals()).map(|_| alloc()).collect::<Vec<_>>();
+        let stack = (0..ir.max_stack()).map(|_| alloc()).collect::<Vec<_>>();
+        for vars in arguments.iter().chain(&locals).chain(&stack) {
+            builder.declare_var(vars.payload, types::I64);
+            builder.declare_var(vars.tag, types::I64);
+        }
+        for (index, vars) in arguments.iter().enumerate() {
+            let pair = opt_load(&mut builder, arg_buf, index);
+            opt_define(&mut builder, *vars, pair);
+        }
+        for (index, vars) in locals.iter().enumerate() {
+            let pair = opt_load(&mut builder, var_buf, index);
+            opt_define(&mut builder, *vars, pair);
+        }
+        let undefined = OptPair {
+            payload: builder.ins().iconst(types::I64, 0),
+            tag: builder
+                .ins()
+                .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
+        };
+        for vars in &stack {
+            opt_define(&mut builder, *vars, undefined);
+        }
+        let blocks = ir
+            .blocks()
+            .iter()
+            .map(|block| (block.start_pc(), builder.create_block()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
+        emit_opt_numeric_guard(
+            &mut builder,
+            frame,
+            sret,
+            &arguments,
+            &[],
+            pointer_type,
+            layout,
+            entry_site.guard(),
+            0,
+            entry,
+        );
+        for block in ir.blocks() {
+            let clif_block = blocks[&block.start_pc()];
+            builder.switch_to_block(clif_block);
+            let mut depth = usize::from(block.stack_depth());
+            let mut terminated = false;
+            for node_id in block.nodes() {
+                let node = ir
+                    .nodes()
+                    .get(*node_id as usize)
+                    .ok_or(CompileFailure::InvalidArtifact)?;
+                if node.eliminated() {
+                    depth = depth
+                        .checked_sub(usize::from(node.pops()))
+                        .and_then(|value| value.checked_add(usize::from(node.pushes())))
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    continue;
+                }
+                match node.kind() {
+                    crate::ir::OptimizedNodeKind::GuardNumeric { guard, mid_loop } => {
+                        if *mid_loop {
+                            let pass = builder.create_block();
+                            emit_opt_numeric_guard(
+                                &mut builder,
+                                frame,
+                                sret,
+                                &arguments,
+                                &locals,
+                                pointer_type,
+                                layout,
+                                *guard,
+                                node.pc(),
+                                pass,
+                            );
+                            builder.switch_to_block(pass);
+                        }
+                    }
+                    crate::ir::OptimizedNodeKind::Bytecode { opcode } => {
+                        let name = opcode.as_ref();
+                        match name {
+                            "set_loc_uninitialized" => {
+                                let index = opt_u16(node.bytes())?;
+                                opt_define(&mut builder, locals[index], undefined);
+                                opt_store(&mut builder, var_buf, index, undefined);
+                            }
+                            "push_i8" => {
+                                let value = i64::from(
+                                    node.bytes()
+                                        .get(1)
+                                        .copied()
+                                        .ok_or(CompileFailure::InvalidArtifact)?
+                                        as i8,
+                                );
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(types::I64, value),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "undefined" => {
+                                opt_define(&mut builder, stack[depth], undefined);
+                                depth += 1;
+                            }
+                            "push_i16" => {
+                                let value = i64::from(i16::from_le_bytes([
+                                    node.bytes()[1],
+                                    node.bytes()[2],
+                                ]));
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(types::I64, value),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "push_i32" => {
+                                let value = i64::from(i32::from_le_bytes(
+                                    node.bytes()[1..5]
+                                        .try_into()
+                                        .map_err(|_| CompileFailure::InvalidArtifact)?,
+                                ));
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(types::I64, value),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "push_0" | "push_1" | "push_2" | "push_3" | "push_4" | "push_5"
+                            | "push_6" | "push_7" => {
+                                let value = i64::from(name.as_bytes()[5] - b'0');
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(types::I64, value),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            n if opt_index(n, node.bytes(), "get_arg")?.is_some() => {
+                                let index = opt_index(n, node.bytes(), "get_arg")?.unwrap();
+                                let pair = opt_use(&mut builder, arguments[index]);
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            n if opt_index(n, node.bytes(), "get_loc")?.is_some()
+                                || n == "get_loc_check" =>
+                            {
+                                let index = opt_index(n, node.bytes(), "get_loc")?
+                                    .map_or_else(|| opt_u16(node.bytes()), Ok)?;
+                                let pair = opt_use(&mut builder, locals[index]);
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            n if opt_index(n, node.bytes(), "put_loc")?.is_some()
+                                || matches!(n, "put_loc_check" | "put_loc_check_init") =>
+                            {
+                                let index = opt_index(n, node.bytes(), "put_loc")?
+                                    .map_or_else(|| opt_u16(node.bytes()), Ok)?;
+                                depth = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let pair = opt_use(&mut builder, stack[depth]);
+                                opt_define(&mut builder, locals[index], pair);
+                                opt_store(&mut builder, var_buf, index, pair);
+                            }
+                            "dup" => {
+                                let pair = opt_use(
+                                    &mut builder,
+                                    stack[depth
+                                        .checked_sub(1)
+                                        .ok_or(CompileFailure::InvalidArtifact)?],
+                                );
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "drop" => {
+                                depth = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                            }
+                            "add" | "sub" | "mul" | "div" => {
+                                depth = depth
+                                    .checked_sub(2)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let lhs = opt_use(&mut builder, stack[depth]);
+                                let rhs = opt_use(&mut builder, stack[depth + 1]);
+                                let lf = opt_f64(&mut builder, lhs);
+                                let rf = opt_f64(&mut builder, rhs);
+                                let result = match name {
+                                    "add" => builder.ins().fadd(lf, rf),
+                                    "sub" => builder.ins().fsub(lf, rf),
+                                    "mul" => builder.ins().fmul(lf, rf),
+                                    _ => builder.ins().fdiv(lf, rf),
+                                };
+                                let float_payload =
+                                    builder.ins().bitcast(types::I64, MemFlags::new(), result);
+                                let float_tag = builder
+                                    .ins()
+                                    .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+                                let pair = if name == "add" {
+                                    use cranelift_codegen::ir::condcodes::IntCC;
+                                    let lhs_int = builder.ins().icmp_imm(
+                                        IntCC::Equal,
+                                        lhs.tag,
+                                        i64::from(qjs::JS_TAG_INT),
+                                    );
+                                    let rhs_int = builder.ins().icmp_imm(
+                                        IntCC::Equal,
+                                        rhs.tag,
+                                        i64::from(qjs::JS_TAG_INT),
+                                    );
+                                    let both_int = builder.ins().band(lhs_int, rhs_int);
+                                    let li = builder.ins().ireduce(types::I32, lhs.payload);
+                                    let ri = builder.ins().ireduce(types::I32, rhs.payload);
+                                    let (sum, overflow) = builder.ins().sadd_overflow(li, ri);
+                                    let no_overflow = builder.ins().bnot(overflow);
+                                    let keep_int = builder.ins().band(both_int, no_overflow);
+                                    let int_payload = builder.ins().sextend(types::I64, sum);
+                                    let int_tag = builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+                                    OptPair {
+                                        payload: builder.ins().select(
+                                            keep_int,
+                                            int_payload,
+                                            float_payload,
+                                        ),
+                                        tag: builder.ins().select(keep_int, int_tag, float_tag),
+                                    }
+                                } else {
+                                    OptPair {
+                                        payload: float_payload,
+                                        tag: float_tag,
+                                    }
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "lt" | "lte" | "gt" | "gte" => {
+                                use cranelift_codegen::ir::condcodes::FloatCC;
+                                depth = depth
+                                    .checked_sub(2)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let lhs_pair = opt_use(&mut builder, stack[depth]);
+                                let rhs_pair = opt_use(&mut builder, stack[depth + 1]);
+                                let lhs = opt_f64(&mut builder, lhs_pair);
+                                let rhs = opt_f64(&mut builder, rhs_pair);
+                                let cc = match name {
+                                    "lt" => FloatCC::LessThan,
+                                    "lte" => FloatCC::LessThanOrEqual,
+                                    "gt" => FloatCC::GreaterThan,
+                                    _ => FloatCC::GreaterThanOrEqual,
+                                };
+                                let value = builder.ins().fcmp(cc, lhs, rhs);
+                                let payload = builder.ins().uextend(types::I64, value);
+                                let pair = OptPair {
+                                    payload,
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_BOOL)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                depth += 1;
+                            }
+                            "post_inc" | "inc" => {
+                                let index = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let old = opt_use(&mut builder, stack[index]);
+                                let one = builder.ins().f64const(1.0);
+                                let old = opt_f64(&mut builder, old);
+                                let result = builder.ins().fadd(old, one);
+                                let pair = OptPair {
+                                    payload: builder.ins().bitcast(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        result,
+                                    ),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
+                                };
+                                if name == "post_inc" {
+                                    opt_define(&mut builder, stack[index + 1], pair);
+                                    depth += 1;
+                                } else {
+                                    opt_define(&mut builder, stack[index], pair);
+                                }
+                            }
+                            "if_false8" | "if_true8" | "if_false" | "if_true" => {
+                                depth = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let condition = opt_use(&mut builder, stack[depth]);
+                                let truth = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                                    condition.payload,
+                                    0,
+                                );
+                                let target = *blocks
+                                    .get(
+                                        &node
+                                            .branch_target()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                    )
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let fallthrough = *blocks
+                                    .get(&next_block_pc(ir, block.start_pc())?)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                if name.starts_with("if_false") {
+                                    builder.ins().brif(truth, fallthrough, &[], target, &[]);
+                                } else {
+                                    builder.ins().brif(truth, target, &[], fallthrough, &[]);
+                                }
+                                terminated = true;
+                            }
+                            "goto" | "goto8" | "goto16" => {
+                                let target = *blocks
+                                    .get(
+                                        &node
+                                            .branch_target()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                    )
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                builder.ins().jump(target, &[]);
+                                terminated = true;
+                            }
+                            "return" => {
+                                depth = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let result = opt_use(&mut builder, stack[depth]);
+                                opt_store_at(&mut builder, frame, layout.result, result);
+                                opt_set_stack_top(
+                                    &mut builder,
+                                    frame,
+                                    stack_base,
+                                    depth,
+                                    pointer_type,
+                                    layout,
+                                );
+                                emit_opt_exit(
+                                    &mut builder,
+                                    sret,
+                                    qjs::JSJitExitKind_JS_JIT_EXIT_DONE,
+                                    None,
+                                    pointer_type,
+                                    0,
+                                );
+                                terminated = true;
+                            }
+                            "return_undef" => {
+                                opt_store_at(&mut builder, frame, layout.result, undefined);
+                                emit_opt_exit(
+                                    &mut builder,
+                                    sret,
+                                    qjs::JSJitExitKind_JS_JIT_EXIT_DONE,
+                                    None,
+                                    pointer_type,
+                                    0,
+                                );
+                                terminated = true;
+                            }
+                            "nop" => {}
+                            _ => return Err(CompileFailure::UnsupportedOpcode),
+                        }
+                    }
+                }
+                if terminated {
+                    break;
+                }
+            }
+            if !terminated {
+                let next = next_block_pc(ir, block.start_pc())?;
+                builder.ins().jump(blocks[&next], &[]);
+            }
+        }
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+    super::baseline::finalize_optimized_machine(isa, clif, control)
+}
+
+fn opt_define(builder: &mut cranelift_frontend::FunctionBuilder<'_>, vars: OptVars, pair: OptPair) {
+    builder.def_var(vars.payload, pair.payload);
+    builder.def_var(vars.tag, pair.tag);
+}
+fn opt_use(builder: &mut cranelift_frontend::FunctionBuilder<'_>, vars: OptVars) -> OptPair {
+    OptPair {
+        payload: builder.use_var(vars.payload),
+        tag: builder.use_var(vars.tag),
+    }
+}
+fn opt_load(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    base: cranelift_codegen::ir::Value,
+    index: usize,
+) -> OptPair {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    let offset = i32::try_from(index * 16).expect("verified frame");
+    OptPair {
+        payload: builder
+            .ins()
+            .load(types::I64, MemFlags::new(), base, offset),
+        tag: builder
+            .ins()
+            .load(types::I64, MemFlags::new(), base, offset + 8),
+    }
+}
+fn opt_store(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    base: cranelift_codegen::ir::Value,
+    index: usize,
+    pair: OptPair,
+) {
+    opt_store_at(
+        builder,
+        base,
+        i32::try_from(index * 16).expect("verified frame"),
+        pair,
+    )
+}
+fn opt_store_at(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    base: cranelift_codegen::ir::Value,
+    offset: i32,
+    pair: OptPair,
+) {
+    use cranelift_codegen::ir::{InstBuilder, MemFlags};
+    builder
+        .ins()
+        .store(MemFlags::new(), pair.payload, base, offset);
+    builder
+        .ins()
+        .store(MemFlags::new(), pair.tag, base, offset + 8);
+}
+fn opt_f64(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    pair: OptPair,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    let is_int = builder.ins().icmp_imm(
+        IntCC::Equal,
+        pair.tag,
+        i64::from(rquickjs_core::qjs::JS_TAG_INT),
+    );
+    let int = builder.ins().ireduce(types::I32, pair.payload);
+    let intf = builder.ins().fcvt_from_sint(types::F64, int);
+    let float = builder
+        .ins()
+        .bitcast(types::F64, MemFlags::new(), pair.payload);
+    builder.ins().select(is_int, intf, float)
+}
+fn opt_u16(bytes: &[u8]) -> Result<usize, CompileFailure> {
+    let raw = bytes.get(1..3).ok_or(CompileFailure::InvalidArtifact)?;
+    Ok(usize::from(u16::from_le_bytes([raw[0], raw[1]])))
+}
+fn opt_index(name: &str, bytes: &[u8], prefix: &str) -> Result<Option<usize>, CompileFailure> {
+    if !name.starts_with(prefix) {
+        return Ok(None);
+    }
+    if let Some(last) = name.as_bytes().last().filter(|last| last.is_ascii_digit()) {
+        return Ok(Some(usize::from(*last - b'0')));
+    }
+    Ok(Some(opt_u16(bytes)?))
+}
+fn next_block_pc(ir: &OptimizedIr, pc: u32) -> Result<u32, CompileFailure> {
+    ir.blocks()
+        .iter()
+        .position(|block| block.start_pc() == pc)
+        .and_then(|index| ir.blocks().get(index + 1))
+        .map(|block| block.start_pc())
+        .ok_or(CompileFailure::InvalidArtifact)
+}
+fn opt_set_stack_top(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    depth: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) {
+    use cranelift_codegen::ir::{InstBuilder, MemFlags};
+    let top = builder.ins().iadd_imm(
+        stack_base,
+        i64::try_from(depth * 16).expect("verified frame"),
+    );
+    builder
+        .ins()
+        .store(MemFlags::new(), top, frame, layout.stack_top);
+    let _ = pointer_type;
+}
+fn emit_opt_exit(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    sret: cranelift_codegen::ir::Value,
+    kind: u32,
+    resume: Option<cranelift_codegen::ir::Value>,
+    pointer_type: cranelift_codegen::ir::Type,
+    guard: u32,
+) {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    let zero = builder.ins().iconst(pointer_type, 0);
+    let map_identity = if kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+        guard.saturating_add(1)
+    } else {
+        0
+    };
+    let kind = builder.ins().iconst(types::I32, i64::from(kind));
+    let map = builder.ins().iconst(types::I32, i64::from(map_identity));
+    builder.ins().store(MemFlags::new(), kind, sret, 0);
+    builder.ins().store(MemFlags::new(), map, sret, 4);
+    builder
+        .ins()
+        .store(MemFlags::new(), resume.unwrap_or(zero), sret, 8);
+    builder.ins().store(MemFlags::new(), zero, sret, 16);
+    builder.ins().return_(&[]);
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_numeric_guard(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    guard: u32,
+    pc: u32,
+    pass: cranelift_codegen::ir::Block,
+) {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    let mut numeric = builder.ins().iconst(types::I8, 1);
+    let require_int32 = !locals.is_empty();
+    for vars in arguments.iter().chain(locals) {
+        let pair = opt_use(builder, *vars);
+        let int = builder.ins().icmp_imm(
+            IntCC::Equal,
+            pair.tag,
+            i64::from(rquickjs_core::qjs::JS_TAG_INT),
+        );
+        let float = builder.ins().icmp_imm(
+            IntCC::Equal,
+            pair.tag,
+            i64::from(rquickjs_core::qjs::JS_TAG_FLOAT64),
+        );
+        let valid = if require_int32 {
+            int
+        } else {
+            builder.ins().bor(int, float)
+        };
+        numeric = builder.ins().band(numeric, valid);
+    }
+    let deopt = builder.create_block();
+    builder.ins().brif(numeric, pass, &[], deopt, &[]);
+    builder.switch_to_block(deopt);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    emit_opt_exit(
+        builder,
+        sret,
+        rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+}
+
 impl Tier2Compiler {
     pub fn host(feedback_epoch: u64) -> Self {
         use cranelift_codegen::settings::{self, Configurable};
@@ -246,6 +896,16 @@ impl Tier2Compiler {
             isa,
             feedback_epoch,
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn lower_for_test(
+        &self,
+        function: &VerifiedFunction,
+        epoch: u64,
+    ) -> Result<String, CompileFailure> {
+        let ir = OptimizedIr::translate(function, epoch)?;
+        lower_optimized_machine(&self.isa, &ir, None).map(|code| code.clif().to_owned())
     }
 
     pub fn plan(
@@ -323,7 +983,8 @@ impl Compiler for Tier2Compiler {
             request.snapshot(),
             request.feedback_epoch().max(self.feedback_epoch),
         )?;
-        let code = super::baseline::lower_tier2_machine(&self.isa, request.snapshot(), None)?;
+        let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
+        let code = lower_optimized_machine(&self.isa, &ir, None)?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
             .with_dependencies(vec![dependency])
@@ -352,8 +1013,8 @@ impl Compiler for Tier2Compiler {
                 .len()
                 .saturating_mul(core::mem::size_of::<DeoptMap>()),
         )?;
-        let code =
-            super::baseline::lower_tier2_machine(&self.isa, request.snapshot(), Some(control))?;
+        let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
+        let code = lower_optimized_machine(&self.isa, &ir, Some(control))?;
         control.check()?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)

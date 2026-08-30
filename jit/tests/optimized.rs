@@ -266,6 +266,26 @@ fn production_optimized_ir_is_independent_ssa_with_loop_guards() {
 }
 
 #[test]
+fn independent_optimized_machine_lowers_numeric_loop() {
+    let fixture = SnapshotFixture::compile(
+        "(function(n,zero){let s=zero;for(let i=zero;i<n;i++)s=s+i;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let clif = Tier2Compiler::host(33)
+        .lower_for_test(&verified, 33)
+        .unwrap();
+    assert!(clif.contains("fadd"));
+    assert!(clif.contains("brif"));
+    let fixture = SnapshotFixture::compile(
+        "(function(n,zero){let unused;let s=zero;for(let i=zero;i<n;i++)s=s+i;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    Tier2Compiler::host(34)
+        .lower_for_test(&verified, 34)
+        .unwrap();
+}
+
+#[test]
 fn optimized_passes_rewrite_the_emitted_machine_plan() {
     let fixture = SnapshotFixture::compile("(function(a,b){a+b;return (a+b)+(a+b)})");
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
@@ -317,6 +337,18 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
     assert_eq!(
         jit.test_last_acquired_artifact_key().unwrap().tier,
         rquickjs_jit::runtime::Tier::Optimizing
+    );
+
+    let before_mid_loop = jit.metrics().deopts;
+    let overflowed = context
+        .with(|ctx| ctx.eval::<f64, _>("f(100000,0)"))
+        .unwrap();
+    assert_eq!(overflowed, 4_999_950_000.0);
+    jit.poll();
+    assert!(
+        jit.metrics().deopts > before_mid_loop,
+        "overflow representation guard did not deopt mid-loop: {:?}",
+        jit.metrics()
     );
 
     let deoptimized = context

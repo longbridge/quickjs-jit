@@ -208,7 +208,6 @@ enum CompilePolicy {
 #[derive(Clone, Copy)]
 enum GuardExit {
     Retry,
-    Deopt,
 }
 
 impl BaselineCompiler {
@@ -272,7 +271,7 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
         osr_start: Option<u32>,
-        guard_exit: GuardExit,
+        _guard_exit: GuardExit,
     ) -> Result<RelocatableCode, CompileFailure> {
         if let Some(control) = control {
             control.check()?;
@@ -326,7 +325,7 @@ impl BaselineCompiler {
                 layout,
                 &entry_analysis,
                 osr_start,
-                guard_exit,
+                GuardExit::Retry,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -502,7 +501,7 @@ impl BaselineCompiler {
                     policy,
                     control,
                     Some(point.pc()),
-                    guard_exit,
+                    GuardExit::Retry,
                 )?;
                 code.osr_codes.push((map, child));
             }
@@ -577,26 +576,73 @@ impl Compiler for BaselineCompiler {
     }
 }
 
-/// Emits the shared QuickJS frame ABI after Tier 2 has independently built
-/// and validated its optimization/guard plan. This is deliberately a free
-/// lowering primitive: the optimizing compiler neither owns nor invokes a
-/// production `BaselineCompiler`.
-pub(crate) fn lower_tier2_machine(
+/// Finalizes Cranelift IR produced by the independent optimizing builder. This
+/// owns only target encoding/unwind packaging; it does not translate or lower
+/// baseline IR.
+pub(crate) fn finalize_optimized_machine(
     isa: &OwnedTargetIsa,
-    function: &VerifiedFunction,
+    clif: Function,
     control: Option<&CompileControl>,
 ) -> Result<RelocatableCode, CompileFailure> {
-    BaselineCompiler {
-        isa: isa.clone(),
-        host_publishable: isa_is_host_compatible(&**isa),
+    if let Some(control) = control {
+        control.check()?;
+        control.check_ir_bytes(clif.display().to_string().len())?;
     }
-    .compile_with_policy_start(
-        function,
-        CompilePolicy::AdvertisedOnly,
-        control,
-        None,
-        GuardExit::Deopt,
-    )
+    let clif_text = clif.display().to_string();
+    let function_parameters = clif.params.clone();
+    let mut context = Context::for_function(clif);
+    let compiled = context
+        .compile(&**isa, &mut ControlPlane::default())
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    if let Some(control) = control {
+        control.check()?;
+    }
+    let unwind_info = compiled
+        .create_unwind_info(&**isa)
+        .map_err(|_| CompileFailure::InvalidArtifact)?
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let unwind_metadata = Some(retain_unwind_metadata(&unwind_info, compiled.frame_size)?);
+    let native_unwind = NativeUnwindPlan::new(unwind_info, &**isa)?;
+    let bytes = compiled.code_buffer().to_vec();
+    let relocations = compiled
+        .buffer
+        .relocs()
+        .iter()
+        .map(|reloc| {
+            let target = match &reloc.target {
+                FinalizedRelocTarget::Func(offset) => RelocationTarget::FunctionOffset(*offset),
+                FinalizedRelocTarget::ExternalName(name) => RelocationTarget::Symbol(
+                    name.display(Some(&function_parameters))
+                        .to_string()
+                        .into_boxed_str(),
+                ),
+            };
+            Relocation::with_target(
+                reloc.offset,
+                relocation_kind(reloc.kind),
+                target,
+                reloc.addend,
+            )
+        })
+        .collect();
+    Ok(RelocatableCode {
+        bytes,
+        relocations,
+        unwind_metadata,
+        native_unwind,
+        stack_maps: Vec::new(),
+        frame_states: Vec::new(),
+        call_return_offsets: compiled
+            .buffer
+            .call_sites()
+            .iter()
+            .map(|site| site.ret_addr)
+            .collect(),
+        target: isa.triple().clone(),
+        host_publishable: isa_is_host_compatible(&**isa),
+        clif: clif_text,
+        osr_codes: Vec::new(),
+    })
 }
 
 pub(crate) fn artifact_from_relocatable(
@@ -1759,7 +1805,7 @@ fn lower_function(
     layout: FrameLayout,
     analysis: &EntryAnalysis,
     osr_start: Option<u32>,
-    guard_exit: GuardExit,
+    _guard_exit: GuardExit,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -1790,19 +1836,11 @@ fn lower_function(
     let frame = params[1];
 
     if analysis.retry_before_entry {
-        let resume_pc = matches!(guard_exit, GuardExit::Deopt).then(|| {
-            builder
-                .ins()
-                .load(pointer_type, MemFlags::new(), frame, layout.pc)
-        });
         emit_exit(
             builder,
             sret,
-            match guard_exit {
-                GuardExit::Retry => qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
-                GuardExit::Deopt => qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
-            },
-            resume_pc,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            None,
             pointer_type,
         );
         return Ok(());
@@ -2616,19 +2654,11 @@ fn lower_function(
 
     builder.set_srcloc(SourceLoc::default());
     builder.switch_to_block(retry);
-    let resume_pc = matches!(guard_exit, GuardExit::Deopt).then(|| {
-        builder
-            .ins()
-            .load(pointer_type, MemFlags::new(), frame, layout.pc)
-    });
     emit_exit(
         builder,
         sret,
-        match guard_exit {
-            GuardExit::Retry => qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
-            GuardExit::Deopt => qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
-        },
-        resume_pc,
+        qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+        None,
         pointer_type,
     );
     builder.switch_to_block(invariant_trap);
@@ -3392,15 +3422,8 @@ fn emit_exit(
     pointer_type: cranelift_codegen::ir::Type,
 ) {
     let flags = MemFlags::new();
-    /* Tier 2's first exact entry guard owns deopt-map zero. The wire value is
-     * one-based so zero remains the non-deopt/reserved sentinel. */
-    let map_identity = if kind == qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
-        1
-    } else {
-        0
-    };
     let kind = builder.ins().iconst(types::I32, i64::from(kind));
-    let zero32 = builder.ins().iconst(types::I32, map_identity);
+    let zero32 = builder.ins().iconst(types::I32, 0);
     let zero_pointer = builder.ins().iconst(pointer_type, 0);
     builder.ins().store(flags, kind, sret, 0);
     builder.ins().store(flags, zero32, sret, 4);
