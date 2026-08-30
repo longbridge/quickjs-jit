@@ -262,6 +262,7 @@ struct InFlight {
     attempt_id: AttemptId,
     artifact_key: ArtifactKey,
     tier: Tier,
+    feedback_epoch: u64,
 }
 
 #[derive(Debug)]
@@ -354,6 +355,7 @@ pub struct Coordinator {
     installed_keys: HashMap<(FunctionKey, Tier), ArtifactKey>,
     environment: ArtifactEnvironment,
     dependencies: DependencyGraph,
+    latest_feedback_epochs: HashMap<FunctionKey, u64>,
 }
 
 impl Coordinator {
@@ -432,6 +434,7 @@ impl Coordinator {
             installed_keys: HashMap::new(),
             environment,
             dependencies: DependencyGraph::default(),
+            latest_feedback_epochs: HashMap::new(),
         }
     }
 
@@ -532,6 +535,12 @@ impl Coordinator {
         };
         self.next_attempt_id = next_attempt_id;
         let feedback_epoch = feedback.epoch();
+        if tier == Tier::Optimizing {
+            self.latest_feedback_epochs
+                .entry(key)
+                .and_modify(|epoch| *epoch = (*epoch).max(feedback_epoch))
+                .or_insert(feedback_epoch);
+        }
         self.queue.push_back(CompileRequest {
             key,
             tier,
@@ -563,6 +572,7 @@ impl Coordinator {
                     attempt_id: request.attempt_id,
                     artifact_key: request.artifact_key,
                     tier: request.tier,
+                    feedback_epoch: request.feedback_epoch,
                 },
             );
             self.metrics.compiling = self.metrics.compiling.saturating_add(1);
@@ -614,6 +624,19 @@ impl Coordinator {
         }
         match completion.result {
             Ok(artifact) if completion.artifact_key == artifact.key() => {
+                #[cfg(feature = "compiler")]
+                if completion.requested_tier == Tier::Optimizing
+                    && artifact.optimized_metadata().is_some_and(|metadata| {
+                        metadata.feedback_epoch() != expected.feedback_epoch
+                            || self.latest_feedback_epochs.get(&completion.key)
+                                != Some(&expected.feedback_epoch)
+                    })
+                {
+                    self.in_flight.remove(&completion.key);
+                    self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
+                    self.record_failure(completion.key, completion.requested_tier);
+                    return;
+                }
                 self.in_flight.remove(&completion.key);
                 if let Some(record) = self.functions.get_mut(&completion.key) {
                     record.tier_mut(completion.requested_tier).state =
@@ -857,7 +880,16 @@ impl Coordinator {
 
     pub fn pin(&mut self, key: FunctionKey, tier: Tier) -> Option<ExecutionPin> {
         let artifact_key = *self.installed_keys.get(&(key, tier))?;
-        self.cache.pin(artifact_key)
+        let pin = self.cache.pin(artifact_key)?;
+        #[cfg(feature = "compiler")]
+        if tier == Tier::Optimizing
+            && pin.artifact().optimized_metadata().is_some_and(|metadata| {
+                self.latest_feedback_epochs.get(&key) != Some(&metadata.feedback_epoch())
+            })
+        {
+            return None;
+        }
+        Some(pin)
     }
 
     pub fn cache_len(&self) -> usize {
