@@ -50,6 +50,8 @@ pub struct JitConfig {
     max_compile_attempts: u8,
     #[cfg(feature = "test-support")]
     stress_gc: bool,
+    #[cfg(feature = "test-support")]
+    force_optimized: bool,
     diagnostic_callback: Option<DiagnosticCallback>,
     metrics_observer: Option<MetricsObserver>,
 }
@@ -76,6 +78,12 @@ impl core::fmt::Debug for JitConfig {
                 {
                     false
                 }
+            })
+            .field("force_optimized", &{
+                #[cfg(feature = "test-support")]
+                { self.force_optimized }
+                #[cfg(not(feature = "test-support"))]
+                { false }
             })
             .field(
                 "has_diagnostic_callback",
@@ -107,6 +115,12 @@ impl PartialEq for JitConfig {
                 {
                     true
                 }
+            }
+            && {
+                #[cfg(feature = "test-support")]
+                { self.force_optimized == other.force_optimized }
+                #[cfg(not(feature = "test-support"))]
+                { true }
             }
             && callbacks_equal(&self.diagnostic_callback, &other.diagnostic_callback)
             && callbacks_equal(&self.metrics_observer, &other.metrics_observer)
@@ -171,6 +185,12 @@ impl JitConfig {
         self.stress_gc
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub const fn force_optimized(&self) -> bool {
+        self.force_optimized
+    }
+
     pub(crate) fn report(&self, kind: JitDiagnosticKind) {
         if let Some(callback) = &self.diagnostic_callback {
             callback(&JitDiagnostic { kind });
@@ -199,6 +219,8 @@ impl Default for JitConfig {
             max_compile_attempts: DEFAULT_MAX_COMPILE_ATTEMPTS,
             #[cfg(feature = "test-support")]
             stress_gc: false,
+            #[cfg(feature = "test-support")]
+            force_optimized: false,
             diagnostic_callback: None,
             metrics_observer: None,
         }
@@ -262,6 +284,13 @@ impl JitConfigBuilder {
     #[doc(hidden)]
     pub fn stress_gc(mut self, value: bool) -> Self {
         self.config.stress_gc = value;
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn force_optimized_for_test(mut self, value: bool) -> Self {
+        self.config.force_optimized = value;
         self
     }
 

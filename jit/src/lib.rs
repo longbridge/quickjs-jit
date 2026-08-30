@@ -994,6 +994,20 @@ impl ProductionBackend {
             .collect::<Vec<_>>();
         for key in ready_for_tier2 {
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
+                #[cfg(feature = "test-support")]
+                let feedback = if self.config.force_optimized() {
+                    let mut deterministic = runtime::FeedbackTable::new(1, 1);
+                    deterministic.observe_type(
+                        key,
+                        0,
+                        runtime::FeedbackKind::Value,
+                        runtime::ObservedType::Int32,
+                    );
+                    deterministic.snapshot(self.clock.max(1))
+                } else {
+                    self.feedback.snapshot(self.clock)
+                };
+                #[cfg(not(feature = "test-support"))]
                 let feedback = self.feedback.snapshot(self.clock);
                 if self
                     .coordinator
@@ -1269,7 +1283,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             runtime::Tier::Baseline
         };
         let tier2_snapshot = (requested_tier == runtime::Tier::Baseline).then(|| verified.clone());
-        match self.coordinator.queue(key, requested_tier, verified) {
+        let queued = self.coordinator.queue(key, requested_tier, verified);
+        match queued {
             Ok(()) => {
                 match self.queue_reasons.get(&key).copied() {
                     Some(runtime::HotReason::CallThreshold) => {

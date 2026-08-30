@@ -22,6 +22,7 @@ pub enum OptimizedEffect {
 pub enum OptimizedNodeKind {
     GuardNumeric { guard: u32, mid_loop: bool },
     Bytecode { opcode: Box<str> },
+    Reuse { source: u32 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,7 +258,7 @@ impl OptimizedIr {
                 nodes: block_nodes.into(),
             });
         }
-        let dead_nodes_eliminated = nodes.iter().filter(|node| node.eliminated).count() as u64;
+        let (cse_eliminated, dead_nodes_eliminated) = rewrite_pure_expressions(&mut nodes, &blocks);
         let machine_plan = nodes
             .iter()
             .filter(|node| !node.eliminated)
@@ -270,7 +271,7 @@ impl OptimizedIr {
             guards: guards.into(),
             metrics: OptimizedMetrics {
                 boxes_elided,
-                cse_eliminated: 0,
+                cse_eliminated,
                 dead_nodes_eliminated,
             },
             feedback_epoch,
@@ -298,6 +299,90 @@ impl OptimizedIr {
     pub const fn max_stack(&self) -> u16 {
         self.max_stack
     }
+}
+
+fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBlock]) -> (u64, u64) {
+    use std::collections::BTreeMap;
+    let mut cse = 0u64;
+    let mut dead = 0u64;
+    for block in blocks {
+        let ids = block.nodes();
+        let mut expressions = BTreeMap::<(Box<str>, Box<str>, Box<str>), u32>::new();
+        let mut index = 0usize;
+        while index < ids.len() {
+            if index + 3 < ids.len() {
+                let quartet = [ids[index], ids[index + 1], ids[index + 2], ids[index + 3]];
+                let names = quartet.map(|id| opcode_name(&nodes[id as usize]));
+                if names[3] == Some("drop")
+                    && names[0].is_some_and(is_pure_load)
+                    && names[1].is_some_and(is_pure_load)
+                    && names[2].is_some_and(is_pure_binary)
+                {
+                    for id in quartet {
+                        let node = &mut nodes[id as usize];
+                        node.eliminated = true;
+                        node.pops = 0;
+                        node.pushes = 0;
+                        dead = dead.saturating_add(1);
+                    }
+                    index += 4;
+                    continue;
+                }
+            }
+            if index + 2 < ids.len() {
+                let triple = [ids[index], ids[index + 1], ids[index + 2]];
+                let names = triple.map(|id| opcode_name(&nodes[id as usize]));
+                if names[0].is_some_and(is_pure_load)
+                    && names[1].is_some_and(is_pure_load)
+                    && names[2].is_some_and(is_pure_binary)
+                {
+                    let key = (
+                        names[2].unwrap().into(),
+                        names[0].unwrap().into(),
+                        names[1].unwrap().into(),
+                    );
+                    if let Some(source) = expressions.get(&key).copied() {
+                        for id in &triple[..2] {
+                            let node = &mut nodes[*id as usize];
+                            node.eliminated = true;
+                            node.pops = 0;
+                            node.pushes = 0;
+                        }
+                        let node = &mut nodes[triple[2] as usize];
+                        node.kind = OptimizedNodeKind::Reuse { source };
+                        node.pops = 0;
+                        node.pushes = 1;
+                        cse = cse.saturating_add(1);
+                    } else {
+                        expressions.insert(key, triple[2]);
+                    }
+                    index += 3;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+    }
+    (cse, dead)
+}
+
+fn opcode_name(node: &OptimizedNode) -> Option<&str> {
+    match &node.kind {
+        OptimizedNodeKind::Bytecode { opcode } => Some(opcode),
+        _ => None,
+    }
+}
+
+fn is_pure_load(name: &str) -> bool {
+    matches!(
+        name,
+        "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3"
+            | "get_loc" | "get_loc8" | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3"
+    )
+}
+
+fn is_pure_binary(name: &str) -> bool {
+    matches!(name, "add" | "sub" | "mul" | "div")
 }
 
 fn optimized_block_depths(

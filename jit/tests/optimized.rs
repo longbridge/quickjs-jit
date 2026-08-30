@@ -124,6 +124,21 @@ fn narrow_optimizer_preserves_javascript_numeric_edges() {
 }
 
 #[test]
+fn integer_zero_times_negative_one_folds_to_negative_zero() {
+    let mut compiler = OptimizedCompiler;
+    let function = compiler
+        .compile(&[
+            OptimizedInput::constant_i32(0),
+            OptimizedInput::constant_i32(-1),
+            OptimizedInput::binary(NumericBinaryOp::Mul, 0, 1),
+            OptimizedInput::ret(2),
+        ])
+        .unwrap();
+
+    assert!(function.constant(2).unwrap().is_negative_zero());
+}
+
+#[test]
 fn local_cse_and_dce_are_effect_free_and_bounded() {
     let mut compiler = OptimizedCompiler;
     let function = compiler
@@ -291,9 +306,83 @@ fn optimized_passes_rewrite_the_emitted_machine_plan() {
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let ir = OptimizedIr::translate(&verified, 32).expect("pure numeric function");
 
-    assert!(ir.metrics().cse_eliminated > 0 || ir.metrics().dead_nodes_eliminated > 0);
+    assert!(ir.metrics().cse_eliminated > 0, "{:#?}", ir.nodes());
     assert!(ir.machine_plan().iter().all(|node| !node.eliminated()));
     assert!(ir.machine_plan().len() < ir.nodes().len());
+
+    let clif = Tier2Compiler::host(32)
+        .lower_for_test(&verified, 32)
+        .expect("rewritten plan lowers");
+    assert_eq!(clif.matches("fadd").count(), 2, "{clif}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let captured = SnapshotFixture::compile(
+        "(function truth(v){return v?2:1})",
+    );
+    let verified = captured.snapshot().verify(VerifyLimits::default()).unwrap();
+    Tier2Compiler::host(91)
+        .lower_for_test(&verified, 91)
+        .expect("truthiness fixture must reach the production optimizing lowerer");
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function truth(v){return v?2:1}",
+            )
+        })
+        .unwrap();
+    for _ in 0..8 {
+        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
+    }
+    for _ in 0..10_000 {
+        jit.poll();
+        if jit.metrics().installed > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().installed > 0, "{:?}", jit.metrics());
+    for _ in 0..8 {
+        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
+    }
+    for _ in 0..10_000 {
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+    let before = jit.metrics();
+    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
+    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(NaN)" )).unwrap(), 1);
+    jit.poll();
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    assert_eq!(after.native_retries, before.native_retries, "{after:?}");
 }
 
 #[cfg(all(

@@ -202,6 +202,12 @@ impl OptimizedCompiler {
 
 fn fold(op: NumericBinaryOp, lhs: NumericConstant, rhs: NumericConstant) -> NumericConstant {
     if let (NumericConstant::Int32(lhs), NumericConstant::Int32(rhs)) = (lhs, rhs) {
+        if matches!(op, NumericBinaryOp::Mul)
+            && (lhs == 0 || rhs == 0)
+            && (lhs < 0 || rhs < 0)
+        {
+            return NumericConstant::Float64(-0.0);
+        }
         let exact = match op {
             NumericBinaryOp::Add => lhs.checked_add(rhs),
             NumericBinaryOp::Sub => lhs.checked_sub(rhs),
@@ -349,6 +355,7 @@ fn lower_optimized_machine(
             builder.switch_to_block(clif_block);
             let mut depth = usize::from(block.stack_depth());
             let mut terminated = false;
+            let mut reusable_values = std::collections::BTreeMap::<u32, OptPair>::new();
             for node_id in block.nodes() {
                 let node = ir
                     .nodes()
@@ -389,6 +396,14 @@ fn lower_optimized_machine(
                             builder.switch_to_block(pass);
                         }
                     }
+                    crate::ir::OptimizedNodeKind::Reuse { source } => {
+                        let pair = *reusable_values
+                            .get(source)
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        opt_define(&mut builder, stack[depth], pair);
+                        reusable_values.insert(*node_id, pair);
+                        depth += 1;
+                    }
                     crate::ir::OptimizedNodeKind::Bytecode { opcode } => {
                         let name = opcode.as_ref();
                         match name {
@@ -412,6 +427,7 @@ fn lower_optimized_machine(
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
                                 opt_define(&mut builder, stack[depth], pair);
+                                reusable_values.insert(*node_id, pair);
                                 depth += 1;
                             }
                             "undefined" => {
@@ -430,6 +446,7 @@ fn lower_optimized_machine(
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
                                 opt_define(&mut builder, stack[depth], pair);
+                                reusable_values.insert(*node_id, pair);
                                 depth += 1;
                             }
                             "push_i32" => {
@@ -557,6 +574,7 @@ fn lower_optimized_machine(
                                     }
                                 };
                                 opt_define(&mut builder, stack[depth], pair);
+                                reusable_values.insert(*node_id, pair);
                                 depth += 1;
                             }
                             "lt" | "lte" | "gt" | "gte" => {
@@ -611,15 +629,59 @@ fn lower_optimized_machine(
                                 }
                             }
                             "if_false8" | "if_true8" | "if_false" | "if_true" => {
+                                use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
                                 depth = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let condition = opt_use(&mut builder, stack[depth]);
-                                let truth = builder.ins().icmp_imm(
-                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                                    condition.payload,
-                                    0,
+                                let is_int = builder.ins().icmp_imm(
+                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_INT),
                                 );
+                                let is_bool = builder.ins().icmp_imm(
+                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_BOOL),
+                                );
+                                let is_float = builder.ins().icmp_imm(
+                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_FLOAT64),
+                                );
+                                let is_null = builder.ins().icmp_imm(
+                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_NULL),
+                                );
+                                let is_undefined = builder.ins().icmp_imm(
+                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_UNDEFINED),
+                                );
+                                let scalar = builder.ins().bor(is_int, is_bool);
+                                let empty = builder.ins().bor(is_null, is_undefined);
+                                let numeric = builder.ins().bor(scalar, is_float);
+                                let allowed = builder.ins().bor(numeric, empty);
+                                let truth_block = builder.create_block();
+                                let deopt_block = builder.create_block();
+                                builder.ins().brif(allowed, truth_block, &[], deopt_block, &[]);
+                                builder.switch_to_block(deopt_block);
+                                let start = builder.ins().load(
+                                    pointer_type, MemFlags::new(), frame, layout.bytecode_start,
+                                );
+                                let resume = builder.ins().iadd_imm(start, i64::from(node.pc()));
+                                builder.ins().store(MemFlags::new(), resume, frame, layout.pc);
+                                emit_opt_exit(
+                                    &mut builder,
+                                    sret,
+                                    qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+                                    Some(resume),
+                                    pointer_type,
+                                    entry_site.guard(),
+                                );
+                                builder.switch_to_block(truth_block);
+                                let integer_truth = builder.ins().icmp_imm(
+                                    IntCC::NotEqual, condition.payload, 0,
+                                );
+                                let float = builder.ins().bitcast(
+                                    types::F64, MemFlags::new(), condition.payload,
+                                );
+                                let zero = builder.ins().f64const(0.0);
+                                let float_truth = builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
+                                let numeric_truth = builder.ins().select(is_float, float_truth, integer_truth);
+                                let false_value = builder.ins().iconst(types::I8, 0);
+                                let truth = builder.ins().select(empty, false_value, numeric_truth);
                                 let target = *blocks
                                     .get(
                                         &node
