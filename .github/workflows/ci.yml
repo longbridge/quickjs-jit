@@ -150,6 +150,10 @@ jobs:
         run: cargo test -p rquickjs-jit --features compiler,test-support --test helpers --test semantics --test gpui_shell_surface -- --test-threads=1
       - name: Gate closed opcode policy and executed Tier 1 manifest
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test opcodes --test differential -- --test-threads=1
+      - name: Run bounded Test262 in interpreter, automatic, and strict eligible tiers
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test correctness_runner --test regressions --test test262 -- --test-threads=1
+      - name: Compile all six byte-driven fuzz targets
+        run: cargo check --manifest-path jit/fuzz/Cargo.toml --bins
 
   jit-platform-compiler:
     name: ${{ matrix.os }} / JIT compiler graph and native smoke

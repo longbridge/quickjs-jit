@@ -5,9 +5,9 @@ use rquickjs_core::{
 };
 use rquickjs_jit::{
     correctness::{
-        classify_features_with_config, discover_test262, parse_test262, CaseReport, CaseStatus,
-        ExclusionManifest, FeatureDisposition, NativeEvidence, NegativePhase, RunMode, SuiteReport,
-        Test262Variant,
+        classify_features_with_config, compose_test262_program, discover_test262, parse_test262,
+        CaseReport, CaseStatus, ExclusionManifest, FeatureDisposition, NativeEvidence,
+        NegativePhase, RunMode, SuiteReport, Test262Variant,
     },
     JitConfig, JitRuntime,
 };
@@ -15,13 +15,50 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    ptr,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant},
 };
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct JitTraceEvent {
+    pc: u32,
+    opcode: u8,
+    kind: u8,
+    helper_id: u8,
+    reserved: u8,
+}
+unsafe extern "C" {
+    fn JS_JitSetExecutionTrace(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        events: *mut JitTraceEvent,
+        capacity: u32,
+    ) -> i32;
+    fn JS_JitGetExecutionTraceLength(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        length: *mut u32,
+        overflowed: *mut u32,
+    ) -> i32;
+}
+
+#[derive(serde::Deserialize)]
+struct JitEligibilityManifest {
+    cases: Vec<JitEligibleCase>,
+}
+#[derive(serde::Deserialize)]
+struct JitEligibleCase {
+    path: String,
+    function: String,
+    invocation: String,
+}
+
+type AfterEvaluate<'a> = &'a dyn Fn(&Context) -> Result<(), String>;
 
 const TEST262_REVISION: &str = "d5e73fc8d2c663554fb72e2380a8c2bc1a318a33";
 
@@ -151,10 +188,10 @@ fn harness(root: &Path, includes: &[String], asynchronous: bool) -> Result<Strin
 fn execute(
     runtime: &Runtime,
     root: &Path,
-    source: &str,
     case: &rquickjs_jit::correctness::Test262Case,
     variant: Test262Variant,
     timeout: Duration,
+    after_evaluate: Option<AfterEvaluate<'_>>,
 ) -> Result<(), String> {
     runtime.set_loader(Test262Modules, Test262Modules);
     let deadline = Instant::now() + timeout;
@@ -174,51 +211,80 @@ fn execute(
             | Test262Variant::ModuleAsync
             | Test262Variant::StrictModuleAsync
     );
-    let mut program = harness(root, case.includes(), asynchronous)?;
-    if matches!(
-        variant,
-        Test262Variant::StrictScript | Test262Variant::StrictAsyncScript
-    ) {
-        program.push_str("'use strict';\n");
-    }
-    program.push_str(source);
-    let global = !matches!(
+    let harness = if variant == Test262Variant::RawScript {
+        String::new()
+    } else {
+        harness(root, case.includes(), asynchronous)?
+    };
+    let program = compose_test262_program(case, variant, &harness);
+    let module = matches!(
         variant,
         Test262Variant::Module
             | Test262Variant::StrictModule
             | Test262Variant::ModuleAsync
             | Test262Variant::StrictModuleAsync
     );
+    let filename = root.join(case.path()).to_string_lossy().into_owned();
     let context = Context::full(runtime).map_err(|error| format!("context: {error:?}"))?;
-    let result = context.with(|ctx| {
-        let mut options = EvalOptions::default();
-        options.global = global;
-        options.strict = matches!(
-            variant,
-            Test262Variant::StrictScript
-                | Test262Variant::StrictAsyncScript
-                | Test262Variant::StrictModule
-                | Test262Variant::StrictModuleAsync
-        );
-        options.promise = asynchronous;
-        options.filename = Some(root.join(case.path()).to_string_lossy().into_owned());
-        match ctx.eval_with_options::<(), _>(program.as_str(), options) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let caught = ctx.catch();
-                let detail = caught.into_object().and_then(|object| {
+    let strict = matches!(
+        variant,
+        Test262Variant::StrictScript
+            | Test262Variant::StrictAsyncScript
+            | Test262Variant::StrictModule
+            | Test262Variant::StrictModuleAsync
+    );
+    let result: Result<(), (NegativePhase, String)> = context.with(|ctx| {
+        let detail = |error: Error| {
+            let caught = ctx.catch();
+            caught
+                .into_object()
+                .and_then(|object| {
                     let name = object.get::<_, String>("name").ok()?;
                     let message = object.get::<_, String>("message").ok().unwrap_or_default();
                     Some(format!("{name}: {message}"))
-                });
-                Err(detail.unwrap_or_else(|| format!("{error:?}")))
-            }
+                })
+                .unwrap_or_else(|| format!("{error:?}"))
+        };
+        if case
+            .negative()
+            .is_some_and(|negative| negative.phase() == NegativePhase::Parse)
+        {
+            let parsed = if module {
+                Module::declare(ctx.clone(), filename.as_str(), program.as_bytes()).map(|_| ())
+            } else {
+                ctx.compile(program.as_bytes(), filename.as_bytes(), strict)
+            };
+            return parsed.map_err(|error| (NegativePhase::Parse, detail(error)));
+        }
+        if module {
+            let declared = Module::declare(ctx.clone(), filename.as_str(), program.as_bytes())
+                .map_err(|error| (NegativePhase::Parse, detail(error)))?;
+            let (_, promise) = declared
+                .eval()
+                .map_err(|error| (NegativePhase::Resolution, detail(error)))?;
+            promise
+                .finish::<()>()
+                .map_err(|error| (NegativePhase::Runtime, detail(error)))
+        } else {
+            let mut options = EvalOptions::default();
+            options.global = true;
+            options.strict = strict;
+            options.promise = false;
+            options.filename = Some(filename.clone());
+            ctx.eval_with_options::<(), _>(program.as_str(), options)
+                .map_err(|error| (NegativePhase::Runtime, detail(error)))
         }
     });
-    let observed_error = result.err();
+    let mut observed_error = result.err();
     while runtime.is_job_pending() && Instant::now() < deadline {
         if let Err(error) = runtime.execute_pending_job() {
-            return Err(format!("pending job: {error:?}"));
+            observed_error = Some((NegativePhase::Runtime, format!("pending job: {error:?}")));
+            break;
+        }
+    }
+    if observed_error.is_none() {
+        if let Some(callback) = after_evaluate {
+            callback(&context)?;
         }
     }
     if interrupted.load(Ordering::SeqCst) || Instant::now() >= deadline {
@@ -238,14 +304,19 @@ fn execute(
         }
     }
     match case.negative() {
-        None => observed_error.map_or(Ok(()), Err),
-        Some(negative) => match (negative.phase(), observed_error) {
-            (
-                NegativePhase::Parse | NegativePhase::Resolution | NegativePhase::Runtime,
-                Some(error),
-            ) if error.contains(negative.error_type()) => Ok(()),
-            (_, Some(error)) => Err(format!("expected {}, got {error}", negative.error_type())),
-            (_, None) => Err(format!(
+        None => observed_error.map_or(Ok(()), |(phase, error)| Err(format!("{phase:?}: {error}"))),
+        Some(negative) => match observed_error {
+            Some((phase, error))
+                if phase == negative.phase() && error.contains(negative.error_type()) =>
+            {
+                Ok(())
+            }
+            Some((phase, error)) => Err(format!(
+                "expected {:?} {}, got {phase:?} {error}",
+                negative.phase(),
+                negative.error_type()
+            )),
+            None => Err(format!(
                 "expected {} {:?} failure",
                 negative.error_type(),
                 negative.phase()
@@ -293,6 +364,10 @@ fn run(options: Options) -> Result<SuiteReport, String> {
         serde_json::from_str(include_str!("../../tests/fixtures/test262-exclusions.json"))
             .map_err(|error| format!("invalid exclusion manifest: {error}"))?;
     exclusions.validate("2026-08-30")?;
+    let jit_eligibility: JitEligibilityManifest = serde_json::from_str(include_str!(
+        "../../tests/fixtures/test262-jit-eligible.json"
+    ))
+    .map_err(|error| format!("invalid JIT eligibility manifest: {error}"))?;
     for path in paths {
         let relative = path
             .strip_prefix(&options.root)
@@ -315,6 +390,35 @@ fn run(options: Options) -> Result<SuiteReport, String> {
         let feature_disposition =
             classify_features_with_config(case.features(), &feature_registry, &quickjs_config)?;
         for &variant in case.variants() {
+            let jit_case = jit_eligibility
+                .cases
+                .iter()
+                .find(|entry| entry.path == relative);
+            if matches!(options.mode, RunMode::ForceTier1 | RunMode::ForceTier2)
+                && jit_case.is_none()
+            {
+                reports.push(CaseReport {
+                    path: relative.clone(),
+                    variant,
+                    status: CaseStatus::Skip,
+                    duration_ms: 0,
+                    negative_phase: case.negative().map(|n| n.phase()),
+                    negative_type: case.negative().map(|n| n.error_type().to_owned()),
+                    skip_reason: Some(
+                        "tier-ineligible: not listed in test262-jit-eligible.json".into(),
+                    ),
+                    error: None,
+                    native: NativeEvidence {
+                        native_entries: 0,
+                        tier2_entries: 0,
+                        native_exits: 0,
+                        unexpected_fallbacks: 0,
+                        opcode_ids: vec![],
+                        helper_ids: vec![],
+                    },
+                });
+                continue;
+            }
             if let Some(reason) = exclusions.path_reason(&relative) {
                 reports.push(CaseReport {
                     path: relative.clone(),
@@ -374,10 +478,10 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                         execute(
                             &runtime,
                             &options.root,
-                            &source,
                             &case,
                             variant,
                             options.timeout,
+                            None,
                         ),
                         NativeEvidence {
                             native_entries: 0,
@@ -390,29 +494,105 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                     )
                 }
                 _ => {
+                    let trace_evidence =
+                        Arc::new(Mutex::new((Vec::<u16>::new(), Vec::<u16>::new())));
                     let config = if options.mode == RunMode::Automatic {
                         JitConfig::default()
                     } else {
-                        JitConfig::builder()
-                            .call_threshold(1)
-                            .loop_threshold(1)
-                            .build()
-                            .map_err(|e| e.to_string())?
+                        let builder = JitConfig::builder().call_threshold(1).loop_threshold(1);
+                        #[cfg(feature = "test-support")]
+                        let builder =
+                            builder.force_optimized_for_test(options.mode == RunMode::ForceTier2);
+                        builder.build().map_err(|e| e.to_string())?
                     };
                     let runtime = JitRuntime::builder()
                         .config(config)
                         .build()
                         .map_err(|error| format!("JIT runtime: {error:?}"))?;
+                    let forced = jit_case.map(|eligible| {
+                        let function = eligible.function.clone();
+                        let invocation = eligible.invocation.clone();
+                        let mode = options.mode;
+                        let runtime_ref = &runtime;
+                        let trace_evidence = Arc::clone(&trace_evidence);
+                        move |context: &Context| -> Result<(), String> {
+                            let rt = context.with(|ctx| unsafe {
+                                rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr())
+                            });
+                            let mut trace = vec![JitTraceEvent::default(); 65_536];
+                            if unsafe {
+                                JS_JitSetExecutionTrace(rt, trace.as_mut_ptr(), trace.len() as u32)
+                            } != 0
+                            {
+                                return Err("failed to arm native execution trace".into());
+                            }
+                            let warm = format!(
+                                "for(let __jit_i=0;__jit_i<256;__jit_i++){{{invocation};}}"
+                            );
+                            for _ in 0..128 {
+                                context
+                                    .with(|ctx| ctx.eval::<(), _>(warm.as_str()))
+                                    .map_err(|error| {
+                                        format!("forced {function} replay: {error:?}")
+                                    })?;
+                                runtime_ref.jit().poll();
+                                let metrics = runtime_ref.metrics();
+                                if metrics.native_entries > 0
+                                    && (mode != RunMode::ForceTier2 || metrics.tier2_entries > 0)
+                                {
+                                    let mut length = 0;
+                                    let mut overflowed = 0;
+                                    if unsafe {
+                                        JS_JitGetExecutionTraceLength(
+                                            rt,
+                                            &mut length,
+                                            &mut overflowed,
+                                        )
+                                    } != 0
+                                        || overflowed != 0
+                                    {
+                                        return Err(
+                                            "native execution trace failed or overflowed".into()
+                                        );
+                                    }
+                                    trace.truncate(length as usize);
+                                    unsafe { JS_JitSetExecutionTrace(rt, ptr::null_mut(), 0) };
+                                    let mut evidence =
+                                        trace_evidence.lock().unwrap_or_else(|p| p.into_inner());
+                                    evidence.0 = trace
+                                        .iter()
+                                        .filter(|e| e.kind == 0)
+                                        .map(|e| u16::from(e.opcode))
+                                        .collect();
+                                    evidence.1 = trace
+                                        .iter()
+                                        .filter(|e| e.kind == 1)
+                                        .map(|e| u16::from(e.helper_id))
+                                        .collect();
+                                    evidence.0.sort_unstable();
+                                    evidence.0.dedup();
+                                    evidence.1.sort_unstable();
+                                    evidence.1.dedup();
+                                    return Ok(());
+                                }
+                                thread::yield_now();
+                            }
+                            Err(format!("forced {function} did not enter requested tier"))
+                        }
+                    });
                     let result = execute(
                         &runtime,
                         &options.root,
-                        &source,
                         &case,
                         variant,
                         options.timeout,
+                        forced
+                            .as_ref()
+                            .map(|f| f as &dyn Fn(&Context) -> Result<(), String>),
                     );
                     runtime.jit().poll();
                     let metrics = runtime.metrics();
+                    let trace = trace_evidence.lock().unwrap_or_else(|p| p.into_inner());
                     (
                         result,
                         NativeEvidence {
@@ -420,8 +600,8 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                             tier2_entries: metrics.tier2_entries,
                             native_exits: metrics.native_exits,
                             unexpected_fallbacks: metrics.native_fallbacks,
-                            opcode_ids: vec![],
-                            helper_ids: vec![],
+                            opcode_ids: trace.0.clone(),
+                            helper_ids: trace.1.clone(),
                         },
                     )
                 }

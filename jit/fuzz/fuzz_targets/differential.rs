@@ -1,16 +1,13 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use rquickjs_core::{Context, Runtime};
-use rquickjs_jit::correctness::canonical_observation_source;
+use rquickjs_jit::{correctness::{canonical_observation_source, StructuredProgram}, JitRuntime};
 fuzz_target!(|data: &[u8]| {
-    let a = data.first().copied().unwrap_or(0);
-    let b = data.get(1).copied().unwrap_or(0);
-    let expression = format!(
-        "(()=>{{let x={a};for(let i=0;i<{};i++)x=(x+{b})|0;return x}})()",
-        data.len().min(32)
-    );
-    let source = canonical_observation_source(&expression);
-    if let (Ok(left), Ok(right)) = (Runtime::new(), Runtime::new()) {
+    let mut seed_bytes = [0; 8];
+    for (slot, byte) in seed_bytes.iter_mut().zip(data.iter().copied()) { *slot = byte; }
+    let program = StructuredProgram::generate(u64::from_le_bytes(seed_bytes), data.len().min(256) as u16);
+    let source = canonical_observation_source(program.source());
+    if let (Ok(left), Ok(right)) = (Runtime::new(), JitRuntime::builder().build()) {
         let eval = |runtime: &Runtime| {
             Context::full(runtime)
                 .ok()

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     fmt, fs, io,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -80,6 +81,9 @@ impl Negative {
 #[derive(Clone, Debug)]
 pub struct Test262Case {
     path: String,
+    source: String,
+    metadata_range: Range<usize>,
+    body_range: Range<usize>,
     body: String,
     includes: Vec<String>,
     features: Vec<String>,
@@ -90,6 +94,15 @@ pub struct Test262Case {
 impl Test262Case {
     pub fn path(&self) -> &str {
         &self.path
+    }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn metadata_range(&self) -> Range<usize> {
+        self.metadata_range.clone()
+    }
+    pub fn body_range(&self) -> Range<usize> {
+        self.body_range.clone()
     }
     pub fn body(&self) -> &str {
         &self.body
@@ -163,13 +176,20 @@ pub fn parse_test262(path: impl Into<String>, source: &str) -> Result<Test262Cas
             vec![variant(false), variant(true)]
         }
     };
-    let body_start = yaml_end + "---*/".len();
-    let body = source[body_start..]
-        .strip_prefix('\n')
-        .unwrap_or(&source[body_start..])
-        .to_owned();
+    let metadata_end = yaml_end + "---*/".len();
+    let body_start = if source[metadata_end..].starts_with("\r\n") {
+        metadata_end + 2
+    } else if source[metadata_end..].starts_with('\n') {
+        metadata_end + 1
+    } else {
+        metadata_end
+    };
+    let body = source[body_start..].to_owned();
     Ok(Test262Case {
         path,
+        source: source.to_owned(),
+        metadata_range: start..metadata_end,
+        body_range: body_start..source.len(),
         body,
         includes: metadata.includes,
         features: metadata.features,
@@ -179,6 +199,29 @@ pub fn parse_test262(path: impl Into<String>, source: &str) -> Result<Test262Cas
         }),
         variants,
     })
+}
+
+pub fn compose_test262_program(
+    case: &Test262Case,
+    variant: Test262Variant,
+    harness: &str,
+) -> String {
+    if variant == Test262Variant::RawScript {
+        return case.body().to_owned();
+    }
+    let mut program = String::with_capacity(harness.len() + case.body().len() + 16);
+    program.push_str(harness);
+    if !harness.is_empty() && !harness.ends_with('\n') {
+        program.push('\n');
+    }
+    if matches!(
+        variant,
+        Test262Variant::StrictScript | Test262Variant::StrictAsyncScript
+    ) {
+        program.push_str("'use strict';\n");
+    }
+    program.push_str(case.body());
+    program
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -382,6 +425,48 @@ impl SuiteReport {
         self
     }
 
+    pub fn merge_shards(mut shards: Vec<Self>) -> Result<Self, String> {
+        if shards.is_empty() {
+            return Err("cannot merge zero shard reports".into());
+        }
+        let expected = shards[0].shard_count;
+        if expected == 0 {
+            return Err("invalid zero shard count".into());
+        }
+        let mut seen = vec![false; expected];
+        for shard in &shards {
+            if shard.shard_count != expected
+                || shard.suite != shards[0].suite
+                || shard.suite_revision != shards[0].suite_revision
+                || shard.mode != shards[0].mode
+                || shard.opcode_fingerprint != shards[0].opcode_fingerprint
+            {
+                return Err("incompatible shard report metadata".into());
+            }
+            if shard.cases.is_empty() {
+                return Err(format!("shard {} contains zero cases", shard.shard_index));
+            }
+            if shard.shard_index >= expected {
+                return Err(format!("invalid shard index {}", shard.shard_index));
+            }
+            if std::mem::replace(&mut seen[shard.shard_index], true) {
+                return Err(format!("duplicate shard {}", shard.shard_index));
+            }
+        }
+        if let Some(index) = seen.iter().position(|present| !present) {
+            return Err(format!("missing shard {index}"));
+        }
+        shards.sort_by_key(|report| report.shard_index);
+        let mut merged = shards.remove(0);
+        for shard in shards {
+            merged.cases.extend(shard.cases);
+        }
+        merged.shard_index = 0;
+        merged.shard_count = 1;
+        merged.validate()?;
+        Ok(merged)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.cases.is_empty() {
             return Err(format!("{} report contains zero cases", self.suite));
@@ -577,15 +662,16 @@ pub fn discover_test262(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(cases)
 }
 
-/// Produces a deterministic object-graph observation program.
+/// Produces a side-effect-free observation program.
 ///
-/// Getters are not invoked while enumerating descriptors. Object identities
-/// are assigned before descending so cycles and aliases remain observable.
+/// Arbitrary objects are deliberately opaque: even reflection (`ownKeys`,
+/// `getPrototypeOf`, `instanceof`, or `toString`) can execute user Proxy traps.
+/// Suites needing object-graph comparison must make an explicit snapshot in
+/// the fixture while its intended effects can be recorded in the event log.
 pub fn canonical_observation_source(expression: &str) -> String {
     format!(
         r#"
 (() => {{
-  const seen = new Map(); let nextId = 1;
   const primitive = value => {{
     if (value === undefined) return {{type:'undefined'}};
     if (typeof value === 'number') {{
@@ -598,27 +684,43 @@ pub fn canonical_observation_source(expression: &str) -> String {
     if (typeof value === 'symbol') return {{type:'symbol', global:Symbol.keyFor(value) ?? null, description:value.description ?? null}};
     return {{type:typeof value, value}};
   }};
-  const observe = value => {{
-    if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return primitive(value);
-    if (seen.has(value)) return {{ref:seen.get(value)}};
-    const id = nextId++; seen.set(value,id);
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const properties = Reflect.ownKeys(descriptors).map(key => {{
-      const d=descriptors[key]; return {{key:observe(key), enumerable:d.enumerable, configurable:d.configurable,
-        writable:'writable' in d ? d.writable : null, value:'value' in d ? observe(d.value) : null,
-        get:d.get ? String(d.get.name || '<anonymous>') : null, set:d.set ? String(d.set.name || '<anonymous>') : null}};
-    }});
-    const base={{id, tag:Object.prototype.toString.call(value), prototype:Object.getPrototypeOf(value)?.constructor?.name ?? null, properties}};
-    if (value instanceof Map) base.entries=Array.from(value, pair=>pair.map(observe));
-    if (value instanceof Set) base.entries=Array.from(value, observe);
-    if (ArrayBuffer.isView(value)) base.bytes=Array.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength));
-    if (value instanceof Error) {{ base.error={{name:value.name,message:value.message,stack:String(value.stack||'').replace(/:\d+:\d+/g,':<line>:<col>')}}; }}
-    return base;
-  }};
-  try {{ return JSON.stringify({{ok:true, value:observe(({expression}))}}); }}
-  catch (error) {{ return JSON.stringify({{ok:false, exception:observe(error)}}); }}
+  const observe = value =>
+    ((typeof value !== 'object' || value === null) && typeof value !== 'function')
+      ? primitive(value) : {{type:typeof value,opaque:true}};
+  try {{ return JSON.stringify({{ok:true, coverage:'primitive-only', value:observe(({expression}))}}); }}
+  catch (error) {{ return JSON.stringify({{ok:false, coverage:'primitive-only', exception:observe(error)}}); }}
 }})()
 "#
+    )
+}
+
+/// Observes a fixture-declared, Proxy-free plain data graph.
+///
+/// The caller must own the expression and guarantee it contains only plain
+/// objects/arrays and primitives. This explicit capability is intentionally
+/// separate from [`canonical_observation_source`], which is safe for arbitrary
+/// JavaScript values but treats objects as opaque.
+pub fn canonical_plain_data_observation_source(expression: &str) -> String {
+    format!(
+        r#"(() => {{
+ const seen=new Map(); let nextId=1;
+ const primitive=value=>{{
+  if(value===undefined)return{{type:'undefined'}};
+  if(typeof value==='number'){{if(Number.isNaN(value))return{{type:'number',value:'NaN'}};if(Object.is(value,-0))return{{type:'number',value:'-0'}};}}
+  if(typeof value==='bigint')return{{type:'bigint',value:String(value)}};
+  if(typeof value==='symbol')return{{type:'symbol',global:Symbol.keyFor(value)??null,description:value.description??null}};
+  return{{type:typeof value,value}};
+ }};
+ const observe=value=>{{
+  if((typeof value!=='object'||value===null)&&typeof value!=='function')return primitive(value);
+  if(seen.has(value))return{{ref:seen.get(value)}};
+  const id=nextId++;seen.set(value,id);
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const properties=Reflect.ownKeys(descriptors).map(key=>{{const d=descriptors[key];return{{key:observe(key),enumerable:d.enumerable,configurable:d.configurable,writable:'writable'in d?d.writable:null,value:'value'in d?observe(d.value):null,get:null,set:null}}}});
+  return{{id,tag:Array.isArray(value)?'[object Array]':'[object Object]',prototype:Array.isArray(value)?'Array':'Object',properties}};
+ }};
+ return JSON.stringify({{ok:true,value:observe(({expression}))}});
+}})()"#
     )
 }
 
@@ -648,7 +750,7 @@ const events=[]; const target={{x:{a},get y(){{events.push('get');return this.x}
 const proxy=new Proxy(target,{{get(o,k,r){{events.push('proxy:'+String(k));return Reflect.get(o,k,r)}}}});
 let total=0; for(let i=0;i<{bound};i++){{ try{{total=(total+proxy.y+i+{b})|0}}catch(e){{events.push(e.name)}} finally{{total|=0}} }}
 const closure=x=>()=>x+total; const array=[target,,proxy];
-return {{total,closure:closure(1)(),array,events}};
+return total+'|'+closure(1)()+'|'+(array[0]===target)+'|'+events.join(',');
 }})()"#
         );
         Self { seed, fuel, source }

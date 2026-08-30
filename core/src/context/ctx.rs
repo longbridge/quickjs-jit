@@ -166,6 +166,26 @@ impl<'js> Ctx<'js> {
         self.eval_with_options(source, Default::default())
     }
 
+    /// Compiles a global script without evaluating it.
+    ///
+    /// This is useful for conformance runners which must distinguish an early
+    /// parse error from an exception produced while evaluating the script.
+    pub fn compile<S: Into<Vec<u8>>, N: Into<Vec<u8>>>(
+        &self,
+        source: S,
+        filename: N,
+        strict: bool,
+    ) -> Result<()> {
+        let filename = CString::new(filename)?;
+        let mut flags = qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY;
+        if strict {
+            flags |= qjs::JS_EVAL_FLAG_STRICT;
+        }
+        let value = unsafe { self.eval_raw(source, filename.as_c_str(), flags as i32)? };
+        unsafe { qjs::JS_FreeValue(self.as_ptr(), value) };
+        Ok(())
+    }
+
     /// Evaluate a script in global context with top level await support.
     ///
     /// This function always returns a promise which resolves to the result of the evaluated

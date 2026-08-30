@@ -288,20 +288,103 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
 fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
     for seed in 0..64 {
         let program = StructuredProgram::generate(seed, 32);
-        let source = canonical_observation_source(program.source());
+        let definition = "function f(g,x){return g(x)+0}";
+        let invocation = format!("f(()=>{},0)", program.source());
+        differential(definition, &invocation)
+            .force_baseline()
+            .expect_executed_opcode("call1")
+            .expect_helper(HelperId::Call)
+            .assert_same();
         let interpreter = Runtime::new().unwrap();
-        let expected = Context::full(&interpreter)
-            .unwrap()
-            .with(|ctx| ctx.eval::<String, _>(source.as_str()).unwrap());
-        let automatic = JitRuntime::builder().build().unwrap();
-        let actual = Context::full(&automatic)
-            .unwrap()
-            .with(|ctx| ctx.eval::<String, _>(source.as_str()).unwrap());
+        let expected = Context::full(&interpreter).unwrap().with(|ctx| {
+            ctx.eval::<(), _>(definition).unwrap();
+            ctx.eval::<String, _>(canonical_observation_source(&invocation))
+                .unwrap()
+        });
+        let automatic = JitRuntime::builder()
+            .config(
+                rquickjs_jit::JitConfig::builder()
+                    .call_threshold(1)
+                    .loop_threshold(1)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let automatic_context = Context::full(&automatic).unwrap();
+        automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
+        let warm = format!("for(let i=0;i<256;i++){{{invocation};}}");
+        for _ in 0..128 {
+            automatic_context.with(|ctx| ctx.eval::<(), _>(warm.as_str()).unwrap());
+            automatic.jit().poll();
+            if automatic.metrics().native_entries > 0 {
+                break;
+            }
+        }
+        let actual = automatic_context.with(|ctx| {
+            ctx.eval::<String, _>(canonical_observation_source(&invocation))
+                .unwrap()
+        });
+        let metrics = automatic.metrics();
+        assert!(
+            metrics.native_entries > 0,
+            "seed {seed} never entered automatic native code: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.native_fallbacks, 0,
+            "seed {seed} automatic fallback: {metrics:?}"
+        );
         assert_eq!(
             actual,
             expected,
             "seed {seed}; minimize with fuel {}",
             program.fuel()
         );
+    }
+}
+
+#[test]
+fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
+    for seed in 0..16 {
+        let program = StructuredProgram::generate(seed, 32);
+        let definition = "function f(){return 2}";
+        let invocation = format!("(()=>{{f();return {};}})()", program.source());
+        let interpreter = Runtime::new().unwrap();
+        let expected = Context::full(&interpreter).unwrap().with(|ctx| {
+            ctx.eval::<(), _>(definition).unwrap();
+            ctx.eval::<String, _>(canonical_observation_source(&invocation))
+                .unwrap()
+        });
+        let config = rquickjs_jit::JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap();
+        let optimized = JitRuntime::builder().config(config).build().unwrap();
+        let context = Context::full(&optimized).unwrap();
+        context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
+        let warm = "for(let i=0;i<256;i++){f();}";
+        for _ in 0..128 {
+            context.with(|ctx| ctx.eval::<(), _>(warm).unwrap());
+            optimized.jit().poll();
+            if optimized.metrics().tier2_entries > 0 {
+                break;
+            }
+        }
+        let actual = context.with(|ctx| {
+            ctx.eval::<String, _>(canonical_observation_source(&invocation))
+                .unwrap()
+        });
+        let metrics = optimized.metrics();
+        assert!(
+            metrics.tier2_entries > 0,
+            "seed {seed} never entered Tier2: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.native_fallbacks, 0,
+            "seed {seed} optimized fallback: {metrics:?}"
+        );
+        assert_eq!(actual, expected, "optimized seed {seed}");
     }
 }

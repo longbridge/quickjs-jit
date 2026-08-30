@@ -1,0 +1,115 @@
+name: JIT correctness nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - id: matrix
+        shell: bash
+        run: python -c 'import json; print("shards=" + json.dumps(list(range(256)), separators=(",",":")))' >> "$GITHUB_OUTPUT"
+
+  test262-shard:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Interpreter shard
+        run: cargo run -p rquickjs-jit --release --features compiler,test-support --bin jit-test262 -- --mode interpreter --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/interpreter-${{ matrix.shard }}.json
+      - name: Automatic JIT shard
+        run: cargo run -p rquickjs-jit --release --features compiler,test-support --bin jit-test262 -- --mode automatic --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/automatic-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test262-${{ matrix.shard }}
+          path: target/nightly/*.json
+
+  merge-completeness:
+    needs: test262-shard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: test262-*
+          path: reports
+          merge-multiple: true
+      - name: Reject zero, duplicate, missing, or semantically divergent shards
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob,json,os
+          reports={}
+          for path in glob.glob('reports/*.json'):
+              report=json.load(open(path, encoding='utf-8'))
+              key=(report['mode'],report['shard_index'])
+              assert key not in reports, f'duplicate shard {key}'
+              assert report['shard_count']==256 and report['cases'], f'empty/invalid shard {key}'
+              reports[key]=report
+          for mode in ('interpreter','automatic'):
+              missing=[i for i in range(256) if (mode,i) not in reports]
+              assert not missing, f'{mode} missing shards {missing}'
+          def outcomes(mode):
+              return {(c['path'],c['variant']):(c['status'],c.get('negative_phase'),c.get('negative_type'))
+                      for i in range(256) for c in reports[(mode,i)]['cases']}
+          left,right=outcomes('interpreter'),outcomes('automatic')
+          assert len(left)==sum(len(reports[('interpreter',i)]['cases']) for i in range(256)), 'duplicate interpreter cases'
+          assert len(right)==sum(len(reports[('automatic',i)]['cases']) for i in range(256)), 'duplicate automatic cases'
+          assert left==right, 'interpreter/automatic semantic delta'
+          json.dump({'schema_version':1,'shards':256,'variants':len(left),'semantic_delta':0},open('nightly-summary.json','w'))
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test262-nightly-summary
+          path: nightly-summary.json
+
+  quickjs-c-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Build and run pinned QuickJS reference tests
+        run: make -C sys/quickjs test
+
+  native-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo test -p rquickjs-jit --release --features compiler,test-support --test test262 -- --test-threads=1
+
+  wasm-interpreter-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+      - name: WASM builds without the native compiler tier
+        run: cargo check -p rquickjs-jit --target wasm32-wasip1 --no-default-features

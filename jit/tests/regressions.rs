@@ -1,5 +1,5 @@
 use rquickjs::{Context, Runtime};
-use rquickjs_jit::correctness::canonical_observation_source;
+use rquickjs_jit::correctness::canonical_plain_data_observation_source;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -20,7 +20,7 @@ fn replay_checked_in_regressions() {
     let runtime = Runtime::new().unwrap();
     let observation = Context::full(&runtime).unwrap().with(|ctx| {
         ctx.eval::<(), _>(case.source.as_str()).unwrap();
-        ctx.eval::<String, _>(canonical_observation_source(&case.invocation))
+        ctx.eval::<String, _>(canonical_plain_data_observation_source(&case.invocation))
             .unwrap()
     });
     assert_eq!(observation, case.expected);
