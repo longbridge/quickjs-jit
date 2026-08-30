@@ -264,12 +264,16 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
     assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
 
     context_a.with(|ctx| {
-        ctx.eval::<(), _>("globalThis.f = function f(a, b) { return a + b }; f(1, 2)")
-            .unwrap()
+        ctx.eval::<(), _>(
+            "globalThis.f = function f(a, b) { return a + b }; for(let i=0;i<32;i++) f(1, 2)",
+        )
+        .unwrap()
     });
     context_b.with(|ctx| {
-        ctx.eval::<(), _>("globalThis.f = function f(a, b) { return b + a }; f(1, 2)")
-            .unwrap()
+        ctx.eval::<(), _>(
+            "globalThis.f = function f(a, b) { return b + a }; for(let i=0;i<32;i++) f(1, 2)",
+        )
+        .unwrap()
     });
     let deadline = Instant::now() + std::time::Duration::from_secs(10);
     while Instant::now() < deadline
@@ -354,7 +358,7 @@ fn pending_job_poll_installs_without_an_additional_eligible_function_call() {
     context.with(|ctx| {
         ctx.eval::<(), _>(
             "globalThis.f = function f(a, b) { return a + b; };\n\
-             f(1, 2); Promise.resolve().then(() => 7);",
+             for(let i=0;i<32;i++) f(1, 2); Promise.resolve().then(() => 7);",
         )
         .unwrap();
     });
@@ -429,7 +433,9 @@ fn snapshot_quota_falls_back_without_disabling_runtime() {
     let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| {
-        let value: i32 = ctx.eval("(function(a) { return a + 1; })(41)").unwrap();
+        let value: i32 = ctx
+            .eval("let f=(function(a) { return a + 1; }); let v=0; for(let i=0;i<32;i++)v=f(41); v")
+            .unwrap();
         assert_eq!(value, 42);
     });
     assert_eq!(jit.metrics().queued, 0);
