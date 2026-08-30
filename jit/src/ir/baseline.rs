@@ -258,7 +258,11 @@ impl BaselineIr {
                 depth = next_depth;
 
                 if let Some(target) = instruction.branch_target() {
-                    if target <= i64::from(pc) {
+                    if target <= i64::from(pc)
+                        && !u32::try_from(target).is_ok_and(|target| {
+                            function.control_flow_graph().is_loop_header(target)
+                        })
+                    {
                         let state = record_state(
                             &mut states,
                             snapshot.arg_count(),

@@ -1857,10 +1857,6 @@ fn lower_function(
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
         let mut entered_osr_continuation = false;
-        let block_is_loop_header = block
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction.op, IrOp::OsrLabel { .. }));
         for instruction in &block.instructions {
             let mut helper_states = instruction.helper_states.iter().copied();
             builder.set_srcloc(SourceLoc::default());
@@ -1870,15 +1866,6 @@ fn lower_function(
                 }
             }
             match instruction.op {
-                IrOp::Poll { state: _ }
-                    if osr_start.is_some()
-                        && instruction.pc == block.start_pc
-                        && !block_is_loop_header =>
-                {
-                    // Interpreter cadence is attached to taken backedges. A
-                    // generic CFG-entry poll would add extra polls inside the
-                    // same native iteration. Periodic and return polls remain.
-                }
                 IrOp::Poll { state } => {
                     materialize_frame(
                         builder,

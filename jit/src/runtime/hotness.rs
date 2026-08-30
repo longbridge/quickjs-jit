@@ -88,13 +88,29 @@ pub struct HotnessState {
 
 impl HotnessState {
     pub fn record_call_event(&mut self, count: u32) -> HotDecision {
-        self.record_calls(count);
-        self.decide(self.calls >= BASE_CALL_THRESHOLD, HotReason::CallThreshold)
+        self.record_call_event_with_thresholds(count, AdaptiveInputs::default().thresholds())
     }
 
     pub fn record_loop_event(&mut self, count: u32) -> HotDecision {
+        self.record_loop_event_with_thresholds(count, AdaptiveInputs::default().thresholds())
+    }
+
+    pub fn record_call_event_with_thresholds(
+        &mut self,
+        count: u32,
+        thresholds: HotThresholds,
+    ) -> HotDecision {
+        self.record_calls(count);
+        self.decide(self.calls >= thresholds.calls, HotReason::CallThreshold)
+    }
+
+    pub fn record_loop_event_with_thresholds(
+        &mut self,
+        count: u32,
+        thresholds: HotThresholds,
+    ) -> HotDecision {
         self.record_loops(count);
-        self.decide(self.loops >= BASE_LOOP_THRESHOLD, HotReason::LoopThreshold)
+        self.decide(self.loops >= thresholds.loops, HotReason::LoopThreshold)
     }
 
     fn decide(&mut self, hot: bool, reason: HotReason) -> HotDecision {

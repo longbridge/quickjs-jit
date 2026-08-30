@@ -48,6 +48,8 @@ pub struct JitConfig {
     max_queue_len: usize,
     workers: usize,
     max_compile_attempts: u8,
+    #[cfg(feature = "test-support")]
+    stress_gc: bool,
     diagnostic_callback: Option<DiagnosticCallback>,
     metrics_observer: Option<MetricsObserver>,
 }
@@ -65,6 +67,16 @@ impl core::fmt::Debug for JitConfig {
             .field("max_queue_len", &self.max_queue_len)
             .field("workers", &self.workers)
             .field("max_compile_attempts", &self.max_compile_attempts)
+            .field("stress_gc", &{
+                #[cfg(feature = "test-support")]
+                {
+                    self.stress_gc
+                }
+                #[cfg(not(feature = "test-support"))]
+                {
+                    false
+                }
+            })
             .field(
                 "has_diagnostic_callback",
                 &self.diagnostic_callback.is_some(),
@@ -86,6 +98,16 @@ impl PartialEq for JitConfig {
             && self.max_queue_len == other.max_queue_len
             && self.workers == other.workers
             && self.max_compile_attempts == other.max_compile_attempts
+            && {
+                #[cfg(feature = "test-support")]
+                {
+                    self.stress_gc == other.stress_gc
+                }
+                #[cfg(not(feature = "test-support"))]
+                {
+                    true
+                }
+            }
             && callbacks_equal(&self.diagnostic_callback, &other.diagnostic_callback)
             && callbacks_equal(&self.metrics_observer, &other.metrics_observer)
     }
@@ -143,6 +165,12 @@ impl JitConfig {
         self.max_compile_attempts
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub const fn stress_gc(&self) -> bool {
+        self.stress_gc
+    }
+
     pub(crate) fn report(&self, kind: JitDiagnosticKind) {
         if let Some(callback) = &self.diagnostic_callback {
             callback(&JitDiagnostic { kind });
@@ -169,6 +197,8 @@ impl Default for JitConfig {
             max_queue_len: DEFAULT_MAX_QUEUE_LEN,
             workers: DEFAULT_WORKERS,
             max_compile_attempts: DEFAULT_MAX_COMPILE_ATTEMPTS,
+            #[cfg(feature = "test-support")]
+            stress_gc: false,
             diagnostic_callback: None,
             metrics_observer: None,
         }
@@ -225,6 +255,13 @@ impl JitConfigBuilder {
 
     pub fn max_compile_attempts(mut self, value: u8) -> Self {
         self.config.max_compile_attempts = value;
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn stress_gc(mut self, value: bool) -> Self {
+        self.config.stress_gc = value;
         self
     }
 

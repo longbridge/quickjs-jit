@@ -21,6 +21,8 @@ pub mod runtime;
 pub mod test_support;
 
 use core::ops::Deref;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use config::{JitConfig, JitConfigBuilder, JitDiagnostic, JitDiagnosticKind};
@@ -465,6 +467,17 @@ struct ProductionBackend {
     osr_not_ready: u64,
     osr_map_misses: u64,
     osr_validation_failures: u64,
+    osr_attempts: u64,
+    osr_generated_retries: u64,
+    osr_validation: Arc<OsrValidationMetrics>,
+    clock: u64,
+    queue_reasons: std::collections::HashMap<runtime::FunctionKey, runtime::HotReason>,
+    prequeue_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
+    hot_call_queues: u64,
+    hot_loop_queues: u64,
+    adaptive_neutral_queues: u64,
+    adaptive_inputs_recorded: u64,
+    snapshot_requests: u64,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
@@ -478,6 +491,33 @@ struct ProductionEntryPin {
     pc: u32,
     stack_map_count: u32,
     osr: Option<runtime::OsrMap>,
+    validation: Arc<OsrValidationMetrics>,
+    #[cfg(feature = "test-support")]
+    stress_gc: bool,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Default)]
+struct OsrValidationMetrics {
+    successes: AtomicU64,
+    failures: AtomicU64,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn record_osr_validation(metrics: &OsrValidationMetrics, pc: u32, valid: bool) {
+    if pc == 0 {
+        return;
+    }
+    if valid {
+        metrics.successes.fetch_add(1, Ordering::Relaxed);
+    } else {
+        metrics.failures.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const fn is_generated_osr_retry(pc: u32, exit_kind: u32) -> bool {
+    pc != 0 && exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -574,20 +614,26 @@ unsafe extern "C" fn production_entry_trampoline(
     if frame.is_null() {
         return retry_exit();
     }
-    let frame = unsafe { &*frame };
+    let frame = unsafe { &mut *frame };
     if frame.entry.pin.is_null() {
         return retry_exit();
     }
     let pin = unsafe { &*frame.entry.pin.cast::<ProductionEntryPin>() };
+    #[cfg(feature = "test-support")]
+    if pin.stress_gc {
+        frame.flags |= qjs::JS_JIT_FRAME_STRESS_GC;
+    }
     let _keep_execution_pinned = &pin.execution;
-    if !validate_production_frame(
+    let valid = validate_production_frame(
         frame,
         pin.runtime_id,
         pin.key,
         pin.pc,
         pin.stack_map_count,
         pin.osr.as_ref(),
-    ) {
+    );
+    record_osr_validation(&pin.validation, pin.pc, valid);
+    if !valid {
         return retry_exit();
     }
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
@@ -699,6 +745,29 @@ mod production_osr_validation_tests {
         );
         assert_eq!(stack[0].tag, tag_before, "slot owner/refcount is untouched");
     }
+
+    #[test]
+    fn osr_success_is_counted_only_after_frame_validation() {
+        let metrics = OsrValidationMetrics::default();
+        record_osr_validation(&metrics, 9, false);
+        assert_eq!(metrics.successes.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.failures.load(Ordering::Relaxed), 1);
+        assert!(is_generated_osr_retry(
+            9,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        ));
+        assert!(!is_generated_osr_retry(
+            0,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        ));
+        assert!(!is_generated_osr_retry(
+            9,
+            qjs::JSJitExitKind_JS_JIT_EXIT_DONE
+        ));
+        record_osr_validation(&metrics, 9, true);
+        assert_eq!(metrics.successes.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.failures.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[cfg(all(
@@ -764,12 +833,25 @@ impl ProductionBackend {
             osr_not_ready: 0,
             osr_map_misses: 0,
             osr_validation_failures: 0,
+            osr_attempts: 0,
+            osr_generated_retries: 0,
+            osr_validation: Arc::new(OsrValidationMetrics::default()),
+            clock: 0,
+            queue_reasons: std::collections::HashMap::new(),
+            prequeue_backoff: std::collections::HashMap::new(),
+            hot_call_queues: 0,
+            hot_loop_queues: 0,
+            adaptive_neutral_queues: 0,
+            adaptive_inputs_recorded: 0,
+            snapshot_requests: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
     }
 
     fn maintenance(&mut self) {
+        self.clock = self.clock.saturating_add(1);
+        self.coordinator.advance_clock(self.clock);
         self.coordinator.drain_completions();
         self.workers.drain_overflow(
             &mut self.coordinator,
@@ -783,11 +865,52 @@ impl ProductionBackend {
         snapshot.native_exits = self.native_exits;
         snapshot.native_fallbacks = self.native_fallbacks;
         snapshot.native_retries = self.native_retries;
+        self.osr_entries = self.osr_validation.successes.load(Ordering::Relaxed);
+        self.osr_validation_failures = self.osr_validation.failures.load(Ordering::Relaxed);
         snapshot.osr_entries = self.osr_entries;
+        snapshot.osr_attempts = self.osr_attempts;
+        snapshot.osr_validated_successes = self.osr_validation.successes.load(Ordering::Relaxed);
+        snapshot.osr_generated_retries = self.osr_generated_retries;
+        snapshot.hot_call_queues = self.hot_call_queues;
+        snapshot.hot_loop_queues = self.hot_loop_queues;
+        snapshot.adaptive_neutral_queues = self.adaptive_neutral_queues;
+        snapshot.adaptive_inputs_recorded = self.adaptive_inputs_recorded;
+        snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
+        snapshot.snapshot_requests = self.snapshot_requests;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
+        let requested = self.requested.iter().copied().collect::<Vec<_>>();
+        for key in requested {
+            if matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                runtime::CompileState::Cold
+                    | runtime::CompileState::Backoff { .. }
+                    | runtime::CompileState::Retired
+            ) {
+                self.clear_failed_request(key);
+            }
+        }
         *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
+    }
+
+    fn clear_failed_request(&mut self, key: runtime::FunctionKey) {
+        self.requested.remove(&key);
+        self.queue_reasons.remove(&key);
+        if let Some(hotness) = self.hotness.get_mut(&key) {
+            hotness.clear_queued();
+        }
+    }
+
+    fn fail_before_queue(&mut self, key: runtime::FunctionKey) {
+        let attempts = self
+            .prequeue_backoff
+            .get(&key)
+            .map_or(1, |(attempts, _)| attempts.saturating_add(1));
+        let delay = 1_u64 << u32::from(attempts.min(16));
+        self.prequeue_backoff
+            .insert(key, (attempts, self.clock.saturating_add(delay)));
+        self.clear_failed_request(key);
     }
 }
 
@@ -822,21 +945,45 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             return 0;
         }
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        if matches!(
+            self.coordinator.tier_state(key, runtime::Tier::Baseline),
+            runtime::CompileState::Blacklisted | runtime::CompileState::Installed(_)
+        ) {
+            self.requested.insert(key);
+            return 0;
+        }
+        if self
+            .prequeue_backoff
+            .get(&key)
+            .is_some_and(|(_, retry_after)| self.clock < *retry_after)
+        {
+            return 0;
+        }
         if self.requested.contains(&key) {
             return 0;
         }
         let hotness = self.hotness.entry(key).or_default();
+        // Task 14 owns evidence-based coefficients. Production still consumes
+        // the adaptive interface now, with its documented neutral inputs.
+        let adaptive = runtime::AdaptiveInputs::default().thresholds();
+        let thresholds = runtime::HotThresholds {
+            calls: self.config.call_threshold(),
+            loops: self.config.loop_threshold(),
+            rationale: adaptive.rationale,
+        };
         let decision = if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_CALL
             && event.pc == 0
         {
-            hotness.record_call_event(event.count)
+            hotness.record_call_event_with_thresholds(event.count, thresholds)
         } else if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_LOOP && event.pc != 0 {
-            hotness.record_loop_event(event.count)
+            hotness.record_loop_event_with_thresholds(event.count, thresholds)
         } else {
             return 0;
         };
-        if matches!(decision, runtime::HotDecision::Queue(_)) {
+        if let runtime::HotDecision::Queue(reason) = decision {
             self.requested.insert(key);
+            self.queue_reasons.insert(key, reason);
+            self.snapshot_requests = self.snapshot_requests.saturating_add(1);
             1
         } else {
             0
@@ -853,21 +1000,69 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let Some(raw) = std::ptr::NonNull::new(snapshot) else {
             return;
         };
+        let raw_key = unsafe {
+            runtime::FunctionKey::new(raw.as_ref().function.id, raw.as_ref().function.generation)
+        };
         let _free = FreeSnapshot(snapshot);
         let copied = unsafe { bytecode::CompileSnapshot::copy_borrowed_raw(raw.as_ref()) };
-        let Ok(snapshot) = copied else { return };
+        let Ok(snapshot) = copied else {
+            self.fail_before_queue(raw_key);
+            return;
+        };
+        let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
         if snapshot.owned_bytes() > self.config.max_snapshot_bytes() {
             self.coordinator.record_resource_limit_rejection();
+            self.fail_before_queue(key);
             self.maintenance();
             return;
         }
-        let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
         let Ok(verified) = snapshot.verify(bytecode::VerifyLimits::default()) else {
+            self.fail_before_queue(key);
             return;
         };
-        let _ = self
+        let adaptive = runtime::AdaptiveInputs {
+            bytecode_bytes: verified
+                .snapshot()
+                .bytecode()
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
+            helper_ops: 0,
+            instruction_count: verified.instructions().len().try_into().unwrap_or(u32::MAX),
+            measured_work: None,
+        };
+        self.adaptive_inputs_recorded = self.adaptive_inputs_recorded.saturating_add(1);
+        debug_assert_eq!(
+            adaptive.thresholds().rationale,
+            runtime::HotReason::NeutralBase
+        );
+        match self
             .coordinator
-            .queue(key, runtime::Tier::Baseline, verified);
+            .queue(key, runtime::Tier::Baseline, verified)
+        {
+            Ok(()) => {
+                match self.queue_reasons.get(&key).copied() {
+                    Some(runtime::HotReason::CallThreshold) => {
+                        self.hot_call_queues = self.hot_call_queues.saturating_add(1);
+                    }
+                    Some(runtime::HotReason::LoopThreshold) => {
+                        self.hot_loop_queues = self.hot_loop_queues.saturating_add(1);
+                    }
+                    _ => {}
+                }
+                self.adaptive_neutral_queues = self.adaptive_neutral_queues.saturating_add(1);
+                self.prequeue_backoff.remove(&key);
+            }
+            Err(runtime::QueueError::Blacklisted | runtime::QueueError::NotReady) => {
+                // An active/installed/blacklisted coordinator state owns the
+                // request bit; retaining it prevents duplicate snapshots.
+                self.requested.insert(key);
+            }
+            Err(runtime::QueueError::Retired | runtime::QueueError::Shutdown) => {
+                self.clear_failed_request(key);
+            }
+            Err(_) => self.fail_before_queue(key),
+        }
         self.maintenance();
     }
 
@@ -932,6 +1127,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             pc,
             stack_map_count,
             osr: osr_map,
+            validation: Arc::clone(&self.osr_validation),
+            #[cfg(feature = "test-support")]
+            stress_gc: self.config.stress_gc(),
         }))
         .cast();
         empty.entry = Some(production_entry_trampoline);
@@ -950,7 +1148,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn native_enter(&mut self, _id: u64, _generation: u64, pc: u32) {
         self.native_entries = self.native_entries.saturating_add(1);
         if pc != 0 {
-            self.osr_entries = self.osr_entries.saturating_add(1);
+            self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
     }
 
@@ -958,8 +1156,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.native_exits = self.native_exits.saturating_add(1);
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
             self.native_retries = self.native_retries.saturating_add(1);
-            if pc != 0 {
-                self.osr_validation_failures = self.osr_validation_failures.saturating_add(1);
+            if is_generated_osr_retry(pc, exit_kind) {
+                self.osr_generated_retries = self.osr_generated_retries.saturating_add(1);
             }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
@@ -970,6 +1168,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn function_retire(&mut self, id: u64, generation: u64) {
         let key = runtime::FunctionKey::new(id, generation);
         self.requested.remove(&key);
+        self.queue_reasons.remove(&key);
+        self.prequeue_backoff.remove(&key);
         self.hotness.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();

@@ -89,4 +89,18 @@ mod hotness_tests {
         assert_eq!(neutral.rationale, HotReason::NeutralBase);
         assert_eq!(neutral, AdaptiveInputs::default().thresholds());
     }
+
+    #[test]
+    fn adaptive_thresholds_are_consumed_by_hotness_decisions() {
+        let thresholds = AdaptiveInputs::default().thresholds();
+        let mut hotness = HotnessState::default();
+        assert_eq!(
+            hotness.record_call_event_with_thresholds(thresholds.calls - 1, thresholds),
+            HotDecision::Cold
+        );
+        assert_eq!(
+            hotness.record_call_event_with_thresholds(1, thresholds),
+            HotDecision::Queue(HotReason::CallThreshold)
+        );
+    }
 }

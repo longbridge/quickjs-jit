@@ -8,6 +8,20 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "test-support")]
+unsafe extern "C" {
+    fn JS_JitSetExecutionTrace(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        events: *mut rquickjs_core::qjs::JSJitTraceEvent,
+        capacity: u32,
+    ) -> i32;
+    fn JS_JitGetExecutionTraceLength(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        length: *mut u32,
+        overflowed: *mut i32,
+    ) -> i32;
+}
+
 #[test]
 fn osr_map_retains_exact_function_pc_depth_and_slot_kinds() {
     let key = OsrKey::new(FunctionKey::new(9, 3), 17);
@@ -270,6 +284,47 @@ fn first_osr_transfer_does_not_double_poll_the_backedge() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
+fn branched_loop_osr_preserves_cfg_entry_and_backedge_interrupt_cadence() {
+    fn run(jit_enabled: bool) -> (i32, usize, u64) {
+        let runtime = Runtime::new().unwrap();
+        let attached = jit_enabled.then(|| {
+            rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap()
+        });
+        let polls = Arc::new(AtomicUsize::new(0));
+        runtime.set_interrupt_handler({
+            let polls = Arc::clone(&polls);
+            Some(Box::new(move || {
+                polls.fetch_add(1, Ordering::SeqCst);
+                false
+            }))
+        });
+        let context = Context::full(&runtime).unwrap();
+        let value = context.with(|ctx| {
+            ctx.eval::<i32, _>("let state={limit:500000,half:250000}; function f(state,z){let i=z;while(i<state.limit){if(i<state.half){i++;continue}i++}return i} f(state,0)").unwrap()
+        });
+        (
+            value,
+            polls.load(Ordering::SeqCst),
+            attached.map_or(0, |jit| jit.metrics().osr_entries),
+        )
+    }
+    let interpreted = run(false);
+    let native = run(true);
+    assert_eq!(native.0, interpreted.0);
+    assert!(native.2 > 0);
+    assert_eq!(
+        native.1, interpreted.1,
+        "branched OSR changed exact poll cadence"
+    );
+}
+
+#[cfg(all(
+    feature = "compiler",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
 fn hot_reload_retires_old_osr_entries_without_cross_generation_execution() {
     let runtime = Runtime::new().unwrap();
     let jit = rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap();
@@ -296,4 +351,170 @@ fn hot_reload_retires_old_osr_entries_without_cross_generation_execution() {
         jit.metrics()
     );
     assert_eq!(jit.metrics().native_retries, 0);
+}
+
+#[cfg(all(
+    feature = "compiler",
+    feature = "test-support",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
+    let fixture = SnapshotFixture::compile(
+        "(function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s})",
+    );
+    let verified = fixture.snapshot().verify(Default::default()).unwrap();
+    BaselineCompiler::host()
+        .compile(&verified)
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error:?}: {:?}",
+                verified
+                    .instructions()
+                    .iter()
+                    .map(|i| i.opcode().name())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let runtime = Runtime::new().unwrap();
+    let config = rquickjs_jit::JitConfig::builder()
+        .stress_gc(true)
+        .build()
+        .unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let rt =
+        context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
+    assert_eq!(
+        unsafe { rquickjs_core::qjs::JS_JitResetHelperCounters(rt) },
+        0
+    );
+    let mut trace =
+        vec![unsafe { core::mem::zeroed::<rquickjs_core::qjs::JSJitTraceEvent>() }; 1_000_000];
+    assert_eq!(
+        unsafe { JS_JitSetExecutionTrace(rt, trace.as_mut_ptr(), trace.len() as u32) },
+        0
+    );
+    let result = context.with(|ctx| {
+        ctx.eval::<i32, _>(
+            "let events=0,reentered=0; function nested(){reentered++} let state={limit:20000,get next(){events++;nested();return events}}; function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s} f(state,0)",
+        )
+    }).unwrap_or_else(|error| panic!("{error:?}; {:?}", jit.metrics()));
+    assert_eq!(result, 20001);
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<i32, _>("events").unwrap()),
+        20001
+    );
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<i32, _>("reentered").unwrap()),
+        20001
+    );
+    let mut counters: rquickjs_core::qjs::JSJitHelperCounters = unsafe { core::mem::zeroed() };
+    counters.struct_size = core::mem::size_of_val(&counters) as u32;
+    assert_eq!(
+        unsafe { rquickjs_core::qjs::JS_JitGetHelperCounters(rt, &mut counters) },
+        0
+    );
+    let mut trace_len = 0;
+    let mut overflowed = 0;
+    assert_eq!(
+        unsafe { JS_JitGetExecutionTraceLength(rt, &mut trace_len, &mut overflowed) },
+        0
+    );
+    assert_eq!(overflowed, 0);
+    trace.truncate(trace_len as usize);
+    let helper = rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY as u16;
+    assert!(
+        trace
+            .iter()
+            .any(|event| event.kind == 1 && u16::from(event.helper_id) == helper),
+        "OSR child did not execute GET_PROPERTY helper: {:?}",
+        jit.metrics()
+    );
+    assert!(counters.dup_count > 0 || counters.free_count > 0);
+    let metrics = jit.metrics();
+    assert!(metrics.osr_validated_successes > 0, "{metrics:?}");
+    assert_eq!(metrics.osr_generated_retries, 0, "{metrics:?}");
+    assert_eq!(metrics.osr_validation_failures, 0, "{metrics:?}");
+}
+
+#[cfg(all(
+    feature = "compiler",
+    feature = "test-support",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_compile_failure_retries_through_backoff_without_duplicates() {
+    let runtime = Runtime::new().unwrap();
+    let config = rquickjs_jit::JitConfig::builder()
+        .loop_threshold(1)
+        .max_compile_attempts(2)
+        .build()
+        .unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let value = context.with(|ctx| {
+        ctx.eval::<i32, _>("function f(n,z,unsupported){let i=z;while(i<n)i++;return i+unsupported} f(1000000,0,0)").unwrap()
+    });
+    assert_eq!(value, 1_000_000);
+    let metrics = jit.metrics();
+    assert_eq!(
+        metrics.queued, 2,
+        "one request per coordinator attempt: {metrics:?}"
+    );
+    assert_eq!(metrics.compile_failures, 2, "{metrics:?}");
+    assert_eq!(metrics.blacklisted, 1, "{metrics:?}");
+    assert_eq!(metrics.hot_loop_queues, 2, "{metrics:?}");
+}
+
+#[cfg(all(
+    feature = "compiler",
+    feature = "test-support",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_snapshot_rejection_uses_bounded_prequeue_backoff() {
+    let runtime = Runtime::new().unwrap();
+    let config = rquickjs_jit::JitConfig::builder()
+        .loop_threshold(1)
+        .max_snapshot_bytes(1)
+        .build()
+        .unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    assert_eq!(
+        context.with(|ctx| ctx
+            .eval::<i32, _>("function f(n,z){let i=z;while(i<n)i++;return i} f(10000,0)")
+            .unwrap()),
+        10000
+    );
+    let metrics = jit.metrics();
+    assert_eq!(metrics.queued, 0, "{metrics:?}");
+    assert!(
+        metrics.resource_limit_rejections > 1,
+        "transient path never retried: {metrics:?}"
+    );
+    assert!(
+        metrics.snapshot_requests < 32,
+        "prequeue failure spun duplicate snapshots: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.snapshot_requests, metrics.resource_limit_rejections,
+        "{metrics:?}"
+    );
+    assert_eq!(
+        metrics.hot_loop_queues, 0,
+        "rejected snapshots were not coordinator queues: {metrics:?}"
+    );
+    assert_eq!(metrics.adaptive_neutral_queues, 0, "{metrics:?}");
+    assert_eq!(
+        metrics.adaptive_inputs_recorded, 0,
+        "copy-size rejection precedes verified inputs"
+    );
 }
