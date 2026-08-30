@@ -38,14 +38,14 @@ const WORKLOADS: &[Workload] = &[
     },
     Workload {
         name: "quickjs-bitops",
-        suite: "QuickJS microbench",
+        suite: "rquickjs-jit local",
         group: "compute",
         designated: false,
         file: "quickjs-bitops.js",
     },
     Workload {
         name: "quickjs-fibonacci",
-        suite: "QuickJS microbench",
+        suite: "rquickjs-jit local",
         group: "compute",
         designated: false,
         file: "quickjs-fibonacci.js",
@@ -347,7 +347,7 @@ fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics) -> bool {
         "interpreter" => true,
         "tier1" => m.native_entries > 0,
         "tier2" => m.tier2_entries > 0,
-        "automatic" => m.profitability_evaluations > 0 && m.native_entries > 0,
+        "automatic" => m.profitability_approved > 0 && m.tier2_entries > 0,
         _ => false,
     }
 }
@@ -660,5 +660,16 @@ mod tests {
     fn interpreter_never_pays_a_tier_up_loop() {
         assert_eq!(threshold_attempts("interpreter"), 1);
         assert_eq!(threshold_attempts("automatic"), 64);
+    }
+    #[test]
+    fn automatic_warmup_waits_for_an_installed_profitable_tier2() {
+        let mut metrics = rquickjs_jit::JitMetrics::default();
+        metrics.native_entries = 8;
+        metrics.profitability_evaluations = 1;
+        assert!(!native_ready("automatic", &metrics));
+        metrics.profitability_approved = 1;
+        assert!(!native_ready("automatic", &metrics));
+        metrics.tier2_entries = 1;
+        assert!(native_ready("automatic", &metrics));
     }
 }

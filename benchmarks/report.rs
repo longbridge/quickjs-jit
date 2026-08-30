@@ -1,6 +1,6 @@
 mod model;
 use model::{BenchmarkFile, ModeResult, SampleEvidence, WorkloadResult};
-use std::{env, fs};
+use std::{env, fs, path::Path, process::Command};
 
 fn main() {
     match real_main() {
@@ -56,7 +56,34 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
     {
         return Err("incomplete source hashes or target triple".into());
     }
+    if data.provenance.source_dirty {
+        return Err("benchmark evidence must come from a clean source tree".into());
+    }
+    if data.provenance.source_revision != command("git", &["rev-parse", "HEAD"])
+        || data.provenance.quickjs_revision
+            != command("git", &["-C", "../sys/quickjs", "rev-parse", "HEAD"])
+    {
+        return Err("source revision does not match the current checkout".into());
+    }
+    if data.provenance.schema_sha256 != current_sha256("schema/jit-benchmark-v1.json") {
+        return Err("schema hash does not match the current file".into());
+    }
+    if data.provenance.suites_lock_sha256 != current_sha256("suites.lock") {
+        return Err("suites lock hash does not match the current file".into());
+    }
+    let reference = data
+        .modes
+        .iter()
+        .find(|mode| mode.mode == "interpreter")
+        .ok_or("missing interpreter mode")?;
+    let reference_shape = workload_shape(reference);
+    let mut global_opcode = None;
+    let mut global_abi = None;
     for mode in &data.modes {
+        if workload_shape(mode) != reference_shape {
+            return Err(format!("{} workload set/suite/group/designated metadata differs", mode.mode));
+        }
+        let mut mode_config = None;
         for w in &mode.workloads {
             if w.samples.len() != data.policy.latency_processes as usize {
                 return Err(format!("{} / {} sample count mismatch", mode.mode, w.name));
@@ -71,10 +98,51 @@ fn validate(data: &BenchmarkFile) -> Result<(), String> {
                 if s.pair_index as usize != i {
                     return Err(format!("{} / {} invalid pair index", mode.mode, w.name));
                 }
+                if s.elapsed_ns != w.raw_latency_ns[i] {
+                    return Err(format!("{} / {} raw latency differs from sample", mode.mode, w.name));
+                }
+                match global_opcode { Some(v) if v != s.opcode_fingerprint => return Err("opcode fingerprint drift".into()), None => global_opcode = Some(s.opcode_fingerprint), _ => {} }
+                match global_abi { Some(v) if v != s.abi_fingerprint => return Err("ABI fingerprint drift".into()), None => global_abi = Some(s.abi_fingerprint), _ => {} }
+                match mode_config { Some(v) if v != s.config_fingerprint => return Err(format!("{} config fingerprint drift", mode.mode)), None => mode_config = Some(s.config_fingerprint), _ => {} }
+            }
+            let expected_checksum = reference.workloads.iter().find(|x| x.name == w.name)
+                .and_then(|x| x.samples.first()).map(|x| x.checksum.as_str()).ok_or("missing reference checksum")?;
+            if !w.samples.iter().all(|sample| sample.checksum == expected_checksum) {
+                return Err(format!("{} / {} checksum mismatch", mode.mode, w.name));
+            }
+            let (median, mad, p95, p99, ci) = model::summarize(w.raw_latency_ns.clone());
+            if (w.median_ns, w.mad_ns, w.p95_ns, w.p99_ns, w.ci95_ns)
+                != (median, mad, p95, p99, ci)
+                || w.compile_ns != median_field(&w.samples, |s| s.phases.compile_ns)
+                || w.install_ns != median_field(&w.samples, |s| s.phases.install_ns)
+            {
+                return Err(format!("{} / {} recomputed summary mismatch", mode.mode, w.name));
             }
         }
     }
     Ok(())
+}
+
+fn workload_shape(mode: &ModeResult) -> Vec<(&str, &str, &str, bool)> {
+    mode.workloads.iter().map(|w| (w.name.as_str(), w.suite.as_str(), w.group.as_str(), w.designated_kernel)).collect()
+}
+
+fn median_field(samples: &[SampleEvidence], field: impl Fn(&SampleEvidence) -> u64) -> u64 {
+    let mut values = samples.iter().map(field).collect::<Vec<_>>();
+    values.sort_unstable();
+    model::quantile(&values, 0.5)
+}
+
+fn command(program: &str, args: &[&str]) -> String {
+    Command::new(program).args(args).current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output().ok().filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
+}
+
+fn current_sha256(relative: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    command("sha256sum", &[path.to_string_lossy().as_ref()])
+        .split_whitespace().next().unwrap_or_default().to_owned()
 }
 
 fn render(data: &BenchmarkFile) -> (String, bool) {
@@ -478,10 +546,73 @@ mod tests {
             p95_ns: time,
             p99_ns: time,
             ci95_ns: [time, time],
-            compile_ns: 1,
-            install_ns: 1,
+            compile_ns: 0,
+            install_ns: 0,
             break_even_executions: Some(1),
         }
+    }
+    fn valid_file() -> BenchmarkFile {
+        let workloads = vec![work("a", 100), work("b", 200)];
+        BenchmarkFile {
+            schema: "jit-benchmark-v1".into(),
+            provenance: model::Provenance {
+                source_revision: command("git", &["rev-parse", "HEAD"]),
+                quickjs_revision: command("git", &["-C", "../sys/quickjs", "rev-parse", "HEAD"]),
+                source_dirty: false,
+                command: vec!["jit-bench".into()],
+                target: "x86_64".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(), kernel: "test".into(), cpu: "test".into(),
+                power_mode: "test".into(), rustc: "test".into(), llvm: "test".into(),
+                executable_bytes: 1, stripped_jit_bytes: 2, stripped_no_jit_bytes: 1,
+                stripped_jit_delta_bytes: 1,
+                schema_sha256: current_sha256("schema/jit-benchmark-v1.json"),
+                suites_lock_sha256: current_sha256("suites.lock"),
+            },
+            policy: model::SamplingPolicy {
+                latency_warmups: 5, latency_processes: 30, throughput_windows: 10,
+                throughput_window_ns: 1_000_000_000, bootstrap_resamples: 10_000,
+                pairing: "paired".into(),
+            },
+            modes: ["interpreter", "tier1", "tier2", "automatic"].into_iter()
+                .map(|mode| ModeResult { mode: mode.into(), workloads: workloads.clone() })
+                .collect(),
+            exclusions: vec![],
+        }
+    }
+    #[test]
+    fn validator_rejects_dirty_or_stale_provenance() {
+        let mut data = valid_file();
+        assert!(validate(&data).is_ok());
+        data.provenance.source_dirty = true;
+        assert!(validate(&data).unwrap_err().contains("clean"));
+        data.provenance.source_dirty = false;
+        data.provenance.schema_sha256 = "0".repeat(64);
+        assert!(validate(&data).unwrap_err().contains("schema"));
+        data.provenance.schema_sha256 = current_sha256("schema/jit-benchmark-v1.json");
+        data.provenance.suites_lock_sha256 = "0".repeat(64);
+        assert!(validate(&data).unwrap_err().contains("suites"));
+    }
+    #[test]
+    fn validator_rejects_cross_mode_shape_and_identity_drift() {
+        let mut data = valid_file();
+        data.modes[1].workloads[0].suite = "wrong".into();
+        assert!(validate(&data).unwrap_err().contains("workload set"));
+        let mut data = valid_file();
+        data.modes[2].workloads[0].samples[3].checksum = "wrong".into();
+        assert!(validate(&data).unwrap_err().contains("checksum"));
+        let mut data = valid_file();
+        data.modes[3].workloads[1].samples[4].opcode_fingerprint = 2;
+        assert!(validate(&data).unwrap_err().contains("fingerprint"));
+    }
+    #[test]
+    fn validator_rejects_raw_or_recomputed_summary_drift() {
+        let mut data = valid_file();
+        data.modes[0].workloads[0].raw_latency_ns[2] += 1;
+        assert!(validate(&data).unwrap_err().contains("raw latency"));
+        let mut data = valid_file();
+        data.modes[0].workloads[0].median_ns += 1;
+        assert!(validate(&data).unwrap_err().contains("summary"));
     }
     #[test]
     fn joint_ci_preserves_consistent_cross_workload_ratio() {

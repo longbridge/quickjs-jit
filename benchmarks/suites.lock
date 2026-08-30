@@ -10,6 +10,24 @@ upstream_sha256 = "8745b6b1d616153ba1f0a19349ee37e6d83804af25062d0ee7451f6d6edaa
 adapted_sha256 = "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e"
 
 [[suite]]
+name = "rquickjs-jit-local-bitops"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/quickjs-bitops.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "382fab47164d9a4e6bc2080140b41b40a797d967ef605345b07a22daad08e5c7"
+
+[[suite]]
+name = "rquickjs-jit-local-fibonacci"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/quickjs-fibonacci.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "96ad95758210c1f9b99c5046a2e062a60d1415dceb58fdbf6173a1a28a1381e1"
+
+[[suite]]
 name = "sunspider"
 repository = "https://github.com/WebKit/WebKit.git"
 commit = "excluded-not-imported"
