@@ -28,6 +28,8 @@ pub struct OsrMap {
     key: OsrKey,
     entry_offset: u32,
     stack_depth: u16,
+    argument_count: u16,
+    local_count: u16,
     live_slots: Box<[SlotKind]>,
 }
 
@@ -42,6 +44,8 @@ impl OsrMap {
             key,
             entry_offset,
             stack_depth,
+            argument_count: 0,
+            local_count: 0,
             live_slots: live_slots.into_boxed_slice(),
         }
     }
@@ -61,15 +65,20 @@ impl OsrMap {
             .checked_add(usize::from(snapshot.local_count()))?
             .checked_add(usize::from(snapshot.closure_count()))?;
         let stack_depth = point.live_slots().len().checked_sub(fixed)?;
-        Some(Self::new(
-            OsrKey::new(
+        if snapshot.closure_count() != 0 {
+            return None;
+        }
+        Some(Self {
+            key: OsrKey::new(
                 FunctionKey::new(snapshot.function_id(), snapshot.generation()),
                 pc,
             ),
             entry_offset,
-            u16::try_from(stack_depth).ok()?,
-            point.live_slots().to_vec(),
-        ))
+            stack_depth: u16::try_from(stack_depth).ok()?,
+            argument_count: snapshot.arg_count(),
+            local_count: snapshot.local_count(),
+            live_slots: point.live_slots().to_vec().into_boxed_slice(),
+        })
     }
 
     pub const fn key(&self) -> OsrKey {
@@ -80,6 +89,12 @@ impl OsrMap {
     }
     pub const fn stack_depth(&self) -> u16 {
         self.stack_depth
+    }
+    pub const fn argument_count(&self) -> u16 {
+        self.argument_count
+    }
+    pub const fn local_count(&self) -> u16 {
+        self.local_count
     }
     pub fn live_slots(&self) -> &[SlotKind] {
         &self.live_slots

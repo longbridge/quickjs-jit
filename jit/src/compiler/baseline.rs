@@ -257,6 +257,16 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
     ) -> Result<RelocatableCode, CompileFailure> {
+        self.compile_with_policy_start(function, policy, control, None)
+    }
+
+    fn compile_with_policy_start(
+        &self,
+        function: &VerifiedFunction,
+        policy: CompilePolicy,
+        control: Option<&CompileControl>,
+        osr_start: Option<u32>,
+    ) -> Result<RelocatableCode, CompileFailure> {
         if let Some(control) = control {
             control.check()?;
         }
@@ -302,7 +312,14 @@ impl BaselineCompiler {
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut clif, &mut builder_context);
-            lower_function(&mut builder, &ir, &*self.isa, layout, &entry_analysis)?;
+            lower_function(
+                &mut builder,
+                &ir,
+                &*self.isa,
+                layout,
+                &entry_analysis,
+                osr_start,
+            )?;
             builder.seal_all_blocks();
             builder.finalize();
         }
@@ -364,7 +381,7 @@ impl BaselineCompiler {
             ir.frame_states
                 .iter()
                 .enumerate()
-                .map(|state| {
+                .filter_map(|state| {
                     let (state_index, state) = state;
                     let slots = state
                         .slots
@@ -381,16 +398,30 @@ impl BaselineCompiler {
                                 .and_then(|base| base.checked_add(index))
                                 .ok_or(CompileFailure::ResourceLimit),
                         })
-                        .collect::<Result<_, _>>()?;
-                    let state_id = FrameStateId::from_index(state_index)
-                        .ok_or(CompileFailure::ResourceLimit)?;
-                    let source_location = frame_state_source_loc(state_id)?.bits();
+                        .collect::<Result<Vec<_>, _>>();
+                    let slots = match slots {
+                        Ok(slots) => slots,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let state_id =
+                        FrameStateId::from_index(state_index).ok_or(CompileFailure::ResourceLimit);
+                    let state_id = match state_id {
+                        Ok(state_id) => state_id,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let source_location = match frame_state_source_loc(state_id) {
+                        Ok(location) => location.bits(),
+                        Err(error) => return Some(Err(error)),
+                    };
                     let matching_ranges: Vec<_> = source_ranges
                         .iter()
                         .filter(|range| range.loc.bits() == source_location)
                         .collect();
                     let [source_range] = matching_ranges.as_slice() else {
-                        return Err(CompileFailure::InvalidArtifact);
+                        if osr_start.is_some() && matching_ranges.is_empty() {
+                            return None;
+                        }
+                        return Some(Err(CompileFailure::InvalidArtifact));
                     };
                     let (location_kind, code_offset) = match state.kind {
                         FrameStateKind::Poll | FrameStateKind::Helper => {
@@ -403,7 +434,7 @@ impl BaselineCompiler {
                                 })
                                 .collect();
                             let [return_address] = matching_calls.as_slice() else {
-                                return Err(CompileFailure::InvalidArtifact);
+                                return Some(Err(CompileFailure::InvalidArtifact));
                             };
                             (FrameStateLocationKind::CallReturn, *return_address)
                         }
@@ -412,7 +443,7 @@ impl BaselineCompiler {
                                 source_range.start < *return_address
                                     && *return_address <= source_range.end
                             }) {
-                                return Err(CompileFailure::InvalidArtifact);
+                                return Some(Err(CompileFailure::InvalidArtifact));
                             }
                             (FrameStateLocationKind::Marker, source_range.start)
                         }
@@ -420,9 +451,9 @@ impl BaselineCompiler {
                     if code_offset as usize >= bytes.len()
                         || !distinct_state_offsets.insert(code_offset)
                     {
-                        return Err(CompileFailure::InvalidArtifact);
+                        return Some(Err(CompileFailure::InvalidArtifact));
                     }
-                    Ok(ArtifactFrameState::with_location(
+                    Some(Ok(ArtifactFrameState::with_location(
                         code_offset,
                         state.pc,
                         slots,
@@ -430,7 +461,7 @@ impl BaselineCompiler {
                         source_location,
                         source_range.start,
                         source_range.end,
-                    ))
+                    )))
                 })
                 .collect::<Result<_, _>>()?
         };
@@ -438,7 +469,7 @@ impl BaselineCompiler {
             .iter()
             .map(|state| StackMap::new(state.code_offset, state.slots.to_vec()))
             .collect();
-        Ok(RelocatableCode {
+        let mut code = RelocatableCode {
             bytes,
             relocations,
             unwind_metadata,
@@ -449,7 +480,21 @@ impl BaselineCompiler {
             target: self.isa.triple().clone(),
             host_publishable: self.host_publishable,
             clif: clif_text,
-        })
+            osr_codes: Vec::new(),
+        };
+        if osr_start.is_none() && matches!(policy, CompilePolicy::AdvertisedOnly) {
+            for point in function.osr_points() {
+                let Some(map) =
+                    crate::runtime::OsrMap::from_verified(function, point.pc(), point.pc())
+                else {
+                    continue;
+                };
+                let child =
+                    self.compile_with_policy_start(function, policy, control, Some(point.pc()))?;
+                code.osr_codes.push((map, child));
+            }
+        }
+        Ok(code)
     }
 }
 
@@ -520,12 +565,22 @@ impl Compiler for BaselineCompiler {
 }
 
 fn artifact_from_relocatable(request: CompileRequest, code: RelocatableCode) -> CompiledArtifact {
+    let mut charged_code = Vec::with_capacity(code.total_code_bytes());
+    let mut charged_relocations = Vec::new();
+    let mut charged_stack_maps = Vec::new();
+    let mut charged_frame_states = Vec::new();
+    code.collect_charge_metadata(
+        &mut charged_code,
+        &mut charged_relocations,
+        &mut charged_stack_maps,
+        &mut charged_frame_states,
+    );
     CompiledArtifact::from_parts(
         request.artifact_key(),
-        CodeAllocation::inert(code.bytes.clone()),
-        code.relocations.clone(),
-        code.stack_maps.clone(),
-        code.frame_states.clone(),
+        CodeAllocation::inert(charged_code),
+        charged_relocations,
+        charged_stack_maps,
+        charged_frame_states,
         Vec::new(),
     )
     .with_unwind_metadata(code.unwind_metadata.clone())
@@ -545,11 +600,40 @@ pub struct RelocatableCode {
     target: Triple,
     host_publishable: bool,
     clif: String,
+    osr_codes: Vec<(crate::runtime::OsrMap, RelocatableCode)>,
 }
 
 impl RelocatableCode {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub fn osr_entry_count(&self) -> usize {
+        self.osr_codes.len()
+    }
+
+    pub fn total_code_bytes(&self) -> usize {
+        self.osr_codes
+            .iter()
+            .fold(self.bytes.len(), |total, (_, code)| {
+                total.saturating_add(code.total_code_bytes())
+            })
+    }
+
+    fn collect_charge_metadata(
+        &self,
+        code_bytes: &mut Vec<u8>,
+        relocations: &mut Vec<Relocation>,
+        stack_maps: &mut Vec<StackMap>,
+        frame_states: &mut Vec<ArtifactFrameState>,
+    ) {
+        code_bytes.extend_from_slice(&self.bytes);
+        relocations.extend_from_slice(&self.relocations);
+        stack_maps.extend_from_slice(&self.stack_maps);
+        frame_states.extend_from_slice(&self.frame_states);
+        for (_, code) in &self.osr_codes {
+            code.collect_charge_metadata(code_bytes, relocations, stack_maps, frame_states);
+        }
     }
 
     pub fn relocations(&self) -> &[Relocation] {
@@ -608,12 +692,18 @@ impl RelocatableCode {
         writable.declare_indirect_targets(&[0])?;
         let executable = writable.publish()?;
         let unwind_registration = native_unwind.register(&executable)?;
+        let osr_codes = self
+            .osr_codes
+            .into_iter()
+            .map(|(map, code)| Ok((map, code.publish()?)))
+            .collect::<Result<Vec<_>, CodeMemoryError>>()?;
         Ok(PublishedBaselineCode::new(
             executable,
             unwind_registration,
             self.unwind_metadata,
             self.stack_maps,
             self.frame_states,
+            osr_codes,
         ))
     }
 }
@@ -631,6 +721,7 @@ struct PublishedBaselineAllocation {
     unwind_metadata: Option<UnwindMetadata>,
     stack_maps: Box<[StackMap]>,
     frame_states: Box<[ArtifactFrameState]>,
+    osr_codes: Box<[(crate::runtime::OsrMap, PublishedBaselineCode)]>,
     #[cfg(feature = "test-support")]
     lifetime_events: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -642,6 +733,7 @@ impl PublishedBaselineCode {
         unwind_metadata: Option<UnwindMetadata>,
         stack_maps: Vec<StackMap>,
         frame_states: Vec<ArtifactFrameState>,
+        osr_codes: Vec<(crate::runtime::OsrMap, PublishedBaselineCode)>,
     ) -> Self {
         Self {
             allocation: Arc::new(PublishedBaselineAllocation {
@@ -650,6 +742,7 @@ impl PublishedBaselineCode {
                 unwind_metadata,
                 stack_maps: stack_maps.into_boxed_slice(),
                 frame_states: frame_states.into_boxed_slice(),
+                osr_codes: osr_codes.into_boxed_slice(),
                 #[cfg(feature = "test-support")]
                 lifetime_events: Arc::new(Mutex::new(Vec::new())),
             }),
@@ -688,8 +781,26 @@ impl PublishedBaselineCode {
         &self.allocation.stack_maps
     }
 
+    pub fn required_stack_map_count(&self) -> u32 {
+        self.allocation
+            .frame_states
+            .iter()
+            .map(|state| state.source_location)
+            .max()
+            .and_then(|maximum| maximum.checked_add(1))
+            .unwrap_or(0)
+    }
+
     pub fn frame_states(&self) -> &[ArtifactFrameState] {
         &self.allocation.frame_states
+    }
+
+    pub fn osr_entry(&self, pc: u32) -> Option<(&crate::runtime::OsrMap, &PublishedBaselineCode)> {
+        self.allocation
+            .osr_codes
+            .iter()
+            .find(|(map, _)| map.key().pc() == pc)
+            .map(|(map, code)| (map, code))
     }
 
     pub fn unwind_is_registered(&self) -> bool {
@@ -1609,6 +1720,7 @@ fn lower_function(
     isa: &dyn TargetIsa,
     layout: FrameLayout,
     analysis: &EntryAnalysis,
+    osr_start: Option<u32>,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -1618,7 +1730,17 @@ fn lower_function(
         .collect();
     let retry = builder.create_block();
     let prologue = builder.create_block();
-    let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
+    let osr_post_poll = osr_start.map(|_| builder.create_block());
+    let entry_pc = osr_start.unwrap_or(0);
+    let entry = *blocks
+        .get(&entry_pc)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let entry_depth = ir
+        .blocks
+        .iter()
+        .find(|block| block.start_pc == entry_pc)
+        .map(|block| usize::from(block.stack_depth))
+        .ok_or(CompileFailure::InvalidArtifact)?;
     builder.append_block_params_for_function_params(prologue);
     builder.switch_to_block(prologue);
     let params = builder.block_params(prologue);
@@ -1683,8 +1805,12 @@ fn lower_function(
         layout,
         ir.max_stack_depth,
     );
-    for pair in stack.iter().copied() {
-        let value = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    for (index, pair) in stack.iter().copied().enumerate() {
+        let value = if osr_start.is_some() && index < entry_depth {
+            load_jsvalue(builder, stack_base, index, layout)
+        } else {
+            constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64))
+        };
         define_pair(builder, pair, value);
     }
 
@@ -1720,16 +1846,21 @@ fn lower_function(
         }};
     }
 
-    builder.ins().jump(entry, &[]);
+    builder.ins().jump(osr_post_poll.unwrap_or(entry), &[]);
     builder.switch_to_block(entry);
 
     for (block_index, block) in ir.blocks.iter().enumerate() {
         let clif_block = blocks[&block.start_pc];
-        if clif_block != entry {
+        if clif_block != entry || osr_start.is_some() {
             builder.switch_to_block(clif_block);
         }
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
+        let mut entered_osr_continuation = false;
+        let block_is_loop_header = block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, IrOp::OsrLabel { .. }));
         for instruction in &block.instructions {
             let mut helper_states = instruction.helper_states.iter().copied();
             builder.set_srcloc(SourceLoc::default());
@@ -1739,6 +1870,15 @@ fn lower_function(
                 }
             }
             match instruction.op {
+                IrOp::Poll { state: _ }
+                    if osr_start.is_some()
+                        && instruction.pc == block.start_pc
+                        && !block_is_loop_header =>
+                {
+                    // Interpreter cadence is attached to taken backedges. A
+                    // generic CFG-entry poll would add extra polls inside the
+                    // same native iteration. Periodic and return polls remain.
+                }
                 IrOp::Poll { state } => {
                     materialize_frame(
                         builder,
@@ -1767,6 +1907,12 @@ fn lower_function(
                         pointer_type,
                         layout,
                     );
+                    if osr_start == Some(block.start_pc) && !entered_osr_continuation {
+                        let continuation = osr_post_poll.ok_or(CompileFailure::InvalidArtifact)?;
+                        builder.ins().jump(continuation, &[]);
+                        builder.switch_to_block(continuation);
+                        entered_osr_continuation = true;
+                    }
                 }
                 IrOp::OsrLabel { .. } => {}
                 IrOp::Nop => {}

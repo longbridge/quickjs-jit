@@ -461,8 +461,244 @@ struct ProductionBackend {
     native_exits: u64,
     native_fallbacks: u64,
     native_retries: u64,
+    osr_entries: u64,
+    osr_not_ready: u64,
+    osr_map_misses: u64,
+    osr_validation_failures: u64,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct ProductionEntryPin {
+    execution: code_cache::ExecutionPin,
+    native: *const u8,
+    runtime_id: u64,
+    key: runtime::FunctionKey,
+    pc: u32,
+    stack_map_count: u32,
+    osr: Option<runtime::OsrMap>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn retry_exit() -> rquickjs_core::qjs::JSJitExit {
+    rquickjs_core::qjs::JSJitExit {
+        kind: rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+        reserved: 0,
+        resume_pc: core::ptr::null(),
+        resume_stack_top: core::ptr::null_mut(),
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn validate_production_frame(
+    frame: &rquickjs_core::qjs::JSJitExecFrame,
+    runtime_id: u64,
+    key: runtime::FunctionKey,
+    pc: u32,
+    stack_map_count: u32,
+    osr: Option<&runtime::OsrMap>,
+) -> bool {
+    use bytecode::SlotKind;
+    use rquickjs_core::qjs;
+
+    let expected_pc_address = (frame.bytecode_start as usize).checked_add(pc as usize);
+    if frame.struct_size != core::mem::size_of::<qjs::JSJitExecFrame>() as u32
+        || frame.rt.is_null()
+        || frame.ctx.is_null()
+        || frame.runtime_api.is_null()
+        || frame.runtime_id != runtime_id
+        || frame.frame_cookie == 0
+        || frame.function_id != key.id
+        || frame.generation != key.generation
+        || frame.bytecode_start.is_null()
+        || frame.pc.is_null()
+        || Some(frame.pc as usize) != expected_pc_address
+        || frame.entry.stack_map_count != stack_map_count
+        || frame.entry.helper_abi_version != qjs::QJSJIT_HELPER_ABI_VERSION
+        || frame.stack_base.is_null()
+        || frame.stack_top.is_null()
+        || frame.stack_capacity.is_null()
+        || (frame.stack_base as usize) > (frame.stack_top as usize)
+        || (frame.stack_top as usize) > (frame.stack_capacity as usize)
+    {
+        return false;
+    }
+    let Some(map) = osr else {
+        return pc == 0;
+    };
+    let value_size = core::mem::size_of::<qjs::JSValue>();
+    let expected_top = (frame.stack_base as usize)
+        .checked_add(usize::from(map.stack_depth()).saturating_mul(value_size));
+    if expected_top != Some(frame.stack_top as usize)
+        || frame.arg_buf.is_null()
+        || frame.var_buf.is_null()
+        || map.live_slots().len()
+            != usize::from(map.argument_count())
+                + usize::from(map.local_count())
+                + usize::from(map.stack_depth())
+    {
+        return false;
+    }
+    for (index, kind) in map.live_slots().iter().copied().enumerate() {
+        let value = if index < usize::from(map.argument_count()) {
+            unsafe { &*frame.arg_buf.add(index) }
+        } else if index < usize::from(map.argument_count()) + usize::from(map.local_count()) {
+            unsafe { &*frame.var_buf.add(index - usize::from(map.argument_count())) }
+        } else {
+            unsafe {
+                &*frame
+                    .stack_base
+                    .add(index - usize::from(map.argument_count()) - usize::from(map.local_count()))
+            }
+        };
+        let valid = match kind {
+            SlotKind::Tagged => true,
+            SlotKind::Int32 | SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::Float64 => value.tag == i64::from(qjs::JS_TAG_FLOAT64),
+            SlotKind::Uninitialized => value.tag == i64::from(qjs::JS_TAG_UNINITIALIZED),
+        };
+        if !valid {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+unsafe extern "C" fn production_entry_trampoline(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+) -> rquickjs_core::qjs::JSJitExit {
+    use rquickjs_core::qjs;
+
+    if frame.is_null() {
+        return retry_exit();
+    }
+    let frame = unsafe { &*frame };
+    if frame.entry.pin.is_null() {
+        return retry_exit();
+    }
+    let pin = unsafe { &*frame.entry.pin.cast::<ProductionEntryPin>() };
+    let _keep_execution_pinned = &pin.execution;
+    if !validate_production_frame(
+        frame,
+        pin.runtime_id,
+        pin.key,
+        pin.pc,
+        pin.stack_map_count,
+        pin.osr.as_ref(),
+    ) {
+        return retry_exit();
+    }
+    type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
+    let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
+    unsafe { native(frame as *const _ as *mut _) }
+}
+
+#[cfg(all(test, feature = "compiler", not(target_family = "wasm")))]
+mod production_osr_validation_tests {
+    use super::*;
+    use rquickjs_core::qjs;
+
+    fn bytes(frame: &qjs::JSJitExecFrame) -> Vec<u8> {
+        unsafe {
+            core::slice::from_raw_parts(
+                (frame as *const qjs::JSJitExecFrame).cast::<u8>(),
+                core::mem::size_of::<qjs::JSJitExecFrame>(),
+            )
+            .to_vec()
+        }
+    }
+
+    #[test]
+    fn every_invalid_osr_field_retries_without_mutating_the_frame() {
+        let mut bytecode = [0_u8; 8];
+        let mut stack = [unsafe { core::mem::zeroed::<qjs::JSValue>() }; 2];
+        stack[0].tag = i64::from(qjs::JS_TAG_INT);
+        let dangling_value = core::ptr::NonNull::<qjs::JSValue>::dangling().as_ptr();
+        let key = runtime::FunctionKey::new(7, 3);
+        let map = runtime::OsrMap::new(
+            runtime::OsrKey::new(key, 4),
+            4,
+            1,
+            vec![bytecode::SlotKind::Int32],
+        );
+        let mut frame: qjs::JSJitExecFrame = unsafe { core::mem::zeroed() };
+        frame.struct_size = core::mem::size_of::<qjs::JSJitExecFrame>() as u32;
+        frame.rt = core::ptr::NonNull::dangling().as_ptr();
+        frame.ctx = core::ptr::NonNull::dangling().as_ptr();
+        frame.function_id = key.id;
+        frame.generation = key.generation;
+        frame.arg_buf = dangling_value;
+        frame.var_buf = dangling_value;
+        frame.stack_base = stack.as_mut_ptr();
+        frame.stack_top = unsafe { stack.as_mut_ptr().add(1) };
+        frame.stack_capacity = unsafe { stack.as_mut_ptr().add(2) };
+        frame.bytecode_start = bytecode.as_mut_ptr();
+        frame.pc = unsafe { bytecode.as_mut_ptr().add(4) };
+        frame.runtime_api = core::ptr::NonNull::dangling().as_ptr();
+        frame.runtime_id = 11;
+        frame.frame_cookie = 9;
+        frame.entry.stack_map_count = 5;
+        frame.entry.helper_abi_version = qjs::QJSJIT_HELPER_ABI_VERSION;
+        assert!(validate_production_frame(&frame, 11, key, 4, 5, Some(&map)));
+
+        let mut invalid = Vec::new();
+        let mut value = frame;
+        value.runtime_id = 12;
+        invalid.push(value);
+        let mut value = frame;
+        value.function_id = 8;
+        invalid.push(value);
+        let mut value = frame;
+        value.generation = 4;
+        invalid.push(value);
+        let mut value = frame;
+        value.pc = bytecode.as_mut_ptr();
+        invalid.push(value);
+        let mut value = frame;
+        value.frame_cookie = 0;
+        invalid.push(value);
+        let mut value = frame;
+        value.entry.stack_map_count = 4;
+        invalid.push(value);
+        let mut value = frame;
+        value.entry.helper_abi_version = 0;
+        invalid.push(value);
+        let mut value = frame;
+        value.stack_top = value.stack_base;
+        invalid.push(value);
+
+        for candidate in &invalid {
+            let before = bytes(candidate);
+            assert!(!validate_production_frame(
+                candidate,
+                11,
+                key,
+                4,
+                5,
+                Some(&map)
+            ));
+            assert_eq!(bytes(candidate), before);
+        }
+        let before = bytes(&frame);
+        stack[0].tag = i64::from(qjs::JS_TAG_UNDEFINED);
+        let tag_before = stack[0].tag;
+        assert!(!validate_production_frame(
+            &frame,
+            11,
+            key,
+            4,
+            5,
+            Some(&map)
+        ));
+        assert_eq!(
+            bytes(&frame),
+            before,
+            "slot rejection does not mutate frame pointers"
+        );
+        assert_eq!(stack[0].tag, tag_before, "slot owner/refcount is untouched");
+    }
 }
 
 #[cfg(all(
@@ -524,6 +760,10 @@ impl ProductionBackend {
             native_exits: 0,
             native_fallbacks: 0,
             native_retries: 0,
+            osr_entries: 0,
+            osr_not_ready: 0,
+            osr_map_misses: 0,
+            osr_validation_failures: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
@@ -543,6 +783,10 @@ impl ProductionBackend {
         snapshot.native_exits = self.native_exits;
         snapshot.native_fallbacks = self.native_fallbacks;
         snapshot.native_retries = self.native_retries;
+        snapshot.osr_entries = self.osr_entries;
+        snapshot.osr_not_ready = self.osr_not_ready;
+        snapshot.osr_map_misses = self.osr_map_misses;
+        snapshot.osr_validation_failures = self.osr_validation_failures;
         *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
     }
 }
@@ -642,17 +886,33 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             helper_abi_version: 0,
         };
         self.maintenance();
-        if pc != 0 {
-            return empty;
-        }
         let Some(pin) = self.coordinator.pin(
             runtime::FunctionKey::new(id, generation),
             runtime::Tier::Baseline,
         ) else {
+            if pc != 0 {
+                self.osr_not_ready = self.osr_not_ready.saturating_add(1);
+            }
             return empty;
         };
         let Some(published) = pin.artifact().published() else {
+            if pc != 0 {
+                self.osr_not_ready = self.osr_not_ready.saturating_add(1);
+            }
             return empty;
+        };
+        let (published, osr_map) = if pc == 0 {
+            (published, None)
+        } else {
+            let Some((map, osr)) = published.osr_entry(pc) else {
+                self.osr_map_misses = self.osr_map_misses.saturating_add(1);
+                return empty;
+            };
+            if map.key().function() != runtime::FunctionKey::new(id, generation) {
+                self.osr_map_misses = self.osr_map_misses.saturating_add(1);
+                return empty;
+            }
+            (osr, Some(map.clone()))
         };
         #[cfg(feature = "test-support")]
         {
@@ -662,16 +922,19 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pin.artifact().key());
         }
         let entry = published.as_ptr();
-        let stack_map_count = u32::try_from(published.stack_maps().len()).unwrap_or(u32::MAX);
-        let pin = Box::into_raw(Box::new(pin)).cast();
-        empty.entry = Some(unsafe {
-            core::mem::transmute::<
-                *const u8,
-                unsafe extern "C" fn(
-                    *mut rquickjs_core::qjs::JSJitExecFrame,
-                ) -> rquickjs_core::qjs::JSJitExit,
-            >(entry)
-        });
+        let stack_map_count = published.required_stack_map_count();
+        let artifact_key = pin.artifact().key();
+        let pin = Box::into_raw(Box::new(ProductionEntryPin {
+            execution: pin,
+            native: entry,
+            runtime_id: artifact_key.runtime_id,
+            key: runtime::FunctionKey::new(id, generation),
+            pc,
+            stack_map_count,
+            osr: osr_map,
+        }))
+        .cast();
+        empty.entry = Some(production_entry_trampoline);
         empty.pin = pin;
         empty.stack_map_count = stack_map_count;
         empty.helper_abi_version = rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION;
@@ -680,18 +943,24 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
 
     fn release_entry(&mut self, entry: rquickjs_core::qjs::JSJitEntryHandle) {
         if !entry.pin.is_null() {
-            unsafe { drop(Box::from_raw(entry.pin.cast::<code_cache::ExecutionPin>())) };
+            unsafe { drop(Box::from_raw(entry.pin.cast::<ProductionEntryPin>())) };
         }
     }
 
-    fn native_enter(&mut self, _id: u64, _generation: u64, _pc: u32) {
+    fn native_enter(&mut self, _id: u64, _generation: u64, pc: u32) {
         self.native_entries = self.native_entries.saturating_add(1);
+        if pc != 0 {
+            self.osr_entries = self.osr_entries.saturating_add(1);
+        }
     }
 
-    fn native_exit(&mut self, _id: u64, _generation: u64, _pc: u32, exit_kind: u32) {
+    fn native_exit(&mut self, _id: u64, _generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
             self.native_retries = self.native_retries.saturating_add(1);
+            if pc != 0 {
+                self.osr_validation_failures = self.osr_validation_failures.saturating_add(1);
+            }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
         }

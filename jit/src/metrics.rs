@@ -26,6 +26,10 @@ pub struct JitMetrics {
     pub native_exits: u64,
     pub native_fallbacks: u64,
     pub native_retries: u64,
+    pub osr_entries: u64,
+    pub osr_not_ready: u64,
+    pub osr_map_misses: u64,
+    pub osr_validation_failures: u64,
 }
 
 impl JitMetrics {
@@ -54,6 +58,10 @@ impl JitMetrics {
             native_exits: 0,
             native_fallbacks: 0,
             native_retries: 0,
+            osr_entries: 0,
+            osr_not_ready: 0,
+            osr_map_misses: 0,
+            osr_validation_failures: 0,
         }
     }
 
