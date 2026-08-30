@@ -30,9 +30,25 @@
   before native code. Rejection returns `RETRY` without changing frame bytes or
   value owners.
 - OSR imports current arguments, locals, and live interpreter stack into SSA
-  and jumps directly to a post-poll continuation. Native backedges return to
-  the real header poll. OSR variants suppress generic CFG-entry duplicate polls
-  while retaining periodic and return polls.
+  and jumps directly to a post-poll continuation. Only the transfer-header poll
+  already performed by C is skipped. Native backedges return to the real loop
+  header poll; forward CFG-entry, periodic, and return polls remain. A backward
+  edge targeting a loop header uses that header poll instead of emitting a
+  second poll immediately before the edge.
+- Production request ownership now follows coordinator state. Snapshot
+  copy/size/verification and queue failures clear the requested bit with
+  bounded pre-queue backoff; compiler Backoff becomes retryable; active,
+  Installed, and Blacklisted states retain the bit; retirement clears all
+  hotness, rationale, and backoff records. A monotonic production tick advances
+  coordinator retry deadlines.
+- Production consumes `AdaptiveInputs` and records the actual call/loop
+  `HotReason`, neutral queues, captured bytecode inputs, snapshot requests, and
+  the explicitly disabled size-factor count. Until Task 14 supplies benchmark
+  evidence, measured/size/helper coefficients remain disabled and thresholds
+  use configured neutral values (32 calls and 56 loops by default).
+- OSR metrics distinguish acquisition attempts, trampoline-validated entries,
+  frame-validation failures, and generated guard retries. Legacy `osr_entries`
+  aliases validated entries rather than pre-validation attempts.
 
 ## Correctness evidence
 
@@ -40,6 +56,18 @@
   `12_499_997_500_000`, records native OSR entry, and has zero retry.
 - Interpreter and OSR runs of that loop have identical interrupt-handler poll
   counts, proving the transfer neither skips nor doubles its first backedge.
+- An eligible loop with an internal branch/continue has identical interpreter
+  and OSR interrupt-handler counts, covering loop-header, forward CFG, and
+  backedge cadence rather than only a single-block numeric loop.
+- A first-invocation production OSR child executes GET_PROPERTY plus DUP/FREE
+  helpers under forced cycle GC. Its getter mutates an event count and reenters
+  JavaScript on every access; 20,001 getter/reentry events remain ordered, the
+  exact helper appears in the native PC trace, references balance, and retry,
+  fallback, and validation-failure counts remain zero.
+- Production failure tests prove an unsupported compile performs exactly two
+  configured coordinator attempts before Blacklist, while an over-quota
+  snapshot retries through bounded pre-queue backoff without queueing or
+  spinning one request per backedge.
 - Multi-loop compilation produces one independent entry per verified header.
 - Two hot-reloaded generations both enter OSR, return distinct correct results,
   retire old code safely, and record zero cross-generation retries.
@@ -54,9 +82,9 @@
 
 ## Commands and results
 
-- `cargo test -p rquickjs-jit --features compiler,test-support`: 240/240 pass.
+- `cargo test -p rquickjs-jit --features compiler,test-support`: 246/246 pass.
 - `cargo test -p rquickjs-jit --test osr --test semantics --test background
-  --release --features compiler,test-support`: 32/32 pass.
+  --test lifecycle --release --features compiler,test-support`: 81/81 pass.
 - `cargo clippy -p rquickjs-jit --all-targets --features
   compiler,test-support -- -D warnings`: pass.
 - `cargo fmt --all -- --check`: pass.

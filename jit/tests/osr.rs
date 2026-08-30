@@ -438,6 +438,10 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
     assert!(metrics.osr_validated_successes > 0, "{metrics:?}");
     assert_eq!(metrics.osr_generated_retries, 0, "{metrics:?}");
     assert_eq!(metrics.osr_validation_failures, 0, "{metrics:?}");
+    assert_eq!(
+        unsafe { JS_JitSetExecutionTrace(rt, core::ptr::null_mut(), 0) },
+        0
+    );
 }
 
 #[cfg(all(
