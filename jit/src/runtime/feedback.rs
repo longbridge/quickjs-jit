@@ -494,6 +494,16 @@ impl FeedbackSnapshot {
         })
     }
 
+    pub fn call_specializations_for(
+        &self,
+        caller: FunctionKey,
+    ) -> impl Iterator<Item = CallSpecializationKey> + '_ {
+        self.call_signatures
+            .iter()
+            .filter(move |entry| entry.caller == caller)
+            .filter_map(move |entry| self.call_specialization_at(caller, entry.pc))
+    }
+
     /// Tier 2 may only consume feedback belonging to the exact function
     /// generation and frozen at a nonzero runtime epoch.
     pub fn has_stable_value_for(&self, function: FunctionKey) -> bool {

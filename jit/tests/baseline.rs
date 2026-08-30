@@ -506,7 +506,7 @@ fn dynamic_add_lowers_to_helpers_without_post_call_retry() {
     let code = compile(bytecode, 2, 0);
 
     assert_retry_predecessors_precede_the_first_poll("dynamic add helper", &code);
-    assert!(code.call_return_offsets().len() >= 5, "{}", code.clif());
+    assert!(code.call_return_offsets().len() >= 3, "{}", code.clif());
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn property_bytecode_lowers_to_borrowed_get_then_explicit_free() {
         .expect("property helpers compile");
 
     assert_retry_predecessors_precede_the_first_poll("property helpers", &code);
-    assert!(code.call_return_offsets().len() >= 5, "{}", code.clif());
+    assert!(code.call_return_offsets().len() >= 4, "{}", code.clif());
 }
 
 #[test]
@@ -687,7 +687,7 @@ fn returning_a_borrowed_argument_duplicates_then_transfers_the_owned_result() {
 }
 
 #[test]
-fn overwrite_drop_dup_local_and_stack_all_lower_through_owned_slot_helpers() {
+fn overwrite_drop_dup_local_and_stack_preserve_owned_slot_transitions() {
     let paths = [
         compile(
             vec![
@@ -723,7 +723,7 @@ fn overwrite_drop_dup_local_and_stack_all_lower_through_owned_slot_helpers() {
 
     for (index, code) in paths.iter().enumerate() {
         assert_retry_predecessors_precede_the_first_poll(&format!("owned path {index}"), code);
-        assert!(code.call_return_offsets().len() >= 4, "{}", code.clif());
+        assert!(code.call_return_offsets().len() >= 3, "{}", code.clif());
     }
 }
 

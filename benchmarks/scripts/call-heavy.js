@@ -4,6 +4,9 @@ function increment(value, delta) {
 }
 
 globalThis.workloadArgument = increment;
+// The leaf, initial caller, and direct-edge caller refresh must all publish
+// before the harness starts steady-state timing.
+globalThis.tier1ReadyInstalls = 3;
 
 function workload(iterations, seed, target) {
   let value = seed;

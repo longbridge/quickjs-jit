@@ -21,6 +21,8 @@ struct Provenance {
     rquickjs_revision: String,
     shell_dirty: bool,
     rquickjs_dirty: bool,
+    test_binary_sha256: String,
+    integration_patch_sha256: String,
     target_triple: String,
     command: Vec<String>,
 }
@@ -120,8 +122,9 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
         || report.provenance.rquickjs_revision.len() != 40
         || report.provenance.target_triple.split('-').count() < 3
         || report.provenance.command.is_empty()
-        || report.provenance.shell_dirty
-        || report.provenance.rquickjs_dirty
+        || ((report.provenance.shell_dirty || report.provenance.rquickjs_dirty)
+            && (!is_sha256(&report.provenance.test_binary_sha256)
+                || !is_sha256(&report.provenance.integration_patch_sha256)))
     {
         return Err("incomplete or dirty provenance".into());
     }
@@ -193,6 +196,10 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
         if all_pass { "PASS" } else { "FAIL" },
     ));
     Ok((markdown, all_pass))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_pairs(name: &str, interpreter: &[Sample], automatic: &[Sample]) -> Result<(), String> {
@@ -313,6 +320,8 @@ mod tests {
                 rquickjs_revision: "b".repeat(40),
                 shell_dirty: false,
                 rquickjs_dirty: false,
+                test_binary_sha256: "0".repeat(64),
+                integration_patch_sha256: "0".repeat(64),
                 target_triple: "x86_64-unknown-linux-gnu".into(),
                 command: vec!["real-shell-benchmark".into()],
             },

@@ -156,10 +156,22 @@ fn repeated_failures_blacklist_only_the_generation() {
     }
 
     assert_eq!(coordinator.state(key), CompileState::Blacklisted);
+    assert!(coordinator.is_terminally_blacklisted(key));
+    assert!(!coordinator.is_terminally_blacklisted(FunctionKey::new(9, 2)));
     assert_eq!(
         coordinator.state(FunctionKey::new(9, 2)),
         CompileState::Cold
     );
+}
+
+#[test]
+fn profitability_demoted_baseline_is_not_terminal_for_tier2_feedback() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(91, 1);
+    install_empty(&mut coordinator, key, Tier::Baseline, coordinator_snapshot());
+    assert!(coordinator.demote_baseline_to_interpreter(key));
+    assert_eq!(coordinator.tier_state(key, Tier::Baseline), CompileState::Blacklisted);
+    assert!(!coordinator.is_terminally_blacklisted(key));
 }
 
 fn install_empty(

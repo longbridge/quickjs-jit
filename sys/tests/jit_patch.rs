@@ -47,7 +47,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 10u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 11u"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
     assert!(quickjs.contains("JS_JitHelperMaterializeOwner"));
     assert!(quickjs.contains(
@@ -61,12 +61,15 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
             .count(),
         3
     );
-    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 3u"));
+    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 4u"));
     assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_LOCAL = 1"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_OWNED_STACK = 2"));
     assert!(helper_header.contains("X(MATERIALIZE_OWNER, materialize_owner"));
+    assert!(helper_header.contains("X(GET_ELEMENT, get_element"));
+    assert!(helper_header.contains("X(SET_ELEMENT, set_element"));
+    assert!(helper_header.contains("X(TO_PROPKEY, to_propkey"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
@@ -90,7 +93,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 10;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 11;"),
             "{target}"
         );
         assert!(
@@ -106,7 +109,13 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 128usize"),
+            binding.contains("pub get_element: ::core::option::Option")
+                && binding.contains("pub set_element: ::core::option::Option")
+                && binding.contains("pub to_propkey: ::core::option::Option"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 152usize"),
             "{target}"
         );
     }

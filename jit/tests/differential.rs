@@ -52,6 +52,9 @@ enum ManifestHelper {
     CompareSlow,
     GetProperty,
     SetProperty,
+    GetElement,
+    SetElement,
+    ToPropertyKey,
     Call,
     NewArray,
     NewObject,
@@ -69,6 +72,9 @@ impl ManifestHelper {
             Self::CompareSlow => HelperId::CompareSlow,
             Self::GetProperty => HelperId::GetProperty,
             Self::SetProperty => HelperId::SetProperty,
+            Self::GetElement => HelperId::GetElement,
+            Self::SetElement => HelperId::SetElement,
+            Self::ToPropertyKey => HelperId::ToPropertyKey,
             Self::Call => HelperId::Call,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
@@ -98,6 +104,9 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::CompareSlow
                 | ManifestHelper::GetProperty
                 | ManifestHelper::SetProperty
+                | ManifestHelper::GetElement
+                | ManifestHelper::SetElement
+                | ManifestHelper::ToPropertyKey
                 | ManifestHelper::Call
         )
     ) {

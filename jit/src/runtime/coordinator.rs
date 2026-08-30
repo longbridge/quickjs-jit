@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -550,6 +550,7 @@ pub struct Coordinator {
     side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
     specialization_versions: HashMap<(FunctionKey, u64), u8>,
     call_specialization_versions: HashMap<FunctionKey, HashMap<u64, u8>>,
+    profitability_demotions: HashSet<FunctionKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -640,6 +641,7 @@ impl Coordinator {
             side_exit_observations: HashMap::new(),
             specialization_versions: HashMap::new(),
             call_specialization_versions: HashMap::new(),
+            profitability_demotions: HashSet::new(),
         }
     }
 
@@ -908,7 +910,9 @@ impl Coordinator {
                     .iter()
                     .filter_map(|instruction| {
                         let call = feedback.call_specialization_at(key, instruction.pc())?;
-                        let pin = self.pin(call.callee(), Tier::Optimizing)?;
+                        let pin = self
+                            .pin(call.callee(), Tier::Optimizing)
+                            .or_else(|| self.pin(call.callee(), Tier::Baseline))?;
                         let artifact = pin.artifact();
                         let signature = artifact
                             .optimized_metadata()?
@@ -1240,6 +1244,7 @@ impl Coordinator {
             return false;
         }
         function.baseline.state = CompileState::Blacklisted;
+        self.profitability_demotions.insert(key);
         if function.published == Some(Tier::Baseline) {
             function.published = None;
         }
@@ -1249,6 +1254,65 @@ impl Coordinator {
          * cannot execute; optimized side exits resume the interpreter. */
         self.metrics.interpreter_demotions = self.metrics.interpreter_demotions.saturating_add(1);
         self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+        true
+    }
+
+    /// Returns true when an installed baseline caller has a stable call edge
+    /// whose scalar callee entry is now published, but the caller artifact was
+    /// compiled before that dependency became available.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn baseline_direct_refresh_ready(
+        &mut self,
+        key: FunctionKey,
+        feedback: &FeedbackSnapshot,
+    ) -> bool {
+        let Some(caller_pin) = self.pin(key, Tier::Baseline) else {
+            return false;
+        };
+        let installed_dependencies = caller_pin
+            .artifact()
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.function)
+            .collect::<std::collections::HashSet<_>>();
+        drop(caller_pin);
+        feedback.call_specializations_for(key).any(|call| {
+            if installed_dependencies.contains(&call.callee()) {
+                return false;
+            }
+            let callee_pin = self
+                .pin(call.callee(), Tier::Optimizing)
+                .or_else(|| self.pin(call.callee(), Tier::Baseline));
+            callee_pin.is_some_and(|pin| {
+                let artifact = pin.artifact();
+                artifact.direct_call_published().is_some()
+                    && artifact
+                        .optimized_metadata()
+                        .and_then(|metadata| metadata.direct_call_signature())
+                        .is_some_and(|signature| {
+                            signature.function() == call.callee()
+                                && signature.arguments() == call.arguments()
+                                && signature.result() == call.result()
+                        })
+            })
+        })
+    }
+
+    /// Atomically makes an installed baseline caller queueable again. Existing
+    /// executions retain their publication pin; new entries use the
+    /// interpreter until the refreshed artifact is installed.
+    pub fn prepare_baseline_direct_refresh(&mut self, key: FunctionKey) -> bool {
+        let Some(function) = self.functions.get_mut(&key) else {
+            return false;
+        };
+        if function.published != Some(Tier::Baseline)
+            || !self.installed_keys.contains_key(&(key, Tier::Baseline))
+        {
+            return false;
+        }
+        self.installed_keys.remove(&(key, Tier::Baseline));
+        function.baseline.state = CompileState::Cold;
+        function.published = None;
         true
     }
 
@@ -1274,6 +1338,18 @@ impl Coordinator {
         } else {
             CompileState::Cold
         }
+    }
+
+    /// Reports immutable generations that cannot publish either native tier.
+    /// Profitability demotions remain probeable for their bounded Tier2 trial.
+    pub fn is_terminally_blacklisted(&self, key: FunctionKey) -> bool {
+        matches!(
+            self.tier_state(key, Tier::Optimizing),
+            CompileState::Blacklisted
+        ) || (matches!(
+            self.tier_state(key, Tier::Baseline),
+            CompileState::Blacklisted
+        ) && !self.profitability_demotions.contains(&key))
     }
 
     pub fn advance_clock(&mut self, now: u64) {

@@ -11,11 +11,13 @@ mod shape_feedback;
 
 pub use crate::compiler::CompileFailure;
 pub use background::{BackgroundCompiler, BackgroundCompilerError};
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub use coordinator::DirectCallTarget;
 pub use coordinator::{
     compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
     CompileState, CompiledCallTarget, CompiledCallTargetError, CompletionDrain,
-    CompletionSendError, CompletionSender, Coordinator, DirectCallTarget, FunctionKey, GuardId,
-    QueueError, SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
+    CompletionSendError, CompletionSender, Coordinator, FunctionKey, GuardId, QueueError,
+    SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 pub use feedback::{
     BinaryFeedbackFlags, BinaryFeedbackSnapshot, BoundedSpecializationSignature,

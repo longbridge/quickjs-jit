@@ -186,7 +186,7 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
     use rquickjs_core::qjs;
 
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 3);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 4);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitExecFrame, runtime_api),
         std::mem::offset_of!(qjs::JSJitExecFrame, entry)
@@ -201,7 +201,10 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
         std::mem::offset_of!(qjs::JSJitRuntimeAPI, materialize_owner),
         120
     );
-    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 128);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, get_element), 128);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, set_element), 136);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, to_propkey), 144);
+    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 152);
     assert_eq!(qjs::JS_JIT_HELPER_GUARD_MISS, 1);
 }
 
@@ -271,6 +274,17 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
             1,
             qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
         ),
+        (
+            "GET_ELEMENT",
+            3,
+            qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
+        ),
+        ("SET_ELEMENT", 3, 0),
+        (
+            "TO_PROPKEY",
+            2,
+            qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
+        ),
     ];
 
     let mut count = 0_u32;
@@ -315,9 +329,9 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 10);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 11);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 3);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 4);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitEntryHandle, stack_map_count),

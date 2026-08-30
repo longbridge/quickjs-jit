@@ -132,6 +132,34 @@
       ]
     },
     {
+      "opcode": "get_array_el",
+      "definition": "function f(o,k){ return o[k] }",
+      "expression": "f(new Proxy([20,42],{get(o,k){return o[k]}}),1)",
+      "helper": "GetElement",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "swap",
+      "definition": "function f(o,k,v){ o[k]=v; return v }",
+      "expression": "f({},'x',42)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "put_array_el",
+      "definition": "function f(o,k,v){ o[k]=v; return v }",
+      "expression": "(()=>{const a=new Int32Array(2);return [f(a,1,42),a[1]]})()",
+      "helper": "SetElement",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "to_propkey",
+      "definition": "function f(o,k,v){ o[k]=v; return v }",
+      "expression": "(()=>{const events=[];const key={toString(){events.push('key');return 'x'}};const o={};return [f(o,key,42),o.x,events]})()",
+      "helper": "ToPropertyKey",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
       "opcode": "set_loc_uninitialized",
       "definition": "function f(a){ let x=a; x++; return x }",
       "expression": "f(41)",

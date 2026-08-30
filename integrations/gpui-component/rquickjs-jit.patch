@@ -155,7 +155,7 @@
          let context = JsContext::full(&js_runtime).map_err(js_setup_error)?;
  
          let app_modules = AppModules::default();
-@@ -638,6 +706,11 @@
+@@ -638,6 +706,15 @@
          Ok(runtime)
      }
  
@@ -164,20 +164,25 @@
 +        self.js_runtime.jit_metrics()
 +    }
 +
++    fn poll_jit(&self) {
++        self.js_runtime.poll_jit();
++    }
++
      pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
          cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
      }
-@@ -3143,6 +3216,10 @@
-             self.active_context.set(outer);
-             produced
+@@ -1711,6 +1788,10 @@
+                 object.application_generation(),
+             );
+             (self.call_render(object, generation), policy)
          });
-+        // Installation and reclamation are bounded and happen only after the
-+        // QuickJS context lock has been released. GPUI's foreground thread
-+        // never waits for compilation.
-+        self.js_runtime.poll_jit();
-         match result {
-             Ok(value) => Ok(value),
-             Err(error) => {
++        // One bounded maintenance pass per outer render, after QuickJS has
++        // released its context lock. Low-level host callbacks may enter
++        // `with_js` hundreds of times while describing one panel.
++        self.poll_jit();
+ 
+         let root = match root {
+             Ok(root) => root,
 --- a/crates/shell/src/tests/benchmark.rs
 +++ b/crates/shell/src/tests/benchmark.rs
 @@ -26,12 +26,15 @@

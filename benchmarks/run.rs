@@ -331,7 +331,12 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             builder = builder.call_threshold(1).loop_threshold(1);
         }
         if mode == "tier1" {
-            builder = builder.tier_policy(JitTierPolicy::BaselineOnly);
+            // The second entry freezes the first complete argument/return
+            // profile, allowing baseline artifacts to publish a bounded
+            // scalar entry for baseline-to-baseline calls.
+            builder = builder
+                .call_threshold(2)
+                .tier_policy(JitTierPolicy::BaselineOnly);
         }
         if mode == "tier2" {
             builder = builder
@@ -354,6 +359,13 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
         .map_err(err)?;
     phases.definition_eval_ns = ns(start.elapsed());
+    let tier1_ready_installs = context
+        .with(|ctx| {
+            ctx.eval::<u64, _>(
+                "typeof globalThis.tier1ReadyInstalls === 'number' ? globalThis.tier1ReadyInstalls : 1",
+            )
+        })
+        .map_err(err)?;
     let start = Instant::now();
     let _first_checksum = invoke_workload(&context)?;
     phases.first_eval_ns = ns(start.elapsed());
@@ -372,7 +384,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
                 install_poll = install_poll.saturating_add(poll_ns);
             }
             before = now;
-            if native_ready(mode, &before) || before.blacklisted > 0 {
+            if native_ready(mode, &before, tier1_ready_installs) || before.blacklisted > 0 {
                 break;
             }
             if Instant::now() >= threshold_deadline {
@@ -540,10 +552,10 @@ fn selected_workloads() -> Result<Vec<&'static Workload>, String> {
     }
     Ok(selected)
 }
-fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics) -> bool {
+fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics, tier1_ready_installs: u64) -> bool {
     match mode {
         "interpreter" => true,
-        "tier1" => m.native_entries > 0,
+        "tier1" => m.native_entries > 0 && m.installed >= tier1_ready_installs,
         "tier2" => m.tier2_entries > 0,
         "automatic" => m.profitability_approved > 0 && m.tier2_entries > 0,
         _ => false,

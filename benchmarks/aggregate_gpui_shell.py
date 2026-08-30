@@ -2,6 +2,7 @@
 """Aggregate gpui-shell's one-process samples into gpui-shell-jit-v1 evidence."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,21 @@ from pathlib import Path
 
 def git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", root, *args], text=True).strip()
+
+
+def source_revision(root: Path) -> tuple[str, bool]:
+    """Return provenance for a checkout or an explicitly marked clean source copy."""
+    try:
+        return git(root, "rev-parse", "HEAD"), bool(git(root, "status", "--porcelain"))
+    except subprocess.CalledProcessError:
+        marker = root / ".source-revision"
+        if not marker.is_file():
+            raise SystemExit(f"{root} is not a git checkout and has no .source-revision marker")
+        revision = marker.read_text().strip()
+        if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+            raise SystemExit(f"invalid source revision marker: {marker}")
+        # The integration patch intentionally changes the marked source copy.
+        return revision, True
 
 
 def samples(directory: Path, workload: str, mode: str) -> list[dict]:
@@ -35,13 +51,17 @@ def main() -> None:
         "script_renders",
     )
     select = lambda rows, keys: [{key: row[key] for key in keys} for row in rows]
+    shell_revision, shell_dirty = source_revision(shell_root)
+    rquickjs_revision, rquickjs_dirty = source_revision(rquickjs_root)
     document = {
         "schema": "gpui-shell-jit-v1",
         "provenance": {
-            "shell_revision": git(shell_root, "rev-parse", "HEAD"),
-            "rquickjs_revision": git(rquickjs_root, "rev-parse", "HEAD"),
-            "shell_dirty": bool(git(shell_root, "status", "--porcelain")),
-            "rquickjs_dirty": bool(git(rquickjs_root, "status", "--porcelain")),
+            "shell_revision": shell_revision,
+            "rquickjs_revision": rquickjs_revision,
+            "shell_dirty": shell_dirty,
+            "rquickjs_dirty": rquickjs_dirty,
+            "test_binary_sha256": os.environ.get("GPUI_SHELL_TEST_BINARY_SHA256", ""),
+            "integration_patch_sha256": os.environ.get("GPUI_SHELL_INTEGRATION_PATCH_SHA256", ""),
             "target_triple": subprocess.check_output(
                 ["rustc", "-vV"], text=True
             ).split("host: ", 1)[1].splitlines()[0],

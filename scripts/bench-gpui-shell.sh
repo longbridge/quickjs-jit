@@ -37,8 +37,20 @@ repo_root=$(cd "$(dirname "$0")/.." && pwd)
 shell_root=$(cd "$shell_root" && pwd)
 output_json=$(realpath -m "$output_json")
 
-cargo test --manifest-path "$shell_root/Cargo.toml" --release \
-  tests::benchmark::jit_does_not_change_snapshot_or_render_count -- --exact
+cargo test --manifest-path "$shell_root/Cargo.toml" -p gpui-shell --release --offline --no-run
+target_root=${CARGO_TARGET_DIR:-$shell_root/target}
+test_binary=
+while IFS= read -r candidate; do
+  if "$candidate" --list 2>/dev/null | grep '^tests::benchmark::emit_one_jit_acceptance_sample:' >/dev/null; then
+    test_binary=$candidate
+    break
+  fi
+done < <(find "$target_root/release/deps" -maxdepth 1 -type f -executable -name 'gpui_shell-*' | sort)
+if [[ -z "$test_binary" ]]; then
+  echo "unable to locate gpui-shell library test binary" >&2
+  exit 4
+fi
+"$test_binary" tests::benchmark::jit_does_not_change_snapshot_or_render_count --exact
 
 sample_dir=$(mktemp -d /tmp/gpui-shell-jit-samples.XXXXXX)
 trap 'rm -rf "$sample_dir"' EXIT
@@ -49,8 +61,7 @@ for warmup in $(seq 0 4); do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/warmup-$warmup-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$warmup" \
       GPUI_SHELL_JIT_WORKLOAD="$workload" \
-        cargo test --manifest-path "$shell_root/Cargo.toml" --release \
-          "$sample_test" -- --exact >/dev/null
+        "$test_binary" "$sample_test" --exact >/dev/null
     done
   done
 done
@@ -61,12 +72,15 @@ for pair in $(seq 0 29); do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/pair-$pair-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$pair" \
       GPUI_SHELL_JIT_WORKLOAD="$workload" \
-        cargo test --manifest-path "$shell_root/Cargo.toml" --release \
-          "$sample_test" -- --exact >/dev/null
+        "$test_binary" "$sample_test" --exact >/dev/null
     done
   done
 done
 
+test_binary_sha256=$(sha256sum "$test_binary" | cut -d ' ' -f 1)
+integration_patch_sha256=$(sha256sum "$repo_root/integrations/gpui-component/rquickjs-jit.patch" | cut -d ' ' -f 1)
+GPUI_SHELL_TEST_BINARY_SHA256="$test_binary_sha256" \
+GPUI_SHELL_INTEGRATION_PATCH_SHA256="$integration_patch_sha256" \
 python3 "$repo_root/benchmarks/aggregate_gpui_shell.py" \
   "$sample_dir" "$shell_root" "$repo_root" "$output_json"
 

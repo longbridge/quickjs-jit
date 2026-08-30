@@ -15,7 +15,7 @@ use cranelift_codegen::{
     ir::{
         condcodes::{FloatCC, IntCC},
         types, AbiParam, ArgumentPurpose, Block, Function, InstBuilder, MemFlags, Signature,
-        SourceLoc, TrapCode, Value,
+        SourceLoc, StackSlot, StackSlotData, StackSlotKind, TrapCode, Value,
     },
     isa::{unwind::UnwindInfo as CraneliftUnwindInfo, OwnedTargetIsa, TargetIsa},
     settings::{self, Configurable},
@@ -125,6 +125,61 @@ impl HelperLowering<'_> {
     ) -> Result<(), CompileFailure> {
         set_visible_stack_depth(builder, self.frame, self.stack_base, depth, self.layout)
     }
+
+    fn shape_guard(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        state: FrameStateId,
+        live_depth: usize,
+        object: u32,
+        shape: crate::runtime::ShapeToken,
+    ) -> Result<Value, CompileFailure> {
+        let frame_state = self.ir.frame_states.get(state);
+        let fixed_slots = usize::from(self.ir.argument_count) + usize::from(self.ir.local_count);
+        let visible_depth = frame_state
+            .slots
+            .len()
+            .checked_sub(fixed_slots)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        materialize_frame(
+            builder,
+            self.frame,
+            self.arg_buf,
+            self.var_buf,
+            self.stack_base,
+            self.arguments,
+            self.locals,
+            self.stack,
+            live_depth,
+            visible_depth,
+            frame_state.pc,
+            self.pointer_type,
+            self.layout,
+        )?;
+        let helper_id = qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize;
+        let helper = builder.ins().load(
+            self.pointer_type,
+            MemFlags::new(),
+            self.runtime_api,
+            self.layout.helper_offsets[helper_id],
+        );
+        let params = [
+            self.frame,
+            helper_u32(
+                builder,
+                u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
+            ),
+            helper_u32(builder, object),
+            helper_u32(builder, shape.identity() as u32),
+            helper_u32(builder, (shape.identity() >> 32) as u32),
+            helper_u32(builder, shape.generation() as u32),
+            helper_u32(builder, (shape.generation() >> 32) as u32),
+        ];
+        let call = builder
+            .ins()
+            .call_indirect(self.signatures[helper_id], helper, &params);
+        Ok(builder.inst_results(call)[0])
+    }
 }
 
 /// Cranelift compiler configured for one explicit target ISA.
@@ -139,6 +194,66 @@ struct BaselineDirectCallSite {
     pc: u32,
     call: crate::runtime::CallSpecializationKey,
     entry: usize,
+}
+
+#[derive(Clone, Debug)]
+struct BaselinePropertySite {
+    pc: u32,
+    store: bool,
+    observations: Box<[crate::runtime::ShapeObservation]>,
+}
+
+fn baseline_property_sites(
+    function: &VerifiedFunction,
+    feedback: &crate::runtime::FeedbackSnapshot,
+) -> Vec<BaselinePropertySite> {
+    use crate::runtime::{ObservedType, PropertyAttributes, ShapeFeedbackState};
+    function
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let store = match instruction.opcode().name() {
+                "get_field" => false,
+                "put_field" => true,
+                _ => return None,
+            };
+            let site = feedback.property_at(instruction.pc())?;
+            let observations = site.observations();
+            let safe = site.state() != ShapeFeedbackState::Megamorphic
+                && !observations.is_empty()
+                && observations.len() <= 3
+                && observations.iter().all(|observation| {
+                    matches!(
+                        observation.value(),
+                        ObservedType::Int32
+                            | ObservedType::Float64
+                            | ObservedType::Bool
+                            | ObservedType::Null
+                            | ObservedType::Undefined
+                    ) && observation.prototype().identity() == 0
+                        && observation.prototype().generation() == 0
+                        && !observation
+                            .attributes()
+                            .contains(PropertyAttributes::ACCESSOR)
+                        && (!store
+                            || observation
+                                .attributes()
+                                .contains(PropertyAttributes::WRITABLE))
+                });
+            safe.then(|| BaselinePropertySite {
+                pc: instruction.pc(),
+                store,
+                observations: observations.to_vec().into_boxed_slice(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn has_baseline_property_sites(
+    function: &VerifiedFunction,
+    feedback: &crate::runtime::FeedbackSnapshot,
+) -> bool {
+    !baseline_property_sites(function, feedback).is_empty()
 }
 
 /// Stable, complete identity of the Cranelift target used to produce code.
@@ -278,15 +393,16 @@ impl BaselineCompiler {
         policy: CompilePolicy,
         control: Option<&CompileControl>,
     ) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy_and_direct_calls(function, policy, control, &[])
+        self.compile_with_policy_and_specializations(function, policy, control, &[], &[])
     }
 
-    fn compile_with_policy_and_direct_calls(
+    fn compile_with_policy_and_specializations(
         &self,
         function: &VerifiedFunction,
         policy: CompilePolicy,
         control: Option<&CompileControl>,
         direct_calls: &[crate::runtime::DirectCallTarget],
+        properties: &[BaselinePropertySite],
     ) -> Result<RelocatableCode, CompileFailure> {
         let direct_calls = direct_calls
             .iter()
@@ -303,6 +419,7 @@ impl BaselineCompiler {
             None,
             GuardExit::Retry,
             &direct_calls,
+            properties,
         )
     }
 
@@ -321,6 +438,7 @@ impl BaselineCompiler {
             None,
             GuardExit::Retry,
             &[BaselineDirectCallSite { pc, call, entry }],
+            &[],
         )
         .map(|code| code.clif().to_owned())
     }
@@ -333,6 +451,7 @@ impl BaselineCompiler {
         osr_start: Option<u32>,
         _guard_exit: GuardExit,
         direct_calls: &[BaselineDirectCallSite],
+        properties: &[BaselinePropertySite],
     ) -> Result<RelocatableCode, CompileFailure> {
         if let Some(control) = control {
             control.check()?;
@@ -388,6 +507,7 @@ impl BaselineCompiler {
                 osr_start,
                 GuardExit::Retry,
                 direct_calls,
+                properties,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -574,6 +694,7 @@ impl BaselineCompiler {
                     Some(point.pc()),
                     GuardExit::Retry,
                     direct_calls,
+                    properties,
                 )?;
                 code.osr_codes.push((map, child));
             }
@@ -639,15 +760,42 @@ impl Compiler for BaselineCompiler {
             .iter()
             .map(|target| crate::code_cache::ArtifactDependency::new(target.call().callee()))
             .collect::<Vec<_>>();
-        let code = self.compile_with_policy_and_direct_calls(
+        let direct_signature = request.feedback().bounded_specialization(request.key());
+        let direct_code = direct_signature.as_ref().and_then(|signature| {
+            super::optimized::lower_direct_call_machine(
+                &self.isa,
+                request.snapshot(),
+                signature,
+                None,
+            )
+            .ok()
+        });
+        let properties = baseline_property_sites(request.snapshot(), request.feedback());
+        let code = self.compile_with_policy_and_specializations(
             request.snapshot(),
             CompilePolicy::AdvertisedOnly,
             None,
             request.direct_call_targets(),
+            &properties,
         )?;
-        Ok(artifact_from_relocatable(request, code)
+        let mut artifact = artifact_from_relocatable(request, code)
             .with_dependencies(artifact_dependencies)
-            .with_direct_call_dependencies(dependencies))
+            .with_direct_call_dependencies(dependencies);
+        if let (Some(signature), Some(direct_code)) = (direct_signature, direct_code) {
+            artifact = artifact
+                .with_optimized_metadata(
+                    crate::code_cache::OptimizedArtifactMetadata::new(
+                        signature.feedback_epoch(),
+                        Vec::new(),
+                        0,
+                        0,
+                        0,
+                    )
+                    .with_direct_call_signature(signature),
+                )
+                .with_direct_call_relocatable(direct_code);
+        }
+        Ok(artifact)
     }
 
     fn compile_controlled(
@@ -665,16 +813,43 @@ impl Compiler for BaselineCompiler {
             .iter()
             .map(|target| crate::code_cache::ArtifactDependency::new(target.call().callee()))
             .collect::<Vec<_>>();
-        let code = self.compile_with_policy_and_direct_calls(
+        let direct_signature = request.feedback().bounded_specialization(request.key());
+        let direct_code = direct_signature.as_ref().and_then(|signature| {
+            super::optimized::lower_direct_call_machine(
+                &self.isa,
+                request.snapshot(),
+                signature,
+                Some(control),
+            )
+            .ok()
+        });
+        let properties = baseline_property_sites(request.snapshot(), request.feedback());
+        let code = self.compile_with_policy_and_specializations(
             request.snapshot(),
             CompilePolicy::AdvertisedOnly,
             Some(control),
             request.direct_call_targets(),
+            &properties,
         )?;
         control.check()?;
-        Ok(artifact_from_relocatable(request, code)
+        let mut artifact = artifact_from_relocatable(request, code)
             .with_dependencies(artifact_dependencies)
-            .with_direct_call_dependencies(dependencies))
+            .with_direct_call_dependencies(dependencies);
+        if let (Some(signature), Some(direct_code)) = (direct_signature, direct_code) {
+            artifact = artifact
+                .with_optimized_metadata(
+                    crate::code_cache::OptimizedArtifactMetadata::new(
+                        signature.feedback_epoch(),
+                        Vec::new(),
+                        0,
+                        0,
+                        0,
+                    )
+                    .with_direct_call_signature(signature),
+                )
+                .with_direct_call_relocatable(direct_code);
+        }
+        Ok(artifact)
     }
 }
 
@@ -1756,6 +1931,20 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                 }
+                IrOp::GetElement => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(AbstractValue::unknown());
+                }
+                IrOp::SetElement => {
+                    for _ in 0..3 {
+                        frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    }
+                }
+                IrOp::ToPropertyKey => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(AbstractValue::unknown());
+                }
                 IrOp::Call { argc, has_this } => {
                     let pop = usize::from(*argc) + 1 + usize::from(*has_this);
                     let new_len = frame
@@ -2066,6 +2255,7 @@ fn lower_function(
     osr_start: Option<u32>,
     _guard_exit: GuardExit,
     direct_calls: &[BaselineDirectCallSite],
+    properties: &[BaselinePropertySite],
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -2094,6 +2284,21 @@ fn lower_function(
     }
     let sret = params[0];
     let frame = params[1];
+    let property_caches = properties
+        .iter()
+        .map(|property| {
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                8,
+                0,
+            ));
+            (property.pc, slot)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for slot in property_caches.values().copied() {
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().stack_store(zero, slot, 0);
+    }
 
     if analysis.retry_before_entry {
         emit_exit(
@@ -2337,9 +2542,17 @@ fn lower_function(
                     &mut depth,
                     count,
                 )?,
-                IrOp::GetProperty(atom) => {
-                    lower_get_property(builder, &helper_lowering, &mut helper_states, depth, atom)?
-                }
+                IrOp::GetProperty(atom) => lower_get_property(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    depth,
+                    atom,
+                    properties
+                        .iter()
+                        .find(|site| site.pc == instruction.pc && !site.store),
+                    property_caches.get(&instruction.pc).copied(),
+                )?,
                 IrOp::GetPropertyKeep(atom) => lower_get_property_keep(
                     builder,
                     &helper_lowering,
@@ -2353,7 +2566,20 @@ fn lower_function(
                     &mut helper_states,
                     &mut depth,
                     atom,
+                    properties
+                        .iter()
+                        .find(|site| site.pc == instruction.pc && site.store),
+                    property_caches.get(&instruction.pc).copied(),
                 )?,
+                IrOp::GetElement => {
+                    lower_get_element(builder, &helper_lowering, &mut helper_states, &mut depth)?
+                }
+                IrOp::SetElement => {
+                    lower_set_element(builder, &helper_lowering, &mut helper_states, &mut depth)?
+                }
+                IrOp::ToPropertyKey => {
+                    lower_to_property_key(builder, &helper_lowering, &mut helper_states, depth)?
+                }
                 IrOp::Call { argc, has_this } => lower_call(
                     builder,
                     &helper_lowering,
@@ -3222,6 +3448,8 @@ fn lower_get_property(
     states: &mut impl Iterator<Item = FrameStateId>,
     depth: usize,
     atom: u32,
+    property: Option<&BaselinePropertySite>,
+    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(1)
@@ -3230,21 +3458,139 @@ fn lower_get_property(
     let displaced_index = depth.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let output = flat_stack_slot(helpers.ir, output_index)?;
-    helpers.invoke(
-        builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
-        next_helper_state(states)?,
-        depth,
-        depth,
-        &[output, object, atom],
-    )?;
-    reload_pair(
-        builder,
-        helpers.stack[output_index],
-        helpers.stack_base,
-        output_index,
-        helpers.layout,
-    );
+    let get_state = next_helper_state(states)?;
+    if let Some((property, property_cache)) = property.zip(property_cache) {
+        let generic = builder.create_block();
+        let joined = builder.create_block();
+        builder.append_block_param(joined, types::I64);
+        builder.append_block_param(joined, types::I64);
+        for (index, observation) in property.observations.iter().copied().enumerate() {
+            let access = builder.create_block();
+            let validate = builder.create_block();
+            let next = if index + 1 == property.observations.len() {
+                generic
+            } else {
+                builder.create_block()
+            };
+            let receiver = use_pair(builder, helpers.stack[object_index]);
+            let object_tag =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
+            let cached_check = builder.create_block();
+            builder
+                .ins()
+                .brif(object_tag, cached_check, &[], validate, &[]);
+            builder.switch_to_block(cached_check);
+            let current_shape = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::trusted(),
+                receiver.payload,
+                24,
+            );
+            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
+            let expected = observation.shape().identity();
+            let pointer_ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
+            let cache_ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, cached, expected as i64);
+            let validated = builder.ins().band(pointer_ok, cache_ok);
+            builder.ins().brif(validated, access, &[], validate, &[]);
+            builder.switch_to_block(validate);
+            let status =
+                helpers.shape_guard(builder, get_state, depth, object, observation.shape())?;
+            let matched =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
+            let cache = builder.create_block();
+            builder.ins().brif(matched, cache, &[], next, &[]);
+            builder.switch_to_block(cache);
+            let expected_value = builder.ins().iconst(types::I64, expected as i64);
+            builder.ins().stack_store(expected_value, property_cache, 0);
+            builder.ins().jump(access, &[]);
+            builder.switch_to_block(access);
+            let props = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::trusted(),
+                receiver.payload,
+                32,
+            );
+            let offset = i32::try_from(
+                usize::try_from(observation.offset())
+                    .map_err(|_| CompileFailure::ResourceLimit)?
+                    .checked_mul(16)
+                    .ok_or(CompileFailure::ResourceLimit)?,
+            )
+            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let value = Pair {
+                payload: builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), props, offset),
+                tag: builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), props, offset + 8),
+            };
+            let tag_ok = builder.ins().icmp_imm(
+                IntCC::Equal,
+                value.tag,
+                i64::from(property_value_tag(observation.value())?),
+            );
+            let direct = builder.create_block();
+            builder.ins().brif(tag_ok, direct, &[], generic, &[]);
+            builder.switch_to_block(direct);
+            builder.ins().jump(joined, &[value.payload, value.tag]);
+            if index + 1 != property.observations.len() {
+                builder.switch_to_block(next);
+            }
+        }
+        builder.switch_to_block(generic);
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
+            get_state,
+            depth,
+            depth,
+            &[output, object, atom],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[output_index],
+            helpers.stack_base,
+            output_index,
+            helpers.layout,
+        );
+        let value = use_pair(builder, helpers.stack[output_index]);
+        builder.ins().jump(joined, &[value.payload, value.tag]);
+        builder.switch_to_block(joined);
+        let params = builder.block_params(joined);
+        define_pair(
+            builder,
+            helpers.stack[output_index],
+            Pair {
+                payload: params[0],
+                tag: params[1],
+            },
+        );
+    } else {
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
+            get_state,
+            depth,
+            depth,
+            &[output, object, atom],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[output_index],
+            helpers.stack_base,
+            output_index,
+            helpers.layout,
+        );
+    }
     move_stack_pair(
         builder,
         helpers.stack,
@@ -3262,22 +3608,30 @@ fn lower_get_property(
         helpers.layout,
     )?;
     let displaced = flat_stack_slot(helpers.ir, displaced_index)?;
-    helpers.invoke(
+    let displaced_value = use_pair(builder, helpers.stack[displaced_index]);
+    lower_free_if_refcounted(
         builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        helpers,
         next_helper_state(states)?,
         depth + 2,
-        depth,
-        &[displaced],
-    )?;
-    reload_pair(
-        builder,
+        displaced_value,
+        displaced,
         helpers.stack[displaced_index],
         helpers.stack_base,
         displaced_index,
-        helpers.layout,
-    );
+    )?;
     helpers.set_depth(builder, depth)
+}
+
+fn property_value_tag(value: crate::runtime::ObservedType) -> Result<i32, CompileFailure> {
+    Ok(match value {
+        crate::runtime::ObservedType::Int32 => qjs::JS_TAG_INT,
+        crate::runtime::ObservedType::Float64 => qjs::JS_TAG_FLOAT64,
+        crate::runtime::ObservedType::Bool => qjs::JS_TAG_BOOL,
+        crate::runtime::ObservedType::Null => qjs::JS_TAG_NULL,
+        crate::runtime::ObservedType::Undefined => qjs::JS_TAG_UNDEFINED,
+        _ => return Err(CompileFailure::InvalidArtifact),
+    })
 }
 
 /// Lower QuickJS `get_field2`: unlike `get_field`, the receiver remains on
@@ -3321,6 +3675,8 @@ fn lower_set_property(
     states: &mut impl Iterator<Item = FrameStateId>,
     depth: &mut usize,
     atom: u32,
+    property: Option<&BaselinePropertySite>,
+    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(2)
@@ -3328,28 +3684,176 @@ fn lower_set_property(
     let value_index = *depth - 1;
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let value = flat_stack_slot(helpers.ir, value_index)?;
-    helpers.invoke(
+    let set_state = next_helper_state(states)?;
+    if let Some((property, property_cache)) = property.zip(property_cache) {
+        let generic = builder.create_block();
+        let joined = builder.create_block();
+        for (index, observation) in property.observations.iter().copied().enumerate() {
+            let access = builder.create_block();
+            let validate = builder.create_block();
+            let next = if index + 1 == property.observations.len() {
+                generic
+            } else {
+                builder.create_block()
+            };
+            let receiver = use_pair(builder, helpers.stack[object_index]);
+            let object_tag =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
+            let cached_check = builder.create_block();
+            builder
+                .ins()
+                .brif(object_tag, cached_check, &[], validate, &[]);
+            builder.switch_to_block(cached_check);
+            let current_shape = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::trusted(),
+                receiver.payload,
+                24,
+            );
+            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
+            let expected = observation.shape().identity();
+            let pointer_ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
+            let cache_ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, cached, expected as i64);
+            let validated = builder.ins().band(pointer_ok, cache_ok);
+            builder.ins().brif(validated, access, &[], validate, &[]);
+            builder.switch_to_block(validate);
+            let status =
+                helpers.shape_guard(builder, set_state, *depth, object, observation.shape())?;
+            let matched =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
+            let cache = builder.create_block();
+            builder.ins().brif(matched, cache, &[], next, &[]);
+            builder.switch_to_block(cache);
+            let expected_value = builder.ins().iconst(types::I64, expected as i64);
+            builder.ins().stack_store(expected_value, property_cache, 0);
+            builder.ins().jump(access, &[]);
+            builder.switch_to_block(access);
+            let props = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::trusted(),
+                receiver.payload,
+                32,
+            );
+            let offset = i32::try_from(
+                usize::try_from(observation.offset())
+                    .map_err(|_| CompileFailure::ResourceLimit)?
+                    .checked_mul(16)
+                    .ok_or(CompileFailure::ResourceLimit)?,
+            )
+            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let expected_tag = property_value_tag(observation.value())?;
+            let current_tag =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), props, offset + 8);
+            let input = use_pair(builder, helpers.stack[value_index]);
+            let current_ok =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, current_tag, i64::from(expected_tag));
+            let input_ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, input.tag, i64::from(expected_tag));
+            let tags_ok = builder.ins().band(current_ok, input_ok);
+            let direct = builder.create_block();
+            builder.ins().brif(tags_ok, direct, &[], generic, &[]);
+            builder.switch_to_block(direct);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), input.payload, props, offset);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), input.tag, props, offset + 8);
+            clear_pair(
+                builder,
+                helpers.stack[value_index],
+                helpers.stack_base,
+                value_index,
+                helpers.layout,
+            )?;
+            builder.ins().jump(joined, &[]);
+            if index + 1 != property.observations.len() {
+                builder.switch_to_block(next);
+            }
+        }
+        builder.switch_to_block(generic);
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+            set_state,
+            *depth,
+            *depth,
+            &[object, atom, value],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[value_index],
+            helpers.stack_base,
+            value_index,
+            helpers.layout,
+        );
+        builder.ins().jump(joined, &[]);
+        builder.switch_to_block(joined);
+    } else {
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+            set_state,
+            *depth,
+            *depth,
+            &[object, atom, value],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[value_index],
+            helpers.stack_base,
+            value_index,
+            helpers.layout,
+        );
+    }
+    let object_value = use_pair(builder, helpers.stack[object_index]);
+    lower_free_if_refcounted(
         builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+        helpers,
         next_helper_state(states)?,
         *depth,
-        *depth,
-        &[object, atom, value],
-    )?;
-    reload_pair(
-        builder,
-        helpers.stack[value_index],
+        object_value,
+        object,
+        helpers.stack[object_index],
         helpers.stack_base,
-        value_index,
-        helpers.layout,
-    );
+        object_index,
+    )?;
+    *depth = object_index;
+    helpers.set_depth(builder, *depth)
+}
+
+fn lower_get_element(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let key_index = *depth - 1;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let key = flat_stack_slot(helpers.ir, key_index)?;
     helpers.invoke(
         builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        qjs::JSJitHelperId_JS_JIT_HELPER_GET_ELEMENT,
         next_helper_state(states)?,
         *depth,
         *depth,
-        &[object],
+        &[object, object, key],
     )?;
     reload_pair(
         builder,
@@ -3358,8 +3862,78 @@ fn lower_set_property(
         object_index,
         helpers.layout,
     );
+    reload_pair(
+        builder,
+        helpers.stack[key_index],
+        helpers.stack_base,
+        key_index,
+        helpers.layout,
+    );
+    *depth = key_index;
+    helpers.set_depth(builder, *depth)
+}
+
+fn lower_set_element(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(3)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let key_index = object_index + 1;
+    let value_index = object_index + 2;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let key = flat_stack_slot(helpers.ir, key_index)?;
+    let value = flat_stack_slot(helpers.ir, value_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_SET_ELEMENT,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[object, key, value],
+    )?;
+    for index in object_index..=*depth - 1 {
+        reload_pair(
+            builder,
+            helpers.stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        );
+    }
     *depth = object_index;
     helpers.set_depth(builder, *depth)
+}
+
+fn lower_to_property_key(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: usize,
+) -> Result<(), CompileFailure> {
+    let index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let slot = flat_stack_slot(helpers.ir, index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_TO_PROPKEY,
+        next_helper_state(states)?,
+        depth,
+        depth,
+        &[slot, slot],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[index],
+        helpers.stack_base,
+        index,
+        helpers.layout,
+    );
+    helpers.set_depth(builder, depth)
 }
 
 fn lower_call(
@@ -3394,6 +3968,7 @@ fn lower_call(
     };
     let call_live_depth = output_index;
     let call_state = next_helper_state(states)?;
+    let mut direct_hit = None;
     if let Some(direct) = direct.filter(|target| {
         !has_this
             && target.call.arity() == argc
@@ -3410,6 +3985,7 @@ fn lower_call(
         let invoke = builder.create_block();
         let direct_done = builder.create_block();
         let joined = builder.create_block();
+        builder.append_block_param(joined, types::I8);
         let callable = use_pair(builder, helpers.stack[function_index]);
         let object_tag =
             builder
@@ -3518,7 +4094,8 @@ fn lower_call(
             },
         };
         define_pair(builder, helpers.stack[output_index], result);
-        builder.ins().jump(joined, &[]);
+        let hit = builder.ins().iconst(types::I8, 1);
+        builder.ins().jump(joined, &[hit]);
 
         builder.switch_to_block(slow);
         helpers.invoke(
@@ -3542,8 +4119,10 @@ fn lower_call(
             output_index,
             helpers.layout,
         );
-        builder.ins().jump(joined, &[]);
+        let miss = builder.ins().iconst(types::I8, 0);
+        builder.ins().jump(joined, &[miss]);
         builder.switch_to_block(joined);
+        direct_hit = Some(builder.block_params(joined)[0]);
     } else {
         helpers.invoke(
             builder,
@@ -3593,38 +4172,123 @@ fn lower_call(
         helpers.layout,
     )?;
     let displaced = flat_stack_slot(helpers.ir, displaced_index)?;
-    helpers.invoke(
-        builder,
-        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
-        next_helper_state(states)?,
-        *depth + 2,
-        *depth,
-        &[displaced],
-    )?;
-    reload_pair(
-        builder,
-        helpers.stack[displaced_index],
-        helpers.stack_base,
-        displaced_index,
-        helpers.layout,
-    );
-    for index in (base + 1)..(base + pop) {
-        let slot = flat_stack_slot(helpers.ir, index)?;
+    let displaced_free_state = next_helper_state(states)?;
+    if let Some(hit) = direct_hit {
+        let release_duplicate = builder.create_block();
+        let free = builder.create_block();
+        let continuation = builder.create_block();
+        builder.ins().brif(hit, release_duplicate, &[], free, &[]);
+        builder.switch_to_block(release_duplicate);
+        // The direct guard proved this is the exact function object, and its
+        // argument slot still owns the original reference. GetArgument added
+        // precisely one duplicate, so dropping that duplicate can never run a
+        // finalizer and is the exact non-finalizing JS_FreeValue fast path.
+        let function = use_pair(builder, helpers.stack[displaced_index]);
+        let ref_count = builder
+            .ins()
+            .load(types::I32, MemFlags::trusted(), function.payload, 0);
+        let ref_count = builder.ins().iadd_imm(ref_count, -1);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), ref_count, function.payload, 0);
+        clear_pair(
+            builder,
+            helpers.stack[displaced_index],
+            helpers.stack_base,
+            displaced_index,
+            helpers.layout,
+        )?;
+        builder.ins().jump(continuation, &[]);
+        builder.switch_to_block(free);
         helpers.invoke(
             builder,
             qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
-            next_helper_state(states)?,
+            displaced_free_state,
             *depth + 2,
             *depth,
-            &[slot],
+            &[displaced],
         )?;
         reload_pair(
             builder,
-            helpers.stack[index],
+            helpers.stack[displaced_index],
             helpers.stack_base,
-            index,
+            displaced_index,
             helpers.layout,
         );
+        builder.ins().jump(continuation, &[]);
+        builder.switch_to_block(continuation);
+    } else {
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+            displaced_free_state,
+            *depth + 2,
+            *depth,
+            &[displaced],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[displaced_index],
+            helpers.stack_base,
+            displaced_index,
+            helpers.layout,
+        );
+    }
+    for index in (base + 1)..(base + pop) {
+        let slot = flat_stack_slot(helpers.ir, index)?;
+        let state = next_helper_state(states)?;
+        if let Some(hit) = direct_hit {
+            // A scalar direct edge proves every argument primitive. Clearing
+            // those consumed slots is therefore the exact JS_FreeValue
+            // operation and avoids one helper transition per argument.
+            let clear = builder.create_block();
+            let free = builder.create_block();
+            let continuation = builder.create_block();
+            builder.ins().brif(hit, clear, &[], free, &[]);
+            builder.switch_to_block(clear);
+            clear_pair(
+                builder,
+                helpers.stack[index],
+                helpers.stack_base,
+                index,
+                helpers.layout,
+            )?;
+            builder.ins().jump(continuation, &[]);
+            builder.switch_to_block(free);
+            helpers.invoke(
+                builder,
+                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                state,
+                *depth + 2,
+                *depth,
+                &[slot],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[index],
+                helpers.stack_base,
+                index,
+                helpers.layout,
+            );
+            builder.ins().jump(continuation, &[]);
+            builder.switch_to_block(continuation);
+        } else {
+            helpers.invoke(
+                builder,
+                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                state,
+                *depth + 2,
+                *depth,
+                &[slot],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[index],
+                helpers.stack_base,
+                index,
+                helpers.layout,
+            );
+        }
     }
     for index in (base + 1)..=output_index {
         clear_pair(

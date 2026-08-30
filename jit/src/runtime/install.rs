@@ -2,7 +2,7 @@ use crate::code_cache::{CacheError, CacheInsert, CodeCache, CompiledArtifact};
 
 pub(super) fn publish(
     cache: &mut CodeCache,
-    mut artifact: CompiledArtifact,
+    #[allow(unused_mut)] mut artifact: CompiledArtifact,
 ) -> Result<CacheInsert, CacheError> {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     artifact

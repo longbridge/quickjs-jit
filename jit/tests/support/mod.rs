@@ -638,6 +638,11 @@ impl DifferentialRun {
                 HelperId::Call => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
                 HelperId::NewArray => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY,
                 HelperId::NewObject => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT,
+                HelperId::GetElement => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_ELEMENT,
+                HelperId::SetElement => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_ELEMENT,
+                HelperId::ToPropertyKey => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_PROPKEY
+                }
             };
             let expected_opcode = self
                 .expected_opcode
@@ -1172,6 +1177,9 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         new_object: Some(synthetic_new_unavailable),
         shape_guard: Some(synthetic_shape_guard_unavailable),
         materialize_owner: Some(synthetic_materialize_owner_unavailable),
+        get_element: Some(synthetic_get_unavailable),
+        set_element: Some(synthetic_get_unavailable),
+        to_propkey: Some(synthetic_map_out_in_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

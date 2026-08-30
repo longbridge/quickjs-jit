@@ -468,6 +468,7 @@ struct ProductionBackend {
     optimizing_hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
+    baseline_property_refreshed: std::collections::HashSet<runtime::FunctionKey>,
     tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
     shape_feedback: runtime::ShapeFeedbackTable,
@@ -1096,6 +1097,7 @@ impl ProductionBackend {
             optimizing_requested: std::collections::HashSet::new(),
             optimizing_hotness: std::collections::HashMap::new(),
             optimizing_snapshots: std::collections::HashMap::new(),
+            baseline_property_refreshed: std::collections::HashSet::new(),
             tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
             shape_feedback: runtime::ShapeFeedbackTable::new(3),
@@ -1154,6 +1156,41 @@ impl ProductionBackend {
                     .unwrap_or(u64::MAX),
             );
         }
+        if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
+            let refreshes = self
+                .optimizing_snapshots
+                .iter()
+                .filter_map(|(key, snapshot)| {
+                    let feedback = self
+                        .feedback
+                        .snapshot(self.clock.max(1))
+                        .with_properties(self.shape_feedback.snapshot(*key));
+                    let call_ready = self
+                        .coordinator
+                        .baseline_direct_refresh_ready(*key, &feedback);
+                    let property_ready = !self.baseline_property_refreshed.contains(key)
+                        && compiler::baseline::has_baseline_property_sites(snapshot, &feedback)
+                        && matches!(
+                            self.coordinator.tier_state(*key, runtime::Tier::Baseline),
+                            runtime::CompileState::Installed(_)
+                        );
+                    (call_ready || property_ready)
+                        .then(|| (*key, snapshot.clone(), feedback, property_ready))
+                })
+                .collect::<Vec<_>>();
+            for (key, snapshot, feedback, property_ready) in refreshes {
+                if self.coordinator.prepare_baseline_direct_refresh(key) {
+                    if self
+                        .coordinator
+                        .queue_with_feedback(key, runtime::Tier::Baseline, snapshot, feedback)
+                        .is_ok()
+                        && property_ready
+                    {
+                        self.baseline_property_refreshed.insert(key);
+                    }
+                }
+            }
+        }
         let ready_for_tier2 = self
             .optimizing_snapshots
             .keys()
@@ -1173,10 +1210,7 @@ impl ProductionBackend {
                     self.coordinator.tier_state(*key, runtime::Tier::Baseline),
                     runtime::CompileState::Installed(_)
                 ) || self.profitability_blacklisted.contains(key))
-                    && match self
-                        .coordinator
-                        .tier_state(*key, runtime::Tier::Optimizing)
-                    {
+                    && match self.coordinator.tier_state(*key, runtime::Tier::Optimizing) {
                         runtime::CompileState::Cold => true,
                         runtime::CompileState::Backoff { retry_after, .. } => {
                             self.clock >= retry_after
@@ -1434,11 +1468,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         /* Bit 1 is an append-only response flag understood by the patched
          * interpreter: this immutable bytecode generation will never acquire
          * code, so stop hot and feedback probes locally in C. */
-        if self.feedback_disabled.contains(&key)
-            || matches!(
-                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
-                runtime::CompileState::Blacklisted
-            )
+        if self.feedback_disabled.contains(&key) || self.coordinator.is_terminally_blacklisted(key)
         {
             self.feedback_disabled.insert(key);
             return 2;
@@ -1485,14 +1515,31 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 )),
             );
         }
+        if self.config.tier_policy() == JitTierPolicy::BaselineOnly
+            && matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                runtime::CompileState::Installed(_)
+            )
+        {
+            let feedback = self.feedback.snapshot(self.clock);
+            if self
+                .coordinator
+                .baseline_direct_refresh_ready(key, &feedback)
+                && self.coordinator.prepare_baseline_direct_refresh(key)
+            {
+                self.requested.insert(key);
+                self.queue_reasons
+                    .insert(key, runtime::HotReason::CallThreshold);
+                self.snapshot_requests = self.snapshot_requests.saturating_add(1);
+                return 1;
+            }
+        }
         if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Baseline),
             runtime::CompileState::Installed(_)
         ) || self.profitability_blacklisted.contains(&key)
         {
-            let optimizing_ready = match self
-                .coordinator
-                .tier_state(key, runtime::Tier::Optimizing)
+            let optimizing_ready = match self.coordinator.tier_state(key, runtime::Tier::Optimizing)
             {
                 runtime::CompileState::Cold => true,
                 runtime::CompileState::Backoff { retry_after, .. } => self.clock >= retry_after,
@@ -1778,7 +1825,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
         let requested_tier = runtime::Tier::Baseline;
         let tier2_snapshot = Some(verified.clone());
-        let queued = self.coordinator.queue(key, requested_tier, verified);
+        let feedback = self.feedback.snapshot(self.clock);
+        let queued = self
+            .coordinator
+            .queue_with_feedback(key, requested_tier, verified, feedback);
         match queued {
             Ok(()) => {
                 match self.queue_reasons.get(&key).copied() {

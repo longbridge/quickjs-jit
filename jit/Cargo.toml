@@ -116,5 +116,9 @@ name = "osr"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_arrays_typed"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "test262"
 required-features = ["compiler", "test-support"]

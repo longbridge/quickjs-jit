@@ -31,18 +31,31 @@ passed, as did focused real event, asynchronous continuation, imported-module
 reload, and runtime teardown tests.
 
 Two diagnostic pairs are intentionally not publishable performance evidence,
-but expose the remaining blocker clearly. After rebuilding with the bounded
+but validate the harness before the required multi-process run. After rebuilding with the bounded
 Tier2-after-demotion policy, the suitable JS-heavy numeric layout kernel in the
-real render path measured 4.274 ms interpreted versus 0.129 ms automatic, a
-33.19x steady-state speedup. Automatic installed two entries and sustained 112
+real render path measured 4.271 ms interpreted versus 0.107 ms automatic, a
+39.80x steady-state speedup. Automatic installed two entries and sustained 112
 Tier2 entries after five rejected Tier1 trials and one interpreter demotion,
-with no deopts or fallbacks. The host-heavy 443-node panel still measured 0.823
-ms interpreted versus 17.541 ms automatic: it installed no native entries but
-repeated 72 unsupported compile attempts, causing a 20.30x regression. Both
-pairs retained identical checksums, snapshot SHA-256 values, and 116 script
-renders, and the focused parity test passed. The suitable-workload 2x gate now
-passes its diagnostic pair, but the panel regression guard remains failed. Do
-not publish fixture, forced-tier, or single-pair results in its place.
+with no deopts or fallbacks. After moving bounded JIT maintenance from every
+low-level context entry to one outer render completion, the host-heavy 443-node
+panel measured 0.822 ms interpreted versus 0.834 ms automatic: a 1.50%
+steady-state regression, while P99 improved by 0.63%. Unsupported functions
+were attempted once before measurement and all six measured metric windows
+were stable; no native entry, deopt, or fallback occurred.
+Both pairs retained identical checksums, snapshot SHA-256 values, and 116
+script renders, and the focused parity test passed. Both diagnostic thresholds
+pass. Do not publish fixture, forced-tier, or single-pair results in place of
+the required confidence-bounded run.
+
+The required frozen-binary run (five discarded warmup processes and 30 paired
+fresh processes per workload) is recorded in
+`benchmarks/results/gpui-shell-jit-v1.{json,md}`. Compute passed with a
+37.68x..39.43x 95% speedup CI and 3,379 native entries with zero fallback.
+Panel steady state passed at 0.98x..0.99x, but its P99 regression CI ended at
++5.70%, narrowly outside the +5% guard. First-window (+67.13%..+93.31%) and
+hot-reload (+462.94%..+508.99%) lifecycle CIs also failed. Checksums and render
+counts matched for every pair, so the report correctly remains an overall
+failure rather than hiding startup or tail latency behind the compute result.
 
 The exact external write required is permission to modify these sibling files
 and refresh its `Cargo.lock`:

@@ -1304,7 +1304,7 @@ fn lower_optimized_machine(
 /// the CALL bytecode.  The entry deliberately has no `JSValue`, frame, or
 /// helper parameters, so neither arguments nor the result can be boxed on the
 /// compiled-to-compiled fast path.
-fn lower_direct_call_machine(
+pub(crate) fn lower_direct_call_machine(
     isa: &cranelift_codegen::isa::OwnedTargetIsa,
     function: &VerifiedFunction,
     signature: &crate::runtime::BoundedSpecializationSignature,

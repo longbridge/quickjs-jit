@@ -399,6 +399,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
+        IrOp::GetElement | IrOp::SetElement | IrOp::ToPropertyKey => 1,
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
@@ -584,6 +585,9 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "get_length" => IrOp::GetProperty(qjs::JS_ATOM_length),
         "get_field2" => IrOp::GetPropertyKeep(instruction.operand_u32(1)),
         "put_field" => IrOp::SetProperty(instruction.operand_u32(1)),
+        "get_array_el" => IrOp::GetElement,
+        "put_array_el" => IrOp::SetElement,
+        "to_propkey" => IrOp::ToPropertyKey,
         "call" => IrOp::Call {
             argc: instruction.operand_u16(1),
             has_this: false,

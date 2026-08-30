@@ -9,6 +9,23 @@ use rquickjs::{Context, Runtime};
 use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
 use std::time::{Duration, Instant};
 
+unsafe extern "C" {
+    fn JS_JitGetHelperCount(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        helper_id: u32,
+        count: *mut u64,
+    ) -> i32;
+}
+
+fn helper_count(rt: *mut rquickjs_core::qjs::JSRuntime, helper_id: u32) -> u64 {
+    let mut count = 0;
+    assert_eq!(
+        unsafe { JS_JitGetHelperCount(rt, helper_id, &mut count) },
+        0
+    );
+    count
+}
+
 fn run_until_native(source: &str, expression: &str) -> (String, rquickjs_jit::JitMetrics) {
     let runtime = Runtime::new().unwrap();
     let config = JitConfig::builder()
@@ -57,4 +74,213 @@ fn production_tier1_installs_and_executes_method_property_path() {
     assert!(metrics.installed > 0, "{metrics:?}");
     assert!(metrics.native_entries > 0, "{metrics:?}");
     assert_eq!(metrics.native_entries, metrics.native_exits, "{metrics:?}");
+}
+
+#[test]
+fn baseline_only_direct_call_hit_skips_call_helper_and_misses_remain_exact() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(2)
+            .loop_threshold(64)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function g(a){return a+1}\n\
+                 function h(a){return a+2}\n\
+                 function f(fn,a){let value=fn(a);return value+0}",
+            )
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("f(g,41)")).unwrap(),
+            42
+        );
+        jit.poll();
+        if jit.metrics().installed >= 3 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(jit.metrics().installed >= 3, "{:?}", jit.metrics());
+
+    let rt =
+        context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
+    assert_eq!(
+        unsafe { rquickjs_core::qjs::JS_JitResetHelperCounters(rt) },
+        0
+    );
+    for _ in 0..64 {
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("f(g,41)")).unwrap(),
+            42
+        );
+        jit.poll();
+    }
+    assert_eq!(
+        helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL),
+        0,
+        "stable direct edge used generic CALL"
+    );
+    assert_eq!(
+        helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE),
+        0,
+        "stable scalar edge used a refcount/finalization helper"
+    );
+    // The argument remains an untrusted JSValue until the guarded direct edge
+    // classifies it. Its ownership duplicate must therefore retain the runtime
+    // helper's validation semantics; only CALL itself is eliminated on a hit.
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<i32, _>("f(h,40)")).unwrap(),
+        42
+    );
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<f64, _>("f(g,40.5)")).unwrap(),
+        41.5
+    );
+    assert_eq!(
+        helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL),
+        2,
+        "target/type misses did not take the exact CALL helper edge"
+    );
+    // The machine-level baseline test proves the stable guarded edge does not
+    // call the generic CALL helper. These target and type mutations exercise
+    // the connected miss edge against the production runtime under stress GC.
+}
+
+#[test]
+fn baseline_property_cache_validates_once_per_site_and_mutation_misses_exactly() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(2)
+            .loop_threshold(2)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.obj={x:0}; function bump(o,n){let i=0;while(i<n){o.x=o.x+1;i++}return o.x}",
+            )
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        context
+            .with(|ctx| ctx.eval::<i32, _>("bump(obj,8)"))
+            .unwrap();
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+    }
+    assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+    let rt =
+        context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
+    assert_eq!(
+        unsafe { rquickjs_core::qjs::JS_JitResetHelperCounters(rt) },
+        0
+    );
+    context
+        .with(|ctx| ctx.eval::<i32, _>("bump(obj,64)"))
+        .unwrap();
+    assert_eq!(
+        helper_count(
+            rt,
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD
+        ),
+        3,
+        "each get/put site must validate once, not once per loop iteration"
+    );
+    assert_eq!(
+        helper_count(
+            rt,
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY
+        ),
+        0
+    );
+    assert_eq!(
+        helper_count(
+            rt,
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY
+        ),
+        0
+    );
+    let mutated = context
+        .with(|ctx| ctx.eval::<i32, _>("delete obj.x; obj.y=1; obj.x=7; bump(obj,1)"))
+        .unwrap();
+    assert_eq!(mutated, 8);
+    assert!(
+        helper_count(
+            rt,
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD
+        ) > 3,
+        "shape mutation did not force revalidation/miss"
+    );
+}
+
+#[test]
+fn baseline_property_cache_accepts_bounded_polymorphic_shapes_under_stress_gc() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(4)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.a={x:11}; globalThis.b={pad:0,x:22}; function readx(o){return o.x}",
+            )
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("readx(a)")).unwrap(),
+            11
+        );
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("readx(b)")).unwrap(),
+            22
+        );
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+    }
+    assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+    for _ in 0..64 {
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("readx(a)")).unwrap(),
+            11
+        );
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("readx(b)")).unwrap(),
+            22
+        );
+    }
 }
