@@ -74,8 +74,8 @@ fn retiring_an_installed_dependency_retires_itself_and_transitive_dependents() {
             .queue(key, Tier::Baseline, coordinator_snapshot())
             .unwrap();
         let request = coordinator.begin_next().unwrap();
-        let artifact = CompiledArtifact::empty(request.artifact_key())
-            .with_dependencies(dependencies);
+        let artifact =
+            CompiledArtifact::empty(request.artifact_key()).with_dependencies(dependencies);
         coordinator.complete(CompileCompletion {
             key,
             requested_tier: Tier::Baseline,
@@ -83,7 +83,10 @@ fn retiring_an_installed_dependency_retires_itself_and_transitive_dependents() {
             attempt_id: request.attempt_id(),
             result: Ok(artifact),
         });
-        assert_eq!(coordinator.state(key), CompileState::Installed(Tier::Baseline));
+        assert_eq!(
+            coordinator.state(key),
+            CompileState::Installed(Tier::Baseline)
+        );
     }
 
     coordinator.retire(leaf);
