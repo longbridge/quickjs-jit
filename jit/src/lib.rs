@@ -501,6 +501,35 @@ struct ProductionEntryPin {
 struct OsrValidationMetrics {
     successes: AtomicU64,
     failures: AtomicU64,
+    validation_retries: Mutex<std::collections::HashMap<(u64, u64, u32), u64>>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl OsrValidationMetrics {
+    fn mark_validation_retry(&self, id: u64, generation: u64, pc: u32) {
+        let mut retries = self
+            .validation_retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pending = retries.entry((id, generation, pc)).or_default();
+        *pending = pending.saturating_add(1);
+    }
+
+    fn take_validation_retry(&self, id: u64, generation: u64, pc: u32) -> bool {
+        let mut retries = self
+            .validation_retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (id, generation, pc);
+        let Some(pending) = retries.get_mut(&key) else {
+            return false;
+        };
+        *pending -= 1;
+        if *pending == 0 {
+            retries.remove(&key);
+        }
+        true
+    }
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -516,8 +545,21 @@ fn record_osr_validation(metrics: &OsrValidationMetrics, pc: u32, valid: bool) {
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-const fn is_generated_osr_retry(pc: u32, exit_kind: u32) -> bool {
-    pc != 0 && exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+const fn is_generated_osr_retry(pc: u32, exit_kind: u32, validation_retry: bool) -> bool {
+    pc != 0
+        && exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+        && !validation_retry
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn apply_stress_gc_after_validation(
+    frame: &mut rquickjs_core::qjs::JSJitExecFrame,
+    stress_gc: bool,
+    valid: bool,
+) {
+    if valid && stress_gc {
+        frame.flags |= rquickjs_core::qjs::JS_JIT_FRAME_STRESS_GC;
+    }
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -619,10 +661,6 @@ unsafe extern "C" fn production_entry_trampoline(
         return retry_exit();
     }
     let pin = unsafe { &*frame.entry.pin.cast::<ProductionEntryPin>() };
-    #[cfg(feature = "test-support")]
-    if pin.stress_gc {
-        frame.flags |= qjs::JS_JIT_FRAME_STRESS_GC;
-    }
     let _keep_execution_pinned = &pin.execution;
     let valid = validate_production_frame(
         frame,
@@ -634,8 +672,12 @@ unsafe extern "C" fn production_entry_trampoline(
     );
     record_osr_validation(&pin.validation, pin.pc, valid);
     if !valid {
+        pin.validation
+            .mark_validation_retry(pin.key.id, pin.key.generation, pin.pc);
         return retry_exit();
     }
+    #[cfg(feature = "test-support")]
+    apply_stress_gc_after_validation(frame, pin.stress_gc, valid);
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
     let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
     unsafe { native(frame as *const _ as *mut _) }
@@ -754,19 +796,44 @@ mod production_osr_validation_tests {
         assert_eq!(metrics.failures.load(Ordering::Relaxed), 1);
         assert!(is_generated_osr_retry(
             9,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            false,
         ));
         assert!(!is_generated_osr_retry(
             0,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            false,
         ));
         assert!(!is_generated_osr_retry(
             9,
-            qjs::JSJitExitKind_JS_JIT_EXIT_DONE
+            qjs::JSJitExitKind_JS_JIT_EXIT_DONE,
+            false,
+        ));
+        assert!(!is_generated_osr_retry(
+            9,
+            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER,
+            true,
         ));
         record_osr_validation(&metrics, 9, true);
         assert_eq!(metrics.successes.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.failures.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn invalid_stress_frame_is_byte_identical_and_does_not_arm_stress_gc() {
+        let mut frame: qjs::JSJitExecFrame = unsafe { core::mem::zeroed() };
+        let before = bytes(&frame);
+        apply_stress_gc_after_validation(&mut frame, true, false);
+        assert_eq!(bytes(&frame), before);
+    }
+
+    #[test]
+    fn validation_retry_is_not_attributed_to_generated_native_code() {
+        let metrics = OsrValidationMetrics::default();
+        metrics.mark_validation_retry(7, 3, 9);
+        assert!(metrics.take_validation_retry(7, 3, 9));
+        assert!(!metrics.take_validation_retry(7, 3, 9));
+        assert!(!metrics.take_validation_retry(7, 3, 10));
     }
 }
 
@@ -882,12 +949,12 @@ impl ProductionBackend {
         snapshot.osr_validation_failures = self.osr_validation_failures;
         let requested = self.requested.iter().copied().collect::<Vec<_>>();
         for key in requested {
-            if matches!(
-                self.coordinator.tier_state(key, runtime::Tier::Baseline),
-                runtime::CompileState::Cold
-                    | runtime::CompileState::Backoff { .. }
-                    | runtime::CompileState::Retired
-            ) {
+            let retryable = match self.coordinator.tier_state(key, runtime::Tier::Baseline) {
+                runtime::CompileState::Cold | runtime::CompileState::Retired => true,
+                runtime::CompileState::Backoff { retry_after, .. } => self.clock >= retry_after,
+                _ => false,
+            };
+            if retryable {
                 self.clear_failed_request(key);
             }
         }
@@ -1152,11 +1219,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
     }
 
-    fn native_exit(&mut self, _id: u64, _generation: u64, pc: u32, exit_kind: u32) {
+    fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
             self.native_retries = self.native_retries.saturating_add(1);
-            if is_generated_osr_retry(pc, exit_kind) {
+            let validation_retry = self
+                .osr_validation
+                .take_validation_retry(id, generation, pc);
+            if is_generated_osr_retry(pc, exit_kind, validation_retry) {
                 self.osr_generated_retries = self.osr_generated_retries.saturating_add(1);
             }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {

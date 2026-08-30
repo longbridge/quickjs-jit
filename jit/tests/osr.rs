@@ -456,7 +456,7 @@ fn production_compile_failure_retries_through_backoff_without_duplicates() {
     let runtime = Runtime::new().unwrap();
     let config = rquickjs_jit::JitConfig::builder()
         .loop_threshold(1)
-        .max_compile_attempts(2)
+        .max_compile_attempts(4)
         .build()
         .unwrap();
     let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
@@ -467,12 +467,16 @@ fn production_compile_failure_retries_through_backoff_without_duplicates() {
     assert_eq!(value, 1_000_000);
     let metrics = jit.metrics();
     assert_eq!(
-        metrics.queued, 2,
+        metrics.queued, 4,
         "one request per coordinator attempt: {metrics:?}"
     );
-    assert_eq!(metrics.compile_failures, 2, "{metrics:?}");
+    assert_eq!(metrics.compile_failures, 4, "{metrics:?}");
     assert_eq!(metrics.blacklisted, 1, "{metrics:?}");
-    assert_eq!(metrics.hot_loop_queues, 2, "{metrics:?}");
+    assert_eq!(metrics.hot_loop_queues, 4, "{metrics:?}");
+    assert_eq!(
+        metrics.snapshot_requests, 4,
+        "backoff must suppress duplicate snapshots between attempts: {metrics:?}"
+    );
 }
 
 #[cfg(all(
