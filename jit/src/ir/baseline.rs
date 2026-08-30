@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, StackOp,
-    TaggedValue, UnaryOp,
+    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, PollKind,
+    StackOp, TaggedValue, UnaryOp,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -67,7 +67,7 @@ impl BaselineIr {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn translate_implemented_for_test(
+    pub fn translate_implemented_for_test(
         function: &VerifiedFunction,
     ) -> Result<Self, CompileFailure> {
         Self::translate_with_policy(function, false)
@@ -88,13 +88,25 @@ impl BaselineIr {
         let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
         let mut max_stack_depth = 0_usize;
         let mut emitted_since_poll = 0_usize;
+        let loop_bodies = loop_body_blocks(function);
 
         for (block_index, block) in function.control_flow_graph().blocks().iter().enumerate() {
             let mut depth = *block_depths
                 .get(&block.start_pc())
                 .ok_or(CompileFailure::InvalidArtifact)?;
             let mut instructions = Vec::new();
-            if block_index != 0 {
+            let block_instructions = &function.instructions()[block.instruction_range()];
+            let reaches_nearby_return = block_instructions.len() <= POLL_INTERVAL
+                && block_instructions.last().is_some_and(|instruction| {
+                    matches!(instruction.opcode().name(), "return" | "return_undef")
+                });
+            if block_index != 0
+                && !reaches_nearby_return
+                && (!loop_bodies.contains(&block.start_pc())
+                    || function
+                        .control_flow_graph()
+                        .is_loop_header(block.start_pc()))
+            {
                 let state = record_state(
                     &mut states,
                     snapshot.arg_count(),
@@ -107,7 +119,17 @@ impl BaselineIr {
                     pc: block.start_pc(),
                     frame_state: Some(state),
                     helper_states: Box::new([]),
-                    op: IrOp::Poll { state },
+                    op: IrOp::Poll {
+                        state,
+                        kind: if function
+                            .control_flow_graph()
+                            .is_loop_header(block.start_pc())
+                        {
+                            PollKind::LoopHeader
+                        } else {
+                            PollKind::Edge
+                        },
+                    },
                 });
                 emitted_since_poll = 0;
             }
@@ -149,7 +171,10 @@ impl BaselineIr {
                         pc,
                         frame_state: Some(state),
                         helper_states: Box::new([]),
-                        op: IrOp::Poll { state },
+                        op: IrOp::Poll {
+                            state,
+                            kind: PollKind::Entry,
+                        },
                     });
                     emitted_since_poll = 0;
                 }
@@ -166,7 +191,10 @@ impl BaselineIr {
                         pc,
                         frame_state: Some(state),
                         helper_states: Box::new([]),
-                        op: IrOp::Poll { state },
+                        op: IrOp::Poll {
+                            state,
+                            kind: PollKind::Periodic,
+                        },
                     });
                     emitted_since_poll = 0;
                 }
@@ -183,7 +211,10 @@ impl BaselineIr {
                         pc,
                         frame_state: Some(state),
                         helper_states: Box::new([]),
-                        op: IrOp::Poll { state },
+                        op: IrOp::Poll {
+                            state,
+                            kind: PollKind::Return,
+                        },
                     });
                     emitted_since_poll = 0;
                 }
@@ -202,7 +233,10 @@ impl BaselineIr {
                         pc,
                         frame_state: Some(state),
                         helper_states: Box::new([]),
-                        op: IrOp::Poll { state },
+                        op: IrOp::Poll {
+                            state,
+                            kind: PollKind::Periodic,
+                        },
                     });
                 }
 
@@ -278,7 +312,10 @@ impl BaselineIr {
                                 pc,
                                 frame_state: Some(state),
                                 helper_states: Box::new([]),
-                                op: IrOp::Poll { state },
+                                op: IrOp::Poll {
+                                    state,
+                                    kind: PollKind::Edge,
+                                },
                             },
                         );
                         emitted_since_poll = 0;
@@ -303,6 +340,41 @@ impl BaselineIr {
             local_count: snapshot.local_count(),
         })
     }
+}
+
+fn loop_body_blocks(function: &VerifiedFunction) -> std::collections::BTreeSet<u32> {
+    let cfg = function.control_flow_graph();
+    let mut predecessors: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for block in cfg.blocks() {
+        for successor in block.successors() {
+            predecessors
+                .entry(*successor)
+                .or_default()
+                .push(block.start_pc());
+        }
+    }
+
+    let mut bodies = std::collections::BTreeSet::new();
+    for latch in cfg.blocks() {
+        for header in
+            latch.successors().iter().copied().filter(|successor| {
+                *successor <= latch.start_pc() && cfg.is_loop_header(*successor)
+            })
+        {
+            let mut pending = vec![latch.start_pc()];
+            let mut natural_loop = std::collections::BTreeSet::from([header]);
+            while let Some(pc) = pending.pop() {
+                if natural_loop.insert(pc) && pc != header {
+                    if let Some(block_predecessors) = predecessors.get(&pc) {
+                        pending.extend_from_slice(block_predecessors);
+                    }
+                }
+            }
+            natural_loop.remove(&header);
+            bodies.extend(natural_loop);
+        }
+    }
+    bodies
 }
 
 fn operation_may_exit(operation: &IrOp) -> bool {

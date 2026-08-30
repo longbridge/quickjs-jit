@@ -14,7 +14,7 @@ use rquickjs_jit::{
     bytecode::{linked_opcode_table, opcode, FallbackReason, VerifyLimits},
     code_cache::{FrameStateLocationKind, RelocationTarget},
     compiler::{baseline::BaselineCompiler, CompileFailure},
-    ir::BaselineIr,
+    ir::{BaselineIr, IrOp, PollKind},
     platform::CodeMemoryError,
     test_support::{
         compile_implemented_fixture, verified_bytecode, JSValueRepr, SnapshotFixture,
@@ -37,6 +37,94 @@ fn compile(
 ) -> rquickjs_jit::compiler::baseline::RelocatableCode {
     let function = verified_bytecode(bytecode, args, locals);
     compile_implemented_fixture(&BaselineCompiler::host(), &function).unwrap()
+}
+
+fn poll_sites(bytecode: Vec<u8>, args: u16, locals: u16) -> Vec<(u32, PollKind)> {
+    let function = verified_bytecode(bytecode, args, locals);
+    BaselineIr::translate_implemented_for_test(&function)
+        .unwrap()
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction.op {
+            IrOp::Poll { kind, .. } => Some((instruction.pc, kind)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn baseline_ir_classifies_entry_loop_header_return_and_edge_polls() {
+    let push_0 = named_opcode("push_0");
+    let push_1 = named_opcode("push_1");
+    let plus = named_opcode("plus");
+    let put_loc0 = named_opcode("put_loc0");
+    let put_loc1 = named_opcode("put_loc1");
+    let get_loc0 = named_opcode("get_loc0");
+    let get_loc1 = named_opcode("get_loc1");
+    let get_arg0 = named_opcode("get_arg0");
+    let lt = named_opcode("lt");
+    let if_false8 = named_opcode("if_false8");
+    let goto8 = named_opcode("goto8");
+    let loop_sites = poll_sites(
+        vec![
+            push_0,
+            plus,
+            put_loc0,
+            push_0,
+            plus,
+            put_loc1,
+            get_loc1,
+            get_arg0,
+            lt,
+            if_false8,
+            11,
+            get_loc0,
+            get_loc1,
+            opcode::ADD,
+            put_loc0,
+            get_loc1,
+            push_1,
+            opcode::ADD,
+            put_loc1,
+            goto8,
+            (-14_i8) as u8,
+            get_loc0,
+            opcode::RETURN,
+        ],
+        1,
+        2,
+    );
+    assert_eq!(loop_sites.first(), Some(&(0, PollKind::Entry)));
+    assert_eq!(
+        loop_sites
+            .iter()
+            .filter(|(_, kind)| *kind == PollKind::LoopHeader)
+            .count(),
+        1
+    );
+    assert_eq!(loop_sites.last(), Some(&(22, PollKind::Return)));
+
+    let push_false = named_opcode("push_false");
+    let edge_sites = poll_sites(
+        vec![push_false, if_false8, 2, opcode::NOP, opcode::RETURN_UNDEF],
+        0,
+        0,
+    );
+    assert_eq!(
+        edge_sites,
+        vec![
+            (0, PollKind::Entry),
+            (3, PollKind::Edge),
+            (4, PollKind::Return),
+        ]
+    );
+
+    let mut periodic = vec![opcode::NOP; 1_025];
+    periodic.push(opcode::RETURN_UNDEF);
+    let periodic_sites = poll_sites(periodic, 0, 0);
+    assert!(periodic_sites.contains(&(1_024, PollKind::Periodic)));
+    assert_eq!(periodic_sites.last(), Some(&(1_025, PollKind::Return)));
 }
 
 fn assert_deep_retry(
@@ -681,6 +769,61 @@ fn interrupt_is_polled_immediately_before_return() {
 }
 
 #[test]
+fn loop_header_poll_uses_sixty_four_iteration_countdown_and_exact_resume_pc() {
+    let push_0 = named_opcode("push_0");
+    let push_1 = named_opcode("push_1");
+    let plus = named_opcode("plus");
+    let put_loc0 = named_opcode("put_loc0");
+    let put_loc1 = named_opcode("put_loc1");
+    let get_loc0 = named_opcode("get_loc0");
+    let get_loc1 = named_opcode("get_loc1");
+    let get_arg0 = named_opcode("get_arg0");
+    let lt = named_opcode("lt");
+    let if_false8 = named_opcode("if_false8");
+    let goto8 = named_opcode("goto8");
+    let bytecode = vec![
+        push_0,
+        plus,
+        put_loc0,
+        push_0,
+        plus,
+        put_loc1,
+        get_loc1,
+        get_arg0,
+        lt,
+        if_false8,
+        11,
+        get_loc0,
+        get_loc1,
+        opcode::ADD,
+        put_loc0,
+        get_loc1,
+        push_1,
+        opcode::ADD,
+        put_loc1,
+        goto8,
+        (-14_i8) as u8,
+        get_loc0,
+        opcode::RETURN,
+    ];
+    let executable = compile(bytecode.clone(), 1, 2).publish().unwrap();
+    let mut frame = SyntheticFrame::new(&[JSValueRepr::int32(100)], 2, 2);
+    frame.set_bytecode(&bytecode);
+    let bytecode_start = frame.bytecode_start();
+    frame.interrupt_on_poll(2);
+
+    let outcome = unsafe { frame.call(&executable) };
+
+    assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT);
+    assert_eq!(frame.poll_count(), 2);
+    assert_eq!(
+        unsafe { outcome.exit.resume_pc.offset_from(bytecode_start) },
+        6,
+        "the countdown slow path must resume at the loop header"
+    );
+}
+
+#[test]
 fn straight_line_code_polls_within_four_thousand_ninety_six_operations() {
     let mut bytecode = vec![opcode::NOP; 4_097];
     bytecode.push(opcode::RETURN_UNDEF);
@@ -726,6 +869,16 @@ fn forward_diamond_path_cannot_skip_lexically_inserted_polls() {
         bytecode[forward_operand] = forward as u8;
     }
     bytecode.push(opcode::RETURN_UNDEF);
+
+    let sites = poll_sites(bytecode.clone(), 0, 0);
+    assert!(
+        sites
+            .iter()
+            .filter(|(_, kind)| *kind == PollKind::Edge)
+            .count()
+            >= 2_000,
+        "forward path must retain immediate edge polls"
+    );
 
     let executable = compile(bytecode.clone(), 0, 0).publish().unwrap();
     let mut frame = SyntheticFrame::new(&[], 0, 0);
@@ -832,7 +985,11 @@ fn compiles_loop_and_integer_arithmetic() {
 
     assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
     assert_eq!(outcome.result, JSValueRepr::int32(4_950));
-    assert!(frame.poll_count() >= 102);
+    assert_eq!(
+        frame.poll_count(),
+        3,
+        "entry + one 64-iteration loop-header slow path + return"
+    );
 }
 
 #[test]

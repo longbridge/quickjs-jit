@@ -266,14 +266,18 @@ fn counted_loop(jit: bool) -> (f64, usize, u64) {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn first_osr_transfer_does_not_double_poll_the_backedge() {
+fn osr_countdown_preserves_result_and_interrupt_service() {
     let interpreted = counted_loop(false);
     let native = counted_loop(true);
     assert_eq!(native.0, interpreted.0);
     assert!(native.2 >= 1);
-    assert_eq!(
-        native.1, interpreted.1,
-        "OSR must preserve exact interrupt cadence"
+    assert!(
+        native.1 > 0,
+        "native loops must continue servicing interrupts"
+    );
+    assert!(
+        native.1 <= interpreted.1,
+        "the native countdown must amortize, not amplify, interrupt callbacks"
     );
 }
 
@@ -284,7 +288,7 @@ fn first_osr_transfer_does_not_double_poll_the_backedge() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn branched_loop_osr_preserves_cfg_entry_and_backedge_interrupt_cadence() {
+fn branched_loop_osr_preserves_result_and_interrupt_service() {
     fn run(jit_enabled: bool) -> (i32, usize, u64) {
         let runtime = Runtime::new().unwrap();
         let attached = jit_enabled.then(|| {
@@ -312,9 +316,13 @@ fn branched_loop_osr_preserves_cfg_entry_and_backedge_interrupt_cadence() {
     let native = run(true);
     assert_eq!(native.0, interpreted.0);
     assert!(native.2 > 0);
-    assert_eq!(
-        native.1, interpreted.1,
-        "branched OSR changed exact poll cadence"
+    assert!(
+        native.1 > 0,
+        "branched native loops must service interrupts"
+    );
+    assert!(
+        native.1 <= interpreted.1,
+        "branched native loops must not amplify interrupt callbacks"
     );
 }
 

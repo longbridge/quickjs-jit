@@ -32,8 +32,8 @@ use crate::{
         Relocation, RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
     ir::{
-        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, StackOp, TaggedValue,
-        UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
+        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, PollKind, StackOp,
+        TaggedValue, UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
@@ -61,6 +61,8 @@ struct PollLocation {
     bytecode_pc: u32,
     source_location: SourceLoc,
 }
+
+const LOOP_POLL_INTERVAL: i64 = 64;
 
 struct HelperLowering<'a> {
     ir: &'a BaselineIr,
@@ -1484,7 +1486,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
 
         for instruction in &block.instructions {
             match &instruction.op {
-                IrOp::Poll { state: _ } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
+                IrOp::Poll { .. } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
                 IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
                 IrOp::ResolveConstant(_) | IrOp::NewObject => {
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
@@ -1859,10 +1861,14 @@ fn lower_function(
     let arguments: Vec<PairVars> = (0..ir.argument_count).map(|_| allocate_pair()).collect();
     let locals: Vec<PairVars> = (0..ir.local_count).map(|_| allocate_pair()).collect();
     let stack: Vec<PairVars> = (0..ir.max_stack_depth).map(|_| allocate_pair()).collect();
+    let loop_poll_budget = Variable::from_u32(next_variable);
     for pair in arguments.iter().chain(&locals).chain(&stack) {
         builder.declare_var(pair.payload, types::I64);
         builder.declare_var(pair.tag, types::I64);
     }
+    builder.declare_var(loop_poll_budget, types::I32);
+    let initial_loop_poll_budget = builder.ins().iconst(types::I32, LOOP_POLL_INTERVAL);
+    builder.def_var(loop_poll_budget, initial_loop_poll_budget);
     let flags = MemFlags::new();
     let arg_buf = builder
         .ins()
@@ -1951,7 +1957,23 @@ fn lower_function(
                 }
             }
             match instruction.op {
-                IrOp::Poll { state } => {
+                IrOp::Poll { state, kind } => {
+                    let loop_continuation = if kind == PollKind::LoopHeader {
+                        let remaining = builder.use_var(loop_poll_budget);
+                        let remaining = builder.ins().iadd_imm(remaining, -1);
+                        builder.def_var(loop_poll_budget, remaining);
+                        let due = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
+                        let slow = builder.create_block();
+                        let continuation = builder.create_block();
+                        builder.ins().brif(due, slow, &[], continuation, &[]);
+                        builder.seal_block(slow);
+                        builder.switch_to_block(slow);
+                        let reset = builder.ins().iconst(types::I32, LOOP_POLL_INTERVAL);
+                        builder.def_var(loop_poll_budget, reset);
+                        Some(continuation)
+                    } else {
+                        None
+                    };
                     materialize_frame(
                         builder,
                         frame,
@@ -1979,6 +2001,11 @@ fn lower_function(
                         pointer_type,
                         layout,
                     );
+                    if let Some(continuation) = loop_continuation {
+                        builder.ins().jump(continuation, &[]);
+                        builder.seal_block(continuation);
+                        builder.switch_to_block(continuation);
+                    }
                     if osr_start == Some(block.start_pc) && !entered_osr_continuation {
                         let continuation = osr_post_poll.ok_or(CompileFailure::InvalidArtifact)?;
                         builder.ins().jump(continuation, &[]);
@@ -3914,7 +3941,13 @@ mod tests {
     fn entry_domain_analysis_exhaustively_handles_every_ir_op_variant() {
         let state = FrameStateId::from_index(0).unwrap();
         let mut cases = vec![
-            linear_ir(Vec::new(), IrOp::Poll { state }),
+            linear_ir(
+                Vec::new(),
+                IrOp::Poll {
+                    state,
+                    kind: crate::ir::PollKind::Entry,
+                },
+            ),
             linear_ir(Vec::new(), IrOp::OsrLabel { state }),
             linear_ir(Vec::new(), IrOp::Nop),
             linear_ir(

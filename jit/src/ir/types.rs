@@ -72,7 +72,7 @@ pub enum BinaryOp {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrOp {
-    Poll { state: FrameStateId },
+    Poll { state: FrameStateId, kind: PollKind },
     OsrLabel { state: FrameStateId },
     Nop,
     Push(TaggedValue),
@@ -101,4 +101,13 @@ pub enum IrOp {
     Branch { target: u32, when_true: bool },
     Return,
     ReturnUndefined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PollKind {
+    Entry,
+    Periodic,
+    LoopHeader,
+    Return,
+    Edge,
 }

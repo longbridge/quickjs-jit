@@ -17,4 +17,4 @@ pub use optimized::{
     OptimizedFrameShape, OptimizedIr, OptimizedMetrics, OptimizedNode, OptimizedNodeKind,
     OwnedMaterializeError, OwnedMaterializedFrame, OwnedMaterializedValue, ValueRepresentation,
 };
-pub use types::{BinaryOp, IrOp, StackOp, TaggedValue, UnaryOp};
+pub use types::{BinaryOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp};
