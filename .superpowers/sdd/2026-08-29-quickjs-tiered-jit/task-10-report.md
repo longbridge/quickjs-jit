@@ -65,6 +65,7 @@
 - Nested review fixes: `063f517`
 - Root review fixes: `7aa8842`
 - Target-triple identity correction: `fecd190`
+- Exact compiler target identity and multi-runtime stress: `9436c67`
 
 Task 10 intentionally publishes entry PC zero only. Hot thresholds, loop events,
 and nonzero-PC OSR policy remain Task 11 work.
@@ -111,3 +112,48 @@ and nonzero-PC OSR policy remain Task 11 work.
   declarations. A local `wasm32-unknown-unknown` cross-check could not compile
   QuickJS because that installed target lacks a C sysroot (`stdlib.h`); the
   Rust target gating is covered structurally and WASM remains interpreter-only.
+
+## Final target-identity and multi-runtime review correction
+
+- `BaselineCompiler::target_identity` is now derived directly from the exact
+  `OwnedTargetIsa` used by that compiler. Its canonical representation contains
+  the complete target triple plus every Cranelift shared and ISA-specific flag
+  name/value pair, with deterministic sorting and length-delimited hashing.
+- `ProductionBackend::new` creates the compiler first and derives the
+  `ArtifactEnvironment` from that same compiler before transferring it to the
+  worker pool. The resulting triple and codegen fingerprints therefore flow
+  unchanged through request, completion, artifact, install, cache, and acquire
+  keys; the former handwritten architecture/OS/CPU-feature subset is gone.
+- Tests compare identity with the compiler's actual ISA and mutate every shared
+  and ISA-specific setting entry in turn, proving every value participates in
+  the fingerprint. The canonical full sequences remain available on
+  `TargetIdentity` for collision-independent inspection and cross-platform
+  deterministic comparison.
+- A real two-runtime production stress test attaches two runtimes concurrently,
+  triggers automatic snapshot submission and worker compilation in both,
+  polls both installations, executes 64 native calls per runtime, and reads the
+  actual acquired artifact keys. Runtime IDs, actual keys, caches (`code_bytes`),
+  and native metrics are distinct. Opposite operand order with string addition
+  detects cross-installation. Dropping runtime A's context/JIT/runtime leaves B
+  alive for another 64 native calls with increasing balanced enter/exit metrics.
+  This complements the existing 1,000-generation isolation stress.
+
+### Final correction verification
+
+- TDD RED evidence: target identity initially failed to compile because
+  `TargetIdentity`/`target_identity` did not exist; environment injection failed
+  on the old three-argument API; actual-key stress failed before the test-only
+  acquired-key telemetry existed.
+- `cargo test -p rquickjs-jit --features compiler,test-support`: passed, including
+  13/13 background tests and the full 191-test JIT suite.
+- `cargo test -p rquickjs-jit --release --features compiler,test-support`: passed,
+  including the same 191-test suite in release mode.
+- `cargo clippy -p rquickjs-jit --all-targets --features
+  compiler,test-support -- -D warnings`, `cargo fmt --all -- --check`, and
+  `git diff --check`: passed.
+- `cargo test --workspace` remains blocked by the pre-existing JIT integration
+  tests being built without their required `test-support` feature (`FakeCompiler`
+  and `CompiledArtifact::fake` unavailable). `cargo test --workspace
+  --all-features` additionally selects nightly-only `doc-cfg` on stable; with
+  `RUSTC_BOOTSTRAP=1`, it reaches pre-existing trybuild stderr drift in two async
+  compile-fail cases. Neither failure touches this correction's files or code.
