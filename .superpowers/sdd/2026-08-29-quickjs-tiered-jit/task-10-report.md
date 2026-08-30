@@ -62,6 +62,51 @@
 - Independent cache/compiler resource limits: `86b4474`
 - RAII gauges and timeout categorization: `b7915b5`
 - Saturated completion preservation: `8e8caf5`
+- Nested review fixes: `063f517`
+- Root review fixes: `7aa8842`
 
 Task 10 intentionally publishes entry PC zero only. Hot thresholds, loop events,
 and nonzero-PC OSR policy remain Task 11 work.
+
+## Independent review corrections
+
+- Runtime maintenance no longer invokes metrics observers. It only updates the
+  shared snapshot; `Jit::poll` notifies after releasing the runtime lock, catches
+  observer panics, and permits recursive polling without deadlock.
+- Production coordinators now use the engine-assigned runtime ID, the complete
+  `JSJitABIInfo` build/layout/helper fingerprint, source/opcode identities, host
+  ISA and detected CPU features, and a stable numeric configuration fingerprint.
+  Worker requests, completions, artifacts, installation, and acquisition retain
+  and revalidate the exact key.
+- `RawRuntime::execute_pending_job` performs bounded backend maintenance before
+  and after the QuickJS job while the same runtime lock is held. A production
+  test proves a worker completion installs without another eligible JS call.
+- Production native execution is selected only on little-endian macOS, Windows,
+  and Linux for x86-64/AArch64. Other targets attach the interpreter-only no-op
+  backend even when the compiler feature is selected.
+- Generator/async resume frames now allocate and initialize the two helper
+  scratch slots, place var-ref storage after them, and derive a defined native
+  stack capacity before entry.
+- ABI minor 1.4 appends exact `native_enter`/`native_exit` callbacks. QuickJS
+  calls them immediately around the published entry trampoline; production
+  metrics therefore prove native entry/return rather than inferring it from JS
+  result `42`. The production test observes entries/exits above zero and zero
+  deopt/retry fallbacks.
+
+## Review-fix verification
+
+- Focused debug: API 7/7, background 12/12, ABI 12/12.
+- Full debug: `cargo test -p rquickjs-jit --all-targets --features compiler,test-support`
+  passed (all JIT unit/integration targets, including baseline 28/28,
+  native-boundary 26/26, lifecycle 45/45, verifier 25/25).
+- Focused release: ABI 12/12, API 7/7, background 12/12, native-boundary 26/26.
+- Workspace: `cargo check --workspace --all-targets --features
+  rquickjs-jit/compiler,rquickjs-jit/test-support` passed.
+- C warning regression: a fresh target directory with `CFLAGS=-Werror` passed
+  `cargo check -p rquickjs-jit --features compiler,test-support`.
+- `cargo clippy -p rquickjs-jit --all-targets --features
+  compiler,test-support -- -D warnings`, formatting, and diff checks passed.
+- All nine bundled native JIT bindings share the regenerated ABI 1.4
+  declarations. A local `wasm32-unknown-unknown` cross-check could not compile
+  QuickJS because that installed target lacks a C sysroot (`stdlib.h`); the
+  Rust target gating is covered structurally and WASM remains interpreter-only.
