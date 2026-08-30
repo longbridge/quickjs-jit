@@ -575,6 +575,14 @@ fn tenth_stable_float_exit_installs_side_path_and_eleventh_call_does_not_deopt()
     let entries = installed.side_path_entries;
     assert_eq!(
         context
+            .with(|ctx| ctx.eval::<f64, _>("stableFloat(0,0)"))
+            .unwrap(),
+        0.0
+    );
+    jit.poll();
+    assert_eq!(jit.metrics().side_path_entries, entries);
+    assert_eq!(
+        context
             .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000,0)"))
             .unwrap(),
         4_999_950_000.0

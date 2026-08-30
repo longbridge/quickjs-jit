@@ -85,6 +85,7 @@ pub const QJSJIT_ABI_MAJOR: u32 = 1;
 pub const QJSJIT_ABI_MINOR: u32 = 4;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
+pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
 pub const JS_JIT_SLOT_NONE: u32 = 4294967295;
 pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
 pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;

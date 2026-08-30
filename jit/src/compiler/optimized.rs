@@ -977,6 +977,16 @@ fn emit_opt_numeric_guard(
             .ins()
             .brif(matches_profile, side_block, &[], deopt, &[]);
         builder.switch_to_block(side_block);
+        let flags = builder
+            .ins()
+            .load(types::I32, MemFlags::new(), frame, layout.flags);
+        let flags = builder.ins().bor_imm(
+            flags,
+            i64::from(rquickjs_core::qjs::JS_JIT_FRAME_SIDE_PATH_HIT),
+        );
+        builder
+            .ins()
+            .store(MemFlags::new(), flags, frame, layout.flags);
         builder.ins().jump(pass, &[]);
     } else {
         builder.ins().brif(numeric, pass, &[], deopt, &[]);

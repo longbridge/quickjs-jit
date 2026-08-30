@@ -505,18 +505,20 @@ struct ProductionEntryPin {
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+type PendingDeoptGuards = std::collections::HashMap<
+    (u64, u64),
+    std::collections::VecDeque<(u32, Option<runtime::ObservedType>)>,
+>;
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 #[derive(Default)]
 struct OsrValidationMetrics {
     successes: AtomicU64,
     failures: AtomicU64,
     validation_retries: Mutex<std::collections::HashMap<(u64, u64, u32), u64>>,
-    deopt_guards: Mutex<
-        std::collections::HashMap<
-            (u64, u64),
-            std::collections::VecDeque<(u32, Option<runtime::ObservedType>)>,
-        >,
-    >,
+    deopt_guards: Mutex<PendingDeoptGuards>,
     deopt_materializations: AtomicU64,
+    side_path_entries: AtomicU64,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -576,6 +578,10 @@ impl OsrValidationMetrics {
             guards.remove(&(id, generation));
         }
         guard
+    }
+
+    fn take_side_path_entries(&self) -> u64 {
+        self.side_path_entries.swap(0, Ordering::AcqRel)
     }
 }
 
@@ -728,6 +734,12 @@ unsafe extern "C" fn production_entry_trampoline(
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
     let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
     let mut exit = unsafe { native(frame as *const _ as *mut _) };
+    if frame.flags & qjs::JS_JIT_FRAME_SIDE_PATH_HIT != 0 {
+        frame.flags &= !qjs::JS_JIT_FRAME_SIDE_PATH_HIT;
+        pin.validation
+            .side_path_entries
+            .fetch_add(1, Ordering::Release);
+    }
     if exit.kind != qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
         return exit;
     }
@@ -1492,18 +1504,6 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             runtime::CompileState::Installed(_)
         ) {
             self.coordinator.record_tier2_entry();
-            let key = runtime::FunctionKey::new(_id, _generation);
-            if self
-                .coordinator
-                .pin(key, runtime::Tier::Optimizing)
-                .is_some_and(|pin| {
-                    pin.artifact()
-                        .optimized_metadata()
-                        .is_some_and(|metadata| metadata.side_path_profile().is_some())
-                })
-            {
-                self.coordinator.record_side_path_entry();
-            }
         }
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
@@ -1512,6 +1512,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
 
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
+        self.coordinator
+            .record_side_path_entries(self.osr_validation.take_side_path_entries());
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
             self.native_retries = self.native_retries.saturating_add(1);
             let validation_retry = self
