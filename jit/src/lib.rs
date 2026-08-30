@@ -462,6 +462,7 @@ struct ProductionBackend {
     optimizing_hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
+    tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
@@ -483,6 +484,7 @@ struct ProductionBackend {
     adaptive_neutral_queues: u64,
     adaptive_inputs_recorded: u64,
     snapshot_requests: u64,
+    stable_path_compile_requests: u64,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
@@ -509,6 +511,7 @@ struct OsrValidationMetrics {
     failures: AtomicU64,
     validation_retries: Mutex<std::collections::HashMap<(u64, u64, u32), u64>>,
     deopt_guards: Mutex<std::collections::HashMap<(u64, u64), std::collections::VecDeque<u32>>>,
+    deopt_materializations: AtomicU64,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -722,11 +725,22 @@ unsafe extern "C" fn production_entry_trampoline(
     else {
         return retry_exit();
     };
-    if !pin.deopt_sites.iter().any(|(shape, map)| {
+    let Some((shape, map)) = pin.deopt_sites.iter().find(|(shape, map)| {
         map.guard() == guard && map.resume_pc() == resume_pc && map.validate(*shape).is_ok()
-    }) {
+    }) else {
+        return retry_exit();
+    };
+    /* Narrow Tier 2 currently emits identity recipes only. Execute their
+     * two-phase contract now: validate the complete transaction first, then
+     * commit the already-materialized frame by publishing the resume state.
+     * Any future non-identity/stack recipe fails closed until it has an owning
+     * duplication implementation. */
+    if map.validate_identity_materialization(*shape).is_err() {
         return retry_exit();
     }
+    pin.validation
+        .deopt_materializations
+        .fetch_add(1, Ordering::Relaxed);
     pin.validation
         .mark_deopt_guard(pin.key.id, pin.key.generation, guard);
     /* The one-based identity is internal to the pinned backend artifact. C's
@@ -948,6 +962,7 @@ impl ProductionBackend {
             optimizing_requested: std::collections::HashSet::new(),
             optimizing_hotness: std::collections::HashMap::new(),
             optimizing_snapshots: std::collections::HashMap::new(),
+            tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
             metrics,
             native_entries: 0,
@@ -969,6 +984,7 @@ impl ProductionBackend {
             adaptive_neutral_queues: 0,
             adaptive_inputs_recorded: 0,
             snapshot_requests: 0,
+            stable_path_compile_requests: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
@@ -1015,6 +1031,8 @@ impl ProductionBackend {
                     .is_err()
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
+                } else {
+                    self.tier2_sources.insert(key, snapshot);
                 }
             }
         }
@@ -1042,9 +1060,14 @@ impl ProductionBackend {
         snapshot.adaptive_inputs_recorded = self.adaptive_inputs_recorded;
         snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
         snapshot.snapshot_requests = self.snapshot_requests;
+        snapshot.stable_path_compile_requests = self.stable_path_compile_requests;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
+        snapshot.deopt_materializations = self
+            .osr_validation
+            .deopt_materializations
+            .load(Ordering::Relaxed);
         let requested = self.requested.iter().copied().collect::<Vec<_>>();
         for key in requested {
             let retryable = match self.coordinator.tier_state(key, runtime::Tier::Baseline) {
@@ -1439,7 +1462,30 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
             let key = runtime::FunctionKey::new(id, generation);
             if let Some(guard) = self.osr_validation.take_deopt_guard(id, generation) {
-                let _ = self.coordinator.record_optimized_side_exit(key, guard);
+                if self.coordinator.record_optimized_side_exit(key, guard)
+                    == runtime::SideExitAction::StablePathThreshold
+                {
+                    if let Some(snapshot) = self.tier2_sources.get(&key).cloned() {
+                        let feedback = self.feedback.snapshot(self.clock.max(1));
+                        if feedback.has_stable_value_for(key)
+                            && self.coordinator.prepare_stable_path_recompile(key)
+                        {
+                            if self
+                                .coordinator
+                                .queue_with_feedback(
+                                    key,
+                                    runtime::Tier::Optimizing,
+                                    snapshot,
+                                    feedback,
+                                )
+                                .is_ok()
+                            {
+                                self.stable_path_compile_requests =
+                                    self.stable_path_compile_requests.saturating_add(1);
+                            }
+                        }
+                    }
+                }
             } else {
                 self.coordinator.record_deopt(true);
             }
@@ -1456,6 +1502,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_requested.remove(&key);
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
+        self.tier2_sources.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();
     }

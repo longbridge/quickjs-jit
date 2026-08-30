@@ -97,3 +97,31 @@ fn owning_values_are_duplicated_before_publish_and_rolled_back_on_failure() {
     let frame = map.materialize_owned(shape, &mut refs).unwrap();
     assert_eq!(frame.owned_count(), 2);
 }
+
+#[test]
+fn production_identity_recipes_execute_arguments_and_locals_in_place() {
+    let shape = OptimizedFrameShape::new(1, 1, 0);
+    let map = DeoptMap::new(
+        3,
+        9,
+        DeoptPhase::BeforeEffect(0),
+        vec![
+            Materialization::argument(0, MaterializedValue::TaggedSlot(0)),
+            Materialization::local(0, MaterializedValue::TaggedSlot(1)),
+        ],
+    );
+    assert!(map.validate_identity_materialization(shape).is_ok());
+
+    let non_identity = DeoptMap::new(
+        3,
+        9,
+        DeoptPhase::BeforeEffect(0),
+        vec![
+            Materialization::argument(0, MaterializedValue::TaggedSlot(1)),
+            Materialization::local(0, MaterializedValue::TaggedSlot(0)),
+        ],
+    );
+    assert!(non_identity
+        .validate_identity_materialization(shape)
+        .is_err());
+}

@@ -81,9 +81,13 @@ impl core::fmt::Debug for JitConfig {
             })
             .field("force_optimized", &{
                 #[cfg(feature = "test-support")]
-                { self.force_optimized }
+                {
+                    self.force_optimized
+                }
                 #[cfg(not(feature = "test-support"))]
-                { false }
+                {
+                    false
+                }
             })
             .field(
                 "has_diagnostic_callback",
@@ -118,9 +122,13 @@ impl PartialEq for JitConfig {
             }
             && {
                 #[cfg(feature = "test-support")]
-                { self.force_optimized == other.force_optimized }
+                {
+                    self.force_optimized == other.force_optimized
+                }
                 #[cfg(not(feature = "test-support"))]
-                { true }
+                {
+                    true
+                }
             }
             && callbacks_equal(&self.diagnostic_callback, &other.diagnostic_callback)
             && callbacks_equal(&self.metrics_observer, &other.metrics_observer)

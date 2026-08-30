@@ -1,4 +1,4 @@
-use rquickjs_jit::bytecode::VerifyLimits;
+use rquickjs_jit::bytecode::{CompileSnapshot, VerifyLimits};
 use rquickjs_jit::compiler::optimized::{
     NumericBinaryOp, OptimizedCompiler, OptimizedInput, Tier2Compiler,
 };
@@ -281,6 +281,22 @@ fn production_optimized_ir_is_independent_ssa_with_loop_guards() {
 }
 
 #[test]
+fn tier2_rejects_captured_loop_headers_with_live_operand_stack() {
+    use rquickjs_core::qjs;
+    let bytecode = vec![
+        qjs::QJS_JIT_OP_PUSH_TRUE,
+        qjs::QJS_JIT_OP_DUP,
+        qjs::QJS_JIT_OP_IF_TRUE8,
+        (-2i8) as u8,
+        qjs::QJS_JIT_OP_RETURN,
+    ];
+    let verified = CompileSnapshot::from_untrusted_bytecode(bytecode, 0, 0, 0, 0)
+        .verify(VerifyLimits::default())
+        .expect("captured loop with a live stack value is well formed");
+    assert!(OptimizedIr::translate(&verified, 1).is_err());
+}
+
+#[test]
 fn independent_optimized_machine_lowers_numeric_loop() {
     let fixture = SnapshotFixture::compile(
         "(function(n,zero){let s=zero;for(let i=zero;i<n;i++)s=s+i;return s})",
@@ -326,9 +342,7 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
     use rquickjs::{Context, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
 
-    let captured = SnapshotFixture::compile(
-        "(function truth(v){return v?2:1})",
-    );
+    let captured = SnapshotFixture::compile("(function truth(v){return v?2:1})");
     let verified = captured.snapshot().verify(VerifyLimits::default()).unwrap();
     Tier2Compiler::host(91)
         .lower_for_test(&verified, 91)
@@ -347,14 +361,13 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context
-        .with(|ctx| {
-            ctx.eval::<(), _>(
-                "function truth(v){return v?2:1}",
-            )
-        })
+        .with(|ctx| ctx.eval::<(), _>("function truth(v){return v?2:1}"))
         .unwrap();
     for _ in 0..8 {
-        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("truth(-0)")).unwrap(),
+            1
+        );
     }
     for _ in 0..10_000 {
         jit.poll();
@@ -365,7 +378,10 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
     }
     assert!(jit.metrics().installed > 0, "{:?}", jit.metrics());
     for _ in 0..8 {
-        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("truth(-0)")).unwrap(),
+            1
+        );
     }
     for _ in 0..10_000 {
         jit.poll();
@@ -376,8 +392,16 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
     }
     assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
     let before = jit.metrics();
-    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(-0)" )).unwrap(), 1);
-    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("truth(NaN)" )).unwrap(), 1);
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<i32, _>("truth(-0)")).unwrap(),
+        1
+    );
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("truth(NaN)"))
+            .unwrap(),
+        1
+    );
     jit.poll();
     let after = jit.metrics();
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
@@ -451,6 +475,11 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         "{:?}",
         jit.metrics()
     );
+    assert!(
+        jit.metrics().deopt_materializations >= 1,
+        "{:?}",
+        jit.metrics()
+    );
 }
 
 #[test]
@@ -467,7 +496,7 @@ fn worker_snapshot_contains_stable_tokens_not_runtime_pointers() {
 }
 
 #[test]
-fn stable_side_exit_compiles_at_ten_hits_and_unstable_exit_demotes_with_backoff() {
+fn stable_side_exit_reaches_recompile_threshold_and_unstable_exit_demotes_with_backoff() {
     let key = FunctionKey::new(88, 1);
     let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
     for _ in 0..9 {
@@ -478,7 +507,7 @@ fn stable_side_exit_compiles_at_ten_hits_and_unstable_exit_demotes_with_backoff(
     }
     assert_eq!(
         coordinator.record_optimized_side_exit(key, 7),
-        SideExitAction::CompileStablePath
+        SideExitAction::StablePathThreshold
     );
     coordinator.advance_clock(50);
     let SideExitAction::Demote { retry_after } = coordinator.record_optimized_side_exit(key, 8)

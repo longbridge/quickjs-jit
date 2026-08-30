@@ -362,7 +362,7 @@ pub struct Coordinator {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SideExitAction {
     Counted,
-    CompileStablePath,
+    StablePathThreshold,
     Demote { retry_after: u64 },
 }
 
@@ -917,10 +917,28 @@ impl Coordinator {
             self.metrics.optimized_demotions = self.metrics.optimized_demotions.saturating_add(1);
             SideExitAction::Demote { retry_after }
         } else if count == 10 {
-            SideExitAction::CompileStablePath
+            SideExitAction::StablePathThreshold
         } else {
             SideExitAction::Counted
         }
+    }
+
+    /// Atomically returns an installed optimizing tier to a queueable state
+    /// while preserving its baseline deopt target.
+    pub fn prepare_stable_path_recompile(&mut self, key: FunctionKey) -> bool {
+        if !self.installed_keys.contains_key(&(key, Tier::Baseline))
+            || self
+                .installed_keys
+                .remove(&(key, Tier::Optimizing))
+                .is_none()
+        {
+            return false;
+        }
+        if let Some(function) = self.functions.get_mut(&key) {
+            function.optimizing.state = CompileState::Cold;
+            function.published = Some(Tier::Baseline);
+        }
+        true
     }
 
     pub fn pin(&mut self, key: FunctionKey, tier: Tier) -> Option<ExecutionPin> {

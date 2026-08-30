@@ -155,6 +155,14 @@ impl OptimizedIr {
         let mut guards = Vec::new();
         let mut next_guard = 0u32;
         let block_depths = optimized_block_depths(function)?;
+        if function.control_flow_graph().blocks().iter().any(|block| {
+            function
+                .control_flow_graph()
+                .is_loop_header(block.start_pc())
+                && block_depths.get(&block.start_pc()).copied().unwrap_or(1) != 0
+        }) {
+            return Err(CompileFailure::UnsupportedOpcode);
+        }
         let mut make_guard = |pc: u32,
                               mid_loop: bool,
                               nodes: &mut Vec<OptimizedNode>,
@@ -376,8 +384,17 @@ fn opcode_name(node: &OptimizedNode) -> Option<&str> {
 fn is_pure_load(name: &str) -> bool {
     matches!(
         name,
-        "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3"
-            | "get_loc" | "get_loc8" | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3"
+        "get_arg"
+            | "get_arg0"
+            | "get_arg1"
+            | "get_arg2"
+            | "get_arg3"
+            | "get_loc"
+            | "get_loc8"
+            | "get_loc0"
+            | "get_loc1"
+            | "get_loc2"
+            | "get_loc3"
     )
 }
 
@@ -576,6 +593,7 @@ pub enum DeoptValidationError {
     DuplicateSlot,
     InvalidSlot,
     DestinationSize,
+    UnsupportedRecipe,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -623,6 +641,29 @@ impl DeoptMap {
         }
         if seen.iter().any(|present| !present) {
             return Err(DeoptValidationError::SlotCount);
+        }
+        Ok(())
+    }
+
+    /// Validates the narrow Tier 2 in-place deopt transaction. Every current
+    /// production recipe aliases its own already-rooted frame slot, so the
+    /// two-phase transaction performs complete validation before committing
+    /// the resume state and requires no refcount mutation.
+    pub fn validate_identity_materialization(
+        &self,
+        shape: OptimizedFrameShape,
+    ) -> Result<(), DeoptValidationError> {
+        self.validate(shape)?;
+        if shape.stack() != 0 {
+            return Err(DeoptValidationError::UnsupportedRecipe);
+        }
+        for recipe in &self.slots {
+            let destination = shape
+                .index(recipe.slot)
+                .ok_or(DeoptValidationError::InvalidSlot)?;
+            if recipe.value != MaterializedValue::TaggedSlot(destination as u16) {
+                return Err(DeoptValidationError::UnsupportedRecipe);
+            }
         }
         Ok(())
     }

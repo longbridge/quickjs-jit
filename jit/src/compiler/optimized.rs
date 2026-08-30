@@ -202,10 +202,7 @@ impl OptimizedCompiler {
 
 fn fold(op: NumericBinaryOp, lhs: NumericConstant, rhs: NumericConstant) -> NumericConstant {
     if let (NumericConstant::Int32(lhs), NumericConstant::Int32(rhs)) = (lhs, rhs) {
-        if matches!(op, NumericBinaryOp::Mul)
-            && (lhs == 0 || rhs == 0)
-            && (lhs < 0 || rhs < 0)
-        {
+        if matches!(op, NumericBinaryOp::Mul) && (lhs == 0 || rhs == 0) && (lhs < 0 || rhs < 0) {
             return NumericConstant::Float64(-0.0);
         }
         let exact = match op {
@@ -635,19 +632,29 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let condition = opt_use(&mut builder, stack[depth]);
                                 let is_int = builder.ins().icmp_imm(
-                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_INT),
+                                    IntCC::Equal,
+                                    condition.tag,
+                                    i64::from(qjs::JS_TAG_INT),
                                 );
                                 let is_bool = builder.ins().icmp_imm(
-                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_BOOL),
+                                    IntCC::Equal,
+                                    condition.tag,
+                                    i64::from(qjs::JS_TAG_BOOL),
                                 );
                                 let is_float = builder.ins().icmp_imm(
-                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_FLOAT64),
+                                    IntCC::Equal,
+                                    condition.tag,
+                                    i64::from(qjs::JS_TAG_FLOAT64),
                                 );
                                 let is_null = builder.ins().icmp_imm(
-                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_NULL),
+                                    IntCC::Equal,
+                                    condition.tag,
+                                    i64::from(qjs::JS_TAG_NULL),
                                 );
                                 let is_undefined = builder.ins().icmp_imm(
-                                    IntCC::Equal, condition.tag, i64::from(qjs::JS_TAG_UNDEFINED),
+                                    IntCC::Equal,
+                                    condition.tag,
+                                    i64::from(qjs::JS_TAG_UNDEFINED),
                                 );
                                 let scalar = builder.ins().bor(is_int, is_bool);
                                 let empty = builder.ins().bor(is_null, is_undefined);
@@ -655,13 +662,20 @@ fn lower_optimized_machine(
                                 let allowed = builder.ins().bor(numeric, empty);
                                 let truth_block = builder.create_block();
                                 let deopt_block = builder.create_block();
-                                builder.ins().brif(allowed, truth_block, &[], deopt_block, &[]);
+                                builder
+                                    .ins()
+                                    .brif(allowed, truth_block, &[], deopt_block, &[]);
                                 builder.switch_to_block(deopt_block);
                                 let start = builder.ins().load(
-                                    pointer_type, MemFlags::new(), frame, layout.bytecode_start,
+                                    pointer_type,
+                                    MemFlags::new(),
+                                    frame,
+                                    layout.bytecode_start,
                                 );
                                 let resume = builder.ins().iadd_imm(start, i64::from(node.pc()));
-                                builder.ins().store(MemFlags::new(), resume, frame, layout.pc);
+                                builder
+                                    .ins()
+                                    .store(MemFlags::new(), resume, frame, layout.pc);
                                 emit_opt_exit(
                                     &mut builder,
                                     sret,
@@ -671,15 +685,20 @@ fn lower_optimized_machine(
                                     entry_site.guard(),
                                 );
                                 builder.switch_to_block(truth_block);
-                                let integer_truth = builder.ins().icmp_imm(
-                                    IntCC::NotEqual, condition.payload, 0,
-                                );
+                                let integer_truth =
+                                    builder
+                                        .ins()
+                                        .icmp_imm(IntCC::NotEqual, condition.payload, 0);
                                 let float = builder.ins().bitcast(
-                                    types::F64, MemFlags::new(), condition.payload,
+                                    types::F64,
+                                    MemFlags::new(),
+                                    condition.payload,
                                 );
                                 let zero = builder.ins().f64const(0.0);
-                                let float_truth = builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
-                                let numeric_truth = builder.ins().select(is_float, float_truth, integer_truth);
+                                let float_truth =
+                                    builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
+                                let numeric_truth =
+                                    builder.ins().select(is_float, float_truth, integer_truth);
                                 let false_value = builder.ins().iconst(types::I8, 0);
                                 let truth = builder.ins().select(empty, false_value, numeric_truth);
                                 let target = *blocks
