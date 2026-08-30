@@ -7,6 +7,7 @@ pub struct JitMetrics {
     pub queued: u64,
     pub compiling: u64,
     pub compile_failures: u64,
+    pub compile_timeouts: u64,
     pub stale_results: u64,
     pub installed: u64,
     pub blacklisted: u64,
@@ -17,6 +18,9 @@ pub struct JitMetrics {
     pub resource_limit_rejections: u64,
     pub code_bytes: usize,
     pub metadata_bytes: usize,
+    pub pending_worker_jobs: usize,
+    pub pending_snapshot_bytes: usize,
+    pub active_ir_bytes: usize,
     pub evicted: u64,
 }
 
@@ -27,6 +31,7 @@ impl JitMetrics {
             queued: 0,
             compiling: 0,
             compile_failures: 0,
+            compile_timeouts: 0,
             stale_results: 0,
             installed: 0,
             blacklisted: 0,
@@ -37,6 +42,9 @@ impl JitMetrics {
             resource_limit_rejections: 0,
             code_bytes: 0,
             metadata_bytes: 0,
+            pending_worker_jobs: 0,
+            pending_snapshot_bytes: 0,
+            active_ir_bytes: 0,
             evicted: 0,
         }
     }

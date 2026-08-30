@@ -546,6 +546,14 @@ impl Coordinator {
     }
 
     pub(super) fn rollback_dispatch(&mut self, request: CompileRequest) {
+        self.rollback(request, true);
+    }
+
+    pub(super) fn rollback_resource_limit(&mut self, request: CompileRequest) {
+        self.rollback(request, false);
+    }
+
+    fn rollback(&mut self, request: CompileRequest, saturated: bool) {
         if self.in_flight.get(&request.key).is_some_and(|flight| {
             flight.attempt_id == request.attempt_id && flight.tier == request.tier
         }) {
@@ -554,8 +562,10 @@ impl Coordinator {
                 record.tier_mut(request.tier).state = CompileState::Queued(request.tier);
             }
             self.queue.push_front(request);
-            self.metrics.worker_queue_saturated =
-                self.metrics.worker_queue_saturated.saturating_add(1);
+            if saturated {
+                self.metrics.worker_queue_saturated =
+                    self.metrics.worker_queue_saturated.saturating_add(1);
+            }
         }
     }
 
@@ -611,8 +621,11 @@ impl Coordinator {
             Ok(_) => {
                 self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             }
-            Err(_) => {
+            Err(failure) => {
                 self.in_flight.remove(&completion.key);
+                if failure == CompileFailure::TimedOut {
+                    self.metrics.compile_timeouts = self.metrics.compile_timeouts.saturating_add(1);
+                }
                 self.record_failure(completion.key, completion.requested_tier);
             }
         }
@@ -728,6 +741,12 @@ impl Coordinator {
 
     pub fn set_native_enabled(&mut self, enabled: bool) {
         self.metrics.set_native_enabled(enabled);
+    }
+
+    pub fn set_worker_usage(&mut self, jobs: usize, snapshots: usize, ir: usize) {
+        self.metrics.pending_worker_jobs = jobs;
+        self.metrics.pending_snapshot_bytes = snapshots;
+        self.metrics.active_ir_bytes = ir;
     }
 
     pub fn record_resource_limit_rejection(&mut self) {

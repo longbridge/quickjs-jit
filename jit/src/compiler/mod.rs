@@ -43,7 +43,7 @@ impl CompileControl {
         if self.cancelled.load(Ordering::Acquire) {
             Err(CompileFailure::Cancelled)
         } else if Instant::now() >= self.deadline {
-            Err(CompileFailure::ResourceLimit)
+            Err(CompileFailure::TimedOut)
         } else {
             Ok(())
         }
@@ -80,6 +80,7 @@ pub enum CompileFailure {
     UnsupportedOpcode,
     Tier1Rejected(crate::bytecode::FallbackReason),
     ResourceLimit,
+    TimedOut,
     Cancelled,
     CompilerPanicked,
     InvalidArtifact,

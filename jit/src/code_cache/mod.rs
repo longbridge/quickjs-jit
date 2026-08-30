@@ -235,14 +235,16 @@ impl CodeCache {
             .checked_add(metadata_bytes)
             .ok_or(CacheError::ChargeOverflow)?;
         let needed_bytes = desired_bytes.saturating_sub(self.max_bytes);
-        let needed_code = self
-            .separate_limits
-            .then(|| desired_code.saturating_sub(self.max_code_bytes))
-            .unwrap_or(0);
-        let needed_metadata = self
-            .separate_limits
-            .then(|| desired_metadata.saturating_sub(self.max_metadata_bytes))
-            .unwrap_or(0);
+        let needed_code = if self.separate_limits {
+            desired_code.saturating_sub(self.max_code_bytes)
+        } else {
+            0
+        };
+        let needed_metadata = if self.separate_limits {
+            desired_metadata.saturating_sub(self.max_metadata_bytes)
+        } else {
+            0
+        };
         let selected = evict::plan(
             &self.artifacts,
             key,

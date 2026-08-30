@@ -29,10 +29,15 @@ fn foreground_submission_never_waits_for_blocked_compiler() {
     assert!(workers.dispatch_next(&mut coordinator).unwrap());
     assert!(started.elapsed() < std::time::Duration::from_millis(100));
     assert_eq!(control.next_request().unwrap().key(), key);
+    let usage = workers.live_usage();
+    assert_eq!(usage.0, 1);
+    assert!(usage.1 > 0);
+    assert!(usage.2 >= usage.1);
     assert_eq!(coordinator.drain_completions().drained(), 0);
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
     workers.shutdown(&mut coordinator);
+    assert_eq!(workers.live_usage(), (0, 0, 0));
     assert_eq!(
         coordinator.state(key),
         CompileState::Installed(Tier::Baseline)
@@ -192,4 +197,71 @@ fn snapshot_quota_falls_back_without_disabling_runtime() {
     });
     assert_eq!(jit.metrics().queued, 0);
     assert!(jit.metrics().resource_limit_rejections >= 1);
+}
+
+#[test]
+fn pending_snapshot_and_ir_quotas_are_total_and_release_via_raii() {
+    let (compiler, control) = FakeCompiler::new(1);
+    let bytes = snapshot(1, 1).snapshot().owned_bytes();
+    let mut workers = BackgroundCompiler::new_with_resource_limits(
+        Arc::new(compiler),
+        1,
+        2,
+        std::time::Duration::from_secs(30),
+        bytes,
+        bytes * 32,
+    )
+    .unwrap();
+    let mut coordinator = Coordinator::with_limits(2, 2, 4, 1024);
+    coordinator
+        .queue(FunctionKey::new(1, 1), Tier::Baseline, snapshot(1, 1))
+        .unwrap();
+    coordinator
+        .queue(FunctionKey::new(2, 1), Tier::Baseline, snapshot(2, 1))
+        .unwrap();
+    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    assert!(control.next_request().is_some());
+    assert!(!workers.dispatch_next(&mut coordinator).unwrap());
+    assert_eq!(coordinator.metrics().resource_limit_rejections, 1);
+    control.complete(CompiledArtifact::fake(Tier::Baseline));
+    while workers.live_usage().0 != 0 {
+        std::thread::yield_now();
+    }
+    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    assert!(control.next_request().is_some());
+    control.complete(CompiledArtifact::fake(Tier::Baseline));
+    workers.shutdown(&mut coordinator);
+    assert_eq!(workers.live_usage(), (0, 0, 0));
+}
+
+#[test]
+fn compile_deadline_is_categorized_and_interpretation_remains_available() {
+    let (compiler, _control) = FakeCompiler::new(1);
+    let mut workers = BackgroundCompiler::new_with_resource_limits(
+        Arc::new(compiler),
+        1,
+        1,
+        std::time::Duration::ZERO,
+        usize::MAX,
+        usize::MAX,
+    )
+    .unwrap();
+    let mut coordinator = Coordinator::with_limits(1, 1, 4, 1024);
+    let key = FunctionKey::new(55, 1);
+    coordinator
+        .queue(key, Tier::Baseline, snapshot(55, 1))
+        .unwrap();
+    workers.dispatch_next(&mut coordinator).unwrap();
+    while workers.live_usage().0 != 0 {
+        std::thread::yield_now();
+    }
+    while coordinator.drain_completions().drained() == 0 {
+        std::thread::yield_now();
+    }
+    workers.shutdown(&mut coordinator);
+    assert_eq!(coordinator.metrics().compile_timeouts, 1);
+    assert!(matches!(
+        coordinator.state(key),
+        CompileState::Backoff { .. }
+    ));
 }

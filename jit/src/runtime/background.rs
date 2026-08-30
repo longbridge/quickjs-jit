@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -24,6 +24,32 @@ pub struct BackgroundCompiler {
     workers: Vec<JoinHandle<()>>,
     completion_slot: Arc<Mutex<Option<super::CompletionSender>>>,
     cancelled: Arc<AtomicBool>,
+    usage: Arc<WorkerUsage>,
+    max_snapshot_bytes: usize,
+    max_ir_bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct WorkerUsage {
+    jobs: AtomicUsize,
+    snapshots: AtomicUsize,
+    ir: AtomicUsize,
+}
+
+struct UsageGuard {
+    usage: Arc<WorkerUsage>,
+    snapshot_bytes: usize,
+    ir_bytes: usize,
+}
+
+impl Drop for UsageGuard {
+    fn drop(&mut self) {
+        self.usage.jobs.fetch_sub(1, Ordering::AcqRel);
+        self.usage
+            .snapshots
+            .fetch_sub(self.snapshot_bytes, Ordering::AcqRel);
+        self.usage.ir.fetch_sub(self.ir_bytes, Ordering::AcqRel);
+    }
 }
 
 impl BackgroundCompiler {
@@ -38,6 +64,7 @@ impl BackgroundCompiler {
             max_pending_jobs,
             Duration::from_secs(30),
             usize::MAX,
+            usize::MAX,
         )
     }
 
@@ -46,6 +73,7 @@ impl BackgroundCompiler {
         worker_count: usize,
         max_pending_jobs: usize,
         compile_budget: Duration,
+        max_snapshot_bytes: usize,
         max_ir_bytes: usize,
     ) -> Result<Self, BackgroundCompilerError> {
         if worker_count == 0 || max_pending_jobs == 0 {
@@ -55,6 +83,7 @@ impl BackgroundCompiler {
         let receiver = Arc::new(Mutex::new(receiver));
         let completion_slot = Arc::new(Mutex::new(None));
         let cancelled = Arc::new(AtomicBool::new(false));
+        let usage = Arc::new(WorkerUsage::default());
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
@@ -63,6 +92,7 @@ impl BackgroundCompiler {
                 Arc::clone(&completion_slot);
             let cancelled = Arc::clone(&cancelled);
             let worker_budget = compile_budget;
+            let usage = Arc::clone(&usage);
             workers.push(
                 thread::Builder::new()
                     .name(format!("rquickjs-jit-{index}"))
@@ -70,6 +100,13 @@ impl BackgroundCompiler {
                         while let Ok(request) =
                             receiver.lock().unwrap_or_else(|p| p.into_inner()).recv()
                         {
+                            let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
+                            let ir_bytes = snapshot_bytes.saturating_mul(32);
+                            let _usage = UsageGuard {
+                                usage: Arc::clone(&usage),
+                                snapshot_bytes,
+                                ir_bytes,
+                            };
                             let sender = completion_slot
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
@@ -109,6 +146,9 @@ impl BackgroundCompiler {
             workers,
             completion_slot,
             cancelled,
+            usage,
+            max_snapshot_bytes,
+            max_ir_bytes,
         })
     }
 
@@ -128,17 +168,59 @@ impl BackgroundCompiler {
         let Some(request) = coordinator.begin_next() else {
             return Ok(false);
         };
+        let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
+        let ir_bytes = snapshot_bytes.saturating_mul(32);
+        if self
+            .usage
+            .snapshots
+            .load(Ordering::Acquire)
+            .saturating_add(snapshot_bytes)
+            > self.max_snapshot_bytes
+            || self
+                .usage
+                .ir
+                .load(Ordering::Acquire)
+                .saturating_add(ir_bytes)
+                > self.max_ir_bytes
+        {
+            coordinator.rollback_resource_limit(request);
+            coordinator.record_resource_limit_rejection();
+            return Ok(false);
+        }
+        self.usage.jobs.fetch_add(1, Ordering::AcqRel);
+        self.usage
+            .snapshots
+            .fetch_add(snapshot_bytes, Ordering::AcqRel);
+        self.usage.ir.fetch_add(ir_bytes, Ordering::AcqRel);
         match sender.try_send(request) {
             Ok(()) => Ok(true),
             Err(mpsc::TrySendError::Full(request)) => {
+                self.usage.jobs.fetch_sub(1, Ordering::AcqRel);
+                self.usage
+                    .snapshots
+                    .fetch_sub(snapshot_bytes, Ordering::AcqRel);
+                self.usage.ir.fetch_sub(ir_bytes, Ordering::AcqRel);
                 coordinator.rollback_dispatch(request);
                 Ok(false)
             }
             Err(mpsc::TrySendError::Disconnected(request)) => {
+                self.usage.jobs.fetch_sub(1, Ordering::AcqRel);
+                self.usage
+                    .snapshots
+                    .fetch_sub(snapshot_bytes, Ordering::AcqRel);
+                self.usage.ir.fetch_sub(ir_bytes, Ordering::AcqRel);
                 coordinator.rollback_dispatch(request);
                 Err(BackgroundCompilerError::Shutdown)
             }
         }
+    }
+
+    pub fn live_usage(&self) -> (usize, usize, usize) {
+        (
+            self.usage.jobs.load(Ordering::Acquire),
+            self.usage.snapshots.load(Ordering::Acquire),
+            self.usage.ir.load(Ordering::Acquire),
+        )
     }
 
     pub fn shutdown(&mut self, coordinator: &mut Coordinator) {

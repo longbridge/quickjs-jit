@@ -143,6 +143,7 @@ impl ProductionBackend {
             config.workers(),
             config.max_queue_len(),
             std::time::Duration::from_millis(config.compile_timeout_ms()),
+            config.max_snapshot_bytes(),
             config.max_ir_bytes(),
         )
         .map_err(|_| JitError::InvalidConfig("workers"))?;
@@ -167,6 +168,8 @@ impl ProductionBackend {
     fn maintenance(&mut self) {
         self.coordinator.drain_completions();
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
+        let (jobs, snapshots, ir) = self.workers.live_usage();
+        self.coordinator.set_worker_usage(jobs, snapshots, ir);
         let snapshot = self.coordinator.metrics();
         *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
         self.config.observe(&snapshot);
