@@ -1,6 +1,7 @@
 use std::{fs, io, path::Path};
 
 const QUICKJS_BASELINE_FNV64: u64 = 0x3302_116a_b0fc_269c;
+const EXPECTED_PATCHES: [(&str, u64); 1] = [("0001-rquickjs-jit.patch", 0x305b_e3c0_2c77_793e)];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
     "builtin-array-fromasync.h",
@@ -22,11 +23,28 @@ pub(crate) const BASELINE_FILES: [&str; 19] = [
     "quickjs.c",
     "quickjs.h",
 ];
-const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 4] = [
+const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("api-test.c", 0x7af4_1bd9_e9b2_68b4),
+    ("builtin-array-fromasync.h", 0xbfd4_3b62_5abd_4aaf),
+    ("builtin-iterator-zip-keyed.h", 0x4d42_cf0c_325c_04b1),
+    ("builtin-iterator-zip.h", 0xb222_0daf_80a0_cfd0),
+    ("cutils.h", 0x85f1_4868_bfc5_48be),
+    ("dtoa.c", 0x1aff_2cc2_d08c_f224),
+    ("dtoa.h", 0x602f_733b_bb27_f6e1),
+    ("libregexp-opcode.h", 0xcab9_d5af_847e_0e1d),
+    ("libregexp.c", 0x22cf_560e_7519_7e35),
+    ("libregexp.h", 0x67f0_39e8_b9b2_d548),
+    ("libunicode-table.h", 0x274f_4562_d305_7644),
+    ("libunicode.c", 0xf461_4418_33a0_a781),
+    ("libunicode.h", 0xfd4e_9ecf_f3c5_9c57),
+    ("list.h", 0xb337_70f7_b76d_a3d8),
+    ("quickjs-atom.h", 0x30b4_9116_b6a2_aa99),
+    ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
     ("quickjs.c", 0x9700_47a0_ca58_f454),
     ("quickjs-jit.h", 0xd531_9715_3b42_8610),
     ("quickjs-jit-helpers.h", 0xfc63_8662_ecd7_71c7),
+    ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
+    ("quickjs.h", 0x4831_2cde_9c2f_a5ee),
 ];
 
 pub fn apply_patch_set(source_dir: &Path, patch_dir: &Path) -> io::Result<()> {
@@ -42,22 +60,33 @@ pub fn apply_patch_set(source_dir: &Path, patch_dir: &Path) -> io::Result<()> {
     }
 
     let mut patches = fs::read_dir(patch_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "patch")
-        })
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    patches.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "patch")
+    });
+    patches.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    let actual_names = patches
+        .iter()
+        .map(|path| path.file_name().and_then(|name| name.to_str()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 patch filename"))?;
+    let expected_names = EXPECTED_PATCHES
+        .iter()
+        .map(|(name, _)| *name)
         .collect::<Vec<_>>();
-    patches.sort();
-    if patches.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no QuickJS integration patches found",
-        ));
+    if actual_names != expected_names {
+        return invalid("QuickJS patch-set manifest mismatch");
     }
-    for patch in patches {
-        apply_unified_patch(source_dir, &fs::read_to_string(patch)?)?;
+    for (patch, (_, expected_digest)) in patches.iter().zip(EXPECTED_PATCHES) {
+        let bytes = fs::read(patch)?;
+        if fnv1a64(&bytes) != expected_digest {
+            return invalid("QuickJS integration patch digest mismatch");
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "patch is not UTF-8"))?;
+        apply_unified_patch(source_dir, text)?;
     }
     for (file, expected) in PATCHED_FILE_FINGERPRINTS {
         let actual = fnv1a64(&fs::read(source_dir.join(file))?);
@@ -115,6 +144,12 @@ fn apply_unified_patch(root: &Path, patch: &str) -> io::Result<()> {
         let path = new_path.as_deref().or(old_path.as_deref()).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "patch has no target path")
         })?;
+        if !PATCHED_FILE_FINGERPRINTS
+            .iter()
+            .any(|(allowed, _)| *allowed == path)
+        {
+            return invalid("patch targets a file outside the pinned source manifest");
+        }
         let original = match old_path {
             Some(_) => fs::read_to_string(root.join(path))?,
             None => String::new(),
