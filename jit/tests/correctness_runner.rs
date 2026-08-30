@@ -6,6 +6,7 @@ use rquickjs_jit::correctness::{
     NegativePhase, RunMode, StructuredProgram, SuiteReport, Test262Variant,
 };
 use std::fs;
+use std::path::Path;
 
 const FULL_METADATA: &str = r#"
 /*---
@@ -150,17 +151,34 @@ fn structured_programs_are_seeded_terminating_and_shrinkable() {
 #[test]
 fn every_fuzz_seed_has_current_version_and_opcode_fingerprint() {
     const PREFIX: &[u8] = b"QJSJFZ01:05d5c0867521c077:";
-    for seed in [
-        include_bytes!("../fuzz/corpus/snapshot/v1-opcodes").as_slice(),
-        include_bytes!("../fuzz/corpus/verifier/v1-opcodes"),
-        include_bytes!("../fuzz/corpus/differential/v1-opcodes"),
-        include_bytes!("../fuzz/corpus/frame_state/v1-opcodes"),
-        include_bytes!("../fuzz/corpus/lowering/v1-opcodes"),
-        include_bytes!("../fuzz/corpus/relocations/v1-opcodes"),
-    ] {
-        assert!(seed.starts_with(PREFIX));
-        assert!(seed.len() > PREFIX.len());
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus");
+    let mut pending = vec![corpus];
+    let mut checked = 0;
+
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) != Some("README.md") {
+                let seed = std::fs::read(&path).unwrap();
+                assert!(
+                    seed.starts_with(PREFIX),
+                    "{} lacks the current fuzz format and opcode fingerprint",
+                    path.display()
+                );
+                assert!(
+                    seed.len() > PREFIX.len(),
+                    "{} has no seed payload",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
     }
+
+    assert!(checked > 0, "the fuzz corpus must contain fixed seeds");
 }
 
 #[test]
