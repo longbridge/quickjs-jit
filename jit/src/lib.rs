@@ -496,6 +496,7 @@ struct ProductionEntryPin {
     pc: u32,
     stack_map_count: u32,
     osr: Option<runtime::OsrMap>,
+    deopt_sites: Box<[(ir::OptimizedFrameShape, ir::DeoptMap)]>,
     validation: Arc<OsrValidationMetrics>,
     #[cfg(feature = "test-support")]
     stress_gc: bool,
@@ -685,7 +686,28 @@ unsafe extern "C" fn production_entry_trampoline(
     apply_stress_gc_after_validation(frame, pin.stress_gc, valid);
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
     let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
-    unsafe { native(frame as *const _ as *mut _) }
+    let mut exit = unsafe { native(frame as *const _ as *mut _) };
+    if exit.kind != qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+        return exit;
+    }
+    let Some(guard) = exit.reserved.checked_sub(1) else {
+        return retry_exit();
+    };
+    let Some(resume_pc) = (exit.resume_pc as usize)
+        .checked_sub(frame.bytecode_start as usize)
+        .and_then(|pc| u32::try_from(pc).ok())
+    else {
+        return retry_exit();
+    };
+    if !pin.deopt_sites.iter().any(|(shape, map)| {
+        map.guard() == guard && map.resume_pc() == resume_pc && map.validate(*shape).is_ok()
+    }) {
+        return retry_exit();
+    }
+    /* The one-based identity is internal to the pinned backend artifact. C's
+     * stable ABI keeps this field reserved and receives only validated zero. */
+    exit.reserved = 0;
+    exit
 }
 
 #[cfg(all(test, feature = "compiler", not(target_family = "wasm")))]
@@ -1315,6 +1337,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let entry = published.as_ptr();
         let stack_map_count = published.required_stack_map_count();
         let artifact_key = pin.artifact().key();
+        let deopt_sites: Box<[(ir::OptimizedFrameShape, ir::DeoptMap)]> =
+            pin.artifact().optimized_metadata().map_or_else(
+                || Vec::new().into_boxed_slice(),
+                |metadata| metadata.deopt_sites().to_vec().into_boxed_slice(),
+            );
         let pin = Box::into_raw(Box::new(ProductionEntryPin {
             execution: pin,
             native: entry,
@@ -1323,6 +1350,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             pc,
             stack_map_count,
             osr: osr_map,
+            deopt_sites,
             validation: Arc::clone(&self.osr_validation),
             #[cfg(feature = "test-support")]
             stress_gc: self.config.stress_gc(),

@@ -3392,8 +3392,15 @@ fn emit_exit(
     pointer_type: cranelift_codegen::ir::Type,
 ) {
     let flags = MemFlags::new();
+    /* Tier 2's first exact entry guard owns deopt-map zero. The wire value is
+     * one-based so zero remains the non-deopt/reserved sentinel. */
+    let map_identity = if kind == qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+        1
+    } else {
+        0
+    };
     let kind = builder.ins().iconst(types::I32, i64::from(kind));
-    let zero32 = builder.ins().iconst(types::I32, 0);
+    let zero32 = builder.ins().iconst(types::I32, map_identity);
     let zero_pointer = builder.ins().iconst(pointer_type, 0);
     builder.ins().store(flags, kind, sret, 0);
     builder.ins().store(flags, zero32, sret, 4);
