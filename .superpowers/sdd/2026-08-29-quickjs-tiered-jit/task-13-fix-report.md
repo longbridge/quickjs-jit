@@ -87,3 +87,6 @@ Verification on Linux x86_64:
 - Task 13 files pass rustfmt and `git diff --check`
 - whole-workspace fmt/clippy was temporarily affected by concurrent, uncommitted
   Task 14 benchmark/profitability files; no Task 14 file is included here
+
+Implementation commit: `425f908`. The commit contains only Task 13 correctness,
+runner, randomized-input, CI, corpus, and evidence files.
