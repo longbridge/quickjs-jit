@@ -106,3 +106,15 @@ required-features = ["compiler", "test-support"]
 [[test]]
 name = "deopt"
 required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "background"
+required-features = ["test-support"]
+
+[[test]]
+name = "osr"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "test262"
+required-features = ["compiler", "test-support"]
