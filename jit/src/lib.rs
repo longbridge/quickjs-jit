@@ -8,6 +8,7 @@ pub mod bytecode;
 pub mod code_cache;
 pub mod compiler;
 mod config;
+pub mod correctness;
 mod error;
 #[cfg(feature = "compiler")]
 pub mod ir;

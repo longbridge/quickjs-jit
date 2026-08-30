@@ -5,10 +5,15 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
+use rquickjs::{Context, Runtime};
 use rquickjs_jit::bytecode::{
     linked_opcode_table, tier1_policy, FallbackReason, HelperId, Tier1Policy,
 };
 use rquickjs_jit::test_support::{assert_tier1_rejected, differential};
+use rquickjs_jit::{
+    correctness::{canonical_observation_source, StructuredProgram},
+    JitRuntime,
+};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -276,5 +281,27 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             .expect_executed_opcode(opcode)
             .expect_helper(helper)
             .assert_same();
+    }
+}
+
+#[test]
+fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
+    for seed in 0..64 {
+        let program = StructuredProgram::generate(seed, 32);
+        let source = canonical_observation_source(program.source());
+        let interpreter = Runtime::new().unwrap();
+        let expected = Context::full(&interpreter)
+            .unwrap()
+            .with(|ctx| ctx.eval::<String, _>(source.as_str()).unwrap());
+        let automatic = JitRuntime::builder().build().unwrap();
+        let actual = Context::full(&automatic)
+            .unwrap()
+            .with(|ctx| ctx.eval::<String, _>(source.as_str()).unwrap());
+        assert_eq!(
+            actual,
+            expected,
+            "seed {seed}; minimize with fuel {}",
+            program.fuel()
+        );
     }
 }

@@ -14,6 +14,9 @@ rquickjs-sys = { path = "../sys", features = ["jit-abi"] }
 
 [dependencies]
 rquickjs-core = { path = "../core", features = ["jit-abi"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
 
 [target.'cfg(all(target_endian = "little", any(target_os = "linux", target_os = "macos"), any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 libc = "0.2"
@@ -40,8 +43,6 @@ target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
 rquickjs = { path = "..", features = ["jit-abi", "loader"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 static_assertions = "1"
 trybuild = "1"
 
