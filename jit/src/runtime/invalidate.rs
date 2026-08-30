@@ -32,7 +32,7 @@ struct DependencyNode {
     dependencies: BTreeSet<DependencyKey>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DependencyGraph {
     nodes: BTreeMap<DependencyKey, DependencyNode>,
     reverse: BTreeMap<DependencyKey, BTreeSet<DependencyKey>>,
@@ -53,9 +53,12 @@ impl DependencyGraph {
             return Err(DependencyError::VersionRegression);
         }
         let dependencies = dependencies.into_iter().collect::<BTreeSet<_>>();
-        if dependencies
-            .iter()
-            .any(|dependency| self.nodes.get(dependency).is_some_and(|node| !node.valid))
+        if dependencies.iter().any(|dependency| {
+            !self
+                .nodes
+                .get(dependency)
+                .is_some_and(|node| node.valid)
+        })
         {
             return Err(DependencyError::StaleDependency);
         }

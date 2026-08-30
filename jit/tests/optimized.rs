@@ -105,14 +105,14 @@ fn local_cse_and_dce_are_effect_free_and_bounded() {
 }
 
 #[test]
-fn dependency_invalidation_is_transitive_cycle_safe_and_generation_exact() {
+fn dependency_invalidation_is_transitive_and_generation_exact() {
     let a = DependencyKey::function(FunctionKey::new(1, 1));
     let b = DependencyKey::function(FunctionKey::new(2, 1));
     let c = DependencyKey::function(FunctionKey::new(3, 1));
     let mut graph = DependencyGraph::default();
-    graph.install(a, 1, [b]).unwrap();
+    graph.install(c, 1, []).unwrap();
     graph.install(b, 1, [c]).unwrap();
-    graph.install(c, 1, [a]).unwrap();
+    graph.install(a, 1, [b]).unwrap();
 
     let invalidated = graph.invalidate(c);
     assert_eq!(invalidated.len(), 3);

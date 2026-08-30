@@ -95,6 +95,37 @@ fn retiring_an_installed_dependency_retires_itself_and_transitive_dependents() {
 }
 
 #[test]
+fn stale_dependency_rejects_artifact_before_publication() {
+    let mut coordinator = Coordinator::with_limits(8, 8, 4, 64);
+    let key = FunctionKey::new(111, 1);
+    let missing = FunctionKey::new(112, 1);
+    coordinator
+        .queue(missing, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let _missing_in_flight = coordinator.begin_next().unwrap();
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    let artifact = CompiledArtifact::empty(request.artifact_key())
+        .with_dependencies(vec![ArtifactDependency::new(missing)]);
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Ok(artifact),
+    });
+
+    assert!(matches!(
+        coordinator.state(key),
+        CompileState::Backoff { attempts: 1, .. }
+    ));
+    assert_eq!(coordinator.cache_len(), 0);
+    assert_eq!(coordinator.metrics().installed, 0);
+}
+
+#[test]
 fn repeated_failures_blacklist_only_the_generation() {
     let mut coordinator = coordinator(4);
     let key = FunctionKey::new(9, 1);

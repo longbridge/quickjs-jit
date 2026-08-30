@@ -634,8 +634,23 @@ impl Coordinator {
                     self.record_failure(completion.key, completion.requested_tier);
                     return;
                 }
+                let mut staged_dependencies = self.dependencies.clone();
+                if staged_dependencies
+                    .install(
+                        DependencyKey::function(completion.key),
+                        completion.key.generation,
+                        dependency_versions
+                            .iter()
+                            .map(|(dependency, _)| *dependency),
+                    )
+                    .is_err()
+                {
+                    self.record_failure(completion.key, completion.requested_tier);
+                    return;
+                }
                 match install::publish(&mut self.cache, artifact) {
                     Ok(insert) => {
+                        self.dependencies = staged_dependencies;
                         for evicted in insert.evictions() {
                             self.record_eviction(*evicted);
                         }
@@ -657,13 +672,6 @@ impl Coordinator {
                             self.metrics.dead_nodes_eliminated =
                                 self.metrics.dead_nodes_eliminated.saturating_add(dead);
                         }
-                        let _ = self.dependencies.install(
-                            DependencyKey::function(completion.key),
-                            completion.key.generation,
-                            dependency_versions
-                                .iter()
-                                .map(|(dependency, _)| *dependency),
-                        );
                     }
                     Err(_) => self.record_failure(completion.key, completion.requested_tier),
                 }
