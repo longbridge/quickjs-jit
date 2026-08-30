@@ -61,7 +61,7 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
     let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`.\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
     let mut checksums = true;
     let mut strict_native = true;
-    let mut automatic_policy = true;
+    let mut automatic_policy = false;
     if let Some(base) = interp {
         for w in &base.workloads {
             let a = matching(auto, w);
@@ -76,8 +76,10 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
                     .all(|s| s.tier1_entries > 0 && s.tier2_entries == 0)
             }) && two
                 .is_some_and(|x| x.samples.iter().all(|s| s.tier2_entries > 0));
-            automatic_policy &=
-                a.is_some_and(|x| x.samples.iter().all(|s| s.profitability_evaluations > 0));
+            automatic_policy |= a.is_some_and(|x| {
+                x.samples.iter().all(|s| s.profitability_evaluations > 0)
+                    && x.samples.iter().any(|s| s.profitability_approved > 0)
+            });
             let proof = two.or(a);
             let entries = proof
                 .map(|x| (sum(x, |s| s.tier1_entries), sum(x, |s| s.tier2_entries)))

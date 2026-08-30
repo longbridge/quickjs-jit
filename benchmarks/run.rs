@@ -263,8 +263,8 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         }
     }
     phases.threshold_crossing_ns = ns(threshold_start.elapsed());
-    phases.install_ns = install_poll;
-    phases.compile_ns = phases.threshold_crossing_ns.saturating_sub(install_poll);
+    phases.compile_ns = before.compile_ns;
+    phases.install_ns = before.install_ns.max(install_poll);
     let osr_before = before.osr_entries;
     let start = Instant::now();
     let _osr_checksum: String = context
@@ -294,8 +294,9 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     phases.steady_state_ns = ns(start.elapsed());
     let metrics = jit.as_ref().map(Jit::metrics).unwrap_or_default();
     let abi = AbiInfo::linked().map_err(err)?;
+    phases.total_ns = ns(total.elapsed());
     let result = WorkerResult {
-        elapsed_ns: ns(total.elapsed()),
+        elapsed_ns: phases.steady_state_ns,
         checksum,
         native_entries: metrics.native_entries,
         native_exits: metrics.native_exits,

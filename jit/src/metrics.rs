@@ -56,6 +56,8 @@ pub struct JitMetrics {
     pub profitability_rejected: u64,
     pub benefit_recordings: u64,
     pub measured_benefit_ns: u64,
+    pub compile_ns: u64,
+    pub install_ns: u64,
 }
 
 impl JitMetrics {
@@ -114,6 +116,8 @@ impl JitMetrics {
             profitability_rejected: 0,
             benefit_recordings: 0,
             measured_benefit_ns: 0,
+            compile_ns: 0,
+            install_ns: 0,
         }
     }
 

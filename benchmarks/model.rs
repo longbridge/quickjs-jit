@@ -45,6 +45,7 @@ pub struct ModeResult {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PhaseTiming {
+    pub total_ns: u64,
     pub runtime_create_ns: u64,
     pub jit_attach_ns: u64,
     pub context_create_ns: u64,

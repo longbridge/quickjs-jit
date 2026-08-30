@@ -498,8 +498,38 @@ struct ProductionBackend {
     profitability_rejected: u64,
     benefit_recordings: u64,
     measured_benefit_ns: u64,
+    compiler_measurements: Arc<CompilerMeasurements>,
+    install_ns: u64,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Default)]
+struct CompilerMeasurements {
+    elapsed_ns: AtomicU64,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct MeasuredCompiler<C> {
+    inner: C,
+    measurements: Arc<CompilerMeasurements>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl<C: compiler::Compiler> compiler::Compiler for MeasuredCompiler<C> {
+    fn compile(
+        &self,
+        request: runtime::CompileRequest,
+    ) -> Result<code_cache::CompiledArtifact, compiler::CompileFailure> {
+        let started = std::time::Instant::now();
+        let result = self.inner.compile(request);
+        self.measurements.elapsed_ns.fetch_add(
+            started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        result
+    }
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -1018,7 +1048,11 @@ impl ProductionBackend {
     ) -> Result<Self, JitError> {
         let identity_compiler = compiler::baseline::BaselineCompiler::host();
         let environment = artifact_environment(runtime_id, info, &config, &identity_compiler);
-        let compiler = Arc::new(compiler::optimized::TieredCompiler::host());
+        let compiler_measurements = Arc::new(CompilerMeasurements::default());
+        let compiler = Arc::new(MeasuredCompiler {
+            inner: compiler::optimized::TieredCompiler::host(),
+            measurements: Arc::clone(&compiler_measurements),
+        });
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
             compiler,
             config.workers(),
@@ -1078,6 +1112,8 @@ impl ProductionBackend {
             profitability_rejected: 0,
             benefit_recordings: 0,
             measured_benefit_ns: 0,
+            compiler_measurements,
+            install_ns: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
@@ -1086,7 +1122,18 @@ impl ProductionBackend {
     fn maintenance(&mut self) {
         self.clock = self.clock.saturating_add(1);
         self.coordinator.advance_clock(self.clock);
+        let installed_before = self.coordinator.metrics().installed;
+        let install_started = std::time::Instant::now();
         self.coordinator.drain_completions();
+        if self.coordinator.metrics().installed > installed_before {
+            self.install_ns = self.install_ns.saturating_add(
+                install_started
+                    .elapsed()
+                    .as_nanos()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            );
+        }
         let ready_for_tier2 = self
             .optimizing_snapshots
             .keys()
@@ -1196,6 +1243,11 @@ impl ProductionBackend {
         snapshot.profitability_rejected = self.profitability_rejected;
         snapshot.benefit_recordings = self.benefit_recordings;
         snapshot.measured_benefit_ns = self.measured_benefit_ns;
+        snapshot.compile_ns = self
+            .compiler_measurements
+            .elapsed_ns
+            .load(Ordering::Relaxed);
+        snapshot.install_ns = self.install_ns;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
