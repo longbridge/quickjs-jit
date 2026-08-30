@@ -162,4 +162,31 @@ mod hotness_tests {
             ProfitabilityRationale::FixedPolicy
         );
     }
+
+    #[test]
+    fn automatic_trial_requires_measured_baseline_and_positive_modeled_benefit() {
+        let cold = Profile {
+            bytecodes: 10_000,
+            ..Profile::default()
+        };
+        assert_eq!(
+            Profitability::default().evaluate_trial(cold).tier,
+            Decision::Baseline
+        );
+        let measured = Profile {
+            bytecodes: 10_000,
+            helper_calls: 2,
+            compile_ns: 10_000,
+            executions: 16,
+            baseline_ns: 1_600_000,
+            code_bytes: 512,
+            ..Profile::default()
+        };
+        let decision = Profitability::default().evaluate_trial(measured);
+        assert_eq!(decision.tier, Decision::Optimize);
+        assert_eq!(
+            decision.rationale,
+            ProfitabilityRationale::PositiveAmortizedBenefit
+        );
+    }
 }

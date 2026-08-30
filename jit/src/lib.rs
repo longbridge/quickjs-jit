@@ -491,8 +491,26 @@ struct ProductionBackend {
     adaptive_inputs_recorded: u64,
     snapshot_requests: u64,
     stable_path_compile_requests: u64,
+    execution_starts: std::collections::HashMap<runtime::FunctionKey, Vec<std::time::Instant>>,
+    execution_profiles: std::collections::HashMap<runtime::FunctionKey, ProductionProfile>,
+    profitability_evaluations: u64,
+    profitability_approved: u64,
+    profitability_rejected: u64,
+    benefit_recordings: u64,
+    measured_benefit_ns: u64,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProductionProfile {
+    bytecodes: u64,
+    helper_calls: u64,
+    baseline_executions: u64,
+    baseline_ns: u64,
+    optimized_executions: u64,
+    optimized_ns: u64,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -1053,6 +1071,13 @@ impl ProductionBackend {
             adaptive_inputs_recorded: 0,
             snapshot_requests: 0,
             stable_path_compile_requests: 0,
+            execution_starts: std::collections::HashMap::new(),
+            execution_profiles: std::collections::HashMap::new(),
+            profitability_evaluations: 0,
+            profitability_approved: 0,
+            profitability_rejected: 0,
+            benefit_recordings: 0,
+            measured_benefit_ns: 0,
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
@@ -1081,6 +1106,39 @@ impl ProductionBackend {
         } else {
             ready_for_tier2
         } {
+            #[cfg(feature = "test-support")]
+            let forced = self.config.force_optimized();
+            #[cfg(not(feature = "test-support"))]
+            let forced = false;
+            if !forced {
+                let measured = self
+                    .execution_profiles
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_default();
+                let profile = runtime::Profile {
+                    bytecodes: measured.bytecodes,
+                    helper_calls: measured.helper_calls,
+                    compile_ns: measured
+                        .bytecodes
+                        .saturating_mul(100)
+                        .saturating_add(10_000),
+                    executions: measured.baseline_executions,
+                    baseline_ns: measured.baseline_ns,
+                    code_bytes: measured.bytecodes.saturating_mul(8),
+                    ..runtime::Profile::default()
+                };
+                self.profitability_evaluations = self.profitability_evaluations.saturating_add(1);
+                if runtime::Profitability::default()
+                    .evaluate_trial(profile)
+                    .tier
+                    != runtime::Decision::Optimize
+                {
+                    self.profitability_rejected = self.profitability_rejected.saturating_add(1);
+                    continue;
+                }
+                self.profitability_approved = self.profitability_approved.saturating_add(1);
+            }
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
                 #[cfg(feature = "test-support")]
                 let feedback = if self.config.force_optimized() {
@@ -1133,6 +1191,11 @@ impl ProductionBackend {
         snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
         snapshot.snapshot_requests = self.snapshot_requests;
         snapshot.stable_path_compile_requests = self.stable_path_compile_requests;
+        snapshot.profitability_evaluations = self.profitability_evaluations;
+        snapshot.profitability_approved = self.profitability_approved;
+        snapshot.profitability_rejected = self.profitability_rejected;
+        snapshot.benefit_recordings = self.benefit_recordings;
+        snapshot.measured_benefit_ns = self.measured_benefit_ns;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
@@ -1367,6 +1430,20 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             instruction_count: verified.instructions().len().try_into().unwrap_or(u32::MAX),
             measured_work: None,
         };
+        let profile = self.execution_profiles.entry(key).or_default();
+        profile.bytecodes = verified.instructions().len().try_into().unwrap_or(u64::MAX);
+        profile.helper_calls = verified
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                matches!(
+                    bytecode::tier1_policy(instruction.opcode().id()),
+                    Some(bytecode::Tier1Policy::Helper(_))
+                )
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u64::MAX);
         self.adaptive_inputs_recorded = self.adaptive_inputs_recorded.saturating_add(1);
         debug_assert_eq!(
             adaptive.thresholds().rationale,
@@ -1518,10 +1595,43 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
+        self.execution_starts
+            .entry(runtime::FunctionKey::new(_id, _generation))
+            .or_default()
+            .push(std::time::Instant::now());
     }
 
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
+        let key = runtime::FunctionKey::new(id, generation);
+        if let Some(start) = self.execution_starts.get_mut(&key).and_then(Vec::pop) {
+            let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
+            let optimized = matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Installed(_)
+            );
+            let profile = self.execution_profiles.entry(key).or_default();
+            if optimized {
+                profile.optimized_executions = profile.optimized_executions.saturating_add(1);
+                profile.optimized_ns = profile.optimized_ns.saturating_add(elapsed);
+                if let Some(baseline_average) =
+                    profile.baseline_ns.checked_div(profile.baseline_executions)
+                {
+                    let saved = baseline_average.saturating_sub(elapsed);
+                    if saved != 0
+                        && self
+                            .coordinator
+                            .record_benefit(key, runtime::Tier::Optimizing, saved)
+                    {
+                        self.benefit_recordings = self.benefit_recordings.saturating_add(1);
+                        self.measured_benefit_ns = self.measured_benefit_ns.saturating_add(saved);
+                    }
+                }
+            } else {
+                profile.baseline_executions = profile.baseline_executions.saturating_add(1);
+                profile.baseline_ns = profile.baseline_ns.saturating_add(elapsed);
+            }
+        }
         self.coordinator
             .record_side_path_entries(self.osr_validation.take_side_path_entries());
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {

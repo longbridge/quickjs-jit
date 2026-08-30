@@ -51,6 +51,11 @@ pub struct JitMetrics {
     pub cse_eliminated: u64,
     pub dead_nodes_eliminated: u64,
     pub dependency_invalidations: u64,
+    pub profitability_evaluations: u64,
+    pub profitability_approved: u64,
+    pub profitability_rejected: u64,
+    pub benefit_recordings: u64,
+    pub measured_benefit_ns: u64,
 }
 
 impl JitMetrics {
@@ -104,6 +109,11 @@ impl JitMetrics {
             cse_eliminated: 0,
             dead_nodes_eliminated: 0,
             dependency_invalidations: 0,
+            profitability_evaluations: 0,
+            profitability_approved: 0,
+            profitability_rejected: 0,
+            benefit_recordings: 0,
+            measured_benefit_ns: 0,
         }
     }
 

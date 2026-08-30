@@ -3,23 +3,24 @@ schema = 1
 [[suite]]
 name = "quickjs-ng"
 repository = "https://github.com/quickjs-ng/quickjs.git"
-commit = "submodule:sys/quickjs"
-subdirectory = "tests/benchmark"
+commit = "ddf43e5e9872538a2c1ef693b84424beb0163195"
+subdirectory = "tests/microbench.js:int_arith"
 license = "MIT"
-sha256 = "resolved-from-pinned-submodule"
+upstream_sha256 = "8745b6b1d616153ba1f0a19349ee37e6d83804af25062d0ee7451f6d6edaad6c"
+adapted_sha256 = "e9f1fcb85664ed4c36b35c30dc5a301055ced995153a50bfdbc16366e8866b24"
 
 [[suite]]
 name = "sunspider"
 repository = "https://github.com/WebKit/WebKit.git"
-commit = "not-imported"
+commit = "excluded-not-imported"
 subdirectory = "PerformanceTests/SunSpider"
 license = "BSD-2-Clause"
-sha256 = "not-imported"
+sha256 = "excluded-not-imported"
 
 [[suite]]
 name = "jetstream"
 repository = "https://github.com/WebKit/Speedometer.git"
-commit = "not-imported"
+commit = "excluded-not-imported"
 subdirectory = "resources/tests/JetStream3"
 license = "BSD-2-Clause"
-sha256 = "not-imported"
+sha256 = "excluded-not-imported"

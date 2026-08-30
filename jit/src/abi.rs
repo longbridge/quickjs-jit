@@ -134,15 +134,15 @@ impl AbiInfo {
         self.raw.little_endian != 0
     }
 
-    pub(crate) const fn source_revision(&self) -> u64 {
+    pub const fn source_revision(&self) -> u64 {
         self.raw.source_revision
     }
 
-    pub(crate) const fn opcode_fingerprint(&self) -> u64 {
+    pub const fn opcode_fingerprint(&self) -> u64 {
         self.raw.opcode_fingerprint
     }
 
-    pub(crate) const fn build_fingerprint(&self) -> u64 {
+    pub const fn build_fingerprint(&self) -> u64 {
         self.raw.build_fingerprint
     }
 

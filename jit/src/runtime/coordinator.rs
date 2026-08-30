@@ -999,6 +999,14 @@ impl Coordinator {
     pub fn record_tier2_entry(&mut self) {
         self.metrics.tier2_entries = self.metrics.tier2_entries.saturating_add(1);
     }
+
+    /// Feeds observed time saved by an installed artifact into cache eviction.
+    pub fn record_benefit(&mut self, key: FunctionKey, tier: Tier, saved_ns: u64) -> bool {
+        let Some(artifact) = self.installed_keys.get(&(key, tier)).copied() else {
+            return false;
+        };
+        self.cache.record_benefit(artifact, saved_ns).is_ok()
+    }
     pub fn record_side_path_entries(&mut self, count: u64) {
         self.metrics.side_path_entries = self.metrics.side_path_entries.saturating_add(count);
     }

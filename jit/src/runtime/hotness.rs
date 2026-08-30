@@ -130,6 +130,35 @@ impl Profitability {
         }
         .with_break_even(break_even)
     }
+
+    /// Decides whether production should pay for an initial Tier-2 compile.
+    ///
+    /// Tier-2 time cannot exist before the first compile, so this deliberately
+    /// uses measured baseline time plus a conservative, documented 25% saving
+    /// model. Once Tier-2 runs, `evaluate` replaces the model with observations.
+    pub fn evaluate_trial(self, mut profile: Profile) -> ProfitabilityDecision {
+        if let Some(tier) = self.fixed {
+            return decision(tier, ProfitabilityRationale::FixedPolicy, 0, 0, 0, 0);
+        }
+        if profile.executions < 8 || profile.baseline_ns == 0 || profile.bytecodes == 0 {
+            return decision(
+                Decision::Baseline,
+                ProfitabilityRationale::InsufficientMeasurement,
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+        let baseline_per_execution = profile.baseline_ns / profile.executions;
+        let modeled_optimized = baseline_per_execution.saturating_mul(3) / 4;
+        profile.interpreter_ns = profile.baseline_ns.saturating_mul(2);
+        profile.optimized_ns = modeled_optimized.saturating_mul(profile.executions);
+        // The trial-specific helper gate above has already classified this
+        // profile; avoid applying the stricter post-trial gate a second time.
+        profile.helper_calls = 0;
+        self.evaluate(profile)
+    }
 }
 
 const fn ceil_div(numerator: u64, denominator: u64) -> u64 {

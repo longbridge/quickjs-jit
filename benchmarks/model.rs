@@ -13,6 +13,8 @@ pub struct BenchmarkFile {
 pub struct Provenance {
     pub source_revision: String,
     pub quickjs_revision: String,
+    pub source_dirty: bool,
+    pub command: Vec<String>,
     pub target: String,
     pub os: String,
     pub kernel: String,
@@ -21,6 +23,8 @@ pub struct Provenance {
     pub rustc: String,
     pub llvm: String,
     pub executable_bytes: u64,
+    pub schema_sha256: String,
+    pub suites_lock_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30,6 +34,7 @@ pub struct SamplingPolicy {
     pub throughput_windows: u32,
     pub throughput_window_ns: u64,
     pub bootstrap_resamples: u32,
+    pub pairing: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -38,18 +43,24 @@ pub struct ModeResult {
     pub workloads: Vec<WorkloadResult>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PhaseTiming {
+    pub runtime_create_ns: u64,
+    pub jit_attach_ns: u64,
+    pub context_create_ns: u64,
+    pub definition_eval_ns: u64,
+    pub first_eval_ns: u64,
+    pub threshold_crossing_ns: u64,
+    pub compile_ns: u64,
+    pub install_ns: u64,
+    pub osr_ns: u64,
+    pub steady_state_ns: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkloadResult {
-    pub name: String,
-    pub group: String,
-    pub designated_kernel: bool,
-    pub raw_latency_ns: Vec<u64>,
-    pub raw_throughput_ops: Vec<u64>,
-    pub median_ns: u64,
-    pub mad_ns: u64,
-    pub p95_ns: u64,
-    pub p99_ns: u64,
-    pub ci95_ns: [u64; 2],
+pub struct SampleEvidence {
+    pub pair_index: u32,
+    pub elapsed_ns: u64,
     pub checksum: String,
     pub native_entries: u64,
     pub native_exits: u64,
@@ -57,14 +68,40 @@ pub struct WorkloadResult {
     pub retry_count: u64,
     pub tier1_entries: u64,
     pub tier2_entries: u64,
-    pub osr_entries: u64,
-    pub compile_ns: u64,
-    pub install_ns: u64,
-    pub break_even_executions: Option<u64>,
+    pub pc_entries: u64,
+    pub helper_exits: u64,
+    pub profitability_evaluations: u64,
+    pub profitability_approved: u64,
+    pub profitability_rejected: u64,
+    pub benefit_recordings: u64,
+    pub measured_benefit_ns: u64,
+    pub opcode_fingerprint: u64,
+    pub abi_fingerprint: u64,
+    pub config_fingerprint: u64,
     pub peak_rss_bytes: u64,
     pub code_bytes: u64,
     pub metadata_bytes: u64,
     pub peak_compiler_bytes: u64,
+    pub phases: PhaseTiming,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkloadResult {
+    pub name: String,
+    pub suite: String,
+    pub group: String,
+    pub designated_kernel: bool,
+    pub samples: Vec<SampleEvidence>,
+    pub raw_latency_ns: Vec<u64>,
+    pub raw_throughput_ops: Vec<u64>,
+    pub median_ns: u64,
+    pub mad_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub ci95_ns: [u64; 2],
+    pub compile_ns: u64,
+    pub install_ns: u64,
+    pub break_even_executions: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,23 +111,36 @@ pub struct Exclusion {
     pub reason: String,
 }
 
-#[allow(dead_code)] // Used by the runner binary; the reporter shares this schema module.
+#[allow(dead_code)]
 pub fn summarize(mut raw: Vec<u64>) -> (u64, u64, u64, u64, [u64; 2]) {
     raw.sort_unstable();
     let median = quantile(&raw, 0.5);
     let mut deviations = raw.iter().map(|x| x.abs_diff(median)).collect::<Vec<_>>();
     deviations.sort_unstable();
-    let mad = quantile(&deviations, 0.5);
     let ci = bootstrap_median_ci(&raw, 10_000);
-    (median, mad, quantile(&raw, 0.95), quantile(&raw, 0.99), ci)
+    (
+        median,
+        quantile(&deviations, 0.5),
+        quantile(&raw, 0.95),
+        quantile(&raw, 0.99),
+        ci,
+    )
 }
 
-#[allow(dead_code)]
-pub fn quantile(values: &[u64], quantile: f64) -> u64 {
+pub fn quantile(values: &[u64], q: f64) -> u64 {
     if values.is_empty() {
         return 0;
     }
-    let index = ((values.len() - 1) as f64 * quantile).ceil() as usize;
+    let index = ((values.len() - 1) as f64 * q).ceil() as usize;
+    values[index.min(values.len() - 1)]
+}
+
+#[allow(dead_code)]
+pub fn quantile_f64(values: &[f64], q: f64) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let index = ((values.len() - 1) as f64 * q).ceil() as usize;
     values[index.min(values.len() - 1)]
 }
 
@@ -104,9 +154,7 @@ pub fn bootstrap_median_ci(values: &[u64], resamples: usize) -> [u64; 2] {
     let mut sample = vec![0; values.len()];
     for _ in 0..resamples {
         for slot in &mut sample {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
+            state = xorshift(state);
             *slot = values[(state as usize) % values.len()];
         }
         sample.sort_unstable();
@@ -114,6 +162,12 @@ pub fn bootstrap_median_ci(values: &[u64], resamples: usize) -> [u64; 2] {
     }
     medians.sort_unstable();
     [quantile(&medians, 0.025), quantile(&medians, 0.975)]
+}
+
+pub fn xorshift(mut state: u64) -> u64 {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^ (state << 17)
 }
 
 #[cfg(test)]
