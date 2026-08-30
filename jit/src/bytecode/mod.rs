@@ -291,7 +291,7 @@ impl CompileSnapshot {
         self
     }
 
-    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
     pub fn with_exception_map(mut self, exception_map: Vec<u8>) -> Self {
         Arc::make_mut(&mut self.data).exception_map = exception_map;
         self

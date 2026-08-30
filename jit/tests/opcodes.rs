@@ -2,6 +2,17 @@ use rquickjs_jit::bytecode::{
     audited_opcode_policy_table, linked_opcode_table, tier1_policy, FallbackReason, HelperId,
     Tier1Policy, GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
 };
+use serde::Deserialize;
+use std::collections::BTreeSet;
+
+#[derive(Deserialize)]
+struct Manifest {
+    cases: Vec<Case>,
+}
+#[derive(Deserialize)]
+struct Case {
+    opcode: String,
+}
 
 #[test]
 fn every_authoritative_opcode_has_exactly_one_generated_policy() {
@@ -40,6 +51,28 @@ fn audited_policy_is_a_closed_per_id_table_not_a_name_default() {
 }
 
 #[test]
+fn manifest_has_exactly_one_case_for_every_advertised_opcode() {
+    let manifest: Manifest =
+        serde_json::from_str(include_str!("fixtures/opcode-cases.json")).unwrap();
+    let cases: BTreeSet<_> = manifest
+        .cases
+        .iter()
+        .map(|case| case.opcode.as_str())
+        .collect();
+    assert_eq!(
+        cases.len(),
+        manifest.cases.len(),
+        "duplicate opcode manifest case"
+    );
+    let advertised: BTreeSet<_> = audited_opcode_policy_table()
+        .iter()
+        .filter(|entry| !matches!(entry.policy, Tier1Policy::Reject(_)))
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(cases, advertised);
+}
+
+#[test]
 fn policies_are_semantic_and_categorized() {
     let by_name = |name| {
         let opcode = linked_opcode_table()
@@ -48,13 +81,13 @@ fn policies_are_semantic_and_categorized() {
         tier1_policy(opcode.id()).unwrap()
     };
 
-    assert_eq!(by_name("push_i32"), Tier1Policy::Native);
+    assert_eq!(by_name("push_0"), Tier1Policy::Native);
     assert_eq!(by_name("add"), Tier1Policy::Helper(HelperId::AddSlow));
     assert_eq!(
         by_name("get_field"),
         Tier1Policy::Helper(HelperId::GetProperty)
     );
-    assert_eq!(by_name("call"), Tier1Policy::Helper(HelperId::Call));
+    assert_eq!(by_name("call1"), Tier1Policy::Helper(HelperId::Call));
     assert_eq!(
         by_name("eval"),
         Tier1Policy::Reject(FallbackReason::DirectEval)

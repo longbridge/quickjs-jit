@@ -441,6 +441,8 @@ fn main() {
 
     #[cfg(feature = "jit-abi")]
     defines.push(("CONFIG_JIT_ABI".into(), Some("1")));
+    #[cfg(feature = "jit-test-support")]
+    defines.push(("CONFIG_JIT_TEST_SUPPORT".into(), Some("1")));
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();

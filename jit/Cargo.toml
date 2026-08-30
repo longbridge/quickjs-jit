@@ -40,6 +40,7 @@ target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
 rquickjs = { path = "..", features = ["jit-abi", "loader"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 static_assertions = "1"
 trybuild = "1"

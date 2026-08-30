@@ -1,13 +1,275 @@
 {
-  "schema": 1,
-  "coverage_scope": "currently eligible Tier 1 families",
-  "dimensions": ["normal", "numeric-tag-edge", "exception-or-nonthrow", "ownership-gc", "coercion-order"],
-  "families": {
-    "immediates-control": ["normal", "exception-or-nonthrow"],
-    "locals-stack": ["normal", "ownership-gc"],
-    "numeric-conversion": ["normal", "numeric-tag-edge", "exception-or-nonthrow", "coercion-order"],
-    "property": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-order"],
-    "call": ["normal", "exception-or-nonthrow", "ownership-gc"],
-    "object-array": ["normal", "ownership-gc"]
-  }
+  "schema": 2,
+  "cases": [
+    {
+      "opcode": "push_const8",
+      "definition": "function f(){ return 123456789012345678901234567890n }",
+      "expression": "String(f())",
+      "helper": "ResolveConst",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "dup",
+      "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
+      "expression": "f(10,0)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "put_loc1",
+      "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
+      "expression": "f(10,0)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "goto8",
+      "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
+      "expression": "f(10,0)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "object",
+      "definition": "function f(){ return {} }",
+      "expression": "f()",
+      "helper": "NewObject",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "drop",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": "Free",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "array_from",
+      "definition": "function f(){ return [20,22] }",
+      "expression": "f()",
+      "helper": "NewArray",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "return",
+      "definition": "function f(a,b){ return a+b }",
+      "expression": "f(20,22)",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_field",
+      "definition": "function f(o){ return o.answer }",
+      "expression": "f({answer:42})",
+      "helper": "GetProperty",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_field",
+      "definition": "function f(o,a){ o.answer=a; return o.answer }",
+      "expression": "f({},42)",
+      "helper": "SetProperty",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_loc_uninitialized",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": "Free",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_loc_check",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": "Dup",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_loc_check",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": "Free",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "plus",
+      "definition": "function f(a){ return +a }",
+      "expression": "f({valueOf(){return 42}})",
+      "helper": "ToNumeric",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "post_inc",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "add",
+      "definition": "function f(a,b){ return a+b }",
+      "expression": "f({valueOf(){return 20}},22)",
+      "helper": "AddSlow",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "lt",
+      "definition": "function f(a,b){ return a < b }",
+      "expression": "f({valueOf(){return 20}},22)",
+      "helper": "CompareSlow",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "push_0",
+      "definition": "function f(g,a){ let x=g(a); return x+0 }",
+      "expression": "f(x=>x+1,41)",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "push_1",
+      "definition": "function f(a){ if(a) return 1; return 2 }",
+      "expression": "f(true)",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "push_2",
+      "definition": "function f(a){ if(a) return 1; return 2 }",
+      "expression": "f(false)",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "push_i8",
+      "definition": "function f(){ return [20,22] }",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_loc0",
+      "definition": "function f(a){ let x=a; x++; return x }",
+      "expression": "f(41)",
+      "helper": "Free",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_arg0",
+      "definition": "function f(a,b){ return a+b }",
+      "expression": "f(20,22)",
+      "helper": "Dup",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_arg1",
+      "definition": "function f(a,b){ return a+b }",
+      "expression": "f(20,22)",
+      "helper": "Dup",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "if_false8",
+      "definition": "function f(a){ if(a) return 1; return 2 }",
+      "expression": "[f(true),f(false)]",
+      "helper": "ToBool",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "call1",
+      "definition": "function f(g,a){ let x=g(a); return x+0 }",
+      "expression": "f(x=>x+1,41)",
+      "helper": "Call",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    }
+  ]
 }

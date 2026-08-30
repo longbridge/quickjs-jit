@@ -16,9 +16,37 @@ use rquickjs_core::{context::EvalOptions, Context, Runtime, Value};
 
 use crate::abi::{AbiInfo, AbiMismatch, AbiStructure};
 use crate::bytecode::{
-    opcode, CompileSnapshot, DeoptPoint, OsrPoint, RuntimeConstants, SnapshotStatus,
-    VerifiedFunction, VerifierMetadata, VerifyLimits,
+    linked_opcode_table, opcode, CompileSnapshot, DeoptPoint, HelperId, OsrPoint, RuntimeConstants,
+    SnapshotStatus, VerifiedFunction, VerifierMetadata, VerifyLimits,
 };
+
+#[cfg(feature = "compiler")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct JitTraceEvent {
+    pc: u32,
+    opcode: u8,
+    reserved: [u8; 3],
+}
+
+#[cfg(feature = "compiler")]
+unsafe extern "C" {
+    fn JS_JitGetHelperCount(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        helper_id: u32,
+        count: *mut u64,
+    ) -> i32;
+    fn JS_JitSetExecutionTrace(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        events: *mut JitTraceEvent,
+        capacity: u32,
+    ) -> i32;
+    fn JS_JitGetExecutionTraceLength(
+        rt: *mut rquickjs_core::qjs::JSRuntime,
+        length: *mut u32,
+        overflowed: *mut u32,
+    ) -> i32;
+}
 use crate::code_cache::CompiledArtifact;
 #[cfg(feature = "compiler")]
 use crate::compiler::baseline::{BaselineCompiler, PublishedBaselineCode};
@@ -359,8 +387,7 @@ fn compile_named_function(
         .clone()
         .verify(VerifyLimits::default())
         .unwrap_or_else(|error| panic!("baseline verification failed: {error:?}"));
-    let code = BaselineCompiler::host()
-        .compile(&verified)
+    let code = crate::ir::with_execution_trace(|| BaselineCompiler::host().compile(&verified))
         .unwrap_or_else(|error| {
             panic!(
                 "forced baseline compilation failed: {error:?}; bytecode={:?}",
@@ -413,6 +440,8 @@ pub struct DifferentialRun {
     definition: String,
     expression: String,
     require_baseline: bool,
+    expected_opcode: Option<String>,
+    expected_helper: Option<HelperId>,
 }
 
 #[cfg(feature = "compiler")]
@@ -421,13 +450,54 @@ pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
         definition: definition.to_owned(),
         expression: expression.to_owned(),
         require_baseline: true,
+        expected_opcode: None,
+        expected_helper: None,
     }
+}
+
+#[cfg(feature = "compiler")]
+pub fn assert_tier1_rejected(
+    definition: &str,
+    expression: &str,
+    expected: crate::bytecode::FallbackReason,
+) {
+    let runtime = Runtime::new().expect("rejected fixture runtime");
+    let context = Context::full(&runtime).expect("rejected fixture context");
+    eval_global_definition(&context, definition).expect("rejected fixture definition");
+    let expected_value = eval_canonical(&context, expression);
+    let snapshot = context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get("f").expect("rejected fixture f");
+        unsafe { CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw()) }
+            .expect("rejected fixture snapshot")
+    });
+    let verified = snapshot
+        .verify(VerifyLimits::default())
+        .expect("rejected fixture verifies");
+    let rejection = verified
+        .tier1_eligibility()
+        .expect_err("fixture must reject Tier 1");
+    assert_eq!(rejection.reason(), expected);
+    assert!(matches!(
+        BaselineCompiler::host().compile(&verified),
+        Err(crate::compiler::CompileFailure::Tier1Rejected(reason)) if reason == expected
+    ));
+    assert_eq!(eval_canonical(&context, expression), expected_value);
 }
 
 #[cfg(feature = "compiler")]
 impl DifferentialRun {
     pub fn force_baseline(mut self) -> Self {
         self.require_baseline = true;
+        self
+    }
+
+    pub fn expect_executed_opcode(mut self, opcode: &str) -> Self {
+        self.expected_opcode = Some(opcode.to_owned());
+        self
+    }
+
+    pub fn expect_helper(mut self, helper: HelperId) -> Self {
+        self.expected_helper = Some(helper);
         self
     }
 
@@ -441,7 +511,51 @@ impl DifferentialRun {
         let runtime = Runtime::new().expect("compiled runtime");
         let context = Context::full(&runtime).expect("compiled context");
         let installation = compile_named_function(&runtime, &context, &self.definition, "f");
+        let rt =
+            context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
+        let mut trace = vec![JitTraceEvent::default(); 16_384];
+        assert_eq!(
+            unsafe { rquickjs_core::qjs::JS_JitResetHelperCounters(rt) },
+            0
+        );
+        assert_eq!(
+            unsafe { JS_JitSetExecutionTrace(rt, trace.as_mut_ptr(), trace.len() as u32) },
+            0
+        );
         let actual = eval_canonical(&context, &self.expression);
+
+        let mut trace_len = 0;
+        let mut overflowed = 0;
+        assert_eq!(
+            unsafe { JS_JitGetExecutionTraceLength(rt, &mut trace_len, &mut overflowed) },
+            0
+        );
+        assert_eq!(overflowed, 0, "native execution trace overflowed");
+        trace.truncate(trace_len as usize);
+        assert_eq!(
+            unsafe { JS_JitSetExecutionTrace(rt, ptr::null_mut(), 0) },
+            0
+        );
+        if std::env::var_os("QJSJIT_DUMP_TRACE").is_some() {
+            eprintln!(
+                "QJSJIT_TRACE {}",
+                trace
+                    .iter()
+                    .filter_map(
+                        |event| linked_opcode_table().find(|opcode| opcode.id() == event.opcode)
+                    )
+                    .map(|opcode| format!(
+                        "{}@{}",
+                        opcode.name(),
+                        trace
+                            .iter()
+                            .find(|event| event.opcode == opcode.id())
+                            .map_or(0, |event| event.pc)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
 
         assert_eq!(actual, expected, "forced baseline changed JS semantics");
         if self.require_baseline {
@@ -454,6 +568,49 @@ impl DifferentialRun {
                 0,
                 "forced baseline silently retried in the interpreter"
             );
+        }
+        if let Some(expected) = self.expected_opcode {
+            let opcode = linked_opcode_table()
+                .find(|opcode| opcode.name() == expected)
+                .unwrap_or_else(|| panic!("unknown expected opcode {expected}"));
+            assert!(
+                trace.iter().any(|event| event.opcode == opcode.id()),
+                "native body did not execute target opcode {expected}; trace={:?}",
+                trace
+                    .iter()
+                    .map(|event| (event.pc, event.opcode))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if let Some(helper) = self.expected_helper {
+            let helper_id = match helper {
+                HelperId::Dup => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                HelperId::Free => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                HelperId::ResolveConst => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_RESOLVE_CONST
+                }
+                HelperId::ToNumeric => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_NUMERIC,
+                HelperId::ToBool => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
+                HelperId::AddSlow => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW,
+                HelperId::CompareSlow => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW
+                }
+                HelperId::GetProperty => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY
+                }
+                HelperId::SetProperty => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY
+                }
+                HelperId::Call => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+                HelperId::NewArray => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY,
+                HelperId::NewObject => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT,
+            };
+            let mut count = 0;
+            assert_eq!(
+                unsafe { JS_JitGetHelperCount(rt, helper_id, &mut count) },
+                0
+            );
+            assert!(count > 0, "expected helper {helper:?} was not executed");
         }
         drop(installation.guard);
         assert!(

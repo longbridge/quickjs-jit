@@ -1,3 +1,5 @@
+#[cfg(feature = "test-support")]
+use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 
 use rquickjs_core::qjs;
@@ -13,6 +15,21 @@ use super::{
 };
 
 const POLL_INTERVAL: usize = 1_024;
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TRACE_COMPILATION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn with_execution_trace<T>(f: impl FnOnce() -> T) -> T {
+    TRACE_COMPILATION.with(|enabled| {
+        let previous = enabled.replace(true);
+        let result = f();
+        enabled.set(previous);
+        result
+    })
+}
 pub(crate) const MAX_HELPER_SCRATCH_SLOTS: usize = 2;
 
 const _: () = assert!(
@@ -153,6 +170,24 @@ impl BaselineIr {
                         op: IrOp::Poll { state },
                     });
                     emitted_since_poll = 0;
+                }
+
+                #[cfg(feature = "test-support")]
+                if TRACE_COMPILATION.with(Cell::get) {
+                    let state = record_state(
+                        &mut states,
+                        snapshot.arg_count(),
+                        snapshot.local_count(),
+                        depth,
+                        FrameStateKind::Poll,
+                        pc,
+                    )?;
+                    instructions.push(IrInstruction {
+                        pc,
+                        frame_state: Some(state),
+                        helper_states: Box::new([]),
+                        op: IrOp::Poll { state },
+                    });
                 }
 
                 let op = translate_instruction(instruction)?;

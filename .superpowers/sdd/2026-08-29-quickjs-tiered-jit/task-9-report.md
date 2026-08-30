@@ -1,6 +1,6 @@
 # Task 9 report: closed Tier 1 opcode policy and differential matrix
 
-Status: **FIX ROUND 1**
+Status: **FIX ROUND 2 COMPLETE**
 
 ## Review fix round 1
 
@@ -15,6 +15,28 @@ Status: **FIX ROUND 1**
 - The forced-baseline test backend now counts entry in a trampoline around the
   real published machine-code body, rather than counting acquisition, and
   fails differential tests if the body returns `RETRY_INTERPRETER`.
+
+## Review fix round 2
+
+- Added test-support-only native execution telemetry. The test compiler inserts
+  a valid poll/frame-state immediately before each bytecode lowering and the C
+  adapter records the actually executed `(pc, opcode)` pair. All helper entry
+  points have canonical-ID counters. C storage/APIs and IR instrumentation are
+  excluded from production builds, so the production ABI query, generated code,
+  and hot path are unchanged.
+- Reduced the production advertised set to the 26 opcodes for which a real
+  emitted-and-executed JS fixture exists: 7 `Native`, 19 `Helper`, and 226
+  categorized rejects. Implemented but unproven lowerings remain available only
+  to ID-zero synthetic compiler tests under `test-support`; runtime snapshots
+  can never use that escape hatch.
+- `opcode-cases.json` schema 2 contains exactly one case per advertised opcode.
+  The test reads the manifest, compares its set with the closed audit, compiles
+  each captured function, enters the real machine body, observes the target at
+  its actual PC, checks the expected helper counter, rejects any retry, and
+  compares canonical interpreter semantics including ownership/coercion cases.
+- Rejected runtime fixtures prove exact fallback reason, compiler rejection,
+  zero native attachment/entry, and normal interpreter semantics.
+- CI now runs the opcode and differential gates in release mode.
 
 ## Result
 
@@ -68,10 +90,8 @@ All corresponding focused tests were then observed GREEN.
   integration, UI, and doc tests).
 - `cargo fmt --all -- --check`: PASS.
 
-## Remaining review gate
+## Coverage statement
 
-The closed audit, verifier split, and strict real-entry/no-retry checks are now
-implemented. Per-PC execution trace, all-helper counters, and the one-case-per-
-advertised-opcode manifest are still required before Task 9 can be called
-review-clean; this report deliberately does not present captured-bytecode
-presence as execution coverage.
+The advertised set is deliberately smaller than the set of internal lowerings.
+No opcode is advertised merely because it appeared in captured bytecode or has
+a translator match arm; every advertised opcode has dynamic native-PC evidence.
