@@ -77,6 +77,65 @@ fn production_tier1_installs_and_executes_method_property_path() {
 }
 
 #[test]
+fn suspend_stops_probes_and_resume_reuses_installed_code() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>("function hot(a){return a+1}"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && jit.metrics().native_entries == 0 {
+        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+        jit.poll();
+    }
+    let installed = jit.metrics();
+    assert!(installed.native_entries > 0, "{installed:?}");
+
+    jit.suspend().unwrap();
+    assert!(jit.is_suspended());
+    for _ in 0..32 {
+        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+        jit.poll();
+    }
+    let suspended = jit.metrics();
+    assert_eq!(suspended.native_entries, installed.native_entries);
+    assert_eq!(suspended.native_exits, installed.native_exits);
+    assert_eq!(suspended.hot_call_queues, installed.hot_call_queues);
+    assert_eq!(suspended.hot_loop_queues, installed.hot_loop_queues);
+
+    jit.resume().unwrap();
+    assert!(!jit.is_suspended());
+    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+    assert!(jit.metrics().native_entries > suspended.native_entries);
+}
+
+#[test]
+fn suspended_backend_detach_resets_state_for_reload() {
+    let runtime = Runtime::new().unwrap();
+    let config = JitConfig::builder()
+        .tier_policy(JitTierPolicy::BaselineOnly)
+        .build()
+        .unwrap();
+    let first = Jit::attach(&runtime, config.clone()).unwrap();
+    first.suspend().unwrap();
+    assert!(first.is_suspended());
+    drop(first);
+
+    let reloaded = Jit::attach(&runtime, config).unwrap();
+    assert!(!reloaded.is_suspended());
+}
+
+#[test]
 fn baseline_only_direct_call_hit_skips_call_helper_and_misses_remain_exact() {
     let runtime = Runtime::new().unwrap();
     let jit = Jit::attach(

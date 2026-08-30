@@ -497,6 +497,37 @@ impl RuntimeJitGuard {
             raw.poll_jit_backend();
         }
     }
+
+    /// Suspends all JIT probes without detaching the backend or discarding code.
+    pub fn suspend(&self) -> Result<(), JitBackendAttachError> {
+        let Some(runtime) = self.runtime.try_ref() else {
+            return Err(JitBackendAttachError::EngineRejected);
+        };
+        let mut raw = runtime.inner.lock();
+        if raw.jit_backend_token() != Some(self.token) {
+            return Err(JitBackendAttachError::EngineRejected);
+        }
+        raw.set_jit_suspended(true)
+    }
+
+    /// Resumes JIT probes while retaining previously installed native code.
+    pub fn resume(&self) -> Result<(), JitBackendAttachError> {
+        let Some(runtime) = self.runtime.try_ref() else {
+            return Err(JitBackendAttachError::EngineRejected);
+        };
+        let mut raw = runtime.inner.lock();
+        if raw.jit_backend_token() != Some(self.token) {
+            return Err(JitBackendAttachError::EngineRejected);
+        }
+        raw.set_jit_suspended(false)
+    }
+
+    /// Reports the runtime-local suspension state.
+    pub fn is_suspended(&self) -> bool {
+        self.runtime
+            .try_ref()
+            .is_some_and(|runtime| runtime.inner.lock().is_jit_suspended())
+    }
 }
 
 impl fmt::Debug for RuntimeJitGuard {

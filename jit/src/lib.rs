@@ -357,6 +357,21 @@ impl Jit {
         }
     }
 
+    /// Suspends hot, feedback, native-entry acquisition, and OSR probes in O(1).
+    pub fn suspend(&self) -> Result<(), JitError> {
+        self._guard.suspend().map_err(Into::into)
+    }
+
+    /// Resumes probes without tearing down the backend or installed artifacts.
+    pub fn resume(&self) -> Result<(), JitError> {
+        self._guard.resume().map_err(Into::into)
+    }
+
+    /// Returns whether this runtime's JIT probes are suspended.
+    pub fn is_suspended(&self) -> bool {
+        self._guard.is_suspended()
+    }
+
     /// Returns the metrics associated with this backend guard.
     pub fn metrics(&self) -> JitMetrics {
         self.metrics

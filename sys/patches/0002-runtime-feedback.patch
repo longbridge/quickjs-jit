@@ -1055,7 +1055,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  
  #define QJSJIT_ABI_MAJOR 1u
 -#define QJSJIT_ABI_MINOR 9u
-+#define QJSJIT_ABI_MINOR 11u
++#define QJSJIT_ABI_MINOR 12u
  
  /* Frame flags are append-only. Stress collection is a test/debug contract:
   * every helper performs an allocating cycle-GC point before and after its
@@ -1274,3 +1274,84 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
  /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -422,3 +422,5 @@
+ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable, void *opaque);
++int JS_SetJitSuspended(JSRuntime *rt, int suspended);
++int JS_IsJitSuspended(JSRuntime *rt);
+ const JSJitOpcodeInfo *JS_JitGetOpcodeTable(uint32_t *count,
+                                             uint64_t *fingerprint);
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -362,3 +362,4 @@ struct JSRuntime {
+     void *jit_backend_opaque;
+     uint32_t jit_backend_active_depth;
++    uint8_t jit_suspended;
+     uint32_t jit_active_stack_map_count;
+@@ -2349,2 +2350,2 @@ static void qjsjit_record_feedback(JSRuntime *rt, JSFunctionBytecode *b,
+-    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
++    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
+         qjsjit_ensure_function_identity(rt, b))
+@@ -2406,1 +2407,1 @@ static void qjsjit_record_callsite_feedback(JSRuntime *rt,
+-    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 ||
++    if (rt->jit_suspended || caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 ||
+@@ -2486,1 +2488,1 @@ static void qjsjit_record_property_feedback(JSRuntime *rt,
+-    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
++    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
+@@ -2960,2 +2962,3 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
+         rt->jit_backend_vtable = NULL;
+         rt->jit_backend_opaque = NULL;
++        rt->jit_suspended = 0;
+@@ -2975,3 +2978,18 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
+     return JS_JIT_BACKEND_OK;
+ }
++
++int JS_SetJitSuspended(JSRuntime *rt, int suspended)
++{
++    if (!rt || rt->jit_backend_active_depth != 0)
++        return rt ? JS_JIT_BACKEND_BUSY : JS_JIT_BACKEND_INVALID_ARGUMENT;
++    rt->jit_suspended = suspended != 0;
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_IsJitSuspended(JSRuntime *rt)
++{
++    if (!rt)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    return rt->jit_suspended != 0;
++}
+ #endif /* CONFIG_JIT_ABI */
+@@ -19583,1 +19601,2 @@ restart:
+-    if (rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
++    if (!rt->jit_suspended && rt->jit_backend_vtable &&
++        rt->jit_backend_vtable->record_feedback) {
+@@ -19597,1 +19616,1 @@ restart:
+-    if (!b->jit_feedback_disabled &&
++    if (!rt->jit_suspended && !b->jit_feedback_disabled &&
+@@ -19657,1 +19676,1 @@ restart:
+-    if (!b->jit_feedback_disabled &&
++    if (!rt->jit_suspended && !b->jit_feedback_disabled &&
+@@ -20883,1 +20902,1 @@ CASE(OP_goto8):
+-                if (diff < 0 && rt->jit_backend_vtable &&
++                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -20898,1 +20917,1 @@ CASE(OP_goto16):
+-                if (diff < 0 && rt->jit_backend_vtable &&
++                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -20913,1 +20932,1 @@ CASE(OP_goto):
+-                if (diff < 0 && rt->jit_backend_vtable &&
++                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -20954,1 +20973,1 @@ CASE(OP_if_false8):
+-                if (pc < next_pc && rt->jit_backend_vtable &&
++                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -20995,1 +21014,1 @@ CASE(OP_if_true8):
+-                if (pc < next_pc && rt->jit_backend_vtable &&
++                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -21036,1 +21055,1 @@ CASE(OP_if_false):
+-                if (pc < next_pc && rt->jit_backend_vtable &&
++                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
+@@ -21077,1 +21096,1 @@ CASE(OP_if_true):
+-                if (pc < next_pc && rt->jit_backend_vtable &&
++                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&

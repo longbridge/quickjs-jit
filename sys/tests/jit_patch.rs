@@ -47,7 +47,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 11u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 12u"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
     assert!(quickjs.contains("JS_JitHelperMaterializeOwner"));
     assert!(quickjs.contains(
@@ -93,7 +93,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 11;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 12;"),
             "{target}"
         );
         assert!(

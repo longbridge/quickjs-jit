@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 const QUICKJS_BASELINE_FNV64: u64 = 0x3302_116a_b0fc_269c;
 const EXPECTED_PATCHES: [(&str, u64); 2] = [
     ("0001-rquickjs-jit.patch", 0x18d7_40cc_6943_30cf),
-    ("0002-runtime-feedback.patch", 0x3a86_81c3_0df4_bb05),
+    ("0002-runtime-feedback.patch", 0x340c_1429_8115_8594),
 ];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
@@ -43,8 +43,8 @@ const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("list.h", 0xb337_70f7_b76d_a3d8),
     ("quickjs-atom.h", 0x30b4_9116_b6a2_aa99),
     ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
-    ("quickjs.c", 0xecad_6cac_65c3_41ef),
-    ("quickjs-jit.h", 0x1174_70f1_fa66_4b61),
+    ("quickjs.c", 0x47e3_8c21_d775_f6e7),
+    ("quickjs-jit.h", 0x83ca_1f3e_7656_11ac),
     ("quickjs-jit-helpers.h", 0xc4b9_e0da_2338_2c18),
     ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
     ("quickjs.h", 0x4831_2cde_9c2f_a5ee),

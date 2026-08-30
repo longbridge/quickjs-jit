@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 11;
+pub const QJSJIT_ABI_MINOR: u32 = 12;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -3438,6 +3438,12 @@ unsafe extern "C" {
         vtable: *const JSJitBackendVTable,
         opaque: *mut ::core::ffi::c_void,
     ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_SetJitSuspended(rt: *mut JSRuntime, suspended: ::core::ffi::c_int) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_IsJitSuspended(rt: *mut JSRuntime) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     pub fn JS_JitGetOpcodeTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitOpcodeInfo;

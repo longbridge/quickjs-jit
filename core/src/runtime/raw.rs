@@ -323,6 +323,24 @@ impl RawRuntime {
     }
 
     #[cfg(feature = "jit-abi")]
+    pub(super) fn set_jit_suspended(
+        &mut self,
+        suspended: bool,
+    ) -> StdResult<(), super::JitBackendAttachError> {
+        let status = unsafe { qjs::JS_SetJitSuspended(self.rt.as_ptr(), i32::from(suspended)) };
+        if status == qjs::JS_JIT_BACKEND_OK {
+            Ok(())
+        } else {
+            Err(super::JitBackendAttachError::EngineRejected)
+        }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn is_jit_suspended(&self) -> bool {
+        unsafe { qjs::JS_IsJitSuspended(self.rt.as_ptr()) > 0 }
+    }
+
+    #[cfg(feature = "jit-abi")]
     pub(super) fn jit_runtime_id(&self) -> u64 {
         unsafe { qjs::JS_GetJitRuntimeId(self.rt.as_ptr()) }
     }
