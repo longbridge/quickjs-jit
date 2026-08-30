@@ -1,4 +1,8 @@
-use rquickjs_core::{context::EvalOptions, Context, Runtime};
+use rquickjs_core::{
+    context::EvalOptions,
+    loader::{ImportAttributes, Loader, Resolver},
+    Context, Ctx, Error, Module, Runtime,
+};
 use rquickjs_jit::{
     correctness::{
         classify_features_with_config, discover_test262, parse_test262, CaseReport, CaseStatus,
@@ -20,6 +24,35 @@ use std::{
 };
 
 const TEST262_REVISION: &str = "d5e73fc8d2c663554fb72e2380a8c2bc1a318a33";
+
+struct Test262Modules;
+impl Resolver for Test262Modules {
+    fn resolve<'js>(
+        &mut self,
+        _: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _: Option<ImportAttributes<'js>>,
+    ) -> rquickjs_core::Result<String> {
+        let path = if name.starts_with('.') {
+            Path::new(base).parent().unwrap_or(Path::new("")).join(name)
+        } else {
+            PathBuf::from(name)
+        };
+        Ok(path.to_string_lossy().into_owned())
+    }
+}
+impl Loader for Test262Modules {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _: Option<ImportAttributes<'js>>,
+    ) -> rquickjs_core::Result<Module<'js>> {
+        let source = fs::read(name).map_err(|_| Error::new_loading(name))?;
+        Module::declare(ctx.clone(), name, source)
+    }
+}
 
 struct Options {
     root: PathBuf,
@@ -123,6 +156,7 @@ fn execute(
     variant: Test262Variant,
     timeout: Duration,
 ) -> Result<(), String> {
+    runtime.set_loader(Test262Modules, Test262Modules);
     let deadline = Instant::now() + timeout;
     let interrupted = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&interrupted);
@@ -167,7 +201,7 @@ fn execute(
                 | Test262Variant::StrictModuleAsync
         );
         options.promise = asynchronous;
-        options.filename = Some(case.path().to_owned());
+        options.filename = Some(root.join(case.path()).to_string_lossy().into_owned());
         match ctx.eval_with_options::<(), _>(program.as_str(), options) {
             Ok(()) => Ok(()),
             Err(error) => {
