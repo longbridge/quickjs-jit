@@ -13,11 +13,18 @@ use super::{
 };
 
 const POLL_INTERVAL: usize = 1_024;
+pub(crate) const MAX_HELPER_SCRATCH_SLOTS: usize = 2;
+
+const _: () = assert!(
+    MAX_HELPER_SCRATCH_SLOTS == qjs::JS_JIT_HELPER_SCRATCH_SLOTS as usize,
+    "the compiler scratch proof must match the native frame ABI"
+);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrInstruction {
     pub pc: u32,
     pub frame_state: Option<FrameStateId>,
+    pub helper_states: Box<[FrameStateId]>,
     pub op: IrOp,
 }
 
@@ -63,6 +70,7 @@ impl BaselineIr {
                 instructions.push(IrInstruction {
                     pc: block.start_pc(),
                     frame_state: Some(state),
+                    helper_states: Box::new([]),
                     op: IrOp::Poll { state },
                 });
                 emitted_since_poll = 0;
@@ -82,6 +90,7 @@ impl BaselineIr {
                 instructions.push(IrInstruction {
                     pc: block.start_pc(),
                     frame_state: Some(state),
+                    helper_states: Box::new([]),
                     op: IrOp::OsrLabel { state },
                 });
             }
@@ -103,6 +112,7 @@ impl BaselineIr {
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
+                        helper_states: Box::new([]),
                         op: IrOp::Poll { state },
                     });
                     emitted_since_poll = 0;
@@ -119,6 +129,7 @@ impl BaselineIr {
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
+                        helper_states: Box::new([]),
                         op: IrOp::Poll { state },
                     });
                     emitted_since_poll = 0;
@@ -135,6 +146,7 @@ impl BaselineIr {
                     instructions.push(IrInstruction {
                         pc,
                         frame_state: Some(state),
+                        helper_states: Box::new([]),
                         op: IrOp::Poll { state },
                     });
                     emitted_since_poll = 0;
@@ -142,7 +154,8 @@ impl BaselineIr {
 
                 let op = translate_instruction(instruction)?;
                 let depth_before = depth;
-                let frame_state = if operation_may_exit(&op) {
+                let helper_call_count = operation_helper_call_count(&op);
+                let frame_state = if operation_may_exit(&op) && helper_call_count == 0 {
                     Some(record_state(
                         &mut states,
                         snapshot.arg_count(),
@@ -160,9 +173,31 @@ impl BaselineIr {
                 }
                 let next_depth = depth - pop + instruction.opcode().n_push() as usize;
                 max_stack_depth = max_stack_depth.max(next_depth).max(depth);
+                let helper_depth = helper_stack_depth(&op, depth, next_depth)?;
+                max_stack_depth = max_stack_depth.max(helper_depth);
+                let next_pc = pc
+                    .checked_add(
+                        u32::try_from(instruction.size())
+                            .map_err(|_| CompileFailure::ResourceLimit)?,
+                    )
+                    .ok_or(CompileFailure::ResourceLimit)?;
+                let helper_states = (0..helper_call_count)
+                    .map(|_| {
+                        record_state(
+                            &mut states,
+                            snapshot.arg_count(),
+                            snapshot.local_count(),
+                            helper_depth,
+                            FrameStateKind::Helper,
+                            next_pc,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice();
                 instructions.push(IrInstruction {
                     pc,
                     frame_state,
+                    helper_states,
                     op,
                 });
                 emitted_since_poll = emitted_since_poll.saturating_add(1);
@@ -184,6 +219,7 @@ impl BaselineIr {
                             IrInstruction {
                                 pc,
                                 frame_state: Some(state),
+                                helper_states: Box::new([]),
                                 op: IrOp::Poll { state },
                             },
                         );
@@ -225,6 +261,68 @@ fn operation_may_exit(operation: &IrOp) -> bool {
             | IrOp::Return
             | IrOp::ReturnUndefined
     )
+}
+
+fn operation_helper_call_count(operation: &IrOp) -> usize {
+    match operation {
+        IrOp::ResolveConstant(_) | IrOp::NewObject => 1,
+        IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
+        IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
+        IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
+        IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
+        IrOp::GetLocalPair => 2,
+        IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
+        IrOp::PutLocalChecked { .. } | IrOp::SetLocalUninitialized(_) | IrOp::Drop => 1,
+        IrOp::Stack(operation) => match operation {
+            StackOp::Nip | StackOp::Nip1 => 1,
+            StackOp::Dup2 => 2,
+            StackOp::Dup3 => 3,
+            StackOp::Dup
+            | StackOp::Dup1
+            | StackOp::Insert2
+            | StackOp::Insert3
+            | StackOp::Insert4 => 1,
+            _ => 0,
+        },
+        IrOp::Unary(UnaryOp::Plus | UnaryOp::LogicalNot) => 1,
+        IrOp::Binary(
+            BinaryOp::Add
+            | BinaryOp::LessThan
+            | BinaryOp::LessThanOrEqual
+            | BinaryOp::GreaterThan
+            | BinaryOp::GreaterThanOrEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::StrictEqual
+            | BinaryOp::StrictNotEqual,
+        ) => 1,
+        IrOp::Branch { .. } => 1,
+        _ => 0,
+    }
+}
+
+fn helper_stack_depth(
+    operation: &IrOp,
+    depth: usize,
+    next_depth: usize,
+) -> Result<usize, CompileFailure> {
+    /*
+     * These are the only lowering families that keep values above the
+     * bytecode-visible stack.  The exhaustive match is the compiler's static
+     * proof that no instruction can require more than the ABI's two scratch
+     * slots at one time.
+     */
+    let extra = match operation {
+        IrOp::GetProperty(_) | IrOp::Call { .. } => 2,
+        IrOp::NewArrayFrom(count) if *count != 0 => 2,
+        IrOp::NewArrayFrom(_) => 0,
+        _ => 0,
+    };
+    debug_assert!(extra <= MAX_HELPER_SCRATCH_SLOTS);
+    depth
+        .max(next_depth)
+        .checked_add(extra)
+        .ok_or(CompileFailure::ResourceLimit)
 }
 
 fn record_state(
@@ -317,6 +415,14 @@ fn indexed_operand(instruction: &Instruction) -> Option<u16> {
     }
 }
 
+fn constant_operand(instruction: &Instruction) -> Option<u32> {
+    match instruction.opcode().format() {
+        OperandFormat::Constant => Some(instruction.operand_u32(1)),
+        OperandFormat::Constant8 => Some(u32::from(instruction.operand_u8(1))),
+        _ => None,
+    }
+}
+
 fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailure> {
     let name = instruction.opcode().name();
     let int = |value: i32| TaggedValue::new(value as i64 as u64, qjs::JS_TAG_INT as i64);
@@ -337,6 +443,31 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "push_i8" => IrOp::Push(int(instruction.operand_u8(1) as i8 as i32)),
         "push_i16" => IrOp::Push(int(instruction.operand_i16(1) as i32)),
         "push_i32" => IrOp::Push(int(instruction.operand_i32(1))),
+        "push_const" | "push_const8" => IrOp::ResolveConstant(
+            constant_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        ),
+        "object" => IrOp::NewObject,
+        "array_from" => IrOp::NewArrayFrom(instruction.operand_u16(1)),
+        "get_field" => IrOp::GetProperty(instruction.operand_u32(1)),
+        "put_field" => IrOp::SetProperty(instruction.operand_u32(1)),
+        "call" => IrOp::Call {
+            argc: instruction.operand_u16(1),
+            has_this: false,
+        },
+        "call0" | "call1" | "call2" | "call3" => IrOp::Call {
+            argc: u16::from(
+                *name
+                    .as_bytes()
+                    .last()
+                    .ok_or(CompileFailure::InvalidArtifact)?
+                    - b'0',
+            ),
+            has_this: false,
+        },
+        "call_method" => IrOp::Call {
+            argc: instruction.operand_u16(1),
+            has_this: true,
+        },
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

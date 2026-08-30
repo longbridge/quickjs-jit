@@ -1102,6 +1102,8 @@ unsafe impl JitBackend for AlwaysNativeBackend {
             reserved: 0,
             entry: (pc == 0).then_some(native_done),
             pin: Box::into_raw(Box::new(0_u8)).cast(),
+            stack_map_count: 0,
+            helper_abi_version: qjs::QJSJIT_HELPER_ABI_VERSION,
         }
     }
 
@@ -1125,6 +1127,12 @@ unsafe impl JitBackend for ToggleNativeBackend {
                 Box::into_raw(Box::new(0_u8)).cast()
             } else {
                 std::ptr::null_mut()
+            },
+            stack_map_count: 0,
+            helper_abi_version: if active {
+                qjs::QJSJIT_HELPER_ABI_VERSION
+            } else {
+                0
             },
         }
     }

@@ -303,6 +303,8 @@ pub unsafe trait JitBackend: Send + 'static {
             reserved: 0,
             entry: None,
             pin: ptr::null_mut(),
+            stack_map_count: 0,
+            helper_abi_version: 0,
         }
     }
 

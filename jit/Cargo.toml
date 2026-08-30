@@ -35,7 +35,7 @@ postcard = { version = "1", optional = true, default-features = false, features 
 target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
-rquickjs = { path = "..", features = ["jit-abi"] }
+rquickjs = { path = "..", features = ["jit-abi", "loader"] }
 static_assertions = "1"
 trybuild = "1"
 

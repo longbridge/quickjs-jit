@@ -31,6 +31,22 @@ pub struct JitGeneratedOpcode {
 #[cfg(feature = "jit-abi")]
 include!(concat!(env!("OUT_DIR"), "/quickjs-jit-opcodes.rs"));
 
+/// Build-time metadata generated from the canonical helper X-macro table.
+#[cfg(feature = "jit-abi")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JitGeneratedHelper {
+    pub id: u16,
+    pub name: &'static str,
+    pub abi_types: &'static [u8],
+    pub value_arity: u8,
+    pub value_ownership: &'static [u8],
+    pub output_ownership: u8,
+    pub flags: u32,
+}
+
+#[cfg(feature = "jit-abi")]
+include!(concat!(env!("OUT_DIR"), "/quickjs-jit-helpers.rs"));
+
 #[doc(hidden)]
 #[cfg(all(feature = "jit-test-support", feature = "bindgen"))]
 pub const JIT_BINDGEN_BINDINGS: Option<&str> =

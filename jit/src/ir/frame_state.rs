@@ -26,6 +26,7 @@ pub enum FrameSlot {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FrameStateKind {
     Poll,
+    Helper,
     Marker,
 }
 

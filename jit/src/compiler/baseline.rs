@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    mem,
     sync::Arc,
 };
 
@@ -32,13 +33,16 @@ use crate::{
     },
     ir::{
         BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, StackOp, TaggedValue,
-        UnaryOp,
+        UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
 };
 
-use super::{helpers::FrameLayout, CompileFailure, Compiler};
+use super::{
+    helpers::{generated_signatures, FrameLayout},
+    CompileFailure, Compiler,
+};
 
 #[derive(Clone, Copy)]
 struct Pair {
@@ -56,6 +60,62 @@ struct PairVars {
 struct PollLocation {
     bytecode_pc: u32,
     source_location: SourceLoc,
+}
+
+struct HelperLowering<'a> {
+    ir: &'a BaselineIr,
+    frame: Value,
+    sret: Value,
+    arg_buf: Value,
+    var_buf: Value,
+    stack_base: Value,
+    arguments: &'a [PairVars],
+    locals: &'a [PairVars],
+    stack: &'a [PairVars],
+    signatures: &'a [cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+}
+
+impl HelperLowering<'_> {
+    fn invoke(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        helper_id: qjs::JSJitHelperId,
+        state: FrameStateId,
+        live_depth: usize,
+        exception_depth: usize,
+        arguments: &[u32],
+    ) -> Result<(), CompileFailure> {
+        invoke_frame_helper(
+            builder,
+            self.ir,
+            self.frame,
+            self.sret,
+            self.arg_buf,
+            self.var_buf,
+            self.stack_base,
+            self.arguments,
+            self.locals,
+            self.stack,
+            live_depth,
+            exception_depth,
+            self.signatures,
+            helper_id as usize,
+            state,
+            arguments,
+            self.pointer_type,
+            self.layout,
+        )
+    }
+
+    fn set_depth(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        depth: usize,
+    ) -> Result<(), CompileFailure> {
+        set_visible_stack_depth(builder, self.frame, self.stack_base, depth, self.layout)
+    }
 }
 
 /// Cranelift compiler configured for one explicit target ISA.
@@ -106,6 +166,16 @@ impl BaselineCompiler {
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
         let ir = BaselineIr::translate(function)?;
+        let logical_stack_capacity = u32::from(function.snapshot().stack_size());
+        let scratch_slots =
+            u32::try_from(MAX_HELPER_SCRATCH_SLOTS).map_err(|_| CompileFailure::InvalidArtifact)?;
+        let stack_capacity = logical_stack_capacity
+            .checked_add(scratch_slots)
+            .ok_or(CompileFailure::ResourceLimit)?;
+        let required_scratch = u32::from(ir.max_stack_depth).saturating_sub(logical_stack_capacity);
+        if required_scratch > scratch_slots || u32::from(ir.max_stack_depth) > stack_capacity {
+            return Err(CompileFailure::ResourceLimit);
+        }
         let entry_analysis = analyze_entry_domains(&ir)?;
         let mut signature = Signature::new(self.isa.default_call_conv());
         signature.params.push(AbiParam::special(
@@ -200,7 +270,7 @@ impl BaselineCompiler {
                         return Err(CompileFailure::InvalidArtifact);
                     };
                     let (location_kind, code_offset) = match state.kind {
-                        FrameStateKind::Poll => {
+                        FrameStateKind::Poll | FrameStateKind::Helper => {
                             let matching_calls: Vec<_> = call_return_offsets
                                 .iter()
                                 .copied()
@@ -852,7 +922,6 @@ enum KnownKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequiredDomain {
     Numeric,
-    Immediate,
     Initialized,
     Uninitialized,
 }
@@ -861,10 +930,6 @@ impl KnownKind {
     fn satisfies(self, required: RequiredDomain) -> bool {
         match required {
             RequiredDomain::Numeric => self == Self::Number,
-            RequiredDomain::Immediate => matches!(
-                self,
-                Self::Number | Self::Boolean | Self::Null | Self::Undefined | Self::ShortBigInt
-            ),
             RequiredDomain::Initialized => self != Self::Uninitialized,
             RequiredDomain::Uninitialized => self == Self::Uninitialized,
         }
@@ -924,7 +989,6 @@ impl AbstractValue {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RootRequirements {
     numeric: bool,
-    immediate: bool,
     initialized: bool,
     uninitialized: bool,
 }
@@ -936,14 +1000,10 @@ impl RootRequirements {
                 self.numeric = true;
                 self.initialized = true;
             }
-            RequiredDomain::Immediate => {
-                self.immediate = true;
-                self.initialized = true;
-            }
             RequiredDomain::Initialized => self.initialized = true,
             RequiredDomain::Uninitialized => self.uninitialized = true,
         }
-        self.uninitialized && (self.numeric || self.immediate || self.initialized)
+        self.uninitialized && (self.numeric || self.initialized)
     }
 }
 
@@ -1044,6 +1104,36 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
             match &instruction.op {
                 IrOp::Poll { state: _ } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
                 IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
+                IrOp::ResolveConstant(_) | IrOp::NewObject => {
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                IrOp::NewArrayFrom(count) => {
+                    let new_len = frame
+                        .stack
+                        .len()
+                        .checked_sub(usize::from(*count))
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.truncate(new_len);
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                IrOp::GetProperty(_) => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                IrOp::SetProperty(_) => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                }
+                IrOp::Call { argc, has_this } => {
+                    let pop = usize::from(*argc) + 1 + usize::from(*has_this);
+                    let new_len = frame
+                        .stack
+                        .len()
+                        .checked_sub(pop)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.truncate(new_len);
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
                         .arguments
@@ -1196,8 +1286,21 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     }
                     let right = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     let left = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
-                    if !analysis.require(&left, RequiredDomain::Numeric)
-                        || !analysis.require(&right, RequiredDomain::Numeric)
+                    let helper = matches!(
+                        operation,
+                        BinaryOp::Add
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                            | BinaryOp::Equal
+                            | BinaryOp::NotEqual
+                            | BinaryOp::StrictEqual
+                            | BinaryOp::StrictNotEqual
+                    );
+                    if !helper
+                        && (!analysis.require(&left, RequiredDomain::Numeric)
+                            || !analysis.require(&right, RequiredDomain::Numeric))
                     {
                         return Ok(analysis);
                     }
@@ -1217,10 +1320,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     target,
                     when_true: _,
                 } => {
-                    let condition = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
-                    if !analysis.require(&condition, RequiredDomain::Immediate) {
-                        return Ok(analysis);
-                    }
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     let fallthrough = ir
                         .blocks
                         .get(block_index + 1)
@@ -1231,10 +1331,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     terminated = true;
                 }
                 IrOp::Return => {
-                    let result = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
-                    if !analysis.require(&result, RequiredDomain::Immediate) {
-                        return Ok(analysis);
-                    }
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     terminated = true;
                 }
                 IrOp::ReturnUndefined => terminated = true,
@@ -1280,12 +1377,11 @@ fn analyze_unary(
     operation: UnaryOp,
 ) -> Result<AbstractValue, CompileFailure> {
     let (required, result) = match operation {
-        UnaryOp::LogicalNot => (RequiredDomain::Immediate, KnownKind::Boolean),
-        UnaryOp::Plus
-        | UnaryOp::Neg
-        | UnaryOp::Increment
-        | UnaryOp::Decrement
-        | UnaryOp::BitNot => (RequiredDomain::Numeric, KnownKind::Number),
+        UnaryOp::LogicalNot => return Ok(AbstractValue::known(KnownKind::Boolean)),
+        UnaryOp::Plus => return Ok(AbstractValue::known(KnownKind::Other)),
+        UnaryOp::Neg | UnaryOp::Increment | UnaryOp::Decrement | UnaryOp::BitNot => {
+            (RequiredDomain::Numeric, KnownKind::Number)
+        }
     };
     let _ = analysis.require(&value, required);
     Ok(AbstractValue::known(result))
@@ -1334,10 +1430,11 @@ fn lower_function(
         .map(|block| (block.start_pc, builder.create_block()))
         .collect();
     let retry = builder.create_block();
+    let prologue = builder.create_block();
     let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
-    builder.append_block_params_for_function_params(entry);
-    builder.switch_to_block(entry);
-    let params = builder.block_params(entry);
+    builder.append_block_params_for_function_params(prologue);
+    builder.switch_to_block(prologue);
+    let params = builder.block_params(prologue);
     if params.len() != 2 {
         return Err(CompileFailure::InvalidArtifact);
     }
@@ -1379,6 +1476,9 @@ fn lower_function(
     let var_buf = builder
         .ins()
         .load(pointer_type, flags, frame, layout.var_buf);
+    let stack_base = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.stack_base);
     for (index, pair) in arguments.iter().copied().enumerate() {
         let value = load_jsvalue(builder, arg_buf, index, layout);
         define_pair(builder, pair, value);
@@ -1387,12 +1487,8 @@ fn lower_function(
         let value = load_jsvalue(builder, var_buf, index, layout);
         define_pair(builder, pair, value);
     }
-    for pair in arguments.iter().chain(&locals).copied() {
-        let value = use_pair(builder, pair);
-        guard_non_refcounted(builder, value, retry);
-    }
     emit_entry_domain_guards(builder, &arguments, &locals, analysis, retry);
-    guard_live_stack_non_refcounted(
+    validate_live_stack_bounds(
         builder,
         frame,
         retry,
@@ -1405,10 +1501,40 @@ fn lower_function(
         define_pair(builder, pair, value);
     }
 
-    let mut poll_signature = Signature::new(isa.default_call_conv());
-    poll_signature.params.push(AbiParam::new(pointer_type));
-    poll_signature.returns.push(AbiParam::new(types::I32));
-    let poll_signature = builder.import_signature(poll_signature);
+    let helper_signatures = generated_signatures(isa)?
+        .into_iter()
+        .map(|signature| builder.import_signature(signature))
+        .collect::<Vec<_>>();
+    let helper_lowering = HelperLowering {
+        ir,
+        frame,
+        sret,
+        arg_buf,
+        var_buf,
+        stack_base,
+        arguments: &arguments,
+        locals: &locals,
+        stack: &stack,
+        signatures: &helper_signatures,
+        pointer_type,
+        layout,
+    };
+
+    macro_rules! invoke_helper {
+        ($helper_id:expr, $state:expr, $live_depth:expr, $arguments:expr) => {{
+            helper_lowering.invoke(
+                builder,
+                $helper_id,
+                $state,
+                $live_depth,
+                $live_depth,
+                $arguments,
+            )?;
+        }};
+    }
+
+    builder.ins().jump(entry, &[]);
+    builder.switch_to_block(entry);
 
     for (block_index, block) in ir.blocks.iter().enumerate() {
         let clif_block = blocks[&block.start_pc];
@@ -1418,6 +1544,7 @@ fn lower_function(
         let mut depth = block.stack_depth as usize;
         let mut terminated = false;
         for instruction in &block.instructions {
+            let mut helper_states = instruction.helper_states.iter().copied();
             builder.set_srcloc(SourceLoc::default());
             if !matches!(&instruction.op, IrOp::Poll { .. }) {
                 if let Some(state) = instruction.frame_state {
@@ -1425,18 +1552,35 @@ fn lower_function(
                 }
             }
             match instruction.op {
-                IrOp::Poll { state } => emit_poll(
-                    builder,
-                    frame,
-                    sret,
-                    poll_signature,
-                    PollLocation {
-                        bytecode_pc: instruction.pc,
-                        source_location: frame_state_source_loc(state)?,
-                    },
-                    pointer_type,
-                    layout,
-                ),
+                IrOp::Poll { state } => {
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        depth,
+                        ir.frame_states.get(state).pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    emit_poll(
+                        builder,
+                        frame,
+                        sret,
+                        helper_signatures[qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
+                        PollLocation {
+                            bytecode_pc: instruction.pc,
+                            source_location: frame_state_source_loc(state)?,
+                        },
+                        pointer_type,
+                        layout,
+                    );
+                }
                 IrOp::OsrLabel { .. } => {}
                 IrOp::Nop => {}
                 IrOp::Push(value) => {
@@ -1444,59 +1588,445 @@ fn lower_function(
                     define_pair(builder, stack[depth], value);
                     depth += 1;
                 }
-                IrOp::GetArgument(index) => {
-                    copy_pair(builder, stack[depth], arguments[index as usize]);
+                IrOp::ResolveConstant(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_RESOLVE_CONST,
+                        state,
+                        depth,
+                        &[output, index]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
                     depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::NewObject => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT,
+                        state,
+                        depth,
+                        &[output]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::NewArrayFrom(count) => lower_new_array(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    count,
+                )?,
+                IrOp::GetProperty(atom) => {
+                    lower_get_property(builder, &helper_lowering, &mut helper_states, depth, atom)?
+                }
+                IrOp::SetProperty(atom) => lower_set_property(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    atom,
+                )?,
+                IrOp::Call { argc, has_this } => lower_call(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    argc,
+                    has_this,
+                )?,
+                IrOp::GetArgument(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        state,
+                        depth,
+                        &[output, flat_argument_slot(index)]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::GetLocal(index) => {
-                    copy_pair(builder, stack[depth], locals[index as usize]);
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        state,
+                        depth,
+                        &[output, flat_local_slot(ir, index)]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
                     depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::GetLocalChecked(index) => {
-                    let value = use_pair(builder, locals[index as usize]);
-                    define_pair(builder, stack[depth], value);
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        state,
+                        depth,
+                        &[output, flat_local_slot(ir, index)]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
                     depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::GetLocalPair => {
-                    copy_pair(builder, stack[depth], locals[0]);
-                    copy_pair(builder, stack[depth + 1], locals[1]);
+                    for local_index in 0..2_u16 {
+                        let state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let output_index = depth + usize::from(local_index);
+                        let output = flat_stack_slot(ir, output_index)?;
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                            state,
+                            output_index,
+                            &[output, flat_local_slot(ir, local_index)]
+                        );
+                        reload_pair(
+                            builder,
+                            stack[output_index],
+                            stack_base,
+                            output_index,
+                            layout,
+                        );
+                    }
                     depth += 2;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::PutArgument { index, keep } => {
-                    let source = stack[depth - 1];
-                    copy_pair(builder, arguments[index as usize], source);
-                    if !keep {
+                    let source_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let destination = flat_argument_slot(index);
+                    let free_state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        free_state,
+                        depth,
+                        &[destination]
+                    );
+                    reload_pair(
+                        builder,
+                        arguments[index as usize],
+                        arg_buf,
+                        index as usize,
+                        layout,
+                    );
+                    if keep {
+                        let dup_state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                            dup_state,
+                            depth,
+                            &[destination, flat_stack_slot(ir, source_index)?]
+                        );
+                        reload_pair(
+                            builder,
+                            arguments[index as usize],
+                            arg_buf,
+                            index as usize,
+                            layout,
+                        );
+                    } else {
+                        let value = use_pair(builder, stack[source_index]);
+                        define_pair(builder, arguments[index as usize], value);
+                        store_jsvalue_slot(builder, arg_buf, index as usize, value, layout)?;
+                        clear_pair(
+                            builder,
+                            stack[source_index],
+                            stack_base,
+                            source_index,
+                            layout,
+                        )?;
                         depth -= 1;
+                        set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                     }
                 }
                 IrOp::PutLocal { index, keep } => {
-                    let source = stack[depth - 1];
-                    copy_pair(builder, locals[index as usize], source);
-                    if !keep {
+                    let source_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let destination = flat_local_slot(ir, index);
+                    let free_state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        free_state,
+                        depth,
+                        &[destination]
+                    );
+                    reload_pair(
+                        builder,
+                        locals[index as usize],
+                        var_buf,
+                        index as usize,
+                        layout,
+                    );
+                    if keep {
+                        let dup_state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                            dup_state,
+                            depth,
+                            &[destination, flat_stack_slot(ir, source_index)?]
+                        );
+                        reload_pair(
+                            builder,
+                            locals[index as usize],
+                            var_buf,
+                            index as usize,
+                            layout,
+                        );
+                    } else {
+                        let value = use_pair(builder, stack[source_index]);
+                        define_pair(builder, locals[index as usize], value);
+                        store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
+                        clear_pair(
+                            builder,
+                            stack[source_index],
+                            stack_base,
+                            source_index,
+                            layout,
+                        )?;
                         depth -= 1;
+                        set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                     }
                 }
                 IrOp::PutLocalChecked { index, initialize } => {
                     let _ = initialize;
-                    let source = stack[depth - 1];
-                    copy_pair(builder, locals[index as usize], source);
+                    let source_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let destination = flat_local_slot(ir, index);
+                    let free_state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        free_state,
+                        depth,
+                        &[destination]
+                    );
+                    reload_pair(
+                        builder,
+                        locals[index as usize],
+                        var_buf,
+                        index as usize,
+                        layout,
+                    );
+                    let value = use_pair(builder, stack[source_index]);
+                    define_pair(builder, locals[index as usize], value);
+                    store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
+                    clear_pair(
+                        builder,
+                        stack[source_index],
+                        stack_base,
+                        source_index,
+                        layout,
+                    )?;
                     depth -= 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::SetLocalUninitialized(index) => {
+                    let destination = flat_local_slot(ir, index);
+                    let free_state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        free_state,
+                        depth,
+                        &[destination]
+                    );
                     let value = constant_pair(
                         builder,
                         TaggedValue::new(0, qjs::JS_TAG_UNINITIALIZED as i64),
                     );
                     define_pair(builder, locals[index as usize], value);
+                    store_jsvalue_slot(builder, var_buf, index as usize, value, layout)?;
                 }
-                IrOp::Drop => depth -= 1,
+                IrOp::Drop => {
+                    let index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        state,
+                        depth,
+                        &[flat_stack_slot(ir, index)?]
+                    );
+                    reload_pair(builder, stack[index], stack_base, index, layout);
+                    depth = index;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
                 IrOp::Stack(operation) => {
-                    apply_stack_operation(builder, &stack, &mut depth, operation)
+                    let old_depth = depth;
+                    match operation {
+                        StackOp::Nip | StackOp::Nip1 => {
+                            let (take, _) = stack_operation_order(operation);
+                            let start = depth
+                                .checked_sub(take)
+                                .ok_or(CompileFailure::InvalidArtifact)?;
+                            let state = helper_states
+                                .next()
+                                .ok_or(CompileFailure::InvalidArtifact)?;
+                            invoke_helper!(
+                                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                                state,
+                                depth,
+                                &[flat_stack_slot(ir, start)?]
+                            );
+                            for (offset, variables) in stack
+                                .get(start..depth)
+                                .ok_or(CompileFailure::InvalidArtifact)?
+                                .iter()
+                                .copied()
+                                .enumerate()
+                            {
+                                let index = start + offset;
+                                reload_pair(builder, variables, stack_base, index, layout);
+                            }
+                            apply_stack_operation(builder, &stack, &mut depth, operation);
+                        }
+                        StackOp::Dup
+                        | StackOp::Dup1
+                        | StackOp::Dup2
+                        | StackOp::Dup3
+                        | StackOp::Insert2
+                        | StackOp::Insert3
+                        | StackOp::Insert4 => {
+                            let (take, order) = stack_operation_order(operation);
+                            let start = depth
+                                .checked_sub(take)
+                                .ok_or(CompileFailure::InvalidArtifact)?;
+                            let duplicated_sources: &[usize] = match operation {
+                                StackOp::Dup | StackOp::Dup1 => &[0],
+                                StackOp::Dup2 => &[0, 1],
+                                StackOp::Dup3 => &[0, 1, 2],
+                                StackOp::Insert2 => &[1],
+                                StackOp::Insert3 => &[2],
+                                StackOp::Insert4 => &[3],
+                                _ => unreachable!(),
+                            };
+                            for (created, source) in duplicated_sources.iter().copied().enumerate()
+                            {
+                                let state = helper_states
+                                    .next()
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let output_index = old_depth + created;
+                                invoke_helper!(
+                                    qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                                    state,
+                                    output_index,
+                                    &[
+                                        flat_stack_slot(ir, output_index)?,
+                                        flat_stack_slot(ir, start + source)?,
+                                    ]
+                                );
+                                reload_pair(
+                                    builder,
+                                    stack[output_index],
+                                    stack_base,
+                                    output_index,
+                                    layout,
+                                );
+                            }
+                            debug_assert_eq!(
+                                order.len(),
+                                old_depth - start + duplicated_sources.len()
+                            );
+                            apply_stack_operation(builder, &stack, &mut depth, operation);
+                        }
+                        _ => apply_stack_operation(builder, &stack, &mut depth, operation),
+                    }
+                    let (take, _) = stack_operation_order(operation);
+                    let start = old_depth
+                        .checked_sub(take)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    for (offset, variables) in stack
+                        .get(start..depth)
+                        .ok_or(CompileFailure::InvalidArtifact)?
+                        .iter()
+                        .copied()
+                        .enumerate()
+                    {
+                        let index = start + offset;
+                        let value = use_pair(builder, variables);
+                        store_jsvalue_slot(builder, stack_base, index, value, layout)?;
+                    }
+                    if depth < old_depth {
+                        for (offset, variables) in stack
+                            .get(depth..old_depth)
+                            .ok_or(CompileFailure::InvalidArtifact)?
+                            .iter()
+                            .copied()
+                            .enumerate()
+                        {
+                            clear_pair(builder, variables, stack_base, depth + offset, layout)?;
+                        }
+                    }
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::Unary(operation) => {
-                    let value = use_pair(builder, stack[depth - 1]);
-                    let result = emit_unary(builder, value, operation);
-                    define_pair(builder, stack[depth - 1], result);
+                    let index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    if matches!(operation, UnaryOp::Plus | UnaryOp::LogicalNot) {
+                        let state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let slot = flat_stack_slot(ir, index)?;
+                        let helper = if operation == UnaryOp::Plus {
+                            qjs::JSJitHelperId_JS_JIT_HELPER_TO_NUMERIC
+                        } else {
+                            qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL
+                        };
+                        invoke_helper!(helper, state, depth, &[slot, slot]);
+                        reload_pair(builder, stack[index], stack_base, index, layout);
+                        if operation == UnaryOp::LogicalNot {
+                            let boolean = use_pair(builder, stack[index]);
+                            let payload = builder.ins().bxor_imm(boolean.payload, 1);
+                            let result = Pair {
+                                payload,
+                                tag: boolean.tag,
+                            };
+                            define_pair(builder, stack[index], result);
+                            store_jsvalue_slot(builder, stack_base, index, result, layout)?;
+                        }
+                    } else {
+                        let value = use_pair(builder, stack[index]);
+                        let result = emit_unary(builder, value, operation);
+                        define_pair(builder, stack[index], result);
+                    }
                 }
                 IrOp::PostUnary(operation) => {
                     let value = use_pair(builder, stack[depth - 1]);
@@ -1520,20 +2050,105 @@ fn lower_function(
                     if operation == BinaryOp::Mod {
                         return Err(CompileFailure::InvalidArtifact);
                     }
-                    let left = use_pair(builder, stack[depth - 2]);
-                    let right = use_pair(builder, stack[depth - 1]);
-                    let result = emit_binary(builder, left, right, operation);
-                    depth -= 1;
-                    define_pair(builder, stack[depth - 1], result);
+                    let left_index = depth
+                        .checked_sub(2)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let right_index = depth - 1;
+                    let helper = match operation {
+                        BinaryOp::Add => Some((qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW, None)),
+                        BinaryOp::LessThan => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_LT),
+                        )),
+                        BinaryOp::LessThanOrEqual => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_LTE),
+                        )),
+                        BinaryOp::GreaterThan => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_GT),
+                        )),
+                        BinaryOp::GreaterThanOrEqual => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_GTE),
+                        )),
+                        BinaryOp::Equal => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_EQ),
+                        )),
+                        BinaryOp::NotEqual => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_NEQ),
+                        )),
+                        BinaryOp::StrictEqual => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_STRICT_EQ),
+                        )),
+                        BinaryOp::StrictNotEqual => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
+                            Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_STRICT_NEQ),
+                        )),
+                        _ => None,
+                    };
+                    if let Some((helper, comparison)) = helper {
+                        let state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let left = flat_stack_slot(ir, left_index)?;
+                        let right = flat_stack_slot(ir, right_index)?;
+                        if let Some(comparison) = comparison {
+                            invoke_helper!(helper, state, depth, &[left, left, right, comparison]);
+                        } else {
+                            invoke_helper!(helper, state, depth, &[left, left, right]);
+                        }
+                        reload_pair(builder, stack[left_index], stack_base, left_index, layout);
+                        reload_pair(builder, stack[right_index], stack_base, right_index, layout);
+                        depth -= 1;
+                        set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                    } else {
+                        let left = use_pair(builder, stack[left_index]);
+                        let right = use_pair(builder, stack[right_index]);
+                        let result = emit_binary(builder, left, right, operation);
+                        depth -= 1;
+                        define_pair(builder, stack[depth - 1], result);
+                    }
                 }
                 IrOp::Jump(target) => {
                     builder.ins().jump(blocks[&target], &[]);
                     terminated = true;
                 }
                 IrOp::Branch { target, when_true } => {
-                    let condition = use_pair(builder, stack[depth - 1]);
+                    let condition_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let condition_slot = flat_stack_slot(ir, condition_index)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
+                        state,
+                        depth,
+                        &[condition_slot, condition_slot]
+                    );
+                    reload_pair(
+                        builder,
+                        stack[condition_index],
+                        stack_base,
+                        condition_index,
+                        layout,
+                    );
+                    let condition = use_pair(builder, stack[condition_index]);
                     depth -= 1;
-                    let truthy = emit_truthy(builder, condition);
+                    let truthy = builder.ins().ireduce(types::I8, condition.payload);
+                    clear_pair(
+                        builder,
+                        stack[condition_index],
+                        stack_base,
+                        condition_index,
+                        layout,
+                    )?;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                     let taken = if when_true {
                         truthy
                     } else {
@@ -1550,8 +2165,34 @@ fn lower_function(
                     terminated = true;
                 }
                 IrOp::Return => {
-                    let result = use_pair(builder, stack[depth - 1]);
+                    let result_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        depth,
+                        instruction.pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    let result = use_pair(builder, stack[result_index]);
                     store_jsvalue(builder, frame, layout.result, result, layout);
+                    clear_pair(
+                        builder,
+                        stack[result_index],
+                        stack_base,
+                        result_index,
+                        layout,
+                    )?;
+                    set_visible_stack_depth(builder, frame, stack_base, result_index, layout)?;
                     emit_exit(
                         builder,
                         sret,
@@ -1562,6 +2203,21 @@ fn lower_function(
                     terminated = true;
                 }
                 IrOp::ReturnUndefined => {
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        depth,
+                        instruction.pc,
+                        pointer_type,
+                        layout,
+                    )?;
                     let result =
                         constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
                     store_jsvalue(builder, frame, layout.result, result, layout);
@@ -1574,6 +2230,9 @@ fn lower_function(
                     );
                     terminated = true;
                 }
+            }
+            if helper_states.next().is_some() {
+                return Err(CompileFailure::InvalidArtifact);
             }
             if terminated {
                 break;
@@ -1600,6 +2259,351 @@ fn lower_function(
     builder.switch_to_block(invariant_trap);
     builder.ins().trap(TrapCode::unwrap_user(1));
     Ok(())
+}
+
+fn next_helper_state(
+    states: &mut impl Iterator<Item = FrameStateId>,
+) -> Result<FrameStateId, CompileFailure> {
+    states.next().ok_or(CompileFailure::InvalidArtifact)
+}
+
+fn lower_new_array(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    count: u16,
+) -> Result<(), CompileFailure> {
+    let count = usize::from(count);
+    let input_base = depth
+        .checked_sub(count)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let output_index = *depth;
+    let output = flat_stack_slot(helpers.ir, output_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[output],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[output_index],
+        helpers.stack_base,
+        output_index,
+        helpers.layout,
+    );
+    if count == 0 {
+        *depth = input_base + 1;
+        return helpers.set_depth(builder, *depth);
+    }
+
+    /*
+     * Keep the array in the first logical input slot before invoking a
+     * setter. The displaced first element occupies the second scratch slot,
+     * so either setter exit has no owning value in scratch: SET_PROPERTY
+     * consumes that element on both success and exception.
+     */
+    let displaced_index = output_index
+        .checked_add(1)
+        .ok_or(CompileFailure::ResourceLimit)?;
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        input_base,
+        displaced_index,
+        helpers.layout,
+    )?;
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        output_index,
+        input_base,
+        helpers.layout,
+    )?;
+    let array = flat_stack_slot(helpers.ir, input_base)?;
+
+    for index in 0..count {
+        let value_index = if index == 0 {
+            displaced_index
+        } else {
+            input_base + index
+        };
+        let value = flat_stack_slot(helpers.ir, value_index)?;
+        let atom =
+            (1_u32 << 31) | u32::try_from(index).map_err(|_| CompileFailure::ResourceLimit)?;
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+            next_helper_state(states)?,
+            *depth + 2,
+            *depth,
+            &[array, atom, value],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[value_index],
+            helpers.stack_base,
+            value_index,
+            helpers.layout,
+        );
+        reload_pair(
+            builder,
+            helpers.stack[input_base],
+            helpers.stack_base,
+            input_base,
+            helpers.layout,
+        );
+    }
+    for index in (input_base + 1)..=displaced_index {
+        clear_pair(
+            builder,
+            helpers.stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        )?;
+    }
+    *depth = input_base + 1;
+    helpers.set_depth(builder, *depth)
+}
+
+fn lower_get_property(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: usize,
+    atom: u32,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let output_index = depth;
+    let displaced_index = depth.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let output = flat_stack_slot(helpers.ir, output_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
+        next_helper_state(states)?,
+        depth,
+        depth,
+        &[output, object, atom],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[output_index],
+        helpers.stack_base,
+        output_index,
+        helpers.layout,
+    );
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        object_index,
+        displaced_index,
+        helpers.layout,
+    )?;
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        output_index,
+        object_index,
+        helpers.layout,
+    )?;
+    let displaced = flat_stack_slot(helpers.ir, displaced_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        next_helper_state(states)?,
+        depth + 2,
+        depth,
+        &[displaced],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[displaced_index],
+        helpers.stack_base,
+        displaced_index,
+        helpers.layout,
+    );
+    helpers.set_depth(builder, depth)
+}
+
+fn lower_set_property(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    atom: u32,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let value_index = *depth - 1;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let value = flat_stack_slot(helpers.ir, value_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[object, atom, value],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[value_index],
+        helpers.stack_base,
+        value_index,
+        helpers.layout,
+    );
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[object],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[object_index],
+        helpers.stack_base,
+        object_index,
+        helpers.layout,
+    );
+    *depth = object_index;
+    helpers.set_depth(builder, *depth)
+}
+
+fn lower_call(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    argc: u16,
+    has_this: bool,
+) -> Result<(), CompileFailure> {
+    let argc = usize::from(argc);
+    let pop = argc + 1 + usize::from(has_this);
+    let base = depth
+        .checked_sub(pop)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let this_index = if has_this { base } else { *depth };
+    let function_index = if has_this { base + 1 } else { base };
+    let argv_index = function_index + 1;
+    let output_index = if has_this { *depth } else { *depth + 1 };
+    if !has_this {
+        let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+        define_pair(builder, helpers.stack[this_index], undefined);
+    }
+    let output = flat_stack_slot(helpers.ir, output_index)?;
+    let function = flat_stack_slot(helpers.ir, function_index)?;
+    let this_value = flat_stack_slot(helpers.ir, this_index)?;
+    let argv = if argc == 0 {
+        u32::MAX
+    } else {
+        flat_stack_slot(helpers.ir, argv_index)?
+    };
+    let call_live_depth = output_index;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+        next_helper_state(states)?,
+        call_live_depth,
+        *depth,
+        &[
+            output,
+            function,
+            this_value,
+            argv,
+            u32::try_from(argc).map_err(|_| CompileFailure::ResourceLimit)?,
+        ],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[output_index],
+        helpers.stack_base,
+        output_index,
+        helpers.layout,
+    );
+    // CALL borrows every input. The bytecode stack effect is separate and is
+    // implemented with explicit FREE calls in QuickJS interpreter order.
+    // Move the first input aside and install the result in its logical slot
+    // before FREE can finalize or re-enter, leaving at most one scratch owner.
+    let displaced_index = if has_this {
+        output_index + 1
+    } else {
+        this_index
+    };
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        base,
+        displaced_index,
+        helpers.layout,
+    )?;
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        output_index,
+        base,
+        helpers.layout,
+    )?;
+    let displaced = flat_stack_slot(helpers.ir, displaced_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        next_helper_state(states)?,
+        *depth + 2,
+        *depth,
+        &[displaced],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[displaced_index],
+        helpers.stack_base,
+        displaced_index,
+        helpers.layout,
+    );
+    for index in (base + 1)..(base + pop) {
+        let slot = flat_stack_slot(helpers.ir, index)?;
+        helpers.invoke(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+            next_helper_state(states)?,
+            *depth + 2,
+            *depth,
+            &[slot],
+        )?;
+        reload_pair(
+            builder,
+            helpers.stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        );
+    }
+    for index in (base + 1)..=output_index {
+        clear_pair(
+            builder,
+            helpers.stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        )?;
+    }
+    *depth = base + 1;
+    helpers.set_depth(builder, *depth)
 }
 
 fn load_jsvalue(
@@ -1632,6 +2636,281 @@ fn store_jsvalue(
         .store(flags, value.tag, base, offset + layout.value_tag);
 }
 
+fn store_jsvalue_slot(
+    builder: &mut FunctionBuilder<'_>,
+    base: Value,
+    index: usize,
+    value: Pair,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    let offset = index
+        .checked_mul(mem::size_of::<qjs::JSValue>())
+        .and_then(|offset| i32::try_from(offset).ok())
+        .ok_or(CompileFailure::ResourceLimit)?;
+    store_jsvalue(builder, base, offset, value, layout);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_frame(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    arg_buf: Value,
+    var_buf: Value,
+    stack_base: Value,
+    arguments: &[PairVars],
+    locals: &[PairVars],
+    stack: &[PairVars],
+    live_depth: usize,
+    visible_depth: usize,
+    bytecode_pc: u32,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    if live_depth > visible_depth || visible_depth > stack.len() {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    for (index, pair) in arguments.iter().copied().enumerate() {
+        let value = use_pair(builder, pair);
+        store_jsvalue_slot(builder, arg_buf, index, value, layout)?;
+    }
+    for (index, pair) in locals.iter().copied().enumerate() {
+        let value = use_pair(builder, pair);
+        store_jsvalue_slot(builder, var_buf, index, value, layout)?;
+    }
+    for (index, pair) in stack.iter().copied().take(live_depth).enumerate() {
+        let value = use_pair(builder, pair);
+        store_jsvalue_slot(builder, stack_base, index, value, layout)?;
+    }
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    for (index, pair) in stack
+        .iter()
+        .copied()
+        .enumerate()
+        .take(visible_depth)
+        .skip(live_depth)
+    {
+        define_pair(builder, pair, undefined);
+        store_jsvalue_slot(builder, stack_base, index, undefined, layout)?;
+    }
+    let stack_bytes = visible_depth
+        .checked_mul(mem::size_of::<qjs::JSValue>())
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or(CompileFailure::ResourceLimit)?;
+    let stack_top = builder.ins().iadd_imm(stack_base, stack_bytes);
+    let flags = MemFlags::new();
+    builder
+        .ins()
+        .store(flags, stack_top, frame, layout.stack_top);
+    let bytecode = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.bytecode_start);
+    let pc = builder.ins().iadd_imm(bytecode, i64::from(bytecode_pc));
+    builder.ins().store(flags, pc, frame, layout.pc);
+    Ok(())
+}
+
+fn set_visible_stack_depth(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    stack_base: Value,
+    depth: usize,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    let bytes = depth
+        .checked_mul(mem::size_of::<qjs::JSValue>())
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or(CompileFailure::ResourceLimit)?;
+    let top = builder.ins().iadd_imm(stack_base, bytes);
+    builder
+        .ins()
+        .store(MemFlags::new(), top, frame, layout.stack_top);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_helper_call(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    sret: Value,
+    stack_base: Value,
+    exception_depth: usize,
+    signatures: &[cranelift_codegen::ir::SigRef],
+    helper_id: usize,
+    state: FrameStateId,
+    arguments: &[Value],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    let signature = *signatures
+        .get(helper_id)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let offset = *layout
+        .helper_offsets
+        .get(helper_id)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let flags = MemFlags::new();
+    let api = builder
+        .ins()
+        .load(pointer_type, flags, frame, layout.runtime_api);
+    let helper = builder.ins().load(pointer_type, flags, api, offset);
+    let mut params = Vec::with_capacity(arguments.len() + 1);
+    params.push(frame);
+    params.extend_from_slice(arguments);
+    builder.set_srcloc(frame_state_source_loc(state)?);
+    let call = builder.ins().call_indirect(signature, helper, &params);
+    builder.set_srcloc(SourceLoc::default());
+    let status = builder.inst_results(call)[0];
+    let succeeded = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+    let continuation = builder.create_block();
+    let exception = builder.create_block();
+    builder
+        .ins()
+        .brif(succeeded, continuation, &[], exception, &[]);
+    builder.seal_block(exception);
+    builder.seal_block(continuation);
+    builder.switch_to_block(exception);
+    set_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
+    emit_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+        None,
+        pointer_type,
+    );
+    builder.switch_to_block(continuation);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_frame_helper(
+    builder: &mut FunctionBuilder<'_>,
+    ir: &BaselineIr,
+    frame: Value,
+    sret: Value,
+    arg_buf: Value,
+    var_buf: Value,
+    stack_base: Value,
+    arguments: &[PairVars],
+    locals: &[PairVars],
+    stack: &[PairVars],
+    live_depth: usize,
+    exception_depth: usize,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    helper_id: usize,
+    state: FrameStateId,
+    helper_arguments: &[u32],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    let frame_state = ir.frame_states.get(state);
+    let fixed_slots = usize::from(ir.argument_count) + usize::from(ir.local_count);
+    let visible_depth = frame_state
+        .slots
+        .len()
+        .checked_sub(fixed_slots)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    materialize_frame(
+        builder,
+        frame,
+        arg_buf,
+        var_buf,
+        stack_base,
+        arguments,
+        locals,
+        stack,
+        live_depth,
+        visible_depth,
+        frame_state.pc,
+        pointer_type,
+        layout,
+    )?;
+    let mut values = Vec::with_capacity(helper_arguments.len() + 1);
+    values.push(helper_u32(
+        builder,
+        u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
+    ));
+    values.extend(
+        helper_arguments
+            .iter()
+            .copied()
+            .map(|argument| helper_u32(builder, argument)),
+    );
+    emit_helper_call(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        exception_depth,
+        helper_signatures,
+        helper_id,
+        state,
+        &values,
+        pointer_type,
+        layout,
+    )
+}
+
+fn helper_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
+    builder.ins().iconst(types::I32, i64::from(value))
+}
+
+fn flat_stack_slot(ir: &BaselineIr, index: usize) -> Result<u32, CompileFailure> {
+    usize::from(ir.argument_count)
+        .checked_add(usize::from(ir.local_count))
+        .and_then(|base| base.checked_add(index))
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+fn flat_argument_slot(index: u16) -> u32 {
+    u32::from(index)
+}
+
+fn flat_local_slot(ir: &BaselineIr, index: u16) -> u32 {
+    u32::from(ir.argument_count) + u32::from(index)
+}
+
+fn reload_pair(
+    builder: &mut FunctionBuilder<'_>,
+    variables: PairVars,
+    base: Value,
+    index: usize,
+    layout: FrameLayout,
+) {
+    let value = load_jsvalue(builder, base, index, layout);
+    define_pair(builder, variables, value);
+}
+
+fn move_stack_pair(
+    builder: &mut FunctionBuilder<'_>,
+    stack: &[PairVars],
+    base: Value,
+    source: usize,
+    destination: usize,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    if source == destination {
+        return Ok(());
+    }
+    let value = use_pair(builder, stack[source]);
+    define_pair(builder, stack[destination], value);
+    store_jsvalue_slot(builder, base, destination, value, layout)?;
+    clear_pair(builder, stack[source], base, source, layout)
+}
+
+fn clear_pair(
+    builder: &mut FunctionBuilder<'_>,
+    variables: PairVars,
+    base: Value,
+    index: usize,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    define_pair(builder, variables, undefined);
+    store_jsvalue_slot(builder, base, index, undefined, layout)
+}
+
 fn constant_pair(builder: &mut FunctionBuilder<'_>, value: TaggedValue) -> Pair {
     Pair {
         payload: builder.ins().iconst(types::I64, value.payload as i64),
@@ -1644,28 +2923,11 @@ fn define_pair(builder: &mut FunctionBuilder<'_>, variables: PairVars, value: Pa
     builder.def_var(variables.tag, value.tag);
 }
 
-fn copy_pair(builder: &mut FunctionBuilder<'_>, destination: PairVars, source: PairVars) {
-    let value = use_pair(builder, source);
-    define_pair(builder, destination, value);
-}
-
 fn use_pair(builder: &mut FunctionBuilder<'_>, variables: PairVars) -> Pair {
     Pair {
         payload: builder.use_var(variables.payload),
         tag: builder.use_var(variables.tag),
     }
-}
-
-fn guard_non_refcounted(builder: &mut FunctionBuilder<'_>, value: Pair, retry: Block) {
-    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
-    let at_or_after_first = builder.ins().icmp_imm(
-        IntCC::SignedGreaterThanOrEqual,
-        value.tag,
-        i64::from(qjs::JS_TAG_FIRST),
-    );
-    let refcounted = builder.ins().band(negative, at_or_after_first);
-    let immediate = builder.ins().bxor_imm(refcounted, 1);
-    guard(builder, immediate, retry);
 }
 
 fn emit_entry_domain_guards(
@@ -1677,8 +2939,7 @@ fn emit_entry_domain_guards(
 ) {
     for (root, requirements) in &analysis.requirements {
         debug_assert!(
-            !requirements.uninitialized
-                || !(requirements.numeric || requirements.immediate || requirements.initialized),
+            !requirements.uninitialized || !(requirements.numeric || requirements.initialized),
             "entry-domain analysis rejected conflicting requirements"
         );
         let variables = match *root {
@@ -1690,8 +2951,6 @@ fn emit_entry_domain_guards(
             tag_is(builder, value.tag, qjs::JS_TAG_UNINITIALIZED)
         } else if requirements.numeric {
             emit_numeric_tag(builder, value.tag)
-        } else if requirements.immediate {
-            emit_returnable_tag(builder, value.tag)
         } else {
             debug_assert!(requirements.initialized);
             builder.ins().icmp_imm(
@@ -1704,7 +2963,7 @@ fn emit_entry_domain_guards(
     }
 }
 
-fn guard_live_stack_non_refcounted(
+fn validate_live_stack_bounds(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
     retry: Block,
@@ -1748,52 +3007,6 @@ fn guard_live_stack_non_refcounted(
         .ins()
         .icmp(IntCC::UnsignedLessThanOrEqual, slot_count, slot_limit);
     guard(builder, bounded, retry);
-
-    let scan = builder.create_block();
-    let inspect = builder.create_block();
-    let continuation = builder.create_block();
-    builder.append_block_param(scan, pointer_type);
-    builder.append_block_param(scan, pointer_type);
-    builder.ins().jump(scan, &[stack_base, slot_count]);
-
-    builder.switch_to_block(scan);
-    let cursor = builder.block_params(scan)[0];
-    let remaining = builder.block_params(scan)[1];
-    let complete = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
-    builder
-        .ins()
-        .brif(complete, continuation, &[], inspect, &[cursor, remaining]);
-
-    builder.append_block_param(inspect, pointer_type);
-    builder.append_block_param(inspect, pointer_type);
-    builder.switch_to_block(inspect);
-    let cursor = builder.block_params(inspect)[0];
-    let remaining = builder.block_params(inspect)[1];
-    let tag = builder
-        .ins()
-        .load(types::I64, flags, cursor, layout.value_tag);
-    let value = Pair {
-        payload: builder.ins().iconst(types::I64, 0),
-        tag,
-    };
-    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
-    let at_or_after_first = builder.ins().icmp_imm(
-        IntCC::SignedGreaterThanOrEqual,
-        value.tag,
-        i64::from(qjs::JS_TAG_FIRST),
-    );
-    let refcounted = builder.ins().band(negative, at_or_after_first);
-    let immediate = builder.ins().bxor_imm(refcounted, 1);
-    let next = builder.ins().iadd_imm(cursor, 16);
-    let next_remaining = builder.ins().iadd_imm(remaining, -1);
-    builder
-        .ins()
-        .brif(immediate, scan, &[next, next_remaining], retry, &[]);
-
-    builder.seal_block(inspect);
-    builder.seal_block(scan);
-    builder.seal_block(continuation);
-    builder.switch_to_block(continuation);
 }
 
 fn emit_exit(
@@ -1851,7 +3064,12 @@ fn emit_poll(
     let api = builder
         .ins()
         .load(pointer_type, flags, frame, layout.runtime_api);
-    let poll = builder.ins().load(pointer_type, flags, api, layout.poll);
+    let poll = builder.ins().load(
+        pointer_type,
+        flags,
+        api,
+        layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
+    );
     builder.set_srcloc(location.source_location);
     let call = builder.ins().call_indirect(signature, poll, &[frame]);
     builder.set_srcloc(SourceLoc::default());
@@ -1892,20 +3110,6 @@ fn tag_is(builder: &mut FunctionBuilder<'_>, tag: Value, expected: i32) -> Value
     builder
         .ins()
         .icmp_imm(IntCC::Equal, tag, i64::from(expected))
-}
-
-fn emit_returnable_tag(builder: &mut FunctionBuilder<'_>, tag: Value) -> Value {
-    let int = tag_is(builder, tag, qjs::JS_TAG_INT);
-    let boolean = tag_is(builder, tag, qjs::JS_TAG_BOOL);
-    let null = tag_is(builder, tag, qjs::JS_TAG_NULL);
-    let undefined = tag_is(builder, tag, qjs::JS_TAG_UNDEFINED);
-    let short_big_int = tag_is(builder, tag, qjs::JS_TAG_SHORT_BIG_INT);
-    let float = tag_is(builder, tag, qjs::JS_TAG_FLOAT64);
-    let result = builder.ins().bor(int, boolean);
-    let result = builder.ins().bor(result, null);
-    let result = builder.ins().bor(result, undefined);
-    let result = builder.ins().bor(result, short_big_int);
-    builder.ins().bor(result, float)
 }
 
 fn emit_numeric_tag(builder: &mut FunctionBuilder<'_>, tag: Value) -> Value {
@@ -2240,6 +3444,7 @@ mod tests {
         IrInstruction {
             pc,
             frame_state: None,
+            helper_states: Box::new([]),
             op,
         }
     }
@@ -2272,6 +3477,12 @@ mod tests {
             IrOp::OsrLabel { .. } => "osr_label",
             IrOp::Nop => "nop",
             IrOp::Push(_) => "push",
+            IrOp::ResolveConstant(_) => "resolve_constant",
+            IrOp::NewObject => "new_object",
+            IrOp::NewArrayFrom(_) => "new_array_from",
+            IrOp::GetProperty(_) => "get_property",
+            IrOp::SetProperty(_) => "set_property",
+            IrOp::Call { .. } => "call",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",
@@ -2304,6 +3515,18 @@ mod tests {
             linear_ir(
                 Vec::new(),
                 IrOp::Push(TaggedValue::new(1, qjs::JS_TAG_INT as i64)),
+            ),
+            linear_ir(Vec::new(), IrOp::ResolveConstant(0)),
+            linear_ir(Vec::new(), IrOp::NewObject),
+            linear_ir(vec![numeric_push(), numeric_push()], IrOp::NewArrayFrom(2)),
+            linear_ir(vec![numeric_push()], IrOp::GetProperty(1)),
+            linear_ir(vec![numeric_push(), numeric_push()], IrOp::SetProperty(1)),
+            linear_ir(
+                vec![numeric_push(), numeric_push()],
+                IrOp::Call {
+                    argc: 1,
+                    has_this: false,
+                },
             ),
             linear_ir(Vec::new(), IrOp::GetArgument(0)),
             linear_ir(Vec::new(), IrOp::GetLocal(0)),
@@ -2479,7 +3702,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            23,
+            29,
             "every IrOp variant is represented: {seen:?}"
         );
     }

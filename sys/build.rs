@@ -2,7 +2,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::{self, Command},
+    process,
 };
 
 // WASI logic lifted from https://github.com/bytecodealliance/javy/blob/61616e1507d2bf896f46dc8d72687273438b58b2/crates/quickjs-wasm-sys/build.rs#L18
@@ -18,6 +18,17 @@ struct JitOpcode {
     n_pop: u8,
     n_push: u8,
     format: u8,
+}
+
+#[cfg(feature = "jit-abi")]
+#[derive(Debug)]
+struct JitHelper {
+    name: String,
+    table_field: String,
+    signature: String,
+    value_ownership: Vec<u8>,
+    output_ownership: u8,
+    flags: u32,
 }
 
 #[cfg(feature = "jit-abi")]
@@ -39,6 +50,36 @@ fn hash_u64(mut hash: u64, mut value: u64) -> u64 {
 }
 
 #[cfg(feature = "jit-abi")]
+fn preprocess(expansion_source: &Path, src_dir: &Path, description: &str) -> String {
+    let compiler = cc::Build::new().get_compiler();
+    let mut command = process::Command::new(compiler.path());
+    command.args(compiler.args());
+    if compiler.is_like_msvc() {
+        command
+            .arg("/nologo")
+            .arg("/EP")
+            .arg(format!("/I{}", src_dir.display()))
+            .arg(expansion_source);
+    } else {
+        command
+            .arg("-E")
+            .arg("-P")
+            .arg(format!("-I{}", src_dir.display()))
+            .arg(expansion_source);
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("run C preprocessor for {description}: {error}"));
+    if !output.status.success() {
+        panic!(
+            "QuickJS {description} macro expansion failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout).unwrap_or_else(|_| panic!("{description} expansion is UTF-8"))
+}
+
+#[cfg(feature = "jit-abi")]
 fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
     let expansion_source = out_dir.join("quickjs-jit-opcode-expand.c");
     fs::write(
@@ -52,32 +93,7 @@ fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
     )
     .expect("write QuickJS opcode expansion source");
 
-    let compiler = cc::Build::new().get_compiler();
-    let mut command = Command::new(compiler.path());
-    command.args(compiler.args());
-    if compiler.is_like_msvc() {
-        command
-            .arg("/nologo")
-            .arg("/EP")
-            .arg(format!("/I{}", src_dir.display()))
-            .arg(&expansion_source);
-    } else {
-        command
-            .arg("-E")
-            .arg("-P")
-            .arg(format!("-I{}", src_dir.display()))
-            .arg(&expansion_source);
-    }
-    let output = command
-        .output()
-        .expect("run C preprocessor for QuickJS opcodes");
-    if !output.status.success() {
-        panic!(
-            "QuickJS opcode macro expansion failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let expanded = String::from_utf8(output.stdout).expect("opcode expansion is UTF-8");
+    let expanded = preprocess(&expansion_source, src_dir, "opcode");
 
     let formats: Vec<String> = macro_invocations(&expanded, "QJSJIT_FORMAT")
         .map(|format| format.trim().to_owned())
@@ -145,6 +161,131 @@ fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
     rust.push_str(&constants);
     fs::write(out_dir.join("quickjs-jit-opcodes.rs"), rust)
         .expect("write generated QuickJS opcode Rust metadata");
+}
+
+#[cfg(feature = "jit-abi")]
+fn generate_jit_helper_metadata(src_dir: &Path, out_dir: &Path) {
+    let expansion_source = out_dir.join("quickjs-jit-helper-expand.c");
+    fs::write(
+        &expansion_source,
+        r#"
+#include <stdint.h>
+#define JS_EXTERN
+typedef struct JSRuntime JSRuntime;
+typedef struct JSContext JSContext;
+typedef struct JSJitExecFrame JSJitExecFrame;
+#include "quickjs-jit-helpers.h"
+#define QJSJIT_EMIT(id, field, c_name, signature, value_arity, own0, own1, own2, own3, output, flags) \
+    QJSJIT_HELPER_META(id, field, signature, value_arity, own0, own1, own2, own3, output, flags)
+QJSJIT_HELPER_LIST(QJSJIT_EMIT)
+"#,
+    )
+    .expect("write QuickJS helper expansion source");
+    let expanded = preprocess(&expansion_source, src_dir, "helper");
+
+    let ownership = |value: &str| match value.trim() {
+        "NONE" => 0,
+        "BORROWED" => 1,
+        "CONSUMED" => 2,
+        "OWNED" => 3,
+        other => panic!("unknown helper ownership {other}"),
+    };
+    let mut helpers = Vec::new();
+    for invocation in macro_invocations(&expanded, "QJSJIT_HELPER_META") {
+        let fields: Vec<_> = invocation.split(',').map(str::trim).collect();
+        assert_eq!(fields.len(), 10, "malformed helper expansion: {invocation}");
+        let value_arity: usize = fields[3].parse().expect("helper value arity");
+        let all_ownership = fields[4..8]
+            .iter()
+            .map(|value| ownership(value))
+            .collect::<Vec<_>>();
+        let flags = u32::from(fields[9].contains("THROWING"))
+            | (u32::from(fields[9].contains("ALLOCATING")) << 1)
+            | (u32::from(fields[9].contains("REENTRANT")) << 2)
+            | (u32::from(fields[9].contains("FINALIZING")) << 3);
+        helpers.push(JitHelper {
+            name: fields[0].to_owned(),
+            table_field: fields[1].to_owned(),
+            signature: fields[2].to_owned(),
+            value_ownership: all_ownership[..value_arity].to_vec(),
+            output_ownership: ownership(fields[8]),
+            flags,
+        });
+    }
+    assert_eq!(helpers.len(), 13, "canonical initial helper count");
+
+    let u32_args = |signature: &str| match signature {
+        "FRAME" => 0,
+        "MAP_IN" | "MAP_OUT" => 2,
+        "MAP_OUT_IN" | "MAP_OUT_INDEX" => 3,
+        "MAP_OUT_TWO" | "MAP_OUT_OBJECT_ATOM" | "MAP_OBJECT_ATOM_VALUE" => 4,
+        "MAP_OUT_TWO_OP" => 5,
+        "MAP_CALL" => 6,
+        other => panic!("unknown helper signature {other}"),
+    };
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for (id, helper) in helpers.iter().enumerate() {
+        fingerprint = hash_u64(fingerprint, id as u64);
+        let abi_types = std::iter::once(1_u8)
+            .chain(std::iter::once(2))
+            .chain(std::iter::repeat_n(3, u32_args(&helper.signature)))
+            .collect::<Vec<_>>();
+        fingerprint = hash_u64(fingerprint, abi_types.len() as u64);
+        for value in &abi_types {
+            fingerprint = hash_u64(fingerprint, u64::from(*value));
+        }
+        fingerprint = hash_u64(fingerprint, helper.value_ownership.len() as u64);
+        for value in &helper.value_ownership {
+            fingerprint = hash_u64(fingerprint, u64::from(*value));
+        }
+        fingerprint = hash_u64(fingerprint, u64::from(helper.output_ownership));
+        fingerprint = hash_u64(fingerprint, u64::from(helper.flags));
+        for byte in helper.name.as_bytes() {
+            fingerprint = hash_u64(fingerprint, u64::from(*byte));
+        }
+    }
+
+    fs::write(
+        out_dir.join("quickjs-jit-helpers.generated.h"),
+        format!(
+            "#define QJSJIT_GENERATED_HELPER_COUNT {}u\n#define QJSJIT_GENERATED_HELPER_FINGERPRINT UINT64_C(0x{fingerprint:016x})\n",
+            helpers.len()
+        ),
+    )
+    .expect("write generated QuickJS helper C metadata");
+
+    let mut rust = format!(
+        "pub const QJSJIT_GENERATED_HELPER_COUNT: usize = {};\n\
+         pub const QJSJIT_GENERATED_HELPER_FINGERPRINT: u64 = 0x{fingerprint:016x};\n\
+         pub static QJSJIT_GENERATED_HELPERS: &[JitGeneratedHelper] = &[\n",
+        helpers.len()
+    );
+    for (id, helper) in helpers.iter().enumerate() {
+        let abi_types = std::iter::once(1_u8)
+            .chain(std::iter::once(2))
+            .chain(std::iter::repeat_n(3, u32_args(&helper.signature)))
+            .collect::<Vec<_>>();
+        rust.push_str(&format!(
+            "    JitGeneratedHelper {{ id: {id}, name: {:?}, abi_types: &{:?}, value_arity: {}, value_ownership: &{:?}, output_ownership: {}, flags: {} }},\n",
+            helper.name,
+            abi_types,
+            helper.value_ownership.len(),
+            helper.value_ownership,
+            helper.output_ownership,
+            helper.flags,
+        ));
+    }
+    rust.push_str("];\n\
+        pub fn qjsjit_generated_helper_offsets() -> [usize; QJSJIT_GENERATED_HELPER_COUNT] {\n    [\n");
+    for helper in &helpers {
+        rust.push_str(&format!(
+            "        ::core::mem::offset_of!(JSJitRuntimeAPI, {}),\n",
+            helper.table_field
+        ));
+    }
+    rust.push_str("    ]\n}\n");
+    fs::write(out_dir.join("quickjs-jit-helpers.rs"), rust)
+        .expect("write generated QuickJS helper Rust metadata");
 }
 
 fn download_wasi_sdk() -> PathBuf {
@@ -264,6 +405,9 @@ fn main() {
     #[cfg(feature = "jit-abi")]
     generate_jit_opcode_metadata(src_dir, out_dir);
 
+    #[cfg(feature = "jit-abi")]
+    generate_jit_helper_metadata(src_dir, out_dir);
+
     let header_files = [
         "builtin-array-fromasync.h",
         "builtin-iterator-zip-keyed.h",
@@ -280,6 +424,7 @@ fn main() {
         "quickjs-c-atomics.h",
         "quickjs.h",
         "quickjs-jit.h",
+        "quickjs-jit-helpers.h",
     ];
 
     let source_files = ["libregexp.c", "libunicode.c", "quickjs.c", "dtoa.c"];

@@ -26,6 +26,7 @@ enum EntryKind {
     },
     InvalidDeopt,
     Retry,
+    ScratchOwner(ScratchExit),
     Malformed(MalformedExit),
     FailingInterrupt(Arc<AtomicBool>),
     FailingPrebuiltInterrupt(Arc<AtomicBool>),
@@ -41,6 +42,7 @@ impl EntryKind {
             Self::Deopt { .. } => native_deopt,
             Self::InvalidDeopt => native_invalid_deopt,
             Self::Retry => native_retry,
+            Self::ScratchOwner(_) => native_scratch_owner,
             Self::Malformed(_) => native_malformed,
             Self::FailingInterrupt(_) => native_failing_interrupt,
             Self::FailingPrebuiltInterrupt(_) => native_failing_prebuilt_interrupt,
@@ -57,6 +59,15 @@ enum MalformedExit {
     InterruptWithResult,
     DeoptWithPendingAndResult,
     RetryWithPendingAndResult,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScratchExit {
+    Done,
+    Exception,
+    Interrupt,
+    Deopt,
+    Retry,
 }
 
 #[derive(Clone)]
@@ -122,6 +133,8 @@ unsafe impl JitBackend for NativeBackend {
                 reserved: 0,
                 entry: None,
                 pin: std::ptr::null_mut(),
+                stack_map_count: 0,
+                helper_abi_version: 0,
             };
         };
 
@@ -133,6 +146,8 @@ unsafe impl JitBackend for NativeBackend {
             reserved: 0,
             entry: Some(spec.kind.entry()),
             pin: Arc::into_raw(pin).cast_mut().cast::<c_void>(),
+            stack_map_count: 0,
+            helper_abi_version: qjs::QJSJIT_HELPER_ABI_VERSION,
         }
     }
 
@@ -157,6 +172,8 @@ unsafe impl JitBackend for UnpinnedBackend {
             reserved: 0,
             entry: Some(native_done),
             pin: std::ptr::null_mut(),
+            stack_map_count: 0,
+            helper_abi_version: qjs::QJSJIT_HELPER_ABI_VERSION,
         }
     }
 }
@@ -207,6 +224,8 @@ unsafe impl JitBackend for ReentrantBackend {
             reserved: 0,
             entry: Some(native_reentrant),
             pin: Arc::into_raw(pin).cast_mut().cast::<c_void>(),
+            stack_map_count: 0,
+            helper_abi_version: qjs::QJSJIT_HELPER_ABI_VERSION,
         }
     }
 
@@ -350,6 +369,32 @@ unsafe extern "C" fn native_invalid_deopt(frame: *mut qjs::JSJitExecFrame) -> qj
 
 unsafe extern "C" fn native_retry(_frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
     qjs::JSJitExit::retry_interpreter()
+}
+
+unsafe extern "C" fn native_scratch_owner(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let pin = &*((*frame).entry.pin.cast::<EntryPin>());
+        let EntryKind::ScratchOwner(exit) = pin.kind else {
+            return qjs::JSJitExit::retry_interpreter();
+        };
+        let scratch = (*frame)
+            .stack_capacity
+            .sub(qjs::JS_JIT_HELPER_SCRATCH_SLOTS as usize);
+        *scratch = take_global(frame, b"__jitScratch\0");
+        match exit {
+            ScratchExit::Done => {
+                (*frame).result = qjs::JS_MKVAL(qjs::JS_TAG_INT, 1);
+                qjs::JSJitExit::done()
+            }
+            ScratchExit::Exception => {
+                qjs::JS_Throw((*frame).ctx, qjs::JS_MKVAL(qjs::JS_TAG_INT, 17));
+                qjs::JSJitExit::exception()
+            }
+            ScratchExit::Interrupt => qjs::JSJitExit::interrupt(),
+            ScratchExit::Deopt => qjs::JSJitExit::resume((*frame).pc),
+            ScratchExit::Retry => qjs::JSJitExit::retry_interpreter(),
+        }
+    }
 }
 
 unsafe fn take_global(frame: *mut qjs::JSJitExecFrame, name: &'static [u8]) -> qjs::JSValue {
@@ -528,6 +573,43 @@ fn assert_malformed_exit_is_uncatchable_and_balanced(
         usize::from(pending_value) + usize::from(result_value),
         "the malformed exit did not release every transferred value"
     );
+    drop(guard);
+}
+
+fn assert_owned_scratch_exit_is_rejected_and_freed(exit: ScratchExit) {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            globalThis.target = function target() { return 1 };
+            globalThis.wrapper = function wrapper() {
+                try { target(); return "accepted"; }
+                catch (_) { return "caught"; }
+            };
+            "#,
+        )
+        .unwrap();
+        install_drop_value(&ctx, "__jitScratch", Arc::clone(&drops));
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(NativeBackend::one(
+            &captured,
+            EntryKind::ScratchOwner(exit),
+            Arc::clone(&releases),
+        ))
+        .unwrap();
+
+    let result = context.with(|ctx| ctx.eval::<String, _>("wrapper()"));
+
+    assert!(result.is_err(), "{exit:?} scratch owner reached JavaScript");
+    drop(result);
+    assert_eq!(drops.load(Ordering::SeqCst), 1, "{exit:?} leaked scratch");
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
     drop(guard);
 }
 
@@ -1017,6 +1099,19 @@ fn malformed_retry_with_pending_exception_frees_exception_and_transferred_result
         true,
         true,
     );
+}
+
+#[test]
+fn every_exit_requires_both_reserved_scratch_slots_to_be_clear() {
+    for exit in [
+        ScratchExit::Done,
+        ScratchExit::Exception,
+        ScratchExit::Interrupt,
+        ScratchExit::Deopt,
+        ScratchExit::Retry,
+    ] {
+        assert_owned_scratch_exit_is_rejected_and_freed(exit);
+    }
 }
 
 #[test]

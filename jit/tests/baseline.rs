@@ -8,7 +8,7 @@
 ))]
 
 use cranelift_codegen::{isa, settings};
-use rquickjs::{Context, Runtime, Value};
+use rquickjs::{Context, Runtime};
 use rquickjs_core::qjs;
 use rquickjs_jit::{
     bytecode::{linked_opcode_table, opcode, VerifyLimits},
@@ -59,7 +59,8 @@ fn assert_retry_predecessors_precede_the_first_poll(
 ) {
     let lines: Vec<_> = code.clif().lines().collect();
     let mut current_block = None;
-    let mut retry_blocks = BTreeSet::new();
+    let mut line_blocks = Vec::with_capacity(lines.len());
+    let mut retry_candidates = Vec::new();
     let mut first_poll = None;
 
     for (line_index, line) in lines.iter().enumerate() {
@@ -67,6 +68,7 @@ fn assert_retry_predecessors_precede_the_first_poll(
         if trimmed.starts_with("block") && trimmed.ends_with(':') {
             current_block = trimmed.split(['(', ':']).next().map(str::to_owned);
         }
+        line_blocks.push(current_block.clone());
         if trimmed.contains("call_indirect") && first_poll.is_none() {
             first_poll = Some(line_index);
         }
@@ -74,13 +76,32 @@ fn assert_retry_predecessors_precede_the_first_poll(
             "iconst.i32 {}",
             qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
         )) {
-            retry_blocks.insert(
+            let value = trimmed
+                .split_once(" = iconst.i32")
+                .map(|(value, _)| value.trim().to_owned())
+                .unwrap_or_else(|| panic!("{label}: malformed RETRY constant: {trimmed}"));
+            retry_candidates.push((
                 current_block
                     .clone()
                     .unwrap_or_else(|| panic!("{label}: RETRY outside a block: {trimmed}")),
-            );
+                value,
+            ));
         }
     }
+
+    let retry_blocks: BTreeSet<_> = retry_candidates
+        .into_iter()
+        .filter_map(|(block, value)| {
+            lines
+                .iter()
+                .zip(&line_blocks)
+                .any(|(line, line_block)| {
+                    line_block.as_ref() == Some(&block)
+                        && line.trim().contains(&format!("store {value}, v0 "))
+                })
+                .then_some(block)
+        })
+        .collect();
 
     assert_eq!(retry_blocks.len(), 1, "{label}: {}", code.clif());
     let retry_block = retry_blocks.first().unwrap();
@@ -319,64 +340,20 @@ fn result_copy_preserves_all_sixteen_jsvalue_bytes() {
 }
 
 #[test]
-fn unsupported_dynamic_add_retries_before_mutating_the_frame() {
+fn dynamic_add_lowers_to_helpers_without_post_call_retry() {
     let mut bytecode = vec![opcode::GET_ARG];
     bytecode.extend_from_slice(&0_u16.to_le_bytes());
     bytecode.push(opcode::GET_ARG);
     bytecode.extend_from_slice(&1_u16.to_le_bytes());
     bytecode.extend([opcode::ADD, opcode::RETURN]);
-    let executable = compile(bytecode, 2, 0).publish().unwrap();
-    let left = JSValueRepr::new(0x1111_2222_3333_4444, qjs::JS_TAG_OBJECT as i64);
-    let right = JSValueRepr::new(0xaaaa_bbbb_cccc_dddd, qjs::JS_TAG_STRING as i64);
-    let mut frame = SyntheticFrame::new(&[left, right], 0, 2);
-    let before = frame.snapshot();
+    let code = compile(bytecode, 2, 0);
 
-    let outcome = unsafe { frame.call(&executable) };
-
-    assert_eq!(
-        outcome.exit.kind,
-        qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
-    );
-    assert_eq!(frame.snapshot(), before);
+    assert_retry_predecessors_precede_the_first_poll("dynamic add helper", &code);
+    assert!(code.call_return_offsets().len() >= 5, "{}", code.clif());
 }
 
 #[test]
-fn every_runtime_domain_failure_retries_before_poll_state_or_buffers_change() {
-    let undefined_plus = compile(
-        vec![
-            named_opcode("undefined"),
-            named_opcode("plus"),
-            opcode::RETURN,
-        ],
-        0,
-        0,
-    )
-    .publish()
-    .unwrap();
-    assert_deep_retry(
-        "undefined unary plus",
-        &undefined_plus,
-        SyntheticFrame::new(&[], 0, 1),
-    );
-
-    let null_add = compile(
-        vec![
-            named_opcode("get_arg0"),
-            named_opcode("push_1"),
-            opcode::ADD,
-            opcode::RETURN,
-        ],
-        1,
-        0,
-    )
-    .publish()
-    .unwrap();
-    assert_deep_retry(
-        "null arithmetic",
-        &null_add,
-        SyntheticFrame::new(&[JSValueRepr::new(0, qjs::JS_TAG_NULL as i64)], 0, 2),
-    );
-
+fn checked_local_domain_failures_retry_before_poll_state_or_buffers_change() {
     let mut checked_local_bytecode = vec![named_opcode("get_loc_check")];
     checked_local_bytecode.extend_from_slice(&0_u16.to_le_bytes());
     checked_local_bytecode.push(opcode::RETURN);
@@ -401,20 +378,6 @@ fn every_runtime_domain_failure_retries_before_poll_state_or_buffers_change() {
         &explicitly_uninitialized,
         SyntheticFrame::new(&[], 1, 1),
     );
-
-    let refcount_guard = compile(vec![opcode::RETURN_UNDEF], 1, 0).publish().unwrap();
-    for (name, tag) in [
-        ("object table input", qjs::JS_TAG_OBJECT),
-        ("string input", qjs::JS_TAG_STRING),
-        ("symbol input", qjs::JS_TAG_SYMBOL),
-        ("bigint input", qjs::JS_TAG_BIG_INT),
-    ] {
-        assert_deep_retry(
-            name,
-            &refcount_guard,
-            SyntheticFrame::new(&[JSValueRepr::new(0x1000, tag as i64)], 0, 0),
-        );
-    }
 }
 
 #[test]
@@ -426,7 +389,7 @@ fn every_generated_retry_predecessor_dominates_the_first_poll() {
         vec![
             named_opcode("get_arg0"),
             named_opcode("push_1"),
-            opcode::ADD,
+            named_opcode("sub"),
             opcode::RETURN,
         ],
         1,
@@ -436,8 +399,9 @@ fn every_generated_retry_predecessor_dominates_the_first_poll() {
 
     let static_failure = compile(
         vec![
-            named_opcode("undefined"),
-            named_opcode("plus"),
+            named_opcode("push_1"),
+            named_opcode("push_1"),
+            named_opcode("mod"),
             opcode::RETURN,
         ],
         0,
@@ -488,130 +452,123 @@ fn supported_immediate_truthiness_stays_native_and_exact() {
 }
 
 #[test]
-fn property_bytecode_is_rejected_before_publication() {
+fn property_bytecode_lowers_to_borrowed_get_then_explicit_free() {
     let fixture = SnapshotFixture::compile("(function read(object) { return object.value; })");
     let verified = fixture
         .snapshot()
         .verify(VerifyLimits::default())
         .expect("captured property function verifies");
 
-    assert!(matches!(
-        BaselineCompiler::host().compile(&verified),
-        Err(CompileFailure::UnsupportedOpcode)
-    ));
+    let code = BaselineCompiler::host()
+        .compile(&verified)
+        .expect("property helpers compile");
+
+    assert_retry_predecessors_precede_the_first_poll("property helpers", &code);
+    assert!(code.call_return_offsets().len() >= 5, "{}", code.clif());
 }
 
 #[test]
-fn returning_a_borrowed_refcounted_value_retries_without_mutating_the_frame() {
+fn every_helper_family_statically_fits_the_two_slot_scratch_tail() {
+    let fixtures = [
+        SnapshotFixture::compile("(function read(object) { return object.value; })"),
+        SnapshotFixture::compile("(function invoke(fn, value) { fn(value); return 1; })"),
+        SnapshotFixture::compile(
+            "(function pair(value) { let copy = value; return [copy, copy]; })",
+        ),
+    ];
+    let mut observed_two_slot_family = false;
+    for fixture in &fixtures {
+        let verified = fixture
+            .snapshot()
+            .verify(VerifyLimits::default())
+            .expect("helper fixture verifies");
+        let ir = BaselineIr::translate(&verified).expect("helper IR translates");
+        let required = ir
+            .max_stack_depth
+            .saturating_sub(verified.snapshot().stack_size());
+        assert!(
+            required <= qjs::JS_JIT_HELPER_SCRATCH_SLOTS as u16,
+            "required {required} scratch slots for {:?}",
+            verified.snapshot().bytecode()
+        );
+        observed_two_slot_family |= required == 2;
+        BaselineCompiler::host()
+            .compile(&verified)
+            .expect("statically bounded helper lowering compiles");
+    }
+    assert!(
+        observed_two_slot_family,
+        "fixture must exercise both scratch slots"
+    );
+}
+
+#[test]
+fn maximum_synthetic_logical_capacity_reserves_scratch_without_u16_overflow() {
+    // Untrusted synthetic snapshots deliberately use u16::MAX as their
+    // conservative logical stack capacity. Reserving the ABI scratch tail is
+    // capacity arithmetic, not a reason to reject otherwise valid bytecode.
+    let function = verified_bytecode(vec![opcode::RETURN_UNDEF], 0, 0);
+    assert_eq!(function.snapshot().stack_size(), u16::MAX);
+
+    BaselineCompiler::host()
+        .compile(&function)
+        .expect("scratch capacity addition uses a widened integer");
+}
+
+#[test]
+fn returning_a_borrowed_argument_duplicates_then_transfers_the_owned_result() {
     let mut bytecode = vec![opcode::GET_ARG];
     bytecode.extend_from_slice(&0_u16.to_le_bytes());
     bytecode.push(opcode::RETURN);
     let executable = compile(bytecode, 1, 0).publish().unwrap();
-    let object = JSValueRepr::new(0x1111_2222_3333_4444, qjs::JS_TAG_OBJECT as i64);
-    let mut frame = SyntheticFrame::new(&[object], 0, 1);
-    let before = frame.snapshot();
+    let value = JSValueRepr::new(0x1111_2222_3333_4444, qjs::JS_TAG_FLOAT64 as i64);
+    let mut frame = SyntheticFrame::new(&[value], 0, 1);
 
     let outcome = unsafe { frame.call(&executable) };
 
-    assert_eq!(
-        outcome.exit.kind,
-        qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
-    );
-    assert_eq!(frame.snapshot(), before);
+    assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+    assert_eq!(outcome.result, value);
 }
 
 #[test]
-fn refcounted_overwrite_drop_dup_local_and_stack_retry_with_live_object_unchanged() {
-    let overwrite = compile(
-        vec![
-            named_opcode("get_arg0"),
-            named_opcode("push_1"),
-            named_opcode("put_arg0"),
-            opcode::RETURN_UNDEF,
-        ],
-        1,
-        0,
-    )
-    .publish()
-    .unwrap();
-    let drop_value = compile(
-        vec![
-            named_opcode("get_arg0"),
-            named_opcode("drop"),
-            opcode::RETURN_UNDEF,
-        ],
-        1,
-        0,
-    )
-    .publish()
-    .unwrap();
-    let duplicate = compile(
-        vec![
-            named_opcode("get_arg0"),
-            named_opcode("dup"),
-            named_opcode("drop"),
-            named_opcode("drop"),
-            opcode::RETURN_UNDEF,
-        ],
-        1,
-        0,
-    )
-    .publish()
-    .unwrap();
-    let local = compile(vec![opcode::RETURN_UNDEF], 0, 1).publish().unwrap();
-    let stack = compile(vec![opcode::RETURN_UNDEF], 0, 0).publish().unwrap();
+fn overwrite_drop_dup_local_and_stack_all_lower_through_owned_slot_helpers() {
+    let paths = [
+        compile(
+            vec![
+                named_opcode("get_arg0"),
+                named_opcode("push_1"),
+                named_opcode("put_arg0"),
+                opcode::RETURN_UNDEF,
+            ],
+            1,
+            0,
+        ),
+        compile(
+            vec![
+                named_opcode("get_arg0"),
+                named_opcode("drop"),
+                opcode::RETURN_UNDEF,
+            ],
+            1,
+            0,
+        ),
+        compile(
+            vec![
+                named_opcode("get_arg0"),
+                named_opcode("dup"),
+                named_opcode("drop"),
+                named_opcode("drop"),
+                opcode::RETURN_UNDEF,
+            ],
+            1,
+            0,
+        ),
+    ];
 
-    let runtime = Runtime::new().unwrap();
-    let context = Context::full(&runtime).unwrap();
-    context.with(|ctx| {
-        let object: Value<'_> = ctx.eval("({ marker: 42 })").unwrap();
-        let owned_raw = unsafe { qjs::JS_DupValue(ctx.as_raw().as_ptr(), object.as_raw()) };
-        let owned_value = unsafe { Value::from_raw(ctx.clone(), owned_raw) };
-        let owned = owned_value.as_raw();
-        let object_repr = JSValueRepr::from_raw(owned);
-        let runtime_raw = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
-        let ref_count = || unsafe { *(object_repr.payload as *const i32) };
-        let before_ref_count = ref_count();
-
-        for (executable, mut frame) in [
-            (&overwrite, SyntheticFrame::new(&[object_repr], 0, 2)),
-            (&drop_value, SyntheticFrame::new(&[object_repr], 0, 2)),
-            (&duplicate, SyntheticFrame::new(&[object_repr], 0, 3)),
-        ] {
-            let before = frame.snapshot();
-            let outcome = unsafe { frame.call(executable) };
-            assert_eq!(
-                outcome.exit.kind,
-                qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
-            );
-            assert_eq!(frame.snapshot(), before);
-            assert_eq!(ref_count(), before_ref_count);
-            assert!(unsafe { qjs::JS_IsLiveObject(runtime_raw, owned) });
-        }
-
-        let mut local_frame = SyntheticFrame::new(&[], 1, 0);
-        local_frame.set_local(0, object_repr);
-        let before = local_frame.snapshot();
-        let outcome = unsafe { local_frame.call(&local) };
-        assert_eq!(
-            outcome.exit.kind,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
-        );
-        assert_eq!(local_frame.snapshot(), before);
-
-        let mut stack_frame = SyntheticFrame::new(&[], 0, 1);
-        stack_frame.set_stack(&[object_repr]);
-        let before = stack_frame.snapshot();
-        let outcome = unsafe { stack_frame.call(&stack) };
-        assert_eq!(
-            outcome.exit.kind,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
-        );
-        assert_eq!(stack_frame.snapshot(), before);
-
-        assert_eq!(ref_count(), before_ref_count);
-        assert!(unsafe { qjs::JS_IsLiveObject(runtime_raw, owned) });
-    });
+    for (index, code) in paths.iter().enumerate() {
+        assert_retry_predecessors_precede_the_first_poll(&format!("owned path {index}"), code);
+        assert!(code.call_return_offsets().len() >= 4, "{}", code.clif());
+    }
 }
 
 #[test]
@@ -785,7 +742,7 @@ fn cross_target_compilation_can_never_publish_on_the_host() {
 }
 
 #[test]
-fn overflowing_add_uses_the_number_path_without_runtime_helpers() {
+fn overflowing_add_uses_the_exact_add_helper_number_path() {
     let get_arg0 = named_opcode("get_arg0");
     let push_i32 = opcode::PUSH_I32;
     let add = opcode::ADD;

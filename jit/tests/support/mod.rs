@@ -7,7 +7,11 @@ use std::{
     },
 };
 
+#[cfg(feature = "compiler")]
+use rquickjs_core::runtime::JitFunctionRegistry;
 use rquickjs_core::runtime::{JitBackend, JitBackendAttachError, RuntimeJitGuard};
+#[cfg(feature = "compiler")]
+use rquickjs_core::Function;
 use rquickjs_core::{context::EvalOptions, Context, Runtime, Value};
 
 use crate::abi::{AbiInfo, AbiMismatch, AbiStructure};
@@ -16,6 +20,8 @@ use crate::bytecode::{
     VerifiedFunction, VerifierMetadata, VerifyLimits,
 };
 use crate::code_cache::CompiledArtifact;
+#[cfg(feature = "compiler")]
+use crate::compiler::baseline::{BaselineCompiler, PublishedBaselineCode};
 use crate::compiler::{mock::FakeCompiler, mock::FakeCompilerControl, Compiler};
 use crate::runtime::{
     CompileCompletion, CompileFailure, CompileRequest, CompileState, Coordinator, FunctionKey, Tier,
@@ -200,6 +206,294 @@ impl Drop for SnapshotFixture {
     }
 }
 
+#[cfg(feature = "compiler")]
+struct ForcedBaselineBackend {
+    function_id: u64,
+    generation: u64,
+    code: PublishedBaselineCode,
+    entries: Arc<AtomicUsize>,
+    registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
+}
+
+#[cfg(feature = "compiler")]
+unsafe impl JitBackend for ForcedBaselineBackend {
+    fn runtime_attached(&mut self, registry: JitFunctionRegistry) {
+        *self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(registry);
+    }
+
+    fn acquire_entry(
+        &mut self,
+        id: u64,
+        generation: u64,
+        pc: u32,
+    ) -> rquickjs_core::qjs::JSJitEntryHandle {
+        if id != self.function_id || generation != self.generation || pc != 0 {
+            return empty_entry_handle();
+        }
+        type Entry = unsafe extern "C" fn(
+            *mut rquickjs_core::qjs::JSJitExecFrame,
+        ) -> rquickjs_core::qjs::JSJitExit;
+        let entry: Entry = unsafe { mem::transmute(self.code.as_ptr()) };
+        self.entries.fetch_add(1, Ordering::SeqCst);
+        rquickjs_core::qjs::JSJitEntryHandle {
+            struct_size: mem::size_of::<rquickjs_core::qjs::JSJitEntryHandle>() as u32,
+            reserved: 0,
+            entry: Some(entry),
+            pin: Box::into_raw(Box::new(self.code.clone())).cast(),
+            stack_map_count: u32::try_from(self.code.stack_maps().len()).unwrap_or(u32::MAX),
+            helper_abi_version: rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION,
+        }
+    }
+
+    fn release_entry(&mut self, entry: rquickjs_core::qjs::JSJitEntryHandle) {
+        if !entry.pin.is_null() {
+            unsafe { drop(Box::from_raw(entry.pin.cast::<PublishedBaselineCode>())) };
+        }
+    }
+
+    fn memory_used(&self) -> usize {
+        self.code.len()
+    }
+}
+
+#[cfg(feature = "compiler")]
+fn empty_entry_handle() -> rquickjs_core::qjs::JSJitEntryHandle {
+    rquickjs_core::qjs::JSJitEntryHandle {
+        struct_size: mem::size_of::<rquickjs_core::qjs::JSJitEntryHandle>() as u32,
+        reserved: 0,
+        entry: None,
+        pin: ptr::null_mut(),
+        stack_map_count: 0,
+        helper_abi_version: 0,
+    }
+}
+
+#[cfg(feature = "compiler")]
+fn eval_global_definition(context: &Context, definition: &str) -> Result<(), String> {
+    context.with(|ctx| {
+        let mut options = EvalOptions::default();
+        options.global = true;
+        options.strict = false;
+        ctx.eval_with_options::<(), _>(definition, options)
+            .map_err(|error| format!("{error:?}"))
+    })
+}
+
+#[cfg(feature = "compiler")]
+fn eval_canonical(context: &Context, expression: &str) -> Result<String, String> {
+    let source = format!(
+        r#"
+        JSON.stringify((() => {{
+            try {{
+                return {{ ok: true, value: ({expression}) }};
+            }} catch (error) {{
+                return {{
+                    ok: false,
+                    name: String(error && error.name),
+                    message: String(error && error.message)
+                }};
+            }}
+        }})())
+        "#
+    );
+    context.with(|ctx| {
+        ctx.eval::<String, _>(source)
+            .map_err(|error| format!("{error:?}"))
+    })
+}
+
+#[cfg(feature = "compiler")]
+fn compile_named_function(
+    runtime: &Runtime,
+    context: &Context,
+    definition: &str,
+    function_name: &str,
+) -> (
+    RuntimeJitGuard,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Option<JitFunctionRegistry>>>,
+) {
+    eval_global_definition(context, definition)
+        .unwrap_or_else(|error| panic!("baseline definition failed: {error}"));
+    let snapshot = context.with(|ctx| {
+        let function: Function<'_> = ctx
+            .globals()
+            .get(function_name)
+            .unwrap_or_else(|error| panic!("missing baseline function {function_name}: {error:?}"));
+        unsafe { CompileSnapshot::capture_raw(ctx.as_raw().as_ptr(), function.as_value().as_raw()) }
+            .unwrap_or_else(|status| panic!("baseline snapshot failed: {status:?}"))
+    });
+    let verified = snapshot
+        .clone()
+        .verify(VerifyLimits::default())
+        .unwrap_or_else(|error| panic!("baseline verification failed: {error:?}"));
+    let code = BaselineCompiler::host()
+        .compile(&verified)
+        .unwrap_or_else(|error| {
+            panic!(
+                "forced baseline compilation failed: {error:?}; bytecode={:?}",
+                snapshot.decode()
+            )
+        })
+        .publish()
+        .unwrap_or_else(|error| panic!("forced baseline publication failed: {error:?}"));
+    let entries = Arc::new(AtomicUsize::new(0));
+    let registry_slot = Arc::new(Mutex::new(None));
+    let guard = runtime
+        .attach_jit_backend(ForcedBaselineBackend {
+            function_id: snapshot.function_id(),
+            generation: snapshot.generation(),
+            code,
+            entries: Arc::clone(&entries),
+            registry: Arc::clone(&registry_slot),
+        })
+        .expect("forced baseline backend attaches");
+    let registry = registry_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("forced baseline registry is delivered during attach");
+    context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get(function_name).unwrap();
+        registry
+            .retain_function(
+                &ctx,
+                &function,
+                snapshot.function_id(),
+                snapshot.generation(),
+            )
+            .expect("forced baseline function retention");
+        assert_eq!(registry.retained_len(&ctx).unwrap(), 1);
+    });
+    (guard, entries, registry_slot)
+}
+
+#[cfg(feature = "compiler")]
+#[derive(Clone, Debug)]
+pub struct DifferentialRun {
+    definition: String,
+    expression: String,
+    require_baseline: bool,
+}
+
+#[cfg(feature = "compiler")]
+pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
+    DifferentialRun {
+        definition: definition.to_owned(),
+        expression: expression.to_owned(),
+        require_baseline: true,
+    }
+}
+
+#[cfg(feature = "compiler")]
+impl DifferentialRun {
+    pub fn force_baseline(mut self) -> Self {
+        self.require_baseline = true;
+        self
+    }
+
+    pub fn assert_same(self) {
+        let interpreter_runtime = Runtime::new().expect("interpreter runtime");
+        let interpreter_context = Context::full(&interpreter_runtime).expect("interpreter context");
+        eval_global_definition(&interpreter_context, &self.definition)
+            .unwrap_or_else(|error| panic!("interpreter definition failed: {error}"));
+        let expected = eval_canonical(&interpreter_context, &self.expression);
+
+        let runtime = Runtime::new().expect("compiled runtime");
+        let context = Context::full(&runtime).expect("compiled context");
+        let (guard, entries, registry_slot) =
+            compile_named_function(&runtime, &context, &self.definition, "f");
+        let actual = eval_canonical(&context, &self.expression);
+
+        assert_eq!(actual, expected, "forced baseline changed JS semantics");
+        if self.require_baseline {
+            assert!(
+                entries.load(Ordering::SeqCst) > 0,
+                "forced baseline expression never entered published native code"
+            );
+        }
+        drop(guard);
+        assert!(
+            registry_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .is_some_and(|registry| !registry.is_attached()),
+            "runtime detachment left the function registry attached"
+        );
+    }
+}
+
+#[cfg(feature = "compiler")]
+#[derive(Clone, Debug)]
+pub struct ForcedBaselineRun {
+    definition: String,
+    expression: String,
+    interrupt_after: usize,
+}
+
+#[cfg(feature = "compiler")]
+pub fn forced_baseline(source: &str) -> ForcedBaselineRun {
+    let split = source
+        .rfind(" f(")
+        .unwrap_or_else(|| panic!("forced_baseline source must end in an f(...) expression"));
+    ForcedBaselineRun {
+        definition: source[..split].trim().to_owned(),
+        expression: source[(split + 1)..].trim().to_owned(),
+        interrupt_after: 1,
+    }
+}
+
+#[cfg(feature = "compiler")]
+impl ForcedBaselineRun {
+    pub fn interrupt_after(mut self, polls: usize) -> Self {
+        self.interrupt_after = polls.max(1);
+        self
+    }
+
+    pub fn assert_uncatchable_interrupt(self) {
+        let runtime = Runtime::new().expect("compiled interrupt runtime");
+        let context = Context::full(&runtime).expect("compiled interrupt context");
+        let (guard, entries, registry_slot) =
+            compile_named_function(&runtime, &context, &self.definition, "f");
+        let polls = Arc::new(AtomicUsize::new(0));
+        runtime.set_interrupt_handler({
+            let polls = Arc::clone(&polls);
+            let interrupt_after = self.interrupt_after;
+            Some(Box::new(move || {
+                polls.fetch_add(1, Ordering::SeqCst) + 1 >= interrupt_after
+            }))
+        });
+        let source = format!(
+            "try {{ {}; 'caught' }} catch (_) {{ 'caught' }}",
+            self.expression
+        );
+        let result = context.with(|ctx| ctx.eval::<String, _>(source));
+
+        assert!(result.is_err(), "compiled interrupt became catchable");
+        assert!(
+            entries.load(Ordering::SeqCst) > 0,
+            "interrupt test never entered published native code"
+        );
+        assert!(
+            polls.load(Ordering::SeqCst) >= self.interrupt_after,
+            "compiled loop did not execute the requested poll budget"
+        );
+        drop(guard);
+        assert!(
+            registry_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .is_some_and(|registry| !registry.is_attached()),
+            "interrupt teardown left the function registry attached"
+        );
+    }
+}
+
 pub fn snapshot_status(source: &str) -> SnapshotStatus {
     let runtime = Runtime::new().expect("snapshot runtime");
     let context = Context::full(&runtime).expect("snapshot context");
@@ -299,6 +593,256 @@ struct PollState {
     interrupt_at: AtomicUsize,
     capture_backtrace: AtomicBool,
     backtrace: Mutex<Vec<usize>>,
+    argument_count: usize,
+    local_count: usize,
+}
+
+unsafe fn synthetic_slot(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    slot: u32,
+) -> Option<*mut JSValueRepr> {
+    let frame = unsafe { &mut *frame };
+    let state = unsafe { &*(frame.rt.cast::<PollState>()) };
+    let slot = usize::try_from(slot).ok()?;
+    if slot < state.argument_count {
+        return Some(unsafe { frame.arg_buf.cast::<JSValueRepr>().add(slot) });
+    }
+    let local = slot - state.argument_count;
+    if local < state.local_count {
+        return Some(unsafe { frame.var_buf.cast::<JSValueRepr>().add(local) });
+    }
+    let stack = local - state.local_count;
+    let live = unsafe { frame.stack_top.offset_from(frame.stack_base) };
+    let live = usize::try_from(live).ok()?;
+    (stack < live).then(|| unsafe { frame.stack_base.cast::<JSValueRepr>().add(stack) })
+}
+
+unsafe extern "C" fn synthetic_dup(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    output: u32,
+    input: u32,
+) -> i32 {
+    let (Some(output), Some(input)) = (unsafe { synthetic_slot(frame, output) }, unsafe {
+        synthetic_slot(frame, input)
+    }) else {
+        return -1;
+    };
+    if output == input || unsafe { *output } != JSValueRepr::undefined() {
+        return -1;
+    }
+    unsafe { *output = *input };
+    0
+}
+
+unsafe extern "C" fn synthetic_free(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    input: u32,
+) -> i32 {
+    let Some(input) = (unsafe { synthetic_slot(frame, input) }) else {
+        return -1;
+    };
+    unsafe { *input = JSValueRepr::undefined() };
+    0
+}
+
+fn synthetic_number(value: JSValueRepr) -> Option<f64> {
+    match value.tag as i32 {
+        rquickjs_core::qjs::JS_TAG_INT => Some(value.payload as i64 as i32 as f64),
+        rquickjs_core::qjs::JS_TAG_FLOAT64 => Some(f64::from_bits(value.payload)),
+        _ => None,
+    }
+}
+
+unsafe extern "C" fn synthetic_to_numeric(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    output: u32,
+    input: u32,
+) -> i32 {
+    let (Some(output), Some(input)) = (unsafe { synthetic_slot(frame, output) }, unsafe {
+        synthetic_slot(frame, input)
+    }) else {
+        return -1;
+    };
+    let value = unsafe { *input };
+    let result = match value.tag as i32 {
+        rquickjs_core::qjs::JS_TAG_INT | rquickjs_core::qjs::JS_TAG_FLOAT64 => value,
+        rquickjs_core::qjs::JS_TAG_BOOL => JSValueRepr::int32(value.payload as i32),
+        rquickjs_core::qjs::JS_TAG_NULL => JSValueRepr::int32(0),
+        rquickjs_core::qjs::JS_TAG_UNDEFINED => JSValueRepr::float64(f64::NAN),
+        _ => {
+            unsafe { *input = JSValueRepr::undefined() };
+            return -1;
+        }
+    };
+    unsafe {
+        *input = JSValueRepr::undefined();
+        *output = result;
+    }
+    0
+}
+
+unsafe extern "C" fn synthetic_to_bool(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    output: u32,
+    input: u32,
+) -> i32 {
+    let (Some(output), Some(input)) = (unsafe { synthetic_slot(frame, output) }, unsafe {
+        synthetic_slot(frame, input)
+    }) else {
+        return -1;
+    };
+    let value = unsafe { *input };
+    let truthy = match value.tag as i32 {
+        rquickjs_core::qjs::JS_TAG_UNDEFINED | rquickjs_core::qjs::JS_TAG_NULL => false,
+        rquickjs_core::qjs::JS_TAG_FLOAT64 => {
+            let number = f64::from_bits(value.payload);
+            number != 0.0 && !number.is_nan()
+        }
+        rquickjs_core::qjs::JS_TAG_INT
+        | rquickjs_core::qjs::JS_TAG_BOOL
+        | rquickjs_core::qjs::JS_TAG_SHORT_BIG_INT => value.payload != 0,
+        _ => true,
+    };
+    unsafe {
+        *input = JSValueRepr::undefined();
+        *output = JSValueRepr::new(truthy as u64, rquickjs_core::qjs::JS_TAG_BOOL as i64);
+    }
+    0
+}
+
+unsafe extern "C" fn synthetic_add(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    output: u32,
+    left: u32,
+    right: u32,
+) -> i32 {
+    let (Some(output), Some(left), Some(right)) = (
+        unsafe { synthetic_slot(frame, output) },
+        unsafe { synthetic_slot(frame, left) },
+        unsafe { synthetic_slot(frame, right) },
+    ) else {
+        return -1;
+    };
+    let lhs = unsafe { *left };
+    let rhs = unsafe { *right };
+    let result = if lhs.tag == rquickjs_core::qjs::JS_TAG_INT as i64
+        && rhs.tag == rquickjs_core::qjs::JS_TAG_INT as i64
+    {
+        let lhs = lhs.payload as i64 as i32;
+        let rhs = rhs.payload as i64 as i32;
+        match lhs.checked_add(rhs) {
+            Some(value) => JSValueRepr::int32(value),
+            None => JSValueRepr::float64(f64::from(lhs) + f64::from(rhs)),
+        }
+    } else if let (Some(lhs), Some(rhs)) = (synthetic_number(lhs), synthetic_number(rhs)) {
+        JSValueRepr::float64(lhs + rhs)
+    } else {
+        unsafe {
+            *left = JSValueRepr::undefined();
+            *right = JSValueRepr::undefined();
+        }
+        return -1;
+    };
+    unsafe {
+        *right = JSValueRepr::undefined();
+        *output = result;
+    }
+    0
+}
+
+unsafe extern "C" fn synthetic_compare(
+    frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    output: u32,
+    left: u32,
+    right: u32,
+    operation: u32,
+) -> i32 {
+    let (Some(output), Some(left), Some(right)) = (
+        unsafe { synthetic_slot(frame, output) },
+        unsafe { synthetic_slot(frame, left) },
+        unsafe { synthetic_slot(frame, right) },
+    ) else {
+        return -1;
+    };
+    let lhs = unsafe { *left };
+    let rhs = unsafe { *right };
+    let Some(lhs_number) = synthetic_number(lhs) else {
+        return -1;
+    };
+    let Some(rhs_number) = synthetic_number(rhs) else {
+        return -1;
+    };
+    let result = match operation {
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_LT => lhs_number < rhs_number,
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_LTE => lhs_number <= rhs_number,
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_GT => lhs_number > rhs_number,
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_GTE => lhs_number >= rhs_number,
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_EQ
+        | rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_STRICT_EQ => lhs_number == rhs_number,
+        rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_NEQ
+        | rquickjs_core::qjs::JSJitCompareOp_JS_JIT_COMPARE_STRICT_NEQ => lhs_number != rhs_number,
+        _ => return -1,
+    };
+    unsafe {
+        *right = JSValueRepr::undefined();
+        *output = JSValueRepr::new(result as u64, rquickjs_core::qjs::JS_TAG_BOOL as i64);
+    }
+    0
+}
+
+unsafe extern "C" fn synthetic_map_out_in_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _input: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_get_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _object: u32,
+    _atom: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_set_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _object: u32,
+    _atom: u32,
+    _value: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_call_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _function: u32,
+    _this_value: u32,
+    _argv: u32,
+    _argc: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_new_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+) -> i32 {
+    -1
 }
 
 unsafe extern "C" fn synthetic_interrupt_poll(
@@ -331,6 +875,18 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         major: rquickjs_core::qjs::QJSJIT_RUNTIME_API_MAJOR as u16,
         minor: rquickjs_core::qjs::QJSJIT_RUNTIME_API_MINOR as u16,
         interrupt_poll: Some(synthetic_interrupt_poll),
+        dup: Some(synthetic_dup),
+        free: Some(synthetic_free),
+        resolve_const: Some(synthetic_map_out_in_unavailable),
+        to_numeric: Some(synthetic_to_numeric),
+        to_bool: Some(synthetic_to_bool),
+        add_slow: Some(synthetic_add),
+        compare_slow: Some(synthetic_compare),
+        get_property: Some(synthetic_get_unavailable),
+        set_property: Some(synthetic_set_unavailable),
+        call: Some(synthetic_call_unavailable),
+        new_array: Some(synthetic_new_unavailable),
+        new_object: Some(synthetic_new_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.
@@ -374,14 +930,20 @@ impl SyntheticFrame {
         // sentinel is only aligned to `JSValueRepr`'s declared alignment and
         // is therefore not a valid synthetic `JSValue *` for the JIT's
         // stricter 16-byte slot-range contract.
-        let mut stack = vec![AlignedStackSlot(JSValueRepr::undefined()); stack_size.max(1)];
+        let stack_slots = stack_size
+            .checked_add(rquickjs_core::qjs::JS_JIT_HELPER_SCRATCH_SLOTS as usize)
+            .expect("synthetic stack capacity");
+        let mut stack = vec![AlignedStackSlot(JSValueRepr::undefined()); stack_slots.max(1)];
         let bytecode = vec![0_u8];
         let poll = Box::new(PollState {
             count: AtomicUsize::new(0),
             interrupt_at: AtomicUsize::new(usize::MAX),
             capture_backtrace: AtomicBool::new(false),
             backtrace: Mutex::new(Vec::new()),
+            argument_count: arguments.len(),
+            local_count,
         });
+        let stack_capacity = unsafe { stack.as_mut_ptr().add(stack_slots).cast() };
         let frame = rquickjs_core::qjs::JSJitExecFrame {
             struct_size: mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>() as u32,
             flags: 0,
@@ -401,8 +963,13 @@ impl SyntheticFrame {
                 reserved: 0,
                 entry: None,
                 pin: ptr::null_mut(),
+                stack_map_count: u32::MAX,
+                helper_abi_version: rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION,
             },
             runtime_api: &SYNTHETIC_RUNTIME_API,
+            runtime_id: 0,
+            frame_cookie: 0,
+            stack_capacity,
         };
         Self {
             frame,
@@ -651,11 +1218,12 @@ pub enum AbiMismatchFixture {
     ExecFrameLayout,
     ExitLayout,
     RuntimeApiLayout,
+    HelperTable,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -670,6 +1238,7 @@ impl AbiMismatchFixture {
         Self::ExecFrameLayout,
         Self::ExitLayout,
         Self::RuntimeApiLayout,
+        Self::HelperTable,
         Self::BackendVTableLayout,
     ];
 
@@ -691,6 +1260,7 @@ impl AbiMismatchFixture {
             Self::ExecFrameLayout => AbiMismatch::StructureLayout(AbiStructure::ExecFrame),
             Self::ExitLayout => AbiMismatch::StructureLayout(AbiStructure::Exit),
             Self::RuntimeApiLayout => AbiMismatch::StructureLayout(AbiStructure::RuntimeApi),
+            Self::HelperTable => AbiMismatch::StructureLayout(AbiStructure::HelperTable),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }
