@@ -100,8 +100,53 @@ fn local_cse_and_dce_are_effect_free_and_bounded() {
         ])
         .unwrap();
     assert_eq!(function.cse_eliminated(), 1);
-    assert_eq!(function.dead_nodes_eliminated(), 1);
+    assert_eq!(function.dead_nodes_eliminated(), 2);
     assert_eq!(function.constant(4).unwrap().as_f64(), Some(81.0));
+}
+
+#[test]
+fn cse_rewrites_uses_to_the_canonical_ssa_value() {
+    let mut compiler = OptimizedCompiler;
+    let function = compiler
+        .compile(&[
+            OptimizedInput::constant_i32(4),
+            OptimizedInput::constant_i32(5),
+            OptimizedInput::binary(NumericBinaryOp::Add, 0, 1),
+            OptimizedInput::binary(NumericBinaryOp::Add, 0, 1),
+            OptimizedInput::binary(NumericBinaryOp::Mul, 3, 3),
+            OptimizedInput::ret(4),
+        ])
+        .unwrap();
+
+    assert_eq!(function.cse_eliminated(), 1);
+    assert_eq!(function.representative(3), Some(2));
+    assert_eq!(function.operands(4), Some((2, 2)));
+    assert_eq!(function.constant(4).unwrap().as_f64(), Some(81.0));
+}
+
+#[test]
+fn mixed_numeric_folding_preserves_negative_zero_nan_and_overflow() {
+    let mut compiler = OptimizedCompiler;
+    let function = compiler
+        .compile(&[
+            OptimizedInput::constant_i32(i32::MIN),
+            OptimizedInput::constant_i32(-1),
+            OptimizedInput::binary(NumericBinaryOp::Mul, 0, 1),
+            OptimizedInput::constant_f64(-0.0),
+            OptimizedInput::constant_i32(1),
+            OptimizedInput::binary(NumericBinaryOp::Mul, 3, 4),
+            OptimizedInput::constant_f64(f64::NAN),
+            OptimizedInput::binary(NumericBinaryOp::Add, 6, 4),
+            OptimizedInput::ret(7),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        function.constant(2).unwrap().as_f64(),
+        Some(2_147_483_648.0)
+    );
+    assert!(function.constant(5).unwrap().is_negative_zero());
+    assert!(function.constant(7).unwrap().as_f64().unwrap().is_nan());
 }
 
 #[test]

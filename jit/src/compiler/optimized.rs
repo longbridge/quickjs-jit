@@ -60,6 +60,8 @@ pub enum OptimizedCompileError {
 #[derive(Debug)]
 pub struct OptimizedFunction {
     constants: Box<[Option<NumericConstant>]>,
+    representatives: Box<[u32]>,
+    operands: Box<[Option<(u32, u32)>]>,
     return_value: u32,
     boxes_elided: u64,
     cse_eliminated: u64,
@@ -82,6 +84,12 @@ impl OptimizedFunction {
     pub const fn dead_nodes_eliminated(&self) -> u64 {
         self.dead_nodes_eliminated
     }
+    pub fn representative(&self, value: u32) -> Option<u32> {
+        self.representatives.get(value as usize).copied()
+    }
+    pub fn operands(&self, value: u32) -> Option<(u32, u32)> {
+        self.operands.get(value as usize).copied().flatten()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -98,10 +106,20 @@ impl OptimizedCompiler {
         let mut cse_eliminated = 0u64;
         let mut expressions = std::collections::BTreeMap::<(u8, u32, u32), u32>::new();
         let mut operands = Vec::<Option<(u32, u32)>>::with_capacity(inputs.len());
+        let mut representatives = Vec::<u32>::with_capacity(inputs.len());
         for input in inputs {
+            let value_id =
+                u32::try_from(constants.len()).map_err(|_| OptimizedCompileError::InvalidValue)?;
+            let mut representative = value_id;
             let folded = match *input {
                 OptimizedInput::Constant(value) => Some(value),
                 OptimizedInput::Binary { op, lhs, rhs } => {
+                    let lhs = *representatives
+                        .get(lhs as usize)
+                        .ok_or(OptimizedCompileError::InvalidValue)?;
+                    let rhs = *representatives
+                        .get(rhs as usize)
+                        .ok_or(OptimizedCompileError::InvalidValue)?;
                     let lhs_value = constants
                         .get(lhs as usize)
                         .copied()
@@ -119,27 +137,36 @@ impl OptimizedCompiler {
                         NumericBinaryOp::Mul => 2,
                         NumericBinaryOp::Div => 3,
                     };
-                    if expressions
-                        .insert((opcode, lhs, rhs), constants.len() as u32)
-                        .is_some()
-                    {
+                    if let Some(existing) = expressions.get(&(opcode, lhs, rhs)).copied() {
+                        representative = existing;
                         cse_eliminated = cse_eliminated.saturating_add(1);
+                    } else {
+                        expressions.insert((opcode, lhs, rhs), value_id);
                     }
                     Some(fold(op, lhs_value, rhs_value))
                 }
                 OptimizedInput::Return(value) => {
-                    if constants.get(value as usize).is_none() {
-                        return Err(OptimizedCompileError::InvalidValue);
-                    }
-                    return_value = Some(value);
+                    return_value = Some(
+                        *representatives
+                            .get(value as usize)
+                            .ok_or(OptimizedCompileError::InvalidValue)?,
+                    );
                     None
                 }
             };
             operands.push(match *input {
-                OptimizedInput::Binary { lhs, rhs, .. } => Some((lhs, rhs)),
+                OptimizedInput::Binary { lhs, rhs, .. } => Some((
+                    *representatives
+                        .get(lhs as usize)
+                        .ok_or(OptimizedCompileError::InvalidValue)?,
+                    *representatives
+                        .get(rhs as usize)
+                        .ok_or(OptimizedCompileError::InvalidValue)?,
+                )),
                 _ => None,
             });
             constants.push(folded);
+            representatives.push(representative);
         }
         let return_value = return_value.ok_or(OptimizedCompileError::MissingReturn)?;
         let mut live = vec![false; inputs.len()];
@@ -163,6 +190,8 @@ impl OptimizedCompiler {
             .count() as u64;
         Ok(OptimizedFunction {
             constants: constants.into_boxed_slice(),
+            representatives: representatives.into_boxed_slice(),
+            operands: operands.into_boxed_slice(),
             return_value,
             boxes_elided,
             cse_eliminated,
