@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
@@ -27,6 +28,7 @@ pub struct BackgroundCompiler {
     usage: Arc<WorkerUsage>,
     max_snapshot_bytes: usize,
     max_ir_bytes: usize,
+    overflow: Arc<Mutex<VecDeque<super::CompileCompletion>>>,
 }
 
 #[derive(Debug, Default)]
@@ -84,6 +86,7 @@ impl BackgroundCompiler {
         let completion_slot = Arc::new(Mutex::new(None));
         let cancelled = Arc::new(AtomicBool::new(false));
         let usage = Arc::new(WorkerUsage::default());
+        let overflow = Arc::new(Mutex::new(VecDeque::with_capacity(max_pending_jobs)));
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
@@ -93,6 +96,7 @@ impl BackgroundCompiler {
             let cancelled = Arc::clone(&cancelled);
             let worker_budget = compile_budget;
             let usage = Arc::clone(&usage);
+            let overflow = Arc::clone(&overflow);
             workers.push(
                 thread::Builder::new()
                     .name(format!("rquickjs-jit-{index}"))
@@ -128,13 +132,21 @@ impl BackgroundCompiler {
                                     .unwrap_or(Err(
                                         crate::compiler::CompileFailure::CompilerPanicked,
                                     ));
-                                let _ = sender.try_send(super::CompileCompletion {
+                                let completion = super::CompileCompletion {
                                     key,
                                     requested_tier: tier,
                                     artifact_key,
                                     attempt_id,
                                     result,
-                                });
+                                };
+                                if let Err(super::CompletionSendError::Full(completion)) =
+                                    sender.try_send(completion)
+                                {
+                                    overflow
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .push_back(*completion);
+                                }
                             }
                         }
                     })
@@ -149,6 +161,7 @@ impl BackgroundCompiler {
             usage,
             max_snapshot_bytes,
             max_ir_bytes,
+            overflow,
         })
     }
 
@@ -156,6 +169,7 @@ impl BackgroundCompiler {
         &mut self,
         coordinator: &mut Coordinator,
     ) -> Result<bool, BackgroundCompilerError> {
+        self.drain_overflow(coordinator, super::DEFAULT_COMPLETION_DRAIN_BUDGET);
         let sender = self
             .sender
             .as_ref()
@@ -215,6 +229,21 @@ impl BackgroundCompiler {
         }
     }
 
+    pub fn drain_overflow(&mut self, coordinator: &mut Coordinator, budget: usize) -> usize {
+        let mut drained = 0;
+        while drained < budget {
+            let completion = self
+                .overflow
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pop_front();
+            let Some(completion) = completion else { break };
+            coordinator.complete(completion);
+            drained += 1;
+        }
+        drained
+    }
+
     pub fn live_usage(&self) -> (usize, usize, usize) {
         (
             self.usage.jobs.load(Ordering::Acquire),
@@ -229,6 +258,7 @@ impl BackgroundCompiler {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+        self.drain_overflow(coordinator, usize::MAX);
         loop {
             let drain = coordinator.drain_completions();
             if drain.drained() == 0 {

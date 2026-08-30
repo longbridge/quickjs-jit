@@ -167,6 +167,10 @@ impl ProductionBackend {
 
     fn maintenance(&mut self) {
         self.coordinator.drain_completions();
+        self.workers.drain_overflow(
+            &mut self.coordinator,
+            runtime::DEFAULT_COMPLETION_DRAIN_BUDGET,
+        );
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
         let (jobs, snapshots, ir) = self.workers.live_usage();
         self.coordinator.set_worker_usage(jobs, snapshots, ir);

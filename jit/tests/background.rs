@@ -124,6 +124,7 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
     }
     workers.shutdown(&mut coordinator);
     assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
+    assert_eq!(coordinator.metrics().installed, 2);
 }
 
 #[test]
