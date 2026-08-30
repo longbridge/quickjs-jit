@@ -36,6 +36,7 @@ struct WorkerUsage {
     jobs: AtomicUsize,
     snapshots: AtomicUsize,
     ir: AtomicUsize,
+    peak_compiler: AtomicUsize,
 }
 
 struct UsageGuard {
@@ -206,6 +207,9 @@ impl BackgroundCompiler {
             .snapshots
             .fetch_add(snapshot_bytes, Ordering::AcqRel);
         self.usage.ir.fetch_add(ir_bytes, Ordering::AcqRel);
+        self.usage
+            .peak_compiler
+            .fetch_max(snapshot_bytes.saturating_add(ir_bytes), Ordering::AcqRel);
         match sender.try_send(request) {
             Ok(()) => Ok(true),
             Err(mpsc::TrySendError::Full(request)) => {
@@ -250,6 +254,10 @@ impl BackgroundCompiler {
             self.usage.snapshots.load(Ordering::Acquire),
             self.usage.ir.load(Ordering::Acquire),
         )
+    }
+
+    pub fn peak_compiler_bytes(&self) -> usize {
+        self.usage.peak_compiler.load(Ordering::Acquire)
     }
 
     pub fn shutdown(&mut self, coordinator: &mut Coordinator) {

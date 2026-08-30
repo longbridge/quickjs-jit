@@ -1253,7 +1253,9 @@ impl ProductionBackend {
         );
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
         let (jobs, snapshots, ir) = self.workers.live_usage();
-        self.peak_compiler_bytes = self.peak_compiler_bytes.max(snapshots.saturating_add(ir));
+        self.peak_compiler_bytes = self
+            .peak_compiler_bytes
+            .max(self.workers.peak_compiler_bytes());
         self.coordinator.set_worker_usage(jobs, snapshots, ir);
         let mut snapshot = self.coordinator.metrics();
         snapshot.native_entries = self.native_entries;
