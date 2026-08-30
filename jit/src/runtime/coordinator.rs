@@ -14,7 +14,7 @@ use crate::{
     JitMetrics,
 };
 
-use super::{install, invalidate, DependencyGraph, DependencyKey, FeedbackSnapshot};
+use super::{install, invalidate, DependencyGraph, DependencyKey, FeedbackSnapshot, ObservedType};
 
 pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
     compiler: &C,
@@ -41,6 +41,78 @@ pub fn compile_and_send<C: crate::compiler::Compiler + ?Sized>(
 pub struct FunctionKey {
     pub id: u64,
     pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GuardId(u32);
+
+impl GuardId {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SidePathProfile {
+    function: FunctionKey,
+    guard: GuardId,
+    pc: u32,
+    observed: ObservedType,
+    feedback_epoch: u64,
+}
+
+impl SidePathProfile {
+    pub const fn new(
+        function: FunctionKey,
+        guard: GuardId,
+        pc: u32,
+        observed: ObservedType,
+        feedback_epoch: u64,
+    ) -> Self {
+        Self {
+            function,
+            guard,
+            pc,
+            observed,
+            feedback_epoch,
+        }
+    }
+    pub const fn function(self) -> FunctionKey {
+        self.function
+    }
+    pub const fn guard(self) -> GuardId {
+        self.guard
+    }
+    pub const fn pc(self) -> u32 {
+        self.pc
+    }
+    pub const fn observed(self) -> ObservedType {
+        self.observed
+    }
+    pub const fn feedback_epoch(self) -> u64 {
+        self.feedback_epoch
+    }
+    fn fingerprint(self) -> u64 {
+        let observed = match self.observed {
+            ObservedType::Int32 => 1,
+            ObservedType::Float64 => 2,
+            ObservedType::Bool => 3,
+            ObservedType::Null => 4,
+            ObservedType::Undefined => 5,
+            ObservedType::String => 6,
+            ObservedType::Object => 7,
+            ObservedType::Function(key) => 8 ^ key.id ^ key.generation.rotate_left(17),
+        };
+        self.function.id
+            ^ self.function.generation.rotate_left(7)
+            ^ u64::from(self.guard.0).rotate_left(13)
+            ^ u64::from(self.pc).rotate_left(29)
+            ^ observed
+            ^ self.feedback_epoch.rotate_left(41)
+    }
 }
 
 impl FunctionKey {
@@ -106,6 +178,7 @@ pub struct CompileRequest {
     attempt_id: AttemptId,
     feedback_epoch: u64,
     feedback: Arc<FeedbackSnapshot>,
+    side_path_profile: Option<SidePathProfile>,
 }
 
 impl CompileRequest {
@@ -135,6 +208,9 @@ impl CompileRequest {
 
     pub fn feedback(&self) -> &FeedbackSnapshot {
         &self.feedback
+    }
+    pub const fn side_path_profile(&self) -> Option<SidePathProfile> {
+        self.side_path_profile
     }
 }
 
@@ -263,6 +339,7 @@ struct InFlight {
     artifact_key: ArtifactKey,
     tier: Tier,
     feedback_epoch: u64,
+    side_path: bool,
 }
 
 #[derive(Debug)]
@@ -357,6 +434,7 @@ pub struct Coordinator {
     dependencies: DependencyGraph,
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
     side_exits: HashMap<FunctionKey, HashMap<u32, u8>>,
+    side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -444,6 +522,7 @@ impl Coordinator {
             dependencies: DependencyGraph::default(),
             latest_feedback_epochs: HashMap::new(),
             side_exits: HashMap::new(),
+            side_exit_observations: HashMap::new(),
         }
     }
 
@@ -462,6 +541,36 @@ impl Coordinator {
         tier: Tier,
         snapshot: VerifiedFunction,
         feedback: FeedbackSnapshot,
+    ) -> Result<(), QueueError> {
+        self.queue_request(key, tier, snapshot, feedback, None)
+    }
+
+    pub fn queue_side_path(
+        &mut self,
+        key: FunctionKey,
+        snapshot: VerifiedFunction,
+        feedback: FeedbackSnapshot,
+        profile: SidePathProfile,
+    ) -> Result<(), QueueError> {
+        if profile.function != key
+            || profile.feedback_epoch == 0
+            || profile.feedback_epoch != feedback.epoch()
+            || !feedback.contains_stable_observation(key, profile.pc, profile.observed)
+            || !self.installed_keys.contains_key(&(key, Tier::Baseline))
+            || !self.installed_keys.contains_key(&(key, Tier::Optimizing))
+        {
+            return Err(QueueError::SnapshotIdentity);
+        }
+        self.queue_request(key, Tier::Optimizing, snapshot, feedback, Some(profile))
+    }
+
+    fn queue_request(
+        &mut self,
+        key: FunctionKey,
+        tier: Tier,
+        snapshot: VerifiedFunction,
+        feedback: FeedbackSnapshot,
+        side_path_profile: Option<SidePathProfile>,
     ) -> Result<(), QueueError> {
         if self.shutdown {
             return Err(QueueError::Shutdown);
@@ -494,7 +603,9 @@ impl Coordinator {
             Tier::Baseline if installed_baseline || installed_optimizing => {
                 return Err(QueueError::NotReady)
             }
-            Tier::Optimizing if !installed_baseline || installed_optimizing => {
+            Tier::Optimizing
+                if !installed_baseline || (installed_optimizing && side_path_profile.is_none()) =>
+            {
                 return Err(QueueError::NotReady)
             }
             _ => {}
@@ -505,6 +616,7 @@ impl Coordinator {
             .map_or(CompileState::Cold, |function| function.tier(tier).state);
         match tier_state {
             CompileState::Cold => {}
+            CompileState::Installed(Tier::Optimizing) if side_path_profile.is_some() => {}
             CompileState::Backoff { retry_after, .. } if self.clock >= retry_after => {}
             CompileState::Blacklisted => return Err(QueueError::Blacklisted),
             _ => return Err(QueueError::NotReady),
@@ -526,6 +638,7 @@ impl Coordinator {
             source_revision: source.source_revision(),
             opcode_fingerprint: source.opcode_fingerprint(),
             config_fingerprint: self.environment.config_fingerprint,
+            specialization_fingerprint: side_path_profile.map_or(0, SidePathProfile::fingerprint),
         };
         if self
             .current_generations
@@ -544,7 +657,7 @@ impl Coordinator {
         };
         self.next_attempt_id = next_attempt_id;
         let feedback_epoch = feedback.epoch();
-        if tier == Tier::Optimizing {
+        if tier == Tier::Optimizing && side_path_profile.is_none() {
             self.latest_feedback_epochs
                 .entry(key)
                 .and_modify(|epoch| *epoch = (*epoch).max(feedback_epoch))
@@ -558,6 +671,7 @@ impl Coordinator {
             attempt_id: AttemptId(next_attempt_id),
             feedback_epoch,
             feedback: Arc::new(feedback),
+            side_path_profile,
         });
         let function = self.functions.entry(key).or_default();
         function.tier_mut(tier).state = CompileState::Queued(tier);
@@ -582,6 +696,7 @@ impl Coordinator {
                     artifact_key: request.artifact_key,
                     tier: request.tier,
                     feedback_epoch: request.feedback_epoch,
+                    side_path: request.side_path_profile.is_some(),
                 },
             );
             self.metrics.compiling = self.metrics.compiling.saturating_add(1);
@@ -637,8 +752,9 @@ impl Coordinator {
                 if completion.requested_tier == Tier::Optimizing
                     && artifact.optimized_metadata().is_some_and(|metadata| {
                         metadata.feedback_epoch() != expected.feedback_epoch
-                            || self.latest_feedback_epochs.get(&completion.key)
-                                != Some(&expected.feedback_epoch)
+                            || (!expected.side_path
+                                && self.latest_feedback_epochs.get(&completion.key)
+                                    != Some(&expected.feedback_epoch))
                     })
                 {
                     self.in_flight.remove(&completion.key);
@@ -705,6 +821,10 @@ impl Coordinator {
                         }
                         self.installed_keys
                             .insert((completion.key, completion.requested_tier), artifact_key);
+                        if expected.side_path {
+                            self.latest_feedback_epochs
+                                .insert(completion.key, expected.feedback_epoch);
+                        }
                         if let Some(record) = self.functions.get_mut(&completion.key) {
                             let tier_record = record.tier_mut(completion.requested_tier);
                             tier_record.state = CompileState::Cold;
@@ -879,6 +999,9 @@ impl Coordinator {
     pub fn record_tier2_entry(&mut self) {
         self.metrics.tier2_entries = self.metrics.tier2_entries.saturating_add(1);
     }
+    pub fn record_side_path_entry(&mut self) {
+        self.metrics.side_path_entries = self.metrics.side_path_entries.saturating_add(1);
+    }
     pub fn record_deopt(&mut self, guard_failure: bool) {
         self.metrics.deopts = self.metrics.deopts.saturating_add(1);
         self.metrics.side_exits = self.metrics.side_exits.saturating_add(1);
@@ -888,12 +1011,29 @@ impl Coordinator {
     }
 
     pub fn record_optimized_side_exit(&mut self, key: FunctionKey, guard: u32) -> SideExitAction {
+        self.record_optimized_side_exit_profile(key, guard, None)
+    }
+
+    pub fn record_optimized_side_exit_profile(
+        &mut self,
+        key: FunctionKey,
+        guard: u32,
+        observed: Option<ObservedType>,
+    ) -> SideExitAction {
         self.record_deopt(true);
+        let observation_key = (key, guard);
+        let observation_changed = self
+            .side_exit_observations
+            .get(&observation_key)
+            .is_some_and(|prior| *prior != observed);
+        self.side_exit_observations
+            .entry(observation_key)
+            .or_insert(observed);
         let exits = self.side_exits.entry(key).or_default();
         let count = exits.entry(guard).or_default();
         *count = count.saturating_add(1);
         let count = *count;
-        if exits.len() > 1 {
+        if exits.len() > 1 || observation_changed {
             let attempts = self
                 .functions
                 .entry(key)

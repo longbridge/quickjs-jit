@@ -311,11 +311,21 @@ impl OptimizedIr {
 
 fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBlock]) -> (u64, u64) {
     use std::collections::BTreeMap;
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct ExpressionKey {
+        opcode: Box<str>,
+        lhs: (u8, u16, u64),
+        rhs: (u8, u16, u64),
+        representation: u8,
+        effect_epoch: u64,
+    }
     let mut cse = 0u64;
     let mut dead = 0u64;
     for block in blocks {
         let ids = block.nodes();
-        let mut expressions = BTreeMap::<(Box<str>, Box<str>, Box<str>), u32>::new();
+        let mut expressions = BTreeMap::<ExpressionKey, u32>::new();
+        let mut local_versions = BTreeMap::<u16, u64>::new();
+        let mut effect_epoch = 0u64;
         let mut index = 0usize;
         while index < ids.len() {
             if index + 3 < ids.len() {
@@ -344,11 +354,25 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
                     && names[1].is_some_and(is_pure_load)
                     && names[2].is_some_and(is_pure_binary)
                 {
-                    let key = (
-                        names[2].unwrap().into(),
-                        names[0].unwrap().into(),
-                        names[1].unwrap().into(),
-                    );
+                    let lhs = ssa_load_operand(&nodes[triple[0] as usize], &local_versions);
+                    let rhs = ssa_load_operand(&nodes[triple[1] as usize], &local_versions);
+                    let representation = match nodes[triple[2] as usize].representation {
+                        ValueRepresentation::Tagged => 0,
+                        ValueRepresentation::Int32 => 1,
+                        ValueRepresentation::Float64 => 2,
+                        ValueRepresentation::Effect => 3,
+                    };
+                    let Some((lhs, rhs)) = lhs.zip(rhs) else {
+                        index += 1;
+                        continue;
+                    };
+                    let key = ExpressionKey {
+                        opcode: names[2].unwrap().into(),
+                        lhs,
+                        rhs,
+                        representation,
+                        effect_epoch,
+                    };
                     if let Some(source) = expressions.get(&key).copied() {
                         for id in &triple[..2] {
                             let node = &mut nodes[*id as usize];
@@ -368,10 +392,56 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
                     continue;
                 }
             }
+            let node = &nodes[ids[index] as usize];
+            if node.effect != OptimizedEffect::Pure {
+                effect_epoch = effect_epoch.saturating_add(1);
+                expressions.clear();
+                if node.effect == OptimizedEffect::FrameWrite {
+                    if let Some(local) = local_write_index(node) {
+                        *local_versions.entry(local).or_default() += 1;
+                    } else {
+                        local_versions.clear();
+                    }
+                }
+            }
             index += 1;
         }
     }
     (cse, dead)
+}
+
+fn ssa_load_operand(
+    node: &OptimizedNode,
+    local_versions: &std::collections::BTreeMap<u16, u64>,
+) -> Option<(u8, u16, u64)> {
+    let name = opcode_name(node)?;
+    let index = indexed_node_operand(name, node.bytes())?;
+    if name.starts_with("get_arg") {
+        Some((0, index, 0))
+    } else if name.starts_with("get_loc") {
+        Some((1, index, local_versions.get(&index).copied().unwrap_or(0)))
+    } else {
+        None
+    }
+}
+
+fn local_write_index(node: &OptimizedNode) -> Option<u16> {
+    let name = opcode_name(node)?;
+    (name.starts_with("put_loc") || name.starts_with("set_loc"))
+        .then(|| indexed_node_operand(name, node.bytes()))?
+}
+
+fn indexed_node_operand(name: &str, bytes: &[u8]) -> Option<u16> {
+    for (suffix, index) in [("0", 0), ("1", 1), ("2", 2), ("3", 3)] {
+        if name.ends_with(suffix) {
+            return Some(index);
+        }
+    }
+    match bytes.len() {
+        2 => Some(u16::from(bytes[1])),
+        n if n >= 3 => Some(u16::from_le_bytes([bytes[1], bytes[2]])),
+        _ => None,
+    }
 }
 
 fn opcode_name(node: &OptimizedNode) -> Option<&str> {

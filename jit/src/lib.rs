@@ -510,7 +510,12 @@ struct OsrValidationMetrics {
     successes: AtomicU64,
     failures: AtomicU64,
     validation_retries: Mutex<std::collections::HashMap<(u64, u64, u32), u64>>,
-    deopt_guards: Mutex<std::collections::HashMap<(u64, u64), std::collections::VecDeque<u32>>>,
+    deopt_guards: Mutex<
+        std::collections::HashMap<
+            (u64, u64),
+            std::collections::VecDeque<(u32, Option<runtime::ObservedType>)>,
+        >,
+    >,
     deopt_materializations: AtomicU64,
 }
 
@@ -541,16 +546,26 @@ impl OsrValidationMetrics {
         true
     }
 
-    fn mark_deopt_guard(&self, id: u64, generation: u64, guard: u32) {
+    fn mark_deopt_guard(
+        &self,
+        id: u64,
+        generation: u64,
+        guard: u32,
+        observed: Option<runtime::ObservedType>,
+    ) {
         self.deopt_guards
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry((id, generation))
             .or_default()
-            .push_back(guard);
+            .push_back((guard, observed));
     }
 
-    fn take_deopt_guard(&self, id: u64, generation: u64) -> Option<u32> {
+    fn take_deopt_guard(
+        &self,
+        id: u64,
+        generation: u64,
+    ) -> Option<(u32, Option<runtime::ObservedType>)> {
         let mut guards = self
             .deopt_guards
             .lock()
@@ -741,12 +756,47 @@ unsafe extern "C" fn production_entry_trampoline(
     pin.validation
         .deopt_materializations
         .fetch_add(1, Ordering::Relaxed);
-    pin.validation
-        .mark_deopt_guard(pin.key.id, pin.key.generation, guard);
+    pin.validation.mark_deopt_guard(
+        pin.key.id,
+        pin.key.generation,
+        guard,
+        observed_deopt_type(frame, *shape),
+    );
     /* The one-based identity is internal to the pinned backend artifact. C's
      * stable ABI keeps this field reserved and receives only validated zero. */
     exit.reserved = 0;
     exit
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn observed_deopt_type(
+    frame: &rquickjs_core::qjs::JSJitExecFrame,
+    shape: ir::OptimizedFrameShape,
+) -> Option<runtime::ObservedType> {
+    use rquickjs_core::qjs;
+    let values = unsafe {
+        core::slice::from_raw_parts(frame.arg_buf, usize::from(shape.arguments()))
+            .iter()
+            .chain(core::slice::from_raw_parts(
+                frame.var_buf,
+                usize::from(shape.locals()),
+            ))
+    };
+    values
+        .filter_map(|value| {
+            let tag = unsafe { qjs::JS_VALUE_GET_TAG(*value) };
+            Some(match tag {
+                qjs::JS_TAG_INT => runtime::ObservedType::Int32,
+                qjs::JS_TAG_FLOAT64 => runtime::ObservedType::Float64,
+                qjs::JS_TAG_BOOL => runtime::ObservedType::Bool,
+                qjs::JS_TAG_NULL => runtime::ObservedType::Null,
+                qjs::JS_TAG_UNDEFINED => runtime::ObservedType::Undefined,
+                qjs::JS_TAG_STRING => runtime::ObservedType::String,
+                qjs::JS_TAG_OBJECT => runtime::ObservedType::Object,
+                _ => return None,
+            })
+        })
+        .find(|observed| *observed != runtime::ObservedType::Int32)
 }
 
 #[cfg(all(test, feature = "compiler", not(target_family = "wasm")))]
@@ -1442,6 +1492,18 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             runtime::CompileState::Installed(_)
         ) {
             self.coordinator.record_tier2_entry();
+            let key = runtime::FunctionKey::new(_id, _generation);
+            if self
+                .coordinator
+                .pin(key, runtime::Tier::Optimizing)
+                .is_some_and(|pin| {
+                    pin.artifact()
+                        .optimized_metadata()
+                        .is_some_and(|metadata| metadata.side_path_profile().is_some())
+                })
+            {
+                self.coordinator.record_side_path_entry();
+            }
         }
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
@@ -1461,24 +1523,46 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
             let key = runtime::FunctionKey::new(id, generation);
-            if let Some(guard) = self.osr_validation.take_deopt_guard(id, generation) {
-                if self.coordinator.record_optimized_side_exit(key, guard)
+            if let Some((guard, observed)) = self.osr_validation.take_deopt_guard(id, generation) {
+                if self
+                    .coordinator
+                    .record_optimized_side_exit_profile(key, guard, observed)
                     == runtime::SideExitAction::StablePathThreshold
                 {
                     if let Some(snapshot) = self.tier2_sources.get(&key).cloned() {
+                        let guard_pc = self
+                            .coordinator
+                            .pin(key, runtime::Tier::Optimizing)
+                            .and_then(|pin| {
+                                pin.artifact().optimized_metadata().and_then(|metadata| {
+                                    metadata.deopt_sites().iter().find_map(|(_, map)| {
+                                        (map.guard() == guard).then_some(map.resume_pc())
+                                    })
+                                })
+                            });
+                        if let (Some(guard_pc), Some(observed)) = (guard_pc, observed) {
+                            self.feedback.observe_type(
+                                key,
+                                guard_pc,
+                                runtime::FeedbackKind::Exit,
+                                observed,
+                            );
+                        }
                         let feedback = self.feedback.snapshot(self.clock.max(1));
-                        if feedback.has_stable_value_for(key)
-                            && self.coordinator.prepare_stable_path_recompile(key)
-                            && self
-                                .coordinator
-                                .queue_with_feedback(
-                                    key,
-                                    runtime::Tier::Optimizing,
-                                    snapshot,
-                                    feedback,
-                                )
+                        let profile = guard_pc.zip(observed).map(|(guard_pc, observed)| {
+                            runtime::SidePathProfile::new(
+                                key,
+                                runtime::GuardId::new(guard),
+                                guard_pc,
+                                observed,
+                                feedback.epoch(),
+                            )
+                        });
+                        if profile.is_some_and(|profile| {
+                            self.coordinator
+                                .queue_side_path(key, snapshot, feedback, profile)
                                 .is_ok()
-                        {
+                        }) {
                             self.stable_path_compile_requests =
                                 self.stable_path_compile_requests.saturating_add(1);
                         }

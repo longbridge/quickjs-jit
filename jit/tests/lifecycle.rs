@@ -172,6 +172,7 @@ fn artifact_key(function_id: u64, generation: u64, tier: Tier) -> ArtifactKey {
         source_revision: 5,
         opcode_fingerprint: 6,
         config_fingerprint: 7,
+        specialization_fingerprint: 0,
     }
 }
 
@@ -256,12 +257,16 @@ fn artifact_identity_distinguishes_every_compatibility_field() {
             config_fingerprint: 99,
             ..base
         },
+        ArtifactKey {
+            specialization_fingerprint: 99,
+            ..base
+        },
     ];
 
     let identities = std::iter::once(base)
         .chain(variants)
         .collect::<HashSet<_>>();
-    assert_eq!(identities.len(), 11);
+    assert_eq!(identities.len(), 12);
 }
 
 #[test]

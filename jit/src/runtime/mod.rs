@@ -13,7 +13,7 @@ pub use background::{BackgroundCompiler, BackgroundCompilerError};
 pub use coordinator::{
     compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
     CompileState, CompletionDrain, CompletionSendError, CompletionSender, Coordinator, FunctionKey,
-    QueueError, SideExitAction, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
+    GuardId, QueueError, SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 pub use feedback::{
     FeedbackKind, FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable,

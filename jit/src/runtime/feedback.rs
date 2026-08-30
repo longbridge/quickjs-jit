@@ -120,6 +120,32 @@ impl FeedbackSnapshot {
                     && entry.observations.len() == 1
             })
     }
+
+    pub fn contains_stable_observation(
+        &self,
+        function: FunctionKey,
+        pc: u32,
+        observation: ObservedType,
+    ) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.function == function
+                && entry.pc == pc
+                && entry.kind == FeedbackKind::Exit
+                && entry.state == FeedbackState::Monomorphic
+                && entry.observations.as_ref() == [observation]
+        })
+    }
+
+    pub fn stable_observation_at(&self, function: FunctionKey, pc: u32) -> Option<ObservedType> {
+        self.entries.iter().find_map(|entry| {
+            (entry.function == function
+                && entry.pc == pc
+                && entry.kind == FeedbackKind::Value
+                && entry.state == FeedbackState::Monomorphic
+                && entry.observations.len() == 1)
+                .then_some(entry.observations[0])
+        })
+    }
 }
 
 #[derive(Debug)]

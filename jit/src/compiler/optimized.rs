@@ -250,6 +250,7 @@ fn lower_optimized_machine(
     isa: &cranelift_codegen::isa::OwnedTargetIsa,
     ir: &OptimizedIr,
     control: Option<&CompileControl>,
+    side_path: Option<crate::runtime::SidePathProfile>,
 ) -> Result<super::baseline::RelocatableCode, CompileFailure> {
     use cranelift_codegen::ir::{
         types, AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlags, Signature,
@@ -346,6 +347,7 @@ fn lower_optimized_machine(
             entry_site.guard(),
             0,
             entry,
+            side_path.filter(|profile| profile.guard().get() == entry_site.guard()),
         );
         for block in ir.blocks() {
             let clif_block = blocks[&block.start_pc()];
@@ -389,6 +391,7 @@ fn lower_optimized_machine(
                                 *guard,
                                 node.pc(),
                                 pass,
+                                side_path.filter(|profile| profile.guard().get() == *guard),
                             );
                             builder.switch_to_block(pass);
                         }
@@ -932,10 +935,13 @@ fn emit_opt_numeric_guard(
     guard: u32,
     pc: u32,
     pass: cranelift_codegen::ir::Block,
+    side_path: Option<crate::runtime::SidePathProfile>,
 ) {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     let mut numeric = builder.ins().iconst(types::I8, 1);
+    let mut alternate_numeric = builder.ins().iconst(types::I8, 1);
+    let mut alternate_seen = builder.ins().iconst(types::I8, 0);
     let require_int32 = !locals.is_empty();
     for vars in arguments.iter().chain(locals) {
         let pair = opt_use(builder, *vars);
@@ -955,9 +961,26 @@ fn emit_opt_numeric_guard(
             builder.ins().bor(int, float)
         };
         numeric = builder.ins().band(numeric, valid);
+        let either_numeric = builder.ins().bor(int, float);
+        alternate_numeric = builder.ins().band(alternate_numeric, either_numeric);
+        alternate_seen = builder.ins().bor(alternate_seen, float);
     }
     let deopt = builder.create_block();
-    builder.ins().brif(numeric, pass, &[], deopt, &[]);
+    if side_path.is_some_and(|profile| profile.observed() == crate::runtime::ObservedType::Float64)
+    {
+        let side_check = builder.create_block();
+        let side_block = builder.create_block();
+        builder.ins().brif(numeric, pass, &[], side_check, &[]);
+        builder.switch_to_block(side_check);
+        let matches_profile = builder.ins().band(alternate_numeric, alternate_seen);
+        builder
+            .ins()
+            .brif(matches_profile, side_block, &[], deopt, &[]);
+        builder.switch_to_block(side_block);
+        builder.ins().jump(pass, &[]);
+    } else {
+        builder.ins().brif(numeric, pass, &[], deopt, &[]);
+    }
     builder.switch_to_block(deopt);
     let start = builder
         .ins()
@@ -1044,7 +1067,19 @@ impl Tier2Compiler {
         epoch: u64,
     ) -> Result<String, CompileFailure> {
         let ir = OptimizedIr::translate(function, epoch)?;
-        lower_optimized_machine(&self.isa, &ir, None).map(|code| code.clif().to_owned())
+        lower_optimized_machine(&self.isa, &ir, None, None).map(|code| code.clif().to_owned())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn lower_side_path_for_test(
+        &self,
+        function: &VerifiedFunction,
+        epoch: u64,
+        profile: crate::runtime::SidePathProfile,
+    ) -> Result<String, CompileFailure> {
+        let ir = OptimizedIr::translate(function, epoch)?;
+        lower_optimized_machine(&self.isa, &ir, None, Some(profile))
+            .map(|code| code.clif().to_owned())
     }
 
     pub fn plan(
@@ -1115,7 +1150,9 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
-        if !request.feedback().has_stable_value_for(request.key()) {
+        if request.side_path_profile().is_none()
+            && !request.feedback().has_stable_value_for(request.key())
+        {
             return Err(CompileFailure::InvalidArtifact);
         }
         let metadata = Self::plan(
@@ -1123,11 +1160,17 @@ impl Compiler for Tier2Compiler {
             request.feedback_epoch().max(self.feedback_epoch),
         )?;
         let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
-        let code = lower_optimized_machine(&self.isa, &ir, None)?;
+        let profile = request.side_path_profile();
+        if let Some(profile) = profile {
+            validate_side_path_profile(&request, profile)?;
+        }
+        let code = lower_optimized_machine(&self.isa, &ir, None, profile)?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
             .with_dependencies(vec![dependency])
-            .with_optimized_metadata(metadata))
+            .with_optimized_metadata(profile.map_or(metadata.clone(), |profile| {
+                metadata.with_side_path_profile(profile)
+            })))
     }
 
     fn compile_controlled(
@@ -1139,7 +1182,9 @@ impl Compiler for Tier2Compiler {
         if request.tier() != Tier::Optimizing {
             return Err(CompileFailure::InvalidArtifact);
         }
-        if !request.feedback().has_stable_value_for(request.key()) {
+        if request.side_path_profile().is_none()
+            && !request.feedback().has_stable_value_for(request.key())
+        {
             return Err(CompileFailure::InvalidArtifact);
         }
         let metadata = Self::plan(
@@ -1153,13 +1198,40 @@ impl Compiler for Tier2Compiler {
                 .saturating_mul(core::mem::size_of::<DeoptMap>()),
         )?;
         let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
-        let code = lower_optimized_machine(&self.isa, &ir, Some(control))?;
+        let profile = request.side_path_profile();
+        if let Some(profile) = profile {
+            validate_side_path_profile(&request, profile)?;
+        }
+        let code = lower_optimized_machine(&self.isa, &ir, Some(control), profile)?;
         control.check()?;
         let dependency = crate::code_cache::ArtifactDependency::new(request.key());
         Ok(artifact_from_relocatable(request, code)
             .with_dependencies(vec![dependency])
-            .with_optimized_metadata(metadata))
+            .with_optimized_metadata(profile.map_or(metadata.clone(), |profile| {
+                metadata.with_side_path_profile(profile)
+            })))
     }
+}
+
+fn validate_side_path_profile(
+    request: &CompileRequest,
+    profile: crate::runtime::SidePathProfile,
+) -> Result<(), CompileFailure> {
+    if profile.function() != request.key()
+        || profile.feedback_epoch() != request.feedback_epoch()
+        || !request.feedback().contains_stable_observation(
+            request.key(),
+            profile.pc(),
+            profile.observed(),
+        )
+        || !matches!(
+            profile.observed(),
+            crate::runtime::ObservedType::Int32 | crate::runtime::ObservedType::Float64
+        )
+    {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    Ok(())
 }
 use crate::{
     bytecode::VerifiedFunction,

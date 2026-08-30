@@ -1,11 +1,12 @@
 use rquickjs_jit::bytecode::{CompileSnapshot, VerifyLimits};
+use rquickjs_jit::code_cache::CompiledArtifact;
 use rquickjs_jit::compiler::optimized::{
     NumericBinaryOp, OptimizedCompiler, OptimizedInput, Tier2Compiler,
 };
 use rquickjs_jit::ir::{OptimizedEffect, OptimizedIr, OptimizedNodeKind, ValueRepresentation};
 use rquickjs_jit::runtime::{
-    Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackState, FeedbackTable,
-    FunctionKey, ObservedType, SideExitAction, Tier,
+    CompileCompletion, Coordinator, DependencyGraph, DependencyKey, FeedbackKind, FeedbackSnapshot,
+    FeedbackState, FeedbackTable, FunctionKey, ObservedType, SideExitAction, Tier,
 };
 use rquickjs_jit::test_support::SnapshotFixture;
 
@@ -332,6 +333,30 @@ fn optimized_passes_rewrite_the_emitted_machine_plan() {
     assert_eq!(clif.matches("fadd").count(), 2, "{clif}");
 }
 
+#[test]
+fn production_cse_keys_exact_ssa_operands_and_respects_frame_writes() {
+    let distinct = SnapshotFixture::compile("(function(a,b,c,d,e,f){return (e-f)+(f-e)})");
+    let distinct = distinct.snapshot().verify(VerifyLimits::default()).unwrap();
+    let distinct_ir = OptimizedIr::translate(&distinct, 101).unwrap();
+    assert_eq!(
+        distinct_ir.metrics().cse_eliminated,
+        0,
+        "{:#?}",
+        distinct_ir.nodes()
+    );
+
+    let mutation =
+        SnapshotFixture::compile("(function(a,b){let x=a;let first=x-b;x=b;return first+(x-b)})");
+    let mutation = mutation.snapshot().verify(VerifyLimits::default()).unwrap();
+    let mutation_ir = OptimizedIr::translate(&mutation, 102).unwrap();
+    assert_eq!(
+        mutation_ir.metrics().cse_eliminated,
+        0,
+        "{:#?}",
+        mutation_ir.nodes()
+    );
+}
+
 #[cfg(all(
     target_os = "linux",
     target_endian = "little",
@@ -482,6 +507,84 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
     );
 }
 
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn tenth_stable_float_exit_installs_side_path_and_eleventh_call_does_not_deopt() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function stableFloat(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s}",
+            )
+        })
+        .unwrap();
+    for _ in 0..8 {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100,0)"))
+                .unwrap(),
+            4950.0
+        );
+    }
+    for _ in 0..10_000 {
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+    for _ in 0..10 {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000,0)"))
+                .unwrap(),
+            4_999_950_000.0
+        );
+        jit.poll();
+    }
+    for _ in 0..10_000 {
+        jit.poll();
+        if jit.metrics().stable_path_compile_requests > 0 && jit.metrics().installed >= 3 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let installed = jit.metrics();
+    assert!(installed.stable_path_compile_requests > 0, "{installed:?}");
+    assert!(installed.installed >= 3, "{installed:?}");
+    let deopts = installed.deopts;
+    let entries = installed.side_path_entries;
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("stableFloat(100000,0)"))
+            .unwrap(),
+        4_999_950_000.0
+    );
+    jit.poll();
+    let after = jit.metrics();
+    assert_eq!(after.deopts, deopts, "{after:?}");
+    assert!(after.side_path_entries > entries, "{after:?}");
+}
+
 #[test]
 fn worker_snapshot_contains_stable_tokens_not_runtime_pointers() {
     let function = FunctionKey::new(9, 4);
@@ -516,4 +619,134 @@ fn stable_side_exit_reaches_recompile_threshold_and_unstable_exit_demotes_with_b
     };
     assert!(retry_after > 50);
     assert_eq!(coordinator.metrics().optimized_demotions, 1);
+}
+
+#[test]
+fn stable_side_path_request_owns_exact_guard_profile_without_unloading_target() {
+    use rquickjs_jit::runtime::{GuardId, SidePathProfile};
+    let fixture = SnapshotFixture::compile("(function(a,b){return a-b})");
+    let snapshot = fixture.snapshot();
+    let key = FunctionKey::new(snapshot.function_id(), snapshot.generation());
+    let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+    let mut feedback = FeedbackTable::new(8, 2);
+    feedback.observe_type(key, 7, FeedbackKind::Exit, ObservedType::Float64);
+    let frozen = feedback.snapshot(44);
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+
+    // A side-path request is a specialization of an already installed target.
+    // The test helper installs the baseline and optimizing generations without
+    // involving a worker; queuing must leave the optimizing pin available.
+    coordinator
+        .queue(key, Tier::Baseline, verified.clone())
+        .unwrap();
+    let baseline = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: baseline.artifact_key(),
+        attempt_id: baseline.attempt_id(),
+        result: Ok(CompiledArtifact::empty(baseline.artifact_key())),
+    });
+    coordinator
+        .queue_with_feedback(key, Tier::Optimizing, verified.clone(), frozen.clone())
+        .unwrap();
+    let optimizing = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Optimizing,
+        artifact_key: optimizing.artifact_key(),
+        attempt_id: optimizing.attempt_id(),
+        result: Ok(CompiledArtifact::empty(optimizing.artifact_key())),
+    });
+    let before = coordinator.pin(key, Tier::Optimizing).unwrap();
+    let profile = SidePathProfile::new(key, GuardId::new(7), 7, ObservedType::Float64, 44);
+    coordinator
+        .queue_side_path(key, verified, frozen, profile)
+        .unwrap();
+    assert!(coordinator.pin(key, Tier::Optimizing).is_some());
+    assert_eq!(before.key().generation, key.generation);
+
+    let request = coordinator.begin_next().unwrap();
+    assert_eq!(request.side_path_profile(), Some(profile));
+    assert_ne!(request.artifact_key().specialization_fingerprint, 0);
+}
+
+#[test]
+fn side_path_queue_rejects_stale_or_mismatched_profiles() {
+    use rquickjs_jit::runtime::{GuardId, SidePathProfile};
+    let fixture = SnapshotFixture::compile("(function(a,b){return a-b})");
+    let snapshot = fixture.snapshot();
+    let key = FunctionKey::new(snapshot.function_id(), snapshot.generation());
+    let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+    coordinator
+        .queue(key, Tier::Baseline, verified.clone())
+        .unwrap();
+    let baseline = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: baseline.artifact_key(),
+        attempt_id: baseline.attempt_id(),
+        result: Ok(CompiledArtifact::empty(baseline.artifact_key())),
+    });
+    let mut initial = FeedbackTable::new(8, 2);
+    initial.observe_type(key, 0, FeedbackKind::Value, ObservedType::Int32);
+    coordinator
+        .queue_with_feedback(key, Tier::Optimizing, verified.clone(), initial.snapshot(3))
+        .unwrap();
+    let optimizing = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Optimizing,
+        artifact_key: optimizing.artifact_key(),
+        attempt_id: optimizing.attempt_id(),
+        result: Ok(CompiledArtifact::empty(optimizing.artifact_key())),
+    });
+    let feedback = FeedbackSnapshot::empty(5);
+    let stale = SidePathProfile::new(
+        FunctionKey::new(key.id, key.generation + 1),
+        GuardId::new(0),
+        0,
+        ObservedType::String,
+        5,
+    );
+    assert!(coordinator
+        .queue_side_path(key, verified, feedback, stale)
+        .is_err());
+}
+
+#[test]
+fn guard_specific_float_side_path_changes_machine_guard_and_preserves_profile() {
+    use rquickjs_jit::runtime::{GuardId, SidePathProfile};
+    let fixture =
+        SnapshotFixture::compile("(function(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let ir = OptimizedIr::translate(&verified, 55).unwrap();
+    let loop_guard = ir
+        .guard_maps()
+        .iter()
+        .find(|site| site.guard() != 0)
+        .unwrap();
+    let profile = SidePathProfile::new(
+        key,
+        GuardId::new(loop_guard.guard()),
+        loop_guard.map().resume_pc(),
+        ObservedType::Float64,
+        55,
+    );
+    let compiler = Tier2Compiler::host(55);
+    let generic = compiler.lower_for_test(&verified, 55).unwrap();
+    let specialized = compiler
+        .lower_side_path_for_test(&verified, 55, profile)
+        .unwrap();
+    assert_ne!(
+        generic, specialized,
+        "side path must alter the selected guard block"
+    );
+    assert!(specialized.matches("brif").count() > generic.matches("brif").count());
 }

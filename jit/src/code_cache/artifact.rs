@@ -15,11 +15,15 @@ pub struct ArtifactKey {
     pub source_revision: u64,
     pub opcode_fingerprint: u64,
     pub config_fingerprint: u64,
+    pub specialization_fingerprint: u64,
 }
 
 impl ArtifactKey {
     pub const fn with_tier(mut self, tier: Tier) -> Self {
         self.tier = tier;
+        if matches!(tier, Tier::Baseline) {
+            self.specialization_fingerprint = 0;
+        }
         self
     }
 }
@@ -295,6 +299,7 @@ pub struct OptimizedArtifactMetadata {
     boxes_elided: u64,
     cse_eliminated: u64,
     dead_nodes_eliminated: u64,
+    side_path_profile: Option<crate::runtime::SidePathProfile>,
 }
 
 #[cfg(feature = "compiler")]
@@ -312,6 +317,7 @@ impl OptimizedArtifactMetadata {
             boxes_elided,
             cse_eliminated,
             dead_nodes_eliminated,
+            side_path_profile: None,
         }
     }
     pub const fn feedback_epoch(&self) -> u64 {
@@ -328,6 +334,13 @@ impl OptimizedArtifactMetadata {
     }
     pub const fn dead_nodes_eliminated(&self) -> u64 {
         self.dead_nodes_eliminated
+    }
+    pub const fn side_path_profile(&self) -> Option<crate::runtime::SidePathProfile> {
+        self.side_path_profile
+    }
+    pub fn with_side_path_profile(mut self, profile: crate::runtime::SidePathProfile) -> Self {
+        self.side_path_profile = Some(profile);
+        self
     }
 }
 
@@ -579,6 +592,7 @@ impl CompiledArtifact {
                 source_revision: 0,
                 opcode_fingerprint: 0,
                 config_fingerprint: 0,
+                specialization_fingerprint: 0,
             },
             code: CodeAllocation::inert(Vec::new()),
             relocations: Box::new([]),
