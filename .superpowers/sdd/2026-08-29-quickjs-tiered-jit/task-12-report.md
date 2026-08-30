@@ -100,3 +100,27 @@ int32 domain during native Tier 2 execution, the next loop guard deoptimizes,
 QuickJS resumes at that header, and the final result is exactly
 `4_999_950_000`. The same run separately verifies entry deopt for a string
 argument. The optimized test suite is now 15/15 and the deopt suite 4/4.
+
+Loop headers also call the canonical POLL helper after all live locals are in
+C-visible storage and before evaluating the representation guard. This keeps
+interrupt, stress-GC, and reentry handling on the existing root-safe runtime
+boundary; the generated CLIF retains the indirect call and its unwind site.
+
+Side exits are counted per function generation and guard. A stable guard emits
+the side-path compilation action on exactly hit 10. Seeing a different guard
+marks the profile unstable, atomically demotes future entry selection to the
+pinned baseline artifact, and installs exponential optimizing-tier retry
+backoff. Guard identities are captured inside the pinned trampoline before the
+stable ABI reserved field is cleared, then consumed by the runtime callback.
+
+Final follow-up verification:
+
+- optimized 16/16, deopt 4/4, semantics 8/8, lifecycle 47/47 in debug;
+- the complete `rquickjs-jit` compiler/test-support release suite passed;
+- the non-JIT workspace suite passed (including core 173/173 and doctests);
+- fmt and all-target clippy with `-D warnings` passed.
+
+The bare `cargo test --workspace --all-targets` command remains invalid for the
+repository's pre-existing feature-gated JIT integration tests, while
+`--all-features` enables nightly-only `doc-cfg` on stable. The JIT suite and the
+remaining workspace were therefore run with their valid feature matrices.
