@@ -1,52 +1,71 @@
-# Task 11 implementation checkpoint
+# Task 11 completion report
 
-## Implemented and verified
+## Implemented
 
-- Production hot-call and hot-loop feedback uses saturating per-generation state,
-  base thresholds 32/56, and a queued bit that makes snapshot requests
-  single-shot.
-- The preliminary adaptive interface is deterministic and integer-only. With
-  no measured invocation work it returns the neutral 32/56 base and an
-  auditable `NeutralBase` rationale; Task 14 remains responsible for measured
-  calibration.
-- QuickJS emits a call event once per invocation after function identity is
-  available and before native acquisition. A taken backedge emits a loop event
-  with delta 1 and target PC only after its interrupt poll succeeds. Untaken
-  branches emit no loop event.
-- Verification now retains the exact verifier-derived slot kinds at every real
-  reachable loop header. `OsrKey` and `OsrMap` bind function generation, PC,
-  stack depth, live kinds, and a nonzero independent entry offset. Offset zero
-  is rejected so the ordinary function entry cannot masquerade as OSR.
-- Existing production lifecycle tests were updated to deliberately reach the
-  new call threshold instead of relying on the former one-call Task 10 policy.
+- Per-generation hotness uses saturating counters, exact base thresholds of 32
+  calls and 56 taken loop backedges, and a queued bit that requests one
+  snapshot. Eight short callbacks remain cold.
+- The preliminary adaptive policy is deterministic and integer-only. Without
+  measurements it returns the neutral 32/56 base and `NeutralBase`; Task 14
+  owns coefficient calibration from benchmark evidence.
+- QuickJS reports a call once per invocation after establishing function
+  identity and before native acquisition. A loop event `(delta=1,target_pc)` is
+  reported only after a taken backedge's interrupt poll succeeds. An untaken
+  branch reports nothing.
+- The verifier derives exact live `SlotKind` state for every reachable loop
+  header. `OsrKey`/`OsrMap` retain function generation, PC, argument and local
+  counts, exact stack depth, and live kinds.
+- Tier 1 emits a separate complete Cranelift ABI function for every eligible
+  loop header. Each has its own relocatable output, W^X RX allocation, indirect
+  target declaration, relocations, unwind registration, maps, and entry. No
+  internal marker or ordinary function entry is exposed as OSR.
+- One installed generation artifact owns the ordinary entry and all OSR
+  children. Cache admission recursively charges all child code and metadata;
+  its `ExecutionPin` retains every entry and unwind registration across reload.
+- Nonzero-PC acquisition requires an exact generation+PC map. Not-ready,
+  missing-map, and validation fallback classes are separately counted.
+- The ABI trampoline validates struct/runtime/context/API presence, runtime ID,
+  cookie, function ID/generation, exact PC, helper ABI, map count, stack
+  bounds/depth, argument/local buffers, cardinality, and specialized slot kinds
+  before native code. Rejection returns `RETRY` without changing frame bytes or
+  value owners.
+- OSR imports current arguments, locals, and live interpreter stack into SSA
+  and jumps directly to a post-poll continuation. Native backedges return to
+  the real header poll. OSR variants suppress generic CFG-entry duplicate polls
+  while retaining periodic and return polls.
 
-## Verification evidence
+## Correctness evidence
 
-- `cargo test -p rquickjs-jit --test osr --features compiler,test-support`:
-  5/5 passed, including exact 32/56 boundaries, one snapshot request, untaken
-  loop, real verifier maps, and rejection of entry offset zero.
-- `cargo test -p rquickjs-jit --test background --features compiler,test-support`:
-  14/14 passed, including short callbacks, asynchronous install, quotas,
-  generation isolation, and two-runtime execution/drop isolation.
-- `cargo test -p rquickjs-jit --test osr --test background --features
-  compiler,test-support --release`: 19/19 passed.
-- `cargo test -p rquickjs-jit --features compiler,test-support`: 234/234 passed
-  across all unit and integration suites on the Linux host.
+- A five-million-iteration first invocation enters production OSR, returns
+  `12_499_997_500_000`, records native OSR entry, and has zero retry.
+- Interpreter and OSR runs of that loop have identical interrupt-handler poll
+  counts, proving the transfer neither skips nor doubles its first backedge.
+- Multi-loop compilation produces one independent entry per verified header.
+- Two hot-reloaded generations both enter OSR, return distinct correct results,
+  retire old code safely, and record zero cross-generation retries.
+- The malformed-frame matrix covers wrong runtime, ID, generation, PC, cookie,
+  map count, helper version, depth, and slot kind. Every rejection leaves the
+  frame byte-identical and the slot owner/tag unchanged.
+- Existing native-boundary tests prove retry resumes at the polled PC without
+  replaying prefix side effects. Existing forced Tier 1 tests prove AddSlow
+  `Symbol.toPrimitive`, forced GC, calls, and reentry semantics. Candidate
+  AddSlow loop shapes rejected by the closed opcode policy or merge verifier
+  remain stable interpreter fallback and are not claimed as OSR coverage.
 
-## Required continuation before Task 11 completion
+## Commands and results
 
-The production compiler does not yet publish callable independent OSR entries.
-Task 10's `CompiledArtifact` owns one `PublishedBaselineCode`, and Task 7's
-Cranelift lowering has one ABI prologue; only that prologue receives the hidden
-`JSJitExit` sret and frame arguments. Frame-state marker offsets are internal
-basic-block addresses, not ABI entry points. They must not be returned from
-`acquire_entry`.
+- `cargo test -p rquickjs-jit --features compiler,test-support`: 240/240 pass.
+- `cargo test -p rquickjs-jit --test osr --test semantics --test background
+  --release --features compiler,test-support`: 32/32 pass.
+- `cargo clippy -p rquickjs-jit --all-targets --features
+  compiler,test-support -- -D warnings`: pass.
+- `cargo fmt --all -- --check`: pass.
+- `cargo test --workspace --all-targets --features
+  rquickjs-jit/compiler,rquickjs-jit/test-support`: pass, including 177 core
+  tests, 240 JIT tests, macro trybuild tests, examples, and workspace crates.
+- `cargo test --workspace --all-targets` without features does not compile the
+  pre-existing JIT integration sources because they import feature-gated test
+  APIs; the explicit-feature workspace command above is the valid gate.
 
-The safe continuation is to make a Tier 1 artifact own separately compiled and
-published ABI functions for each verified loop header (including independent
-relocation, W^X indirect-target declaration, unwind registration, pinning, and
-entry address), then teach nonzero-PC acquisition to require the exact `OsrMap`.
-Each variant must validate every frame invariant and import args/locals/live
-stack before jumping to the post-poll header. This checkpoint intentionally
-keeps nonzero-PC production acquisition disabled rather than replaying the
-function prefix or calling an internal marker with the wrong ABI.
+Host execution was Linux x86_64. macOS and Windows execution remains required
+CI evidence under the existing Task 6 platform ruling.
