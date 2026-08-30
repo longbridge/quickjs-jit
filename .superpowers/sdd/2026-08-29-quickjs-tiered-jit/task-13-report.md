@@ -16,8 +16,7 @@ Date: 2026-08-30. Host: Linux x86-64. Test262 revision:
   5,450 excluded, and 5,804 skipped.
 - The Rust host deliberately has a separate checked compatibility/exclusion
   manifest. It does not claim that C-host-only `std`, `os`, agent, realm,
-  detach-buffer, Intl, or unresolved module-graph facilities execute in the
-  Rust host.
+  detach-buffer, or Intl facilities execute in the Rust host.
 
 ## Rust-host Test262
 
@@ -28,10 +27,10 @@ phase/type, duration, skip reason, and native evidence in per-case JSON.
 - Focused first 100 paths: interpreter and automatic each produced 142 pass,
   58 checked skips, 0 failures, and identical case sets.
 - Deterministic universe shard 0/256: interpreter and automatic each produced
-  294 pass, 106 checked skips, 0 failures, and identical case sets. Reports are
+  319 pass, 81 checked skips, 0 failures, and identical case sets. Reports are
   `target/jit-test262/{interpreter,automatic}-shard-0-of-256.json`.
-- Focused behavior: module 1/1, async `$DONE` 2/2, parse-negative 2/2, and
-  runtime-negative 2/2 passed.
+- Focused behavior: module 1/1, imported async module graph 1/1, async `$DONE`
+  2/2, parse-negative 2/2, and runtime-negative 2/2 passed.
 - Automatic native entries were zero in this shard; it is interpreter-fallback
   semantic evidence, not advertised native coverage.
 - Forced native coverage remains the release opcode/differential matrix: all
