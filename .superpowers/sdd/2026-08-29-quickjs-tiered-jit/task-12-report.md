@@ -1,0 +1,79 @@
+# Task 12 implementation report
+
+## Scope delivered
+
+The first optimizing tier is intentionally narrow. It accepts verifier-proven
+numeric/local functions and rejects property, allocation, call, global, shape,
+cell, and inlining specialization. Accepted artifacts use a distinct Cranelift
+guard-exit mode: Tier 1 domain failures return `RETRY_INTERPRETER`, while Tier 2
+domain failures return `DEOPT` with the exact C-visible frame PC. The numeric
+hot path continues to use the audited unboxed payload/tag representation and
+native local arithmetic.
+
+Production dispatch now compiles `Tier::Baseline` and `Tier::Optimizing` on the
+existing bounded Task 10 workers. Installation remains runtime-thread-only,
+Tier 2 retains the exact Tier 1 deopt target, entry acquisition prefers the
+optimizing artifact, and generation dependencies are validated before publish.
+
+## Correctness contracts
+
+- Fixed-capacity feedback entries are keyed by function generation, PC, and
+  feedback kind. Diversity transitions `Monomorphic -> Polymorphic ->
+  Megamorphic` monotonically and snapshots contain only stable tokens plus an
+  epoch.
+- `DeoptMap` validation requires every argument/local/stack slot exactly once.
+  Materialization validates and plans before touching a destination.
+- Owning tagged values use an explicit two-phase duplication contract. A failed
+  duplication releases every earlier duplicate in reverse order and publishes
+  no partial frame.
+- Entry type guards run before native mutation. Arguments and locals are
+  already materialized in QuickJS-owned C-visible slots, so the exact entry
+  deopt does not depend on machine locations or Cranelift stack maps.
+- `BeforeEffect` and `AfterEffect` retain distinct side-effect epochs. Property,
+  getter, proxy, setter, call, and coercion specialization is rejected in this
+  tier, preventing replay of effects without stable shape/cell identities.
+- Numeric folding preserves negative zero and NaN and widens overflowing int32
+  arithmetic to float64. Local CSE/DCE operate only on the separate pure
+  optimizing IR and never cross an effect.
+- Dependency invalidation is generation-exact, reverse-indexed, transitive,
+  and cycle-safe. Optimizing artifacts also retain the Task 5 Tier 1 deopt pin.
+
+## TDD evidence
+
+RED failures were observed for the missing feedback API, deopt API, optimizing
+IR/compiler API, dependency graph, ownership rollback, CSE/DCE metrics, and the
+production Tier 2 entry. A production test then proved all of the following in
+one runtime:
+
+1. Task 10 worker compilation and runtime-thread installation of Tier 2.
+2. Acquisition of an artifact whose key is `Tier::Optimizing`.
+3. At least one real native Tier 2 entry with `boxes_elided > 0`.
+4. Correct numeric-loop output under stress-GC mode.
+5. A real generated type guard returning `DEOPT` for a string argument.
+6. Exact QuickJS resume at entry PC producing the interpreter result `"x"`.
+7. Non-zero deopt and Tier 2 guard-failure metrics.
+
+## Verification
+
+- `cargo test -p rquickjs-jit --features compiler,test-support --test optimized --test deopt --test lifecycle`
+  - optimized 7/7, deopt 4/4, lifecycle 45/45
+- `cargo test -p rquickjs-jit --features compiler,test-support --release`
+  - exit 0; the complete release JIT suite passed, including baseline,
+    background, lifecycle, native-boundary, opcode, OSR, platform, semantics,
+    snapshot, verifier, optimized, and deopt suites
+- `cargo fmt --all -- --check`
+  - exit 0
+- `cargo clippy -p rquickjs-jit --features compiler,test-support --all-targets -- -D warnings`
+  - exit 0
+
+The release build repeats existing upstream QuickJS C compiler warnings about
+`buf2`; no new Rust warning or clippy finding is present.
+
+## Explicit limits
+
+There are no property/shape/global/callee-specialized mid-instruction guards in
+this first tier. Those paths reject Tier 2 and retain Tier 1/interpreter
+semantics. Consequently, the only production deopt currently emitted is the
+pre-mutation numeric entry guard; the complete two-phase materializer is
+retained and tested for later mid-function guards but is not invoked by an
+unsupported specialization.
