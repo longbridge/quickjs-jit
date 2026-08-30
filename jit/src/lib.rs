@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod test_support;
 
 use core::ops::Deref;
+use std::sync::{Arc, Mutex};
 
 pub use config::{JitConfig, JitConfigBuilder, JitDiagnostic, JitDiagnosticKind};
 pub use error::JitError;
@@ -48,7 +49,7 @@ const NATIVE_EXECUTION_SUPPORTED: bool = cfg!(any(
 /// Owns the guard that keeps a JIT backend attached to a runtime.
 #[derive(Debug)]
 pub struct Jit {
-    metrics: JitMetrics,
+    metrics: Arc<Mutex<JitMetrics>>,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
 }
 
@@ -71,11 +72,15 @@ impl Jit {
             return Err(error.into());
         }
 
-        let metrics = JitMetrics::disabled();
-        config.observe(&metrics);
-        let guard = match runtime.attach_jit_backend(NoopBackend {
+        let metrics = Arc::new(Mutex::new(JitMetrics::disabled()));
+        config.observe(&metrics.lock().unwrap_or_else(|p| p.into_inner()));
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let backend = ProductionBackend::new(config.clone(), Arc::clone(&metrics))?;
+        #[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
+        let backend = NoopBackend {
             _config: config.clone(),
-        }) {
+        };
+        let guard = match runtime.attach_jit_backend(backend) {
             Ok(guard) => guard,
             Err(error) => {
                 config.report(JitDiagnosticKind::BackendAttachment);
@@ -98,17 +103,172 @@ impl Jit {
     }
 
     /// Returns the metrics associated with this backend guard.
-    pub const fn metrics(&self) -> &JitMetrics {
-        &self.metrics
+    pub fn metrics(&self) -> JitMetrics {
+        self.metrics
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Performs bounded installation and reclamation work on the runtime thread.
+    pub fn poll(&self) {
+        self._guard.poll();
     }
 }
 
+#[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
 #[derive(Debug)]
 struct NoopBackend {
     _config: JitConfig,
 }
 
+#[cfg(not(all(feature = "compiler", not(target_family = "wasm"))))]
 unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct ProductionBackend {
+    config: JitConfig,
+    coordinator: runtime::Coordinator,
+    workers: runtime::BackgroundCompiler,
+    requested: std::collections::HashSet<runtime::FunctionKey>,
+    metrics: Arc<Mutex<JitMetrics>>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl ProductionBackend {
+    fn new(config: JitConfig, metrics: Arc<Mutex<JitMetrics>>) -> Result<Self, JitError> {
+        let compiler = Arc::new(compiler::baseline::BaselineCompiler::host());
+        let workers =
+            runtime::BackgroundCompiler::new(compiler, config.workers(), config.max_queue_len())
+                .map_err(|_| JitError::InvalidConfig("workers"))?;
+        Ok(Self {
+            coordinator: runtime::Coordinator::with_limits(
+                config.max_queue_len(),
+                config.max_queue_len(),
+                config.max_compile_attempts(),
+                config.max_code_bytes(),
+            ),
+            config,
+            workers,
+            requested: std::collections::HashSet::new(),
+            metrics,
+        })
+    }
+
+    fn maintenance(&mut self) {
+        self.coordinator.drain_completions();
+        while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
+        let snapshot = self.coordinator.metrics();
+        *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
+        self.config.observe(&snapshot);
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
+    fn poll(&mut self) {
+        self.maintenance();
+    }
+
+    fn record_hot(&mut self, event: &rquickjs_core::qjs::JSJitHotEvent) -> u32 {
+        self.maintenance();
+        if event.pc != 0 || event.kind != rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_CALL {
+            return 0;
+        }
+        let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
+        u32::from(self.requested.insert(key))
+    }
+
+    fn submit_snapshot(&mut self, snapshot: *mut rquickjs_core::qjs::JSJitFunctionSnapshot) {
+        struct FreeSnapshot(*mut rquickjs_core::qjs::JSJitFunctionSnapshot);
+        impl Drop for FreeSnapshot {
+            fn drop(&mut self) {
+                unsafe { rquickjs_core::qjs::JS_JitFreeSnapshot(self.0) };
+            }
+        }
+        let Some(raw) = std::ptr::NonNull::new(snapshot) else {
+            return;
+        };
+        let _free = FreeSnapshot(snapshot);
+        let copied = unsafe { bytecode::CompileSnapshot::copy_borrowed_raw(raw.as_ref()) };
+        let Ok(snapshot) = copied else { return };
+        let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
+        let Ok(verified) = snapshot.verify(bytecode::VerifyLimits::default()) else {
+            return;
+        };
+        let _ = self
+            .coordinator
+            .queue(key, runtime::Tier::Baseline, verified);
+        self.maintenance();
+    }
+
+    fn acquire_entry(
+        &mut self,
+        id: u64,
+        generation: u64,
+        pc: u32,
+    ) -> rquickjs_core::qjs::JSJitEntryHandle {
+        let mut empty = rquickjs_core::qjs::JSJitEntryHandle {
+            struct_size: core::mem::size_of::<rquickjs_core::qjs::JSJitEntryHandle>() as u32,
+            reserved: 0,
+            entry: None,
+            pin: core::ptr::null_mut(),
+            stack_map_count: 0,
+            helper_abi_version: 0,
+        };
+        self.maintenance();
+        if pc != 0 {
+            return empty;
+        }
+        let Some(pin) = self.coordinator.pin(
+            runtime::FunctionKey::new(id, generation),
+            runtime::Tier::Baseline,
+        ) else {
+            return empty;
+        };
+        let Some(published) = pin.artifact().published() else {
+            return empty;
+        };
+        let entry = published.as_ptr();
+        let stack_map_count = u32::try_from(published.stack_maps().len()).unwrap_or(u32::MAX);
+        let pin = Box::into_raw(Box::new(pin)).cast();
+        empty.entry = Some(unsafe {
+            core::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(
+                    *mut rquickjs_core::qjs::JSJitExecFrame,
+                ) -> rquickjs_core::qjs::JSJitExit,
+            >(entry)
+        });
+        empty.pin = pin;
+        empty.stack_map_count = stack_map_count;
+        empty.helper_abi_version = rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION;
+        empty
+    }
+
+    fn release_entry(&mut self, entry: rquickjs_core::qjs::JSJitEntryHandle) {
+        if !entry.pin.is_null() {
+            unsafe { drop(Box::from_raw(entry.pin.cast::<code_cache::ExecutionPin>())) };
+        }
+    }
+
+    fn function_retire(&mut self, id: u64, generation: u64) {
+        let key = runtime::FunctionKey::new(id, generation);
+        self.requested.remove(&key);
+        self.coordinator.retire(key);
+        self.maintenance();
+    }
+
+    fn runtime_detach(&mut self) {
+        self.workers.shutdown(&mut self.coordinator);
+        self.coordinator.shutdown();
+        self.maintenance();
+    }
+
+    fn memory_used(&self) -> usize {
+        self.coordinator.cache_bytes()
+    }
+}
 
 /// Builder for an owning [`JitRuntime`].
 #[derive(Clone, Debug, Default)]
@@ -149,7 +309,7 @@ impl JitRuntime {
     }
 
     /// Returns runtime metrics.
-    pub const fn metrics(&self) -> &JitMetrics {
+    pub fn metrics(&self) -> JitMetrics {
         self.jit.metrics()
     }
 }

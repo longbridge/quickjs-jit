@@ -1,11 +1,13 @@
 //! Runtime-thread tiering coordination.
 
+mod background;
 mod coordinator;
 mod hotness;
 mod install;
 mod invalidate;
 
 pub use crate::compiler::CompileFailure;
+pub use background::{BackgroundCompiler, BackgroundCompilerError};
 pub use coordinator::{
     compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
     CompileState, CompletionDrain, CompletionSendError, CompletionSender, Coordinator, FunctionKey,

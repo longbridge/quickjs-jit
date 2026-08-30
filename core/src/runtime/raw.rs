@@ -311,6 +311,18 @@ impl RawRuntime {
     }
 
     #[cfg(feature = "jit-abi")]
+    pub(super) fn jit_backend_token(&self) -> Option<u64> {
+        self.jit_backend.as_ref().map(|attachment| attachment.token)
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn poll_jit_backend(&mut self) {
+        if let Some(attachment) = self.jit_backend.as_mut() {
+            attachment._backend.poll();
+        }
+    }
+
+    #[cfg(feature = "jit-abi")]
     unsafe fn detach_jit_backend_for_runtime_drop(
         &mut self,
     ) -> StdResult<(), super::JitBackendAttachError> {

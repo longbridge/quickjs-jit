@@ -512,6 +512,20 @@ impl Coordinator {
         }
     }
 
+    pub(super) fn rollback_dispatch(&mut self, request: CompileRequest) {
+        if self.in_flight.get(&request.key).is_some_and(|flight| {
+            flight.attempt_id == request.attempt_id && flight.tier == request.tier
+        }) {
+            self.in_flight.remove(&request.key);
+            if let Some(record) = self.functions.get_mut(&request.key) {
+                record.tier_mut(request.tier).state = CompileState::Queued(request.tier);
+            }
+            self.queue.push_front(request);
+            self.metrics.worker_queue_saturated =
+                self.metrics.worker_queue_saturated.saturating_add(1);
+        }
+    }
+
     pub fn complete(&mut self, completion: CompileCompletion) {
         let Some(expected) = self.in_flight.get(&completion.key).copied() else {
             self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
@@ -684,6 +698,10 @@ impl Coordinator {
 
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.charged_bytes()
     }
 
     pub fn poll_cache_reclamation(&mut self) -> usize {

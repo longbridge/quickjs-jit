@@ -291,6 +291,9 @@ pub unsafe trait JitBackend: Send + 'static {
     /// only through methods that require a same-runtime [`Ctx`].
     fn runtime_attached(&mut self, _registry: JitFunctionRegistry) {}
 
+    /// Performs bounded runtime-thread maintenance without crossing the C ABI.
+    fn poll(&mut self) {}
+
     fn record_hot(&mut self, _event: &qjs::JSJitHotEvent) -> u32 {
         0
     }
@@ -355,6 +358,10 @@ impl BackendState {
     unsafe fn from_opaque<'a>(opaque: *mut c_void) -> &'a mut Self {
         debug_assert!(!opaque.is_null());
         unsafe { &mut *opaque.cast() }
+    }
+
+    pub(super) fn poll(&mut self) {
+        self.backend.poll();
     }
 }
 
@@ -441,6 +448,17 @@ impl RuntimeJitGuard {
             runtime: runtime.weak(),
             token,
         })
+    }
+
+    /// Drains bounded backend work while holding the owning runtime lock.
+    pub fn poll(&self) {
+        let Some(runtime) = self.runtime.try_ref() else {
+            return;
+        };
+        let mut raw = runtime.inner.lock();
+        if raw.jit_backend_token() == Some(self.token) {
+            raw.poll_jit_backend();
+        }
     }
 }
 

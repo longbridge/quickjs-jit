@@ -91,6 +91,7 @@ pub enum CacheError {
     MissingDeoptTarget,
     ArtifactTooLarge,
     ChargeOverflow,
+    PublishFailed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

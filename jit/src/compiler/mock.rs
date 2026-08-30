@@ -5,7 +5,7 @@ use std::sync::{
     Mutex,
 };
 
-use super::{CompileFailure, Compiler};
+use super::{CompileControl, CompileFailure, Compiler};
 use crate::{code_cache::CompiledArtifact, runtime::CompileRequest};
 
 pub struct FakeCompiler {
@@ -47,6 +47,33 @@ impl Compiler for FakeCompiler {
             .recv()
             .unwrap_or(Err(CompileFailure::Cancelled));
         release.map(|artifact| artifact.bind_fake(request.artifact_key()))
+    }
+
+    fn compile_controlled(
+        &self,
+        request: CompileRequest,
+        control: &CompileControl,
+    ) -> Result<CompiledArtifact, CompileFailure> {
+        if self.requests.send(request.clone()).is_err() {
+            return Err(CompileFailure::Cancelled);
+        }
+        loop {
+            control.check()?;
+            match self
+                .releases
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .recv_timeout(std::time::Duration::from_millis(1))
+            {
+                Ok(result) => {
+                    return result.map(|artifact| artifact.bind_fake(request.artifact_key()))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(CompileFailure::Cancelled)
+                }
+            }
+        }
     }
 }
 

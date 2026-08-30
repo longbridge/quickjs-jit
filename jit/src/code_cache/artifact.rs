@@ -338,6 +338,10 @@ pub struct CompiledArtifact {
     frame_states: Box<[FrameState]>,
     dependencies: Box<[ArtifactDependency]>,
     benefit: BenefitCounters,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    relocatable: Option<Box<crate::compiler::baseline::RelocatableCode>>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    published: Option<crate::compiler::baseline::PublishedBaselineCode>,
     #[cfg(any(test, feature = "test-support"))]
     fake: bool,
 }
@@ -371,6 +375,10 @@ impl CompiledArtifact {
             frame_states: frame_states.into_boxed_slice(),
             dependencies: dependencies.into_boxed_slice(),
             benefit: BenefitCounters::default(),
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            published: None,
             #[cfg(any(test, feature = "test-support"))]
             fake: false,
         }
@@ -448,6 +456,28 @@ impl CompiledArtifact {
         self.benefit.score.load(Ordering::Acquire)
     }
 
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn with_relocatable(
+        mut self,
+        code: crate::compiler::baseline::RelocatableCode,
+    ) -> Self {
+        self.relocatable = Some(Box::new(code));
+        self
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn publish_relocatable(&mut self) -> Result<(), crate::platform::CodeMemoryError> {
+        if let Some(code) = self.relocatable.take() {
+            self.published = Some(code.publish()?);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn published(&self) -> Option<&crate::compiler::baseline::PublishedBaselineCode> {
+        self.published.as_ref()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn fake(tier: Tier) -> Self {
         Self {
@@ -470,6 +500,10 @@ impl CompiledArtifact {
             frame_states: Box::new([]),
             dependencies: Box::new([]),
             benefit: BenefitCounters::default(),
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            published: None,
             fake: true,
         }
     }

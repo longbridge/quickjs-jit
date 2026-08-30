@@ -41,7 +41,7 @@ use crate::{
 
 use super::{
     helpers::{generated_signatures, FrameLayout},
-    CompileFailure, Compiler,
+    CompileControl, CompileFailure, Compiler,
 };
 
 #[derive(Clone, Copy)]
@@ -163,7 +163,7 @@ impl BaselineCompiler {
 
     /// Compiles verified bytecode without allocating executable memory.
     pub fn compile(&self, function: &VerifiedFunction) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy(function, CompilePolicy::AdvertisedOnly)
+        self.compile_with_policy(function, CompilePolicy::AdvertisedOnly, None)
     }
 
     #[cfg(feature = "test-support")]
@@ -171,14 +171,18 @@ impl BaselineCompiler {
         &self,
         function: &VerifiedFunction,
     ) -> Result<RelocatableCode, CompileFailure> {
-        self.compile_with_policy(function, CompilePolicy::ImplementedForCompilerTest)
+        self.compile_with_policy(function, CompilePolicy::ImplementedForCompilerTest, None)
     }
 
     fn compile_with_policy(
         &self,
         function: &VerifiedFunction,
         policy: CompilePolicy,
+        control: Option<&CompileControl>,
     ) -> Result<RelocatableCode, CompileFailure> {
+        if let Some(control) = control {
+            control.check()?;
+        }
         if self.isa.triple().pointer_width().map(|width| width.bits()) != Ok(64)
             || self.isa.triple().endianness() != Ok(Endianness::Little)
         {
@@ -195,6 +199,9 @@ impl BaselineCompiler {
                 BaselineIr::translate_implemented_for_test(function)?
             }
         };
+        if let Some(control) = control {
+            control.check()?;
+        }
         let logical_stack_capacity = u32::from(function.snapshot().stack_size());
         let scratch_slots =
             u32::try_from(MAX_HELPER_SCRATCH_SLOTS).map_err(|_| CompileFailure::InvalidArtifact)?;
@@ -221,6 +228,9 @@ impl BaselineCompiler {
             builder.seal_all_blocks();
             builder.finalize();
         }
+        if let Some(control) = control {
+            control.check()?;
+        }
 
         let clif_text = clif.display().to_string();
         let function_parameters = clif.params.clone();
@@ -228,6 +238,9 @@ impl BaselineCompiler {
         let compiled = context
             .compile(&*self.isa, &mut ControlPlane::default())
             .map_err(|_| CompileFailure::InvalidArtifact)?;
+        if let Some(control) = control {
+            control.check()?;
+        }
         let unwind_info = compiled
             .create_unwind_info(&*self.isa)
             .map_err(|_| CompileFailure::InvalidArtifact)?
@@ -362,16 +375,35 @@ impl BaselineCompiler {
 impl Compiler for BaselineCompiler {
     fn compile(&self, request: CompileRequest) -> Result<CompiledArtifact, CompileFailure> {
         let code = BaselineCompiler::compile(self, request.snapshot())?;
-        Ok(CompiledArtifact::from_parts(
-            request.artifact_key(),
-            CodeAllocation::inert(code.bytes),
-            code.relocations,
-            code.stack_maps,
-            code.frame_states,
-            Vec::new(),
-        )
-        .with_unwind_metadata(code.unwind_metadata))
+        Ok(artifact_from_relocatable(request, code))
     }
+
+    fn compile_controlled(
+        &self,
+        request: CompileRequest,
+        control: &CompileControl,
+    ) -> Result<CompiledArtifact, CompileFailure> {
+        let code = self.compile_with_policy(
+            request.snapshot(),
+            CompilePolicy::AdvertisedOnly,
+            Some(control),
+        )?;
+        control.check()?;
+        Ok(artifact_from_relocatable(request, code))
+    }
+}
+
+fn artifact_from_relocatable(request: CompileRequest, code: RelocatableCode) -> CompiledArtifact {
+    CompiledArtifact::from_parts(
+        request.artifact_key(),
+        CodeAllocation::inert(code.bytes.clone()),
+        code.relocations.clone(),
+        code.stack_maps.clone(),
+        code.frame_states.clone(),
+        Vec::new(),
+    )
+    .with_unwind_metadata(code.unwind_metadata.clone())
+    .with_relocatable(code)
 }
 
 /// Relocatable Cranelift output. Publication is intentionally host-gated.

@@ -447,6 +447,16 @@ impl CompileSnapshot {
             }),
         })
     }
+
+    /// Copies one callback-borrowed C snapshot into worker-safe owned memory.
+    ///
+    /// # Safety
+    /// `raw` and every slice described by it must remain valid for this call.
+    pub unsafe fn copy_borrowed_raw(
+        raw: &qjs::JSJitFunctionSnapshot,
+    ) -> Result<Self, SnapshotStatus> {
+        unsafe { Self::copy_raw(raw) }
+    }
 }
 
 /// Runtime-thread owner for the source function and its constant pool.
