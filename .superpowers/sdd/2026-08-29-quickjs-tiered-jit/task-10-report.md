@@ -23,7 +23,8 @@
 ## Resource boundaries
 
 - Bounded worker and completion channels use nonblocking `try_send`; saturation
-  rolls back dispatch or categorizes a dropped completion without deadlock.
+  rolls back dispatch or moves a completion into a bounded worker-result overflow
+  queue drained only by the runtime thread, without losing state or deadlocking.
 - Pending snapshot bytes, estimated IR bytes, and worker job counts use shared
   atomic accounting with a worker-side RAII release guard.
 - Compiler cancellation and deadlines are checked before/after translation,
@@ -60,6 +61,7 @@
 - Saturation/shutdown correction: `7e09be8`
 - Independent cache/compiler resource limits: `86b4474`
 - RAII gauges and timeout categorization: `b7915b5`
+- Saturated completion preservation: `8e8caf5`
 
 Task 10 intentionally publishes entry PC zero only. Hot thresholds, loop events,
 and nonzero-PC OSR policy remain Task 11 work.
