@@ -3,6 +3,195 @@
 pub const BASE_CALL_THRESHOLD: u32 = 32;
 pub const BASE_LOOP_THRESHOLD: u32 = 56;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Profile {
+    pub bytecodes: u64,
+    pub helper_calls: u64,
+    pub compile_ns: u64,
+    pub install_ns: u64,
+    pub executions: u64,
+    pub interpreter_ns: u64,
+    pub baseline_ns: u64,
+    pub optimized_ns: u64,
+    pub code_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Decision {
+    Interpret,
+    Baseline,
+    Optimize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfitabilityRationale {
+    FixedPolicy,
+    InsufficientMeasurement,
+    NoBaselineBenefit,
+    HelperDominated,
+    BeforeBreakEven,
+    PositiveAmortizedBenefit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProfitabilityDecision {
+    pub tier: Decision,
+    pub rationale: ProfitabilityRationale,
+    pub gross_benefit_ns: u64,
+    pub net_benefit_ns: i128,
+    pub break_even_executions: u64,
+    /// Net nanoseconds saved per native-code byte. This is the cache's
+    /// benefit-density input; zero-sized artifacts deliberately score zero.
+    pub benefit_density: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Profitability {
+    fixed: Option<Decision>,
+    helper_ratio_limit_per_mille: u16,
+}
+
+impl Default for Profitability {
+    fn default() -> Self {
+        Self {
+            fixed: None,
+            helper_ratio_limit_per_mille: 250,
+        }
+    }
+}
+
+impl Profitability {
+    pub const fn fixed(tier: Decision) -> Self {
+        Self {
+            fixed: Some(tier),
+            helper_ratio_limit_per_mille: 250,
+        }
+    }
+
+    pub fn evaluate(self, profile: Profile) -> ProfitabilityDecision {
+        if let Some(tier) = self.fixed {
+            return decision(tier, ProfitabilityRationale::FixedPolicy, 0, 0, 0, 0);
+        }
+        if profile.executions == 0 || profile.interpreter_ns == 0 {
+            return decision(
+                Decision::Interpret,
+                ProfitabilityRationale::InsufficientMeasurement,
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+        if profile.baseline_ns >= profile.interpreter_ns {
+            return decision(
+                Decision::Interpret,
+                ProfitabilityRationale::NoBaselineBenefit,
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+
+        let baseline_per_execution = profile.interpreter_ns.saturating_sub(profile.baseline_ns);
+        if profile.bytecodes != 0
+            && profile.helper_calls.saturating_mul(1_000)
+                >= profile
+                    .bytecodes
+                    .saturating_mul(u64::from(self.helper_ratio_limit_per_mille))
+        {
+            return measured_decision(
+                Decision::Baseline,
+                ProfitabilityRationale::HelperDominated,
+                baseline_per_execution,
+                profile,
+            );
+        }
+
+        let optimized_per_execution = profile.baseline_ns.saturating_sub(profile.optimized_ns);
+        let compile_cost = profile.compile_ns.saturating_add(profile.install_ns);
+        let break_even = ceil_div(compile_cost, optimized_per_execution);
+        let gross = optimized_per_execution.saturating_mul(profile.executions);
+        let net = i128::from(gross) - i128::from(compile_cost);
+        if optimized_per_execution == 0 || net <= 0 {
+            measured_decision(
+                Decision::Baseline,
+                ProfitabilityRationale::BeforeBreakEven,
+                optimized_per_execution,
+                profile,
+            )
+        } else {
+            measured_decision(
+                Decision::Optimize,
+                ProfitabilityRationale::PositiveAmortizedBenefit,
+                optimized_per_execution,
+                profile,
+            )
+        }
+        .with_break_even(break_even)
+    }
+}
+
+const fn ceil_div(numerator: u64, denominator: u64) -> u64 {
+    match (
+        numerator.checked_div(denominator),
+        numerator.checked_rem(denominator),
+    ) {
+        (Some(quotient), Some(0)) => quotient,
+        (Some(quotient), Some(_)) => quotient.saturating_add(1),
+        _ => u64::MAX,
+    }
+}
+
+fn measured_decision(
+    tier: Decision,
+    rationale: ProfitabilityRationale,
+    saved_per_execution: u64,
+    profile: Profile,
+) -> ProfitabilityDecision {
+    let gross = saved_per_execution.saturating_mul(profile.executions);
+    let cost = profile.compile_ns.saturating_add(profile.install_ns);
+    let net = i128::from(gross) - i128::from(cost);
+    let density = if profile.code_bytes == 0 || net <= 0 {
+        0
+    } else {
+        u64::try_from(net).unwrap_or(u64::MAX) / profile.code_bytes
+    };
+    decision(
+        tier,
+        rationale,
+        gross,
+        net,
+        ceil_div(cost, saved_per_execution),
+        density,
+    )
+}
+
+const fn decision(
+    tier: Decision,
+    rationale: ProfitabilityRationale,
+    gross_benefit_ns: u64,
+    net_benefit_ns: i128,
+    break_even_executions: u64,
+    benefit_density: u64,
+) -> ProfitabilityDecision {
+    ProfitabilityDecision {
+        tier,
+        rationale,
+        gross_benefit_ns,
+        net_benefit_ns,
+        break_even_executions,
+        benefit_density,
+    }
+}
+
+impl ProfitabilityDecision {
+    const fn with_break_even(mut self, break_even_executions: u64) -> Self {
+        self.break_even_executions = break_even_executions;
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HotReason {
     NeutralBase,

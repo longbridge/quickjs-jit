@@ -84,3 +84,52 @@ fn release_deopt_reference(
         *references = references.saturating_sub(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        code_cache::{ArtifactKey, CodeAllocation, CodeCache, CompiledArtifact},
+        runtime::Tier,
+    };
+
+    fn key(id: u64) -> ArtifactKey {
+        ArtifactKey {
+            runtime_id: 1,
+            function_id: id,
+            generation: 1,
+            tier: Tier::Baseline,
+            target_isa: 1,
+            cpu_features: 1,
+            abi_fingerprint: 1,
+            source_revision: 1,
+            opcode_fingerprint: 1,
+            config_fingerprint: 1,
+            specialization_fingerprint: 0,
+        }
+    }
+
+    fn artifact(key: ArtifactKey, bytes: usize) -> CompiledArtifact {
+        CompiledArtifact::from_parts(
+            key,
+            CodeAllocation::inert(vec![0; bytes]),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn eviction_uses_measured_benefit_per_charged_byte() {
+        let mut cache = CodeCache::new(110);
+        let sparse = key(1);
+        let dense = key(2);
+        let incoming = key(3);
+        cache.insert(artifact(sparse, 100)).unwrap();
+        cache.insert(artifact(dense, 10)).unwrap();
+        cache.record_benefit(sparse, 100).unwrap();
+        cache.record_benefit(dense, 50).unwrap();
+        let result = cache.insert(artifact(incoming, 1)).unwrap();
+        assert_eq!(result.evicted(), Some(sparse));
+    }
+}

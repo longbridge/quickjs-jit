@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jit-benchmark-v1",
+  "type": "object",
+  "required": ["schema", "provenance", "policy", "modes", "exclusions"],
+  "properties": {
+    "schema": { "const": "jit-benchmark-v1" },
+    "provenance": {
+      "type": "object",
+      "required": ["source_revision", "quickjs_revision", "target", "os", "kernel", "cpu", "power_mode", "rustc", "llvm", "executable_bytes"]
+    },
+    "policy": {
+      "type": "object",
+      "required": ["latency_warmups", "latency_processes", "throughput_windows", "throughput_window_ns", "bootstrap_resamples"],
+      "properties": {
+        "latency_warmups": { "type": "integer", "minimum": 5 },
+        "latency_processes": { "type": "integer", "minimum": 30 },
+        "throughput_windows": { "type": "integer", "minimum": 10 },
+        "throughput_window_ns": { "type": "integer", "minimum": 1000000000 },
+        "bootstrap_resamples": { "type": "integer", "minimum": 10000 }
+      }
+    },
+    "modes": { "type": "array", "minItems": 1 },
+    "exclusions": { "type": "array" }
+  }
+}

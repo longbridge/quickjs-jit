@@ -26,7 +26,7 @@ use core::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use config::{JitConfig, JitConfigBuilder, JitDiagnostic, JitDiagnosticKind};
+pub use config::{JitConfig, JitConfigBuilder, JitDiagnostic, JitDiagnosticKind, JitTierPolicy};
 pub use error::JitError;
 pub use metrics::JitMetrics;
 pub use rquickjs_core::Runtime;
@@ -91,6 +91,11 @@ fn artifact_environment(
         config.max_queue_len() as u64,
         config.workers() as u64,
         u64::from(config.max_compile_attempts()),
+        match config.tier_policy() {
+            JitTierPolicy::Automatic => 0,
+            JitTierPolicy::BaselineOnly => 1,
+            JitTierPolicy::Optimize => 2,
+        },
     ] {
         config_fingerprint = mix(config_fingerprint, value);
     }
@@ -1071,7 +1076,11 @@ impl ProductionBackend {
                 )
             })
             .collect::<Vec<_>>();
-        for key in ready_for_tier2 {
+        for key in if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
+            Vec::new()
+        } else {
+            ready_for_tier2
+        } {
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
                 #[cfg(feature = "test-support")]
                 let feedback = if self.config.force_optimized() {

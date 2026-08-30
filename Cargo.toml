@@ -17,6 +17,7 @@ members = [
   "sys",
   "core",
   "jit",
+  "benchmarks",
   "macro",
   "examples/native-module",
   "examples/module-loader",

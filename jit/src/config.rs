@@ -15,6 +15,16 @@ pub const DEFAULT_MAX_QUEUE_LEN: usize = 256;
 pub const DEFAULT_WORKERS: usize = 1;
 pub const DEFAULT_MAX_COMPILE_ATTEMPTS: u8 = 4;
 
+/// Explicit tier policy used by reproducible measurements and embedders that
+/// prefer bounded compilation. Automatic is the production default.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum JitTierPolicy {
+    #[default]
+    Automatic,
+    BaselineOnly,
+    Optimize,
+}
+
 /// Bounded policy and resource limits for one JIT runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JitDiagnosticKind {
@@ -48,6 +58,7 @@ pub struct JitConfig {
     max_queue_len: usize,
     workers: usize,
     max_compile_attempts: u8,
+    tier_policy: JitTierPolicy,
     #[cfg(feature = "test-support")]
     stress_gc: bool,
     #[cfg(feature = "test-support")]
@@ -69,6 +80,7 @@ impl core::fmt::Debug for JitConfig {
             .field("max_queue_len", &self.max_queue_len)
             .field("workers", &self.workers)
             .field("max_compile_attempts", &self.max_compile_attempts)
+            .field("tier_policy", &self.tier_policy)
             .field("stress_gc", &{
                 #[cfg(feature = "test-support")]
                 {
@@ -110,6 +122,7 @@ impl PartialEq for JitConfig {
             && self.max_queue_len == other.max_queue_len
             && self.workers == other.workers
             && self.max_compile_attempts == other.max_compile_attempts
+            && self.tier_policy == other.tier_policy
             && {
                 #[cfg(feature = "test-support")]
                 {
@@ -186,6 +199,9 @@ impl JitConfig {
     pub const fn max_compile_attempts(&self) -> u8 {
         self.max_compile_attempts
     }
+    pub const fn tier_policy(&self) -> JitTierPolicy {
+        self.tier_policy
+    }
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
@@ -225,6 +241,7 @@ impl Default for JitConfig {
             max_queue_len: DEFAULT_MAX_QUEUE_LEN,
             workers: DEFAULT_WORKERS,
             max_compile_attempts: DEFAULT_MAX_COMPILE_ATTEMPTS,
+            tier_policy: JitTierPolicy::Automatic,
             #[cfg(feature = "test-support")]
             stress_gc: false,
             #[cfg(feature = "test-support")]
@@ -285,6 +302,11 @@ impl JitConfigBuilder {
 
     pub fn max_compile_attempts(mut self, value: u8) -> Self {
         self.config.max_compile_attempts = value;
+        self
+    }
+
+    pub fn tier_policy(mut self, value: JitTierPolicy) -> Self {
+        self.config.tier_policy = value;
         self
     }
 

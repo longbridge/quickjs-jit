@@ -20,7 +20,8 @@ pub use feedback::{
     ObservedType,
 };
 pub use hotness::{
-    AdaptiveInputs, HotDecision, HotReason, HotThresholds, HotnessState, BASE_CALL_THRESHOLD,
+    AdaptiveInputs, Decision, HotDecision, HotReason, HotThresholds, HotnessState, Profile,
+    Profitability, ProfitabilityDecision, ProfitabilityRationale, BASE_CALL_THRESHOLD,
     BASE_LOOP_THRESHOLD,
 };
 pub use invalidate::{DependencyError, DependencyGraph, DependencyKey};
@@ -29,8 +30,8 @@ pub use osr::{OsrKey, OsrMap};
 #[cfg(test)]
 mod hotness_tests {
     use super::{
-        AdaptiveInputs, HotDecision, HotReason, HotnessState, BASE_CALL_THRESHOLD,
-        BASE_LOOP_THRESHOLD,
+        AdaptiveInputs, Decision, HotDecision, HotReason, HotnessState, Profile, Profitability,
+        ProfitabilityRationale, BASE_CALL_THRESHOLD, BASE_LOOP_THRESHOLD,
     };
 
     #[test]
@@ -107,6 +108,58 @@ mod hotness_tests {
         assert_eq!(
             hotness.record_call_event_with_thresholds(1, thresholds),
             HotDecision::Queue(HotReason::CallThreshold)
+        );
+    }
+
+    #[test]
+    fn measured_profitability_keeps_host_heavy_code_at_baseline() {
+        let profile = Profile {
+            bytecodes: 100,
+            helper_calls: 90,
+            compile_ns: 80_000,
+            install_ns: 10_000,
+            executions: 40,
+            interpreter_ns: 120_000,
+            baseline_ns: 100_000,
+            optimized_ns: 95_000,
+            code_bytes: 512,
+        };
+        let decision = Profitability::default().evaluate(profile);
+        assert_eq!(decision.tier, Decision::Baseline);
+        assert_eq!(decision.rationale, ProfitabilityRationale::HelperDominated);
+    }
+
+    #[test]
+    fn measured_profitability_optimizes_hot_numeric_code_after_break_even() {
+        let profile = Profile {
+            bytecodes: 20_000_000,
+            helper_calls: 2,
+            compile_ns: 120_000,
+            install_ns: 10_000,
+            executions: 20,
+            interpreter_ns: 20_000_000,
+            baseline_ns: 4_000_000,
+            optimized_ns: 1_000_000,
+            code_bytes: 2048,
+        };
+        let decision = Profitability::default().evaluate(profile);
+        assert_eq!(decision.tier, Decision::Optimize);
+        assert_eq!(
+            decision.rationale,
+            ProfitabilityRationale::PositiveAmortizedBenefit
+        );
+        assert!(decision.net_benefit_ns > 0);
+        assert!(decision.break_even_executions <= profile.executions);
+    }
+
+    #[test]
+    fn fixed_policy_is_deterministic_for_reports() {
+        let profile = Profile::default();
+        let policy = Profitability::fixed(Decision::Interpret);
+        assert_eq!(policy.evaluate(profile).tier, Decision::Interpret);
+        assert_eq!(
+            policy.evaluate(profile).rationale,
+            ProfitabilityRationale::FixedPolicy
         );
     }
 }

@@ -1,0 +1,25 @@
+schema = 1
+
+[[suite]]
+name = "quickjs-ng"
+repository = "https://github.com/quickjs-ng/quickjs.git"
+commit = "submodule:sys/quickjs"
+subdirectory = "tests/benchmark"
+license = "MIT"
+sha256 = "resolved-from-pinned-submodule"
+
+[[suite]]
+name = "sunspider"
+repository = "https://github.com/WebKit/WebKit.git"
+commit = "not-imported"
+subdirectory = "PerformanceTests/SunSpider"
+license = "BSD-2-Clause"
+sha256 = "not-imported"
+
+[[suite]]
+name = "jetstream"
+repository = "https://github.com/WebKit/Speedometer.git"
+commit = "not-imported"
+subdirectory = "resources/tests/JetStream3"
+license = "BSD-2-Clause"
+sha256 = "not-imported"

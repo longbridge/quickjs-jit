@@ -42,6 +42,7 @@ postcard = { version = "1", optional = true, default-features = false, features 
 target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
+criterion = "0.5"
 rquickjs = { path = "..", features = ["jit-abi", "loader"] }
 static_assertions = "1"
 trybuild = "1"
@@ -49,6 +50,18 @@ trybuild = "1"
 [[bin]]
 name = "jit-test262"
 required-features = ["test-support"]
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bench]]
+name = "algorithms"
+harness = false
+
+[[bench]]
+name = "tiering"
+harness = false
 
 [features]
 default = []

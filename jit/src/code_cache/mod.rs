@@ -61,22 +61,23 @@ impl CachedArtifact {
             && self.deopt_references.load(Ordering::Acquire) == 0
     }
 
-    pub(super) fn eviction_order(&self) -> (u64, u64, ArtifactKey) {
+    pub(super) fn eviction_order(&self) -> (u128, u64, ArtifactKey) {
         (
-            self.artifact.benefit_score(),
+            u128::from(self.artifact.benefit_score()).saturating_mul(1_000_000)
+                / (self.charge_bytes.max(1) as u128),
             self.last_used.load(Ordering::Acquire),
             self.artifact.key(),
         )
     }
 
-    pub(super) fn eviction_plan_order(&self) -> (u8, u64, u64, ArtifactKey) {
+    pub(super) fn eviction_plan_order(&self) -> (u8, u128, u64, ArtifactKey) {
         let key = self.artifact.key();
         if self.invalidated.load(Ordering::Acquire) {
-            let tier_order = match key.tier {
+            let tier_order: u8 = match key.tier {
                 Tier::Optimizing => 0,
                 Tier::Baseline => 1,
             };
-            (0, tier_order, 0, key)
+            (0, u128::from(tier_order), 0, key)
         } else {
             let (benefit, last_used, key) = self.eviction_order();
             (1, benefit, last_used, key)
