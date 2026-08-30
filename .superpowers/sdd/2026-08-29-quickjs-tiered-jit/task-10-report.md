@@ -64,6 +64,7 @@
 - Saturated completion preservation: `8e8caf5`
 - Nested review fixes: `063f517`
 - Root review fixes: `7aa8842`
+- Target-triple identity correction: `fecd190`
 
 Task 10 intentionally publishes entry PC zero only. Hot thresholds, loop events,
 and nonzero-PC OSR policy remain Task 11 work.
