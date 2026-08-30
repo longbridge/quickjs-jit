@@ -455,6 +455,7 @@ struct ProductionBackend {
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
     requested: std::collections::HashSet<runtime::FunctionKey>,
+    hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
     native_exits: u64,
@@ -517,6 +518,7 @@ impl ProductionBackend {
             config,
             workers,
             requested: std::collections::HashSet::new(),
+            hotness: std::collections::HashMap::new(),
             metrics,
             native_entries: 0,
             native_exits: 0,
@@ -572,11 +574,29 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
 
     fn record_hot(&mut self, event: &rquickjs_core::qjs::JSJitHotEvent) -> u32 {
         self.maintenance();
-        if event.pc != 0 || event.kind != rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_CALL {
+        if event.count == 0 {
             return 0;
         }
         let key = runtime::FunctionKey::new(event.function.id, event.function.generation);
-        u32::from(self.requested.insert(key))
+        if self.requested.contains(&key) {
+            return 0;
+        }
+        let hotness = self.hotness.entry(key).or_default();
+        let decision = if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_CALL
+            && event.pc == 0
+        {
+            hotness.record_call_event(event.count)
+        } else if event.kind == rquickjs_core::qjs::JSJitHotKind_JS_JIT_HOT_LOOP && event.pc != 0 {
+            hotness.record_loop_event(event.count)
+        } else {
+            return 0;
+        };
+        if matches!(decision, runtime::HotDecision::Queue(_)) {
+            self.requested.insert(key);
+            1
+        } else {
+            0
+        }
     }
 
     fn submit_snapshot(&mut self, snapshot: *mut rquickjs_core::qjs::JSJitFunctionSnapshot) {
@@ -681,6 +701,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn function_retire(&mut self, id: u64, generation: u64) {
         let key = runtime::FunctionKey::new(id, generation);
         self.requested.remove(&key);
+        self.hotness.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();
     }

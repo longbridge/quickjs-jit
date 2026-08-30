@@ -181,7 +181,7 @@ fn production_backend_receives_owned_snapshots_automatically() {
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| {
         let value: i32 = ctx
-            .eval("globalThis.add = function add(a, b) { return a + b; }; add(20, 22)")
+            .eval("globalThis.add = function add(a, b) { return a + b; }; let v=0; for(let i=0;i<32;i++) v=add(20,22); v")
             .unwrap();
         assert_eq!(value, 42);
     });
@@ -204,6 +204,29 @@ fn production_backend_receives_owned_snapshots_automatically() {
     assert_eq!(metrics.native_entries, metrics.native_exits);
     assert_eq!(metrics.native_fallbacks, 0);
     assert_eq!(metrics.native_retries, 0);
+}
+
+#[cfg(all(
+    feature = "compiler",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn eight_short_callbacks_do_not_request_a_snapshot() {
+    let runtime = Runtime::new().unwrap();
+    let jit = rquickjs_jit::Jit::attach(&runtime, rquickjs_jit::JitConfig::default()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let value: i32 = ctx
+            .eval("function f(x){return x+1}; let v=0; for(let i=0;i<8;i++)v=f(i); v")
+            .unwrap();
+        assert_eq!(value, 8);
+    });
+    for _ in 0..8 {
+        jit.poll();
+    }
+    assert_eq!(jit.metrics().queued, 0, "{:?}", jit.metrics());
 }
 
 #[cfg(all(

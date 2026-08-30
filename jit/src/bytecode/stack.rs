@@ -325,6 +325,12 @@ pub(crate) fn prove(
                 .iter()
                 .map(|point| point.pc),
         )
+        .chain(
+            cfg.blocks()
+                .iter()
+                .map(|block| block.start_pc())
+                .filter(|pc| cfg.is_loop_header(*pc)),
+        )
         .collect();
     let after_points: BTreeSet<u32> = snapshot
         .data

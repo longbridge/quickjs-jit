@@ -118,6 +118,7 @@ pub struct VerifiedFunction {
     snapshot: CompileSnapshot,
     instructions: Vec<Instruction>,
     cfg: ControlFlowGraph,
+    osr_points: Box<[super::OsrPoint]>,
 }
 
 impl VerifiedFunction {
@@ -131,6 +132,11 @@ impl VerifiedFunction {
 
     pub const fn control_flow_graph(&self) -> &ControlFlowGraph {
         &self.cfg
+    }
+
+    /// Exact verifier-proven states for every reachable loop header.
+    pub fn osr_points(&self) -> &[super::OsrPoint] {
+        &self.osr_points
     }
 
     pub fn tier1_eligibility(&self) -> Result<(), super::Tier1Rejection> {
@@ -398,9 +404,24 @@ pub(crate) fn verify(
         ));
     }
     verify_metadata(&snapshot, &instructions, &cfg, &proof)?;
+    let osr_points = cfg
+        .blocks()
+        .iter()
+        .map(|block| block.start_pc())
+        .filter(|pc| cfg.is_loop_header(*pc))
+        .map(|pc| {
+            let state = proof
+                .before
+                .get(&pc)
+                .ok_or_else(|| VerifyError::new(pc, VerifyErrorKind::IncompleteOsrState))?;
+            Ok(super::OsrPoint::new(pc, state.live_slots(&snapshot)))
+        })
+        .collect::<Result<Vec<_>, VerifyError>>()?
+        .into_boxed_slice();
     Ok(VerifiedFunction {
         snapshot,
         instructions,
         cfg,
+        osr_points,
     })
 }
