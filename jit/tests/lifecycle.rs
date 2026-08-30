@@ -59,6 +59,42 @@ fn stale_result_is_never_installed() {
 }
 
 #[test]
+fn retiring_an_installed_dependency_retires_itself_and_transitive_dependents() {
+    let mut coordinator = Coordinator::with_limits(8, 8, 4, 64);
+    let leaf = FunctionKey::new(101, 1);
+    let middle = FunctionKey::new(102, 1);
+    let root = FunctionKey::new(103, 1);
+
+    for (key, dependencies) in [
+        (leaf, Vec::new()),
+        (middle, vec![ArtifactDependency::new(leaf)]),
+        (root, vec![ArtifactDependency::new(middle)]),
+    ] {
+        coordinator
+            .queue(key, Tier::Baseline, coordinator_snapshot())
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        let artifact = CompiledArtifact::empty(request.artifact_key())
+            .with_dependencies(dependencies);
+        coordinator.complete(CompileCompletion {
+            key,
+            requested_tier: Tier::Baseline,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
+            result: Ok(artifact),
+        });
+        assert_eq!(coordinator.state(key), CompileState::Installed(Tier::Baseline));
+    }
+
+    coordinator.retire(leaf);
+
+    assert_eq!(coordinator.state(leaf), CompileState::Retired);
+    assert_eq!(coordinator.state(middle), CompileState::Retired);
+    assert_eq!(coordinator.state(root), CompileState::Retired);
+    assert_eq!(coordinator.metrics().dependency_invalidations, 3);
+}
+
+#[test]
 fn repeated_failures_blacklist_only_the_generation() {
     let mut coordinator = coordinator(4);
     let key = FunctionKey::new(9, 1);

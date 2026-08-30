@@ -749,7 +749,14 @@ impl Coordinator {
             self.retire_older_generations(key);
             self.current_generations.insert(key.id, key.generation);
         }
-        let invalidated = self.dependencies.invalidate(DependencyKey::function(key));
+        let mut invalidated = self.dependencies.invalidate(DependencyKey::function(key));
+        // A queued or compiling function has no dependency node yet. Retirement
+        // must still retire the identity itself so a late worker completion can
+        // never publish it.
+        let own_dependency = DependencyKey::function(key);
+        if !invalidated.contains(&own_dependency) {
+            invalidated.push(own_dependency);
+        }
         self.metrics.dependency_invalidations = self
             .metrics
             .dependency_invalidations
