@@ -83,6 +83,12 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
     let t2 = mode(data, "tier2");
     let auto = mode(data, "automatic");
     let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`.\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
+    out.push_str(&format!(
+        "\nStripped binary evidence: non-JIT {} bytes; JIT {} bytes; delta {:+} bytes.\n",
+        data.provenance.stripped_no_jit_bytes,
+        data.provenance.stripped_jit_bytes,
+        data.provenance.stripped_jit_delta_bytes
+    ));
     let mut checksums = true;
     let mut strict_native = true;
     let mut automatic_policy = false;
@@ -221,7 +227,7 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
         false,
         "INCONCLUSIVE: Task 15 worktree evidence not supplied".into(),
     );
-    out.push_str("\n## Phase, break-even, and memory evidence\n\nEvery raw sample retains cold runtime creation, JIT attach, context creation, definition/first eval, threshold crossing, compile, install, OSR, and steady-state timing; worker VmHWM RSS; code/metadata/compiler memory; native entry/exit, PC/OSR, helper-exit, retry/fallback, profitability, benefit, and configuration/ABI/opcode fingerprints. Break-even is compile+install cost divided by paired end-to-end savings and is null when no saving was observed.\n\n## Exclusions\n\n");
+    out.push_str("\n## Phase, break-even, and memory evidence\n\nEvery raw sample retains cold runtime creation, JIT attach, context creation, definition/first eval, threshold crossing, measured compile/install, OSR, and steady-state timing; worker VmHWM RSS; code/metadata/compiler high-water memory; native entry/exit, OSR attempts, retry/fallback, profitability, benefit, and configuration/ABI/opcode fingerprints. Helper-exit attribution is not exposed by current runtime metrics and is intentionally absent. Break-even is compile+install cost divided by paired end-to-end savings and is null when no saving was observed.\n\n## Exclusions\n\n");
     for e in &data.exclusions {
         out.push_str(&format!("- {} / {}: {}\n", e.suite, e.test, e.reason));
     }

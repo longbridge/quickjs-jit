@@ -37,6 +37,20 @@ const WORKLOADS: &[Workload] = &[
         file: "quickjs-int-arith.js",
     },
     Workload {
+        name: "quickjs-bitops",
+        suite: "QuickJS microbench",
+        group: "compute",
+        designated: false,
+        file: "quickjs-bitops.js",
+    },
+    Workload {
+        name: "quickjs-fibonacci",
+        suite: "QuickJS microbench",
+        group: "compute",
+        designated: false,
+        file: "quickjs-fibonacci.js",
+    },
+    Workload {
         name: "numeric",
         suite: "rquickjs-jit",
         group: "compute",
