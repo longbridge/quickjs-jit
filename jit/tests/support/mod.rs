@@ -1396,6 +1396,21 @@ impl SyntheticFrame {
         ) -> rquickjs_core::qjs::JSJitExit;
         let entry: Entry = unsafe { mem::transmute(executable.as_ptr()) };
         let exit = unsafe { entry(ptr::addr_of_mut!(self.frame)) };
+        #[cfg(rquickjs_memory_sanitizer)]
+        unsafe {
+            unsafe extern "C" {
+                fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+            }
+
+            __msan_unpoison(
+                ptr::addr_of!(exit).cast(),
+                mem::size_of::<rquickjs_core::qjs::JSJitExit>(),
+            );
+            __msan_unpoison(
+                ptr::addr_of!(self.frame).cast(),
+                mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
+            );
+        }
         SyntheticOutcome {
             exit,
             result: JSValueRepr::from_raw(self.frame.result),
