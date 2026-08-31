@@ -997,7 +997,12 @@ mod tests {
 
     #[test]
     fn bun_external_samples_use_null_native_counters_and_matching_checksums() {
-        if command("bun", &["--version"]).is_empty() {
+        let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
+        if !Command::new(&bun)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
             return;
         }
         for script in ["scalar-loop.js", "numeric.js", "quickjs-fibonacci.js"] {

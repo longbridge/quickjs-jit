@@ -123,6 +123,11 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
         assert!(control.next_request().is_some());
         control.complete(CompiledArtifact::fake(Tier::Baseline));
     }
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while coordinator.metrics().completion_queue_saturated == 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
     workers.shutdown(&mut coordinator);
     assert_eq!(coordinator.metrics().completion_queue_saturated, 1);
     assert_eq!(coordinator.metrics().installed, 2);
