@@ -40,6 +40,7 @@ use crate::{
 };
 
 use super::{
+    emit_external_call,
     helpers::{generated_signatures, FrameLayout},
     CompileControl, CompileFailure, Compiler,
 };
@@ -182,9 +183,13 @@ impl HelperLowering<'_> {
             helper_u32(builder, shape.generation() as u32),
             helper_u32(builder, (shape.generation() >> 32) as u32),
         ];
-        let call = builder
-            .ins()
-            .call_indirect(self.signatures[helper_id], helper, &params);
+        let call = emit_external_call(
+            builder,
+            self.signatures[helper_id],
+            helper,
+            &params,
+            self.pointer_type,
+        );
         Ok(builder.inst_results(call)[0])
     }
 }
@@ -4933,7 +4938,7 @@ fn lower_call(
                 }
             });
         }
-        let call = builder.ins().call_indirect(signature, target, &params);
+        let call = emit_external_call(builder, signature, target, &params, helpers.pointer_type);
         let status = builder.inst_results(call)[0];
         let success = builder.ins().icmp_imm(IntCC::Equal, status, 0);
         builder.ins().brif(success, direct_done, &[], slow, &[]);
@@ -5340,7 +5345,7 @@ fn emit_helper_call(
     params.push(frame);
     params.extend_from_slice(arguments);
     builder.set_srcloc(frame_state_source_loc(state)?);
-    let call = builder.ins().call_indirect(signature, helper, &params);
+    let call = emit_external_call(builder, signature, helper, &params, pointer_type);
     builder.set_srcloc(SourceLoc::default());
     let status = builder.inst_results(call)[0];
     let succeeded = builder.ins().icmp_imm(IntCC::Equal, status, 0);
@@ -5649,7 +5654,7 @@ fn emit_poll(
 ) {
     let flags = MemFlags::new();
     builder.set_srcloc(location.source_location);
-    let call = builder.ins().call_indirect(signature, poll, &[frame]);
+    let call = emit_external_call(builder, signature, poll, &[frame], pointer_type);
     builder.set_srcloc(SourceLoc::default());
     let interrupted = builder.inst_results(call)[0];
     let interrupted = builder.ins().icmp_imm(IntCC::NotEqual, interrupted, 0);

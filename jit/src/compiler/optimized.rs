@@ -1648,7 +1648,7 @@ fn emit_opt_guarded_property(
                 .ins()
                 .iconst(types::I32, i64::from((generation >> 32) as u32)),
         ];
-        let call = builder.ins().call_indirect(signature, helper, &params);
+        let call = super::emit_external_call(builder, signature, helper, &params, pointer_type);
         let status = builder.inst_results(call)[0];
         let ok = builder
             .ins()
@@ -1878,7 +1878,7 @@ fn opt_own_stack_for_exit(
                 i64::try_from(source_index).map_err(|_| CompileFailure::ResourceLimit)?,
             ),
         ];
-        let call = builder.ins().call_indirect(signature, helper, &params);
+        let call = super::emit_external_call(builder, signature, helper, &params, pointer_type);
         let status = builder.inst_results(call)[0];
         let ok = builder.ins().icmp_imm(IntCC::Equal, status, MATERIALIZED);
         let continuation = builder.create_block();
@@ -2075,7 +2075,7 @@ fn emit_opt_specialized_call(
                 }
             });
         }
-        let call = builder.ins().call_indirect(signature, target, &params);
+        let call = super::emit_external_call(builder, signature, target, &params, pointer_type);
         let results = builder.inst_results(call);
         let status = results[0];
         let success = builder.ins().icmp_imm(IntCC::Equal, status, 0);
@@ -2277,7 +2277,7 @@ fn emit_opt_helper(
             .iter()
             .map(|value| builder.ins().iconst(types::I32, i64::from(*value))),
     );
-    let call = builder.ins().call_indirect(signature, helper, &params);
+    let call = super::emit_external_call(builder, signature, helper, &params, pointer_type);
     let status = builder.inst_results(call)[0];
     let succeeded = builder.ins().icmp_imm(IntCC::Equal, status, 0);
     let continuation = builder.create_block();
@@ -2456,7 +2456,7 @@ fn emit_opt_poll(
         api,
         layout.helper_offsets[rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize],
     );
-    let call = builder.ins().call_indirect(signature, poll, &[frame]);
+    let call = super::emit_external_call(builder, signature, poll, &[frame], pointer_type);
     let interrupted = builder.inst_results(call)[0];
     let interrupted = builder.ins().icmp_imm(IntCC::NotEqual, interrupted, 0);
     let interrupt = builder.create_block();

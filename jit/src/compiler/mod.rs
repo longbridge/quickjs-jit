@@ -60,6 +60,42 @@ pub mod optimized;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn emit_external_call(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    signature: cranelift_codegen::ir::SigRef,
+    target: cranelift_codegen::ir::Value,
+    params: &[cranelift_codegen::ir::Value],
+    pointer_type: cranelift_codegen::ir::Type,
+) -> cranelift_codegen::ir::Inst {
+    use cranelift_codegen::ir::InstBuilder;
+    #[cfg(rquickjs_memory_sanitizer)]
+    use cranelift_codegen::ir::{AbiParam, Signature};
+
+    #[cfg(rquickjs_memory_sanitizer)]
+    {
+        unsafe extern "C" {
+            fn __msan_unpoison_param(parameter_count: usize);
+        }
+
+        let mut msan_signature = Signature::new(builder.func.signature.call_conv);
+        msan_signature.params.push(AbiParam::new(pointer_type));
+        let msan_signature = builder.import_signature(msan_signature);
+        let msan_target = builder
+            .ins()
+            .iconst(pointer_type, __msan_unpoison_param as usize as i64);
+        let parameter_count = builder.ins().iconst(pointer_type, params.len() as i64);
+        builder
+            .ins()
+            .call_indirect(msan_signature, msan_target, &[parameter_count]);
+    }
+
+    #[cfg(not(rquickjs_memory_sanitizer))]
+    let _ = pointer_type;
+
+    builder.ins().call_indirect(signature, target, params)
+}
+
 /// A worker-side compiler implementation.
 pub trait Compiler: Send + Sync {
     fn compile(&self, request: CompileRequest) -> Result<CompiledArtifact, CompileFailure>;
