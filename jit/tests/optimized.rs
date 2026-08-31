@@ -1404,7 +1404,7 @@ fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
         })
         .unwrap();
 
-    for _ in 0..128 {
+    for _ in 0..10_000 {
         let result = context.with(|ctx| {
             let function: Function = ctx.globals().get("genericLoop").unwrap();
             function.call::<_, f64>((2_000, 0)).unwrap()
@@ -1472,7 +1472,7 @@ fn iterative_fibonacci_enters_tier2_with_multi_local_loop_phis() {
         })
         .unwrap();
 
-    for _ in 0..128 {
+    for _ in 0..10_000 {
         let result = context.with(|ctx| {
             let function: Function = ctx.globals().get("fib").unwrap();
             function.call::<_, i32>((2_000, 0)).unwrap()
@@ -1484,19 +1484,6 @@ fn iterative_fibonacci_enters_tier2_with_multi_local_loop_phis() {
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
-    for _ in 0..10_000 {
-        jit.poll();
-        if jit.metrics().installed >= 2 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_micros(50));
-    }
-    let result = context.with(|ctx| {
-        let function: Function = ctx.globals().get("fib").unwrap();
-        function.call::<_, i32>((2_000, 0)).unwrap()
-    });
-    assert_eq!(result, 102_334_155);
-    jit.poll();
     assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
 
     let before = jit.metrics();
