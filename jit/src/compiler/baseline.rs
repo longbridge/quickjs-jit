@@ -6269,7 +6269,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            30,
+            33,
             "every IrOp variant is represented: {seen:?}"
         );
     }
