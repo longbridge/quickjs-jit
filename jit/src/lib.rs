@@ -829,6 +829,17 @@ unsafe extern "C" fn production_entry_trampoline(
             core::ptr::addr_of!(exit).cast(),
             core::mem::size_of::<qjs::JSJitExit>(),
         );
+        __msan_unpoison(
+            (frame as *mut qjs::JSJitExecFrame).cast(),
+            core::mem::size_of::<qjs::JSJitExecFrame>(),
+        );
+        let values_start = frame.var_buf.cast::<u8>();
+        let values_end = frame.stack_capacity.cast::<u8>();
+        if !values_start.is_null() {
+            if let Some(values_size) = (values_end as usize).checked_sub(values_start as usize) {
+                __msan_unpoison(values_start.cast(), values_size);
+            }
+        }
     }
     if frame.flags & qjs::JS_JIT_FRAME_SIDE_PATH_HIT != 0 {
         frame.flags &= !qjs::JS_JIT_FRAME_SIDE_PATH_HIT;
