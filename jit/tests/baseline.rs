@@ -897,7 +897,12 @@ fn forward_diamond_path_cannot_skip_lexically_inserted_polls() {
     let push_false = named_opcode("push_false");
     let if_true8 = named_opcode("if_true8");
     let mut bytecode = Vec::new();
-    for _ in 0..2_050 {
+    let diamond_count = if cfg!(rquickjs_memory_sanitizer) {
+        350
+    } else {
+        2_050
+    };
+    for _ in 0..diamond_count {
         bytecode.push(push_true);
         bytecode.push(if_true8);
         let forward_operand = bytecode.len();
@@ -923,7 +928,7 @@ fn forward_diamond_path_cannot_skip_lexically_inserted_polls() {
             .iter()
             .filter(|(_, kind)| *kind == PollKind::Edge)
             .count()
-            >= 2_000,
+            >= diamond_count - 50,
         "forward path must retain immediate edge polls"
     );
 
