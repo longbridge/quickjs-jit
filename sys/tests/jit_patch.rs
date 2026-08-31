@@ -201,7 +201,10 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(
-            binding.contains("JS_JIT_HELPER_MATERIALIZED: _bindgen_ty_4 = 2"),
+            binding.lines().any(|line| {
+                let line = line.trim();
+                line.starts_with("pub const JS_JIT_HELPER_MATERIALIZED:") && line.ends_with(" = 2;")
+            }),
             "{target}"
         );
         assert!(
