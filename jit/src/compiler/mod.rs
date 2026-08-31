@@ -81,12 +81,38 @@ unsafe extern "C" fn clear_msan_param_shadow() {
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(rquickjs_memory_sanitizer)]
+unsafe extern "C" fn unpoison_jit_frame(frame: *mut rquickjs_core::qjs::JSJitExecFrame) {
+    unsafe extern "C" {
+        fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+    }
+
+    if frame.is_null() {
+        return;
+    }
+    unsafe {
+        __msan_unpoison(
+            frame.cast(),
+            core::mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
+        );
+        let start = (*frame).var_buf.cast::<u8>();
+        let end = (*frame).stack_capacity.cast::<u8>();
+        if !start.is_null() {
+            if let Some(size) = (end as usize).checked_sub(start as usize) {
+                __msan_unpoison(start.cast(), size);
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn emit_external_call(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     signature: cranelift_codegen::ir::SigRef,
     target: cranelift_codegen::ir::Value,
     params: &[cranelift_codegen::ir::Value],
     pointer_type: cranelift_codegen::ir::Type,
+    frame: Option<cranelift_codegen::ir::Value>,
     source_location: Option<cranelift_codegen::ir::SourceLoc>,
 ) -> cranelift_codegen::ir::Inst {
     use cranelift_codegen::ir::InstBuilder;
@@ -105,10 +131,27 @@ fn emit_external_call(
         builder
             .ins()
             .call_indirect(msan_signature, msan_target, &[]);
+        if let Some(frame) = frame {
+            let mut frame_signature = Signature::new(builder.func.signature.call_conv);
+            frame_signature
+                .params
+                .push(cranelift_codegen::ir::AbiParam::new(pointer_type));
+            let frame_signature = builder.import_signature(frame_signature);
+            let frame_target = builder.ins().iconst(
+                pointer_type,
+                unpoison_jit_frame as *const () as usize as i64,
+            );
+            builder
+                .ins()
+                .call_indirect(frame_signature, frame_target, &[frame]);
+            builder
+                .ins()
+                .call_indirect(msan_signature, msan_target, &[]);
+        }
     }
 
     #[cfg(not(rquickjs_memory_sanitizer))]
-    let _ = pointer_type;
+    let _ = (pointer_type, frame);
 
     if let Some(source_location) = source_location {
         builder.set_srcloc(source_location);

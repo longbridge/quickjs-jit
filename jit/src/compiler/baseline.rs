@@ -189,6 +189,7 @@ impl HelperLowering<'_> {
             helper,
             &params,
             self.pointer_type,
+            Some(self.frame),
             None,
         );
         Ok(builder.inst_results(call)[0])
@@ -4946,6 +4947,7 @@ fn lower_call(
             &params,
             helpers.pointer_type,
             None,
+            None,
         );
         let status = builder.inst_results(call)[0];
         let success = builder.ins().icmp_imm(IntCC::Equal, status, 0);
@@ -5360,6 +5362,7 @@ fn emit_helper_call(
         helper,
         &params,
         pointer_type,
+        Some(frame),
         Some(source_location),
     );
     builder.set_srcloc(SourceLoc::default());
@@ -5676,6 +5679,7 @@ fn emit_poll(
         poll,
         &[frame],
         pointer_type,
+        Some(frame),
         Some(location.source_location),
     );
     builder.set_srcloc(SourceLoc::default());
