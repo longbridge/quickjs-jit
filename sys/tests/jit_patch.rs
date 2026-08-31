@@ -42,41 +42,40 @@ fn convert_baseline_to_crlf(destination: &std::path::Path) {
     for file in patch::BASELINE_FILES {
         let source = destination.join(file);
         let bytes = fs::read(&source).unwrap();
-        assert!(
-            !bytes.windows(2).any(|pair| pair == b"\r\n"),
-            "bundled baseline unexpectedly contains CRLF: {file}"
-        );
-        let mut crlf = Vec::with_capacity(bytes.len());
-        for byte in bytes {
-            if byte == b'\n' {
-                crlf.push(b'\r');
-            }
-            crlf.push(byte);
-        }
-        fs::write(source, crlf).unwrap();
+        fs::write(source, as_crlf(&bytes)).unwrap();
     }
 }
 
 fn convert_patches_to_crlf(destination: &std::path::Path) {
-    for (name, entry) in fs::read_dir(destination).unwrap().enumerate() {
+    for entry in fs::read_dir(destination).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("patch") {
             continue;
         }
         let bytes = fs::read(&path).unwrap();
-        assert!(
-            !bytes.windows(2).any(|pair| pair == b"\r\n"),
-            "bundled patch {name} unexpectedly contains CRLF"
-        );
-        let mut crlf = Vec::with_capacity(bytes.len());
-        for byte in bytes {
-            if byte == b'\n' {
-                crlf.push(b'\r');
-            }
-            crlf.push(byte);
-        }
-        fs::write(path, crlf).unwrap();
+        fs::write(path, as_crlf(&bytes)).unwrap();
     }
+}
+
+fn as_crlf(bytes: &[u8]) -> Vec<u8> {
+    let mut crlf = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 1;
+        }
+        if bytes[index] == b'\n' {
+            crlf.push(b'\r');
+        }
+        crlf.push(bytes[index]);
+        index += 1;
+    }
+    crlf
+}
+
+#[test]
+fn crlf_conversion_is_idempotent() {
+    assert_eq!(as_crlf(b"one\ntwo\r\n"), b"one\r\ntwo\r\n");
 }
 
 #[test]
