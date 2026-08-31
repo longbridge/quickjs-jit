@@ -14,21 +14,23 @@ const BUNDLED_TARGETS: [&str; 9] = [
 
 fn jit_declarations(source: &str) -> String {
     let lines: Vec<_> = source.lines().collect();
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.starts_with("pub const __JS_ATOM_NULL"))
-            .count(),
-        1
-    );
     let first_struct = lines
         .iter()
         .position(|line| line.starts_with("pub struct JSJitFunctionId"))
         .expect("JSJitFunctionId declaration");
-    let atoms = lines
+    let last_function = lines
         .iter()
-        .position(|line| line.starts_with("pub const __JS_ATOM_NULL"))
-        .expect("atom declarations");
+        .position(|line| line.contains("pub fn JS_JitInvalidateFunction("))
+        .expect("JS_JitInvalidateFunction declaration");
+    let declarations_end = lines[last_function..]
+        .iter()
+        .position(|line| *line == "}")
+        .map(|offset| last_function + offset + 1)
+        .expect("end of JS_JitInvalidateFunction extern block");
+    assert!(
+        first_struct < last_function,
+        "JIT declarations must retain their canonical order"
+    );
     let mut normalized = String::from("pub type size_t = NORMALIZED;\n");
     for line in &lines {
         if line.starts_with("pub const QJSJIT_ABI_") {
@@ -36,11 +38,26 @@ fn jit_declarations(source: &str) -> String {
             normalized.push('\n');
         }
     }
-    for line in &lines[first_struct - 2..atoms] {
+    for line in &lines[first_struct - 2..declarations_end] {
         normalized.push_str(line);
         normalized.push('\n');
     }
     normalized
+}
+
+#[test]
+fn jit_declaration_extraction_does_not_depend_on_atom_bindings() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    let without_atoms = canonical
+        .lines()
+        .take_while(|line| !line.starts_with("pub const __JS_ATOM_NULL"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        jit_declarations(&canonical),
+        jit_declarations(&without_atoms)
+    );
 }
 
 fn bundled_binding(target: &str) -> String {

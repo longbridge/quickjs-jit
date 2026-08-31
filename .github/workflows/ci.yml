@@ -209,13 +209,30 @@ jobs:
           toolchain: stable
       - name: Check the complete compiler build graph
         run: cargo check -p rquickjs-jit --all-targets --features compiler,test-support
+      - name: Probe executable-memory support
+        id: jit-capability
+        shell: bash
+        run: |
+          set +e
+          cargo run -p rquickjs-jit --example host_jit_capability --features compiler
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "native=true" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 77 ]; then
+            echo "native=false" >> "$GITHUB_OUTPUT"
+            echo "Host lacks pthread JIT write protection; native execution tests are unavailable."
+          else
+            exit "$status"
+          fi
       - name: Exercise executable-memory publication on the host
+        if: steps.jit-capability.outputs.native == 'true'
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test platform -- --test-threads=1
       - name: Smoke published native execution on the host
-        if: matrix.smoke == 'differential'
+        if: matrix.smoke == 'differential' && steps.jit-capability.outputs.native == 'true'
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test differential ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter -- --exact --test-threads=1
       - name: Exercise native Windows ARM64 unwind publication
-        if: matrix.smoke == 'windows-arm64'
+        if: matrix.smoke == 'windows-arm64' && steps.jit-capability.outputs.native == 'true'
         run: cargo test -p rquickjs-jit --release --features compiler,test-support --test baseline_windows_arm64 -- --test-threads=1
 
   examples:

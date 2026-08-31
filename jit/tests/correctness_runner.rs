@@ -224,12 +224,14 @@ fn raw_programs_receive_exact_body_without_harness_or_strict_directive() {
 }
 
 #[test]
-fn pinned_annex_b_raw_source_executes_text_before_frontmatter() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sys/quickjs/test262/test/annexB/language/comments/single-line-html-close-first-line-3.js");
-    let pinned = fs::read_to_string(&path).unwrap();
+fn annex_b_raw_source_executes_text_before_frontmatter() {
+    // Keep this regression self-contained: CI does not initialize the optional
+    // upstream Test262 checkout used by the exhaustive conformance runner.
+    let pinned = "/* a comment */ /*another comment*/--> a comment\n\
+/*---\nflags: [raw]\nnegative:\n  phase: runtime\n  type: EvalError\n---*/\n\
+throw new EvalError(\"This is not in a comment\");\n";
     assert!(pinned.starts_with("/* a comment */ /*another comment*/--> a comment"));
-    let case = parse_test262(path.to_string_lossy(), &pinned).unwrap();
+    let case = parse_test262("annex-b-raw.js", pinned).unwrap();
     let program = compose_test262_program(&case, Test262Variant::RawScript, "throw 'harness'");
     assert_eq!(program.as_bytes(), pinned.as_bytes());
     let runtime = Runtime::new().unwrap();

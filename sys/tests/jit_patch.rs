@@ -57,6 +57,28 @@ fn convert_baseline_to_crlf(destination: &std::path::Path) {
     }
 }
 
+fn convert_patches_to_crlf(destination: &std::path::Path) {
+    for (name, entry) in fs::read_dir(destination).unwrap().enumerate() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("patch") {
+            continue;
+        }
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            !bytes.windows(2).any(|pair| pair == b"\r\n"),
+            "bundled patch {name} unexpectedly contains CRLF"
+        );
+        let mut crlf = Vec::with_capacity(bytes.len());
+        for byte in bytes {
+            if byte == b'\n' {
+                crlf.push(b'\r');
+            }
+            crlf.push(byte);
+        }
+        fs::write(path, crlf).unwrap();
+    }
+}
+
 #[test]
 fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -120,6 +142,40 @@ fn pinned_public_quickjs_baseline_with_crlf_applies_cleanly() {
         );
     }
     fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn crlf_patch_checkout_applies_cleanly() {
+    let root = scratch_dir();
+    let source = root.join("source");
+    let patches = root.join("patches");
+    copy_baseline(&source);
+    copy_patches(&patches);
+    convert_patches_to_crlf(&patches);
+
+    patch::apply_patch_set(&source, &patches).unwrap();
+
+    assert!(source.join("quickjs-jit.h").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn crlf_patch_checkout_with_content_tampering_is_rejected() {
+    let root = scratch_dir();
+    let source = root.join("source");
+    let patches = root.join("patches");
+    copy_baseline(&source);
+    copy_patches(&patches);
+    convert_patches_to_crlf(&patches);
+    let patch = patches.join("0001-rquickjs-jit.patch");
+    let mut bytes = fs::read(&patch).unwrap();
+    bytes.extend_from_slice(b"tampered\r\n");
+    fs::write(patch, bytes).unwrap();
+
+    let error = patch::apply_patch_set(&source, &patches).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(!source.join("quickjs-jit.h").exists());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

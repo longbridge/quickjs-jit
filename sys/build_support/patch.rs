@@ -91,10 +91,15 @@ pub fn apply_patch_set(source_dir: &Path, patch_dir: &Path) -> io::Result<()> {
         .zip(EXPECTED_PATCHES)
         .map(|(patch, (_, expected_digest))| {
             let bytes = fs::read(patch)?;
-            if fnv1a64(&bytes) != expected_digest {
+            // Git may materialize text files with CRLF on Windows.  The
+            // manifest pins the canonical LF bytes, so accept only that
+            // newline-only checkout transformation; every other byte remains
+            // covered by the digest below.
+            let canonical = canonicalize_crlf(&bytes);
+            if fnv1a64(&canonical) != expected_digest {
                 return invalid("QuickJS integration patch digest mismatch");
             }
-            std::str::from_utf8(&bytes)
+            std::str::from_utf8(&canonical)
                 .map(str::to_owned)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "patch is not UTF-8"))
         })

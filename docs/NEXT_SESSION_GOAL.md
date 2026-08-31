@@ -228,3 +228,44 @@ automatic fallback, cross-platform behavior, general JavaScript correctness,
 `gpui-shell` integration, and reproducible performance evidence all pass
 independent review.
 
+## Post-merge optimization backlog
+
+The initial PR deliberately remains fail-closed for JavaScript surfaces that
+have not yet received exact native semantics. Merge readiness does not imply
+that Tier 1 or the full benchmark matrix is complete. Follow-up work should be
+prioritized in this order:
+
+1. Extend Tier 1 reachability for strings and JSON, beginning with
+   `push_atom_value`, then the remaining string/property construction
+   operations. Require native-entry evidence and GC/exception differential
+   tests before publishing performance numbers.
+2. Complete array and typed-array loop optimization. Hoist stable class,
+   shape, bounds, and detached-buffer guards where valid, and add Tier 2
+   element-loop SSA so the current exact-but-slower guarded baseline path is
+   profitable.
+3. Add closure and captured-variable support (`fclosure` and the var-ref
+   family), followed by multi-level calls and bounded recursion. Preserve
+   var-ref lifetime, reference counts, reload generation isolation, and GC
+   roots.
+4. Extend collections and integer coverage: Map/Set iteration and mutation,
+   iterator opcodes, `push_i16`, `push_bigint_i32`, and BigInt arithmetic.
+   BigInt remains helper-backed unless a representation proof justifies a
+   specialized path.
+5. Design and implement an interpreter-compatible exception and continuation
+   ABI before admitting protected regions, Promise jobs, generators, or async
+   functions to native execution. Throw/catch state, pending exceptions,
+   suspension, resume PCs, ownership, and job ordering must remain exact.
+6. Re-run the complete benchmark matrix against QuickJS and the pinned Bun
+   version with paired fresh processes. Cover Float64 computation,
+   strings/RegExp, arrays/growth/typed arrays, object shapes, calls/recursion/
+   closures, JSON, Map/Set/BigInt, and exceptions/Promise/async. Keep checksum,
+   native-entry, fallback, deoptimization, memory, startup, and tail-latency
+   evidence in the tracked report.
+7. Investigate V8 and JavaScriptCore/Bun implementation techniques only as
+   design references. Any adopted technique still requires a QuickJS-specific
+   ownership, exception, GC, invalidation, and deoptimization proof.
+
+Known current limitations must remain visible in reports: focused numeric and
+Fibonacci kernels are profitable, while broad strings/JSON/collections/
+closures/async workers may still be interpreter-only, and the guarded Tier 1
+array traversal is not yet a demonstrated speedup.
