@@ -37,6 +37,11 @@ fn foreground_submission_never_waits_for_blocked_compiler() {
     assert_eq!(coordinator.drain_completions().drained(), 0);
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while workers.live_usage().0 != 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(workers.live_usage().0, 0);
     workers.shutdown(&mut coordinator);
     assert_eq!(workers.live_usage(), (0, 0, 0));
     assert_eq!(

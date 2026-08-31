@@ -1342,15 +1342,14 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         .unwrap();
     assert_eq!(first, 1_249_975_000.0);
     for _ in 0..10_000 {
+        let last = context.with(|ctx| ctx.eval::<f64, _>("f(2000,0)")).unwrap();
+        assert_eq!(last, 1_999_000.0);
         jit.poll();
-        if jit.metrics().installed >= 2 {
+        if jit.metrics().tier2_entries > 0 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
-    let last = context.with(|ctx| ctx.eval::<f64, _>("f(2000,0)")).unwrap();
-    assert_eq!(last, 1_999_000.0);
-    jit.poll();
     assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
     assert!(jit.metrics().boxes_elided > 0, "{:?}", jit.metrics());
     assert_eq!(
