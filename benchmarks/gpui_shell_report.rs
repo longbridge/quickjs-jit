@@ -23,6 +23,7 @@ struct Provenance {
     rquickjs_dirty: bool,
     test_binary_sha256: String,
     integration_patch_sha256: String,
+    cpu_affinity: String,
     target_triple: String,
     command: Vec<String>,
 }
@@ -35,7 +36,7 @@ struct Policy {
     bootstrap_resamples: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Workload {
     name: String,
@@ -45,7 +46,7 @@ struct Workload {
     automatic: Vec<Sample>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Sample {
     pair_index: usize,
@@ -73,6 +74,7 @@ struct LifecycleSample {
     hot_reload_ns: u64,
     snapshot_sha256: String,
     script_renders: u64,
+    reload_observations: Vec<serde_json::Value>,
 }
 
 fn main() {
@@ -121,6 +123,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     if report.provenance.shell_revision.len() != 40
         || report.provenance.rquickjs_revision.len() != 40
         || report.provenance.target_triple.split('-').count() < 3
+        || report.provenance.cpu_affinity.is_empty()
         || report.provenance.command.is_empty()
         || ((report.provenance.shell_dirty || report.provenance.rquickjs_dirty)
             && (!is_sha256(&report.provenance.test_binary_sha256)
@@ -134,15 +137,17 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     }
 
     let mut markdown = format!(
-        "# gpui-shell JIT acceptance\n\nShell `{}`, rquickjs `{}`, target `{}`. {} paired fresh processes after {} discarded warmups.\n\n| workload | steady-state speedup CI | P99 regression CI | native entries | fallback | status |\n|---|---:|---:|---:|---:|---|\n",
+        "# gpui-shell JIT acceptance\n\nShell `{}`, rquickjs `{}`, target `{}`, CPU affinity `{}`. {} paired fresh processes after {} discarded warmups.\n\n| workload | steady-state speedup CI | P99 regression CI | native entries | fallback | status |\n|---|---:|---:|---:|---:|---|\n",
         report.provenance.shell_revision,
         report.provenance.rquickjs_revision,
         report.provenance.target_triple,
+        report.provenance.cpu_affinity,
         report.policy.paired_processes,
         report.policy.warmup_processes,
     );
     let mut suitable = 0;
     let mut suitable_pass = 0;
+    let mut workloads_pass = true;
     for workload in &report.workloads {
         validate_pairs(&workload.name, &workload.interpreter, &workload.automatic)?;
         let speedup = paired_bootstrap(&workload.interpreter, &workload.automatic, |i, a| {
@@ -167,6 +172,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
         let regression_gate = !workload.regression_guard
             || (speedup[0] + f64::EPSILON * 8.0 >= 1.0 / 1.05 && tail[1] <= 1.05);
         let pass = suitable_gate && regression_gate;
+        workloads_pass &= pass;
         if workload.suitable_for_jit {
             suitable += 1;
             suitable_pass += usize::from(pass);
@@ -186,7 +192,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     let first = lifecycle_ci(&report.lifecycle, |x| x.first_window_ns);
     let reload = lifecycle_ci(&report.lifecycle, |x| x.hot_reload_ns);
     let lifecycle_pass = first[1] <= 1.05 && reload[1] <= 1.05;
-    let all_pass = suitable > 0 && suitable == suitable_pass && lifecycle_pass;
+    let all_pass = suitable > 0 && suitable == suitable_pass && workloads_pass && lifecycle_pass;
     markdown.push_str(&format!(
         "\nLifecycle regression CIs: first window {:+.2}%..{:+.2}%; hot reload {:+.2}%..{:+.2}%. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
         (first[0] - 1.0) * 100.0,
@@ -245,6 +251,8 @@ fn validate_lifecycle(lifecycle: &Lifecycle) -> Result<(), String> {
             || a.first_window_ns == 0
             || i.hot_reload_ns == 0
             || a.hot_reload_ns == 0
+            || i.reload_observations.len() != 5
+            || a.reload_observations.len() != 5
         {
             return Err(format!("lifecycle: invalid sample {index}"));
         }
@@ -307,9 +315,10 @@ mod tests {
                 .map(|pair_index| LifecycleSample {
                     pair_index,
                     first_window_ns: time,
-                    hot_reload_ns: time,
-                    snapshot_sha256: "snapshot".into(),
-                    script_renders: 1,
+                hot_reload_ns: time,
+                snapshot_sha256: "snapshot".into(),
+                script_renders: 1,
+                reload_observations: vec![serde_json::json!({}); 5],
                 })
                 .collect()
         };
@@ -322,6 +331,7 @@ mod tests {
                 rquickjs_dirty: false,
                 test_binary_sha256: "0".repeat(64),
                 integration_patch_sha256: "0".repeat(64),
+                cpu_affinity: "0".into(),
                 target_triple: "x86_64-unknown-linux-gnu".into(),
                 command: vec!["real-shell-benchmark".into()],
             },
@@ -364,6 +374,23 @@ mod tests {
     fn fixture_like_timing_without_native_entries_fails() {
         let (markdown, pass) = validate_and_render(&report(3, 0)).unwrap();
         assert!(!pass);
+        assert!(markdown.contains("Overall: **FAIL**"));
+    }
+
+    #[test]
+    fn guarded_host_tail_regression_blocks_overall_acceptance() {
+        let mut report = report(2, 1);
+        let mut guarded = report.workloads[0].clone();
+        guarded.name = "host panel".into();
+        guarded.suitable_for_jit = false;
+        guarded.automatic.iter_mut().for_each(|sample| {
+            sample.p99_script_render_ns = 106;
+        });
+        report.workloads.push(guarded);
+
+        let (markdown, pass) = validate_and_render(&report).unwrap();
+        assert!(!pass);
+        assert!(markdown.contains("host panel"));
         assert!(markdown.contains("Overall: **FAIL**"));
     }
 }

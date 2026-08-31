@@ -48,7 +48,7 @@ def main() -> None:
     )
     lifecycle_keys = (
         "pair_index", "first_window_ns", "hot_reload_ns", "snapshot_sha256",
-        "script_renders",
+        "script_renders", "reload_observations",
     )
     select = lambda rows, keys: [{key: row[key] for key in keys} for row in rows]
     shell_revision, shell_dirty = source_revision(shell_root)
@@ -62,6 +62,7 @@ def main() -> None:
             "rquickjs_dirty": rquickjs_dirty,
             "test_binary_sha256": os.environ.get("GPUI_SHELL_TEST_BINARY_SHA256", ""),
             "integration_patch_sha256": os.environ.get("GPUI_SHELL_INTEGRATION_PATCH_SHA256", ""),
+            "cpu_affinity": os.environ.get("GPUI_SHELL_JIT_CPU", "0"),
             "target_triple": subprocess.check_output(
                 ["rustc", "-vV"], text=True
             ).split("host: ", 1)[1].splitlines()[0],

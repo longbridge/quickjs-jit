@@ -49,13 +49,18 @@ the required confidence-bounded run.
 
 The required frozen-binary run (five discarded warmup processes and 30 paired
 fresh processes per workload) is recorded in
-`benchmarks/results/gpui-shell-jit-v1.{json,md}`. Compute passed with a
-37.68x..39.43x 95% speedup CI and 3,379 native entries with zero fallback.
-Panel steady state passed at 0.98x..0.99x, but its P99 regression CI ended at
-+5.70%, narrowly outside the +5% guard. First-window (+67.13%..+93.31%) and
-hot-reload (+462.94%..+508.99%) lifecycle CIs also failed. Checksums and render
-counts matched for every pair, so the report correctly remains an overall
-failure rather than hiding startup or tail latency behind the compute result.
+`benchmarks/results/gpui-shell-jit-v1.{json,md}`. Every process is pinned to
+one selected CPU (`GPUI_SHELL_JIT_CPU`, default `0`), then records 500
+identical renders with the true nearest-rank P99. Reload records the median of
+five fresh module-generation observations and retains suspend, module
+evaluation, instantiation, render, and deferred-resume phase timings in each
+raw sample; no observation is discarded.
+
+The current evidence passes every strict gate: the host-heavy panel's P99 CI
+is -7.21%..+2.74%, first-window is -0.77%..+0.44%, and hot reload is
+-3.37%..+0.84%. The suitable numeric layout workload is 39.82x..40.19x with
+16,835 native entries and zero fallback. Checksums and script-render counts
+match in all 30 pairs.
 
 The exact external write required is permission to modify these sibling files
 and refresh its `Cargo.lock`:

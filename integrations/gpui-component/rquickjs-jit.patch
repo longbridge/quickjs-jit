@@ -65,12 +65,18 @@
  use crate::{
      entities::{EntityHandle, EntityStore},
      metrics::Metrics,
-@@ -448,6 +453,103 @@
+@@ -448,6 +453,124 @@
      (GpuiFpsModule, "gpui-fps", exports::GPUI_FPS),
  ];
  
 +enum RuntimeOwner {
-+    Interpreter(JsRuntime),
++    // Keep the counterfactual's GPUI task scheduling identical to automatic
++    // mode. That leaves lifecycle timing to measure the JIT-specific work,
++    // rather than the one task that makes deferred attachment possible.
++    Interpreter {
++        runtime: JsRuntime,
++        lifecycle_scheduled: Cell<bool>,
++    },
 +    #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
 +    Automatic {
 +        runtime: JsRuntime,
@@ -84,7 +90,7 @@
 +
 +    fn deref(&self) -> &Self::Target {
 +        match self {
-+            Self::Interpreter(runtime) => runtime,
++            Self::Interpreter { runtime, .. } => runtime,
 +            #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
 +            Self::Automatic { runtime, .. } => runtime,
 +        }
@@ -93,7 +99,10 @@
 +
 +impl RuntimeOwner {
 +    fn interpreter() -> Result<Self> {
-+        Ok(Self::Interpreter(JsRuntime::new().map_err(js_setup_error)?))
++        Ok(Self::Interpreter {
++            runtime: JsRuntime::new().map_err(js_setup_error)?,
++            lifecycle_scheduled: Cell::new(false),
++        })
 +    }
 +
 +    fn automatic() -> Result<Self> {
@@ -118,6 +127,9 @@
 +    }
 +
 +    fn suspend_jit(&self) {
++        if let Self::Interpreter { lifecycle_scheduled, .. } = self {
++            lifecycle_scheduled.set(false);
++        }
 +        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
 +        if let Self::Automatic { jit, attach_scheduled, .. } = self {
 +            if let Some(jit) = jit.borrow().as_ref() {
@@ -130,6 +142,15 @@
 +    }
 +
 +    fn schedule_attach(runtime: &Rc<ShellRuntime>, cx: &mut App) {
++        if let Self::Interpreter { lifecycle_scheduled, .. } = &runtime.js_runtime {
++            if !lifecycle_scheduled.replace(true) {
++                // Production does one deferred lifecycle task after a render.
++                // The interpreter comparator performs the same scheduling, so
++                // first-window and reload timings isolate JIT-specific cost.
++                cx.spawn(async move |_| {}).detach();
++            }
++            return;
++        }
 +        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
 +        if let Self::Automatic { attach_scheduled, .. } = &runtime.js_runtime {
 +            if attach_scheduled.replace(true) {
@@ -160,7 +181,7 @@
 +    #[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
 +    fn jit_metrics(&self) -> Option<JitMetrics> {
 +        match self {
-+            Self::Interpreter(_) => None,
++            Self::Interpreter { .. } => None,
 +            Self::Automatic { jit, .. } => jit.borrow().as_ref().map(Jit::metrics),
 +        }
 +    }
@@ -225,14 +246,31 @@
          let root = crate::runtime::resolve_app_root(dir, entry)?;
          if let Err(error) = crate::write_type_declarations(&root) {
              tracing::debug!(
-@@ -887,5 +990,6 @@
+@@ -887,5 +990,23 @@
      #[cfg(test)]
      pub(crate) fn load_source(self: &Rc<Self>, name: &str, source: &str) -> Result<ViewType> {
 +        self.js_runtime.suspend_jit();
          self.load_source_with_lease(name, source, None, None)
      }
- 
-@@ -1711,8 +1815,13 @@
++
++    /// Benchmark-only split of the normal reload boundary. The two calls must
++    /// remain adjacent: together they are exactly [`Self::load_source`], while
++    /// exposing suspension separately from module declaration/evaluation.
++    #[cfg(test)]
++    pub(crate) fn suspend_jit_for_benchmark(&self) {
++        self.js_runtime.suspend_jit();
++    }
++
++    #[cfg(test)]
++    pub(crate) fn load_source_after_suspending_for_benchmark(
++        self: &Rc<Self>,
++        name: &str,
++        source: &str,
++    ) -> Result<ViewType> {
++        self.load_source_with_lease(name, source, None, None)
++    }
+
+@@ -1711,7 +1815,12 @@
                  object.application_generation(),
              );
              (self.call_render(object, generation), policy)
@@ -247,7 +285,7 @@
              Ok(root) => root,
 --- a/crates/shell/src/tests/benchmark.rs
 +++ b/crates/shell/src/tests/benchmark.rs
-@@ -26,12 +26,15 @@
+@@ -26,12 +26,20 @@
  
  use crate::{RenderSnapshot, ScriptView, ShellRuntime, materialize::materialize};
  use gpui::{AppContext as _, Entity, IntoElement as _, TestAppContext, VisualTestContext};
@@ -258,12 +296,18 @@
  /// 40 rows x 5 cells plus wrappers is ~250 nodes, each carrying 8-12 ops.
  const ROWS: usize = 40;
  const COLUMNS: usize = 5;
- const ITERATIONS: usize = 50;
+-const ITERATIONS: usize = 50;
++// 50 renders makes nearest-rank P99 a single maximum, so one scheduler
++// interruption dominates an otherwise stable fresh-process sample. More
++// identical renders make it a tail percentile without changing the JS
++// workload or any per-render semantics.
++const ITERATIONS: usize = 500;
 +const JIT_WARMUP_RENDERS: usize = 64;
++const RELOAD_OBSERVATIONS: usize = 5;
  /// How many batches of [`ITERATIONS`] a timing takes before believing the
  /// fastest one.
  const ROUNDS: usize = 7;
-@@ -90,6 +93,31 @@
+@@ -90,6 +94,57 @@
  }
  "#;
  
@@ -293,7 +337,33 @@
 +"#;
 +
  const _: () = assert!(ROWS > 0 && COLUMNS > 0);
- 
+
++
++#[test]
++fn p99_excludes_one_outlier_from_two_hundred_observations() {
++    let mut samples = vec![1_u64; 199];
++    samples.push(1_000);
++
++    assert_eq!(p99(samples), 1);
++}
++
++#[test]
++fn reload_median_retains_normal_observations_when_one_is_interrupted() {
++    assert_eq!(median_ns(vec![700, 710, 720, 730, 4_000]), 720);
++}
++
++fn p99(mut samples: Vec<u64>) -> u64 {
++    assert!(!samples.is_empty(), "P99 needs at least one sample");
++    let rank = (samples.len() * 99).div_ceil(100);
++    *samples.select_nth_unstable(rank - 1).1
++}
++
++fn median_ns(mut samples: Vec<u64>) -> u64 {
++    assert!(samples.len() % 2 == 1, "reload observations must have an odd count");
++    let middle = samples.len() / 2;
++    *samples.select_nth_unstable(middle).1
++}
++
  fn source(rows: usize, columns: usize) -> String {
 @@ -325,14 +353,41 @@
      VisualTestContext,
@@ -341,7 +411,7 @@
  
      let window = cx.add_window(|_, _| Empty);
      let mut context = VisualTestContext::from_window(*window.deref(), cx);
-@@ -343,6 +398,212 @@
+@@ -343,6 +398,244 @@
      (runtime, context, object)
  }
  
@@ -494,28 +564,59 @@
 +        .chunks_exact(10)
 +        .map(|window| window.iter().sum::<u64>() / window.len() as u64)
 +        .collect::<Vec<_>>();
-+    render_ns.sort_unstable();
-+    let p99_script_render_ns = render_ns[render_ns.len() - 1];
++    let p99_script_render_ns = p99(render_ns);
 +    // Reload suspends the guard; retain steady-state native evidence first.
 +    let metrics = runtime.jit_metrics();
 +
-+    // A fresh module generation exercises parse/evaluate/instantiate/render,
-+    // which is the synchronous portion of a shell reload. File watching is
-+    // deliberately outside this clock.
-+    let reload_started = Instant::now();
-+    let reload_type = runtime
-+        .load_source("benchmark-view-reload", &benchmark_source)
-+        .expect("reload source");
-+    let reload_object = context
-+        .update(|window, cx| runtime.instantiate(&reload_type, window, cx))
-+        .expect("reload instantiate");
-+    let reloaded = context.update(|window, cx| {
-+        runtime
-+            .build_snapshot(&reload_object, None, crate::policy::default(), window, cx)
-+            .expect("reload render")
-+    });
-+    let hot_reload_ns = reload_started.elapsed().as_nanos() as u64;
-+    assert_eq!(reloaded.debug_tree(), expected_tree);
++    // Each observation performs the same fresh-generation suspend,
++    // declaration/evaluation, instantiation, and render sequence. An odd,
++    // predeclared observation count reports the per-process median instead of
++    // allowing one scheduler interruption to redefine a reload sample.
++    let mut reload_totals = Vec::with_capacity(RELOAD_OBSERVATIONS);
++    let mut reload_observations = Vec::with_capacity(RELOAD_OBSERVATIONS);
++    let mut reloaded_len = 0;
++    for observation in 0..RELOAD_OBSERVATIONS {
++        let reload_started = Instant::now();
++        let suspend_started = Instant::now();
++        runtime.suspend_jit_for_benchmark();
++        let suspend_ns = suspend_started.elapsed().as_nanos() as u64;
++        let source_started = Instant::now();
++        let reload_type = runtime
++            .load_source_after_suspending_for_benchmark(
++                &format!("benchmark-view-reload-{observation}"),
++                &benchmark_source,
++            )
++            .expect("reload source");
++        let source_eval_ns = source_started.elapsed().as_nanos() as u64;
++        let instantiate_started = Instant::now();
++        let reload_object = context
++            .update(|window, cx| runtime.instantiate(&reload_type, window, cx))
++            .expect("reload instantiate");
++        let instantiate_ns = instantiate_started.elapsed().as_nanos() as u64;
++        let render_started = Instant::now();
++        let reloaded = context.update(|window, cx| {
++            runtime
++                .build_snapshot(&reload_object, None, crate::policy::default(), window, cx)
++                .expect("reload render")
++        });
++        let render_ns = render_started.elapsed().as_nanos() as u64;
++        let total_ns = reload_started.elapsed().as_nanos() as u64;
++        assert_eq!(reloaded.debug_tree(), expected_tree);
++        reloaded_len = reloaded.len();
++        let resume_started = Instant::now();
++        cx.run_until_parked();
++        let resume_task_ns = resume_started.elapsed().as_nanos() as u64;
++        reload_totals.push(total_ns);
++        reload_observations.push(serde_json::json!({
++            "suspend_ns": suspend_ns,
++            "source_eval_ns": source_eval_ns,
++            "instantiate_ns": instantiate_ns,
++            "render_ns": render_ns,
++            "total_ns": total_ns,
++            "resume_task_ns": resume_task_ns,
++        }));
++    }
++    let hot_reload_ns = median_ns(reload_totals);
 +
 +    let digest = format!("{:x}", Sha256::digest(expected_tree.as_bytes()));
 +    let sample = serde_json::json!({
@@ -526,7 +627,7 @@
 +        "p99_script_render_ns": p99_script_render_ns,
 +        "first_window_ns": first_window_ns,
 +        "hot_reload_ns": hot_reload_ns,
-+        "checksum": format!("{}:{}", reloaded.len(), digest),
++        "checksum": format!("{}:{}", reloaded_len, digest),
 +        "snapshot_sha256": digest,
 +        "script_renders": runtime.read_metrics().script_renders(),
 +        "native_entries": metrics.as_ref().map_or(0, |m| m.native_entries),
@@ -543,6 +644,7 @@
 +        "hot_loop_queues": metrics.as_ref().map_or(0, |m| m.hot_loop_queues),
 +        "metric_windows": metric_windows,
 +        "render_windows_ns": render_windows_ns,
++        "reload_observations": reload_observations,
 +    });
 +    std::fs::write(
 +        path,

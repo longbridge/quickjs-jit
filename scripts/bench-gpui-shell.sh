@@ -37,6 +37,17 @@ repo_root=$(cd "$(dirname "$0")/.." && pwd)
 shell_root=$(cd "$shell_root" && pwd)
 output_json=$(realpath -m "$output_json")
 
+# Pin every fresh process to one explicitly selected CPU. This removes process
+# migration from paired P99 and lifecycle observations without changing either
+# runtime's workload. Override only when the benchmark host reserves another
+# isolated CPU for this run.
+benchmark_cpu=${GPUI_SHELL_JIT_CPU:-0}
+if ! command -v taskset >/dev/null; then
+  echo "gpui-shell acceptance requires taskset for reproducible CPU affinity" >&2
+  exit 5
+fi
+runner=(taskset -c "$benchmark_cpu")
+
 cargo test --manifest-path "$shell_root/Cargo.toml" -p gpui-shell --release --offline --no-run
 target_root=${CARGO_TARGET_DIR:-$shell_root/target}
 test_binary=
@@ -50,7 +61,7 @@ if [[ -z "$test_binary" ]]; then
   echo "unable to locate gpui-shell library test binary" >&2
   exit 4
 fi
-"$test_binary" tests::benchmark::jit_does_not_change_snapshot_or_render_count --exact
+"${runner[@]}" "$test_binary" tests::benchmark::jit_does_not_change_snapshot_or_render_count --exact
 
 sample_dir=$(mktemp -d "${TMPDIR:-/tmp}/gpui-shell-jit-samples.XXXXXX")
 trap 'rm -rf "$sample_dir"' EXIT
@@ -61,7 +72,7 @@ for warmup in $(seq 0 4); do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/warmup-$warmup-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$warmup" \
       GPUI_SHELL_JIT_WORKLOAD="$workload" \
-        "$test_binary" "$sample_test" --exact >/dev/null
+        "${runner[@]}" "$test_binary" "$sample_test" --exact >/dev/null
     done
   done
 done
@@ -72,7 +83,7 @@ for pair in $(seq 0 29); do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/pair-$pair-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$pair" \
       GPUI_SHELL_JIT_WORKLOAD="$workload" \
-        "$test_binary" "$sample_test" --exact >/dev/null
+        "${runner[@]}" "$test_binary" "$sample_test" --exact >/dev/null
     done
   done
 done
