@@ -12,16 +12,24 @@ const BUNDLED_TARGETS: [&str; 9] = [
     "aarch64-pc-windows-msvc.rs",
 ];
 
-fn jit_declarations(source: &str) -> String {
+fn try_jit_declarations(source: &str) -> Option<String> {
     let lines: Vec<_> = source.lines().collect();
     let first_struct = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("pub struct JSJitFunctionId"))
-        .expect("JSJitFunctionId declaration");
-    let last_function = lines
-        .iter()
-        .position(|line| line.contains("JS_JitInvalidateFunction"))
-        .expect("JS_JitInvalidateFunction declaration");
+        .position(|line| line.trim_start().starts_with("pub struct JSJitFunctionId"));
+    let last_function = lines.iter().position(|line| {
+        line.trim_start()
+            .starts_with("pub fn JS_JitInvalidateFunction")
+    });
+    match (first_struct, last_function) {
+        (None, None) => return None,
+        (Some(_), None) | (None, Some(_)) => {
+            panic!("fresh bindgen output contains a partial JIT ABI declaration set")
+        }
+        (Some(_), Some(_)) => {}
+    }
+    let first_struct = first_struct.unwrap();
+    let last_function = last_function.unwrap();
     let declarations_end = lines[last_function..]
         .iter()
         .position(|line| line.trim() == "}")
@@ -43,21 +51,11 @@ fn jit_declarations(source: &str) -> String {
         normalized.push_str(line.trim_start());
         normalized.push('\n');
     }
-    normalized
+    Some(normalized)
 }
 
-fn contains_complete_jit_declarations(source: &str) -> bool {
-    let markers = [
-        "pub const QJSJIT_ABI_MAJOR",
-        "pub struct JSJitFunctionId",
-        "JS_JitInvalidateFunction",
-    ];
-    let present = markers.map(|marker| source.contains(marker));
-    assert!(
-        present.iter().all(|value| *value) || present.iter().all(|value| !*value),
-        "fresh bindgen output contains a partial JIT ABI declaration set: {present:?}"
-    );
-    present[0]
+fn jit_declarations(source: &str) -> String {
+    try_jit_declarations(source).expect("complete JIT ABI declarations")
 }
 
 #[test]
@@ -84,10 +82,9 @@ fn jit_declaration_extraction_does_not_depend_on_atom_bindings() {
 
 #[test]
 fn fresh_binding_classification_rejects_partial_jit_abi_output() {
-    assert!(!contains_complete_jit_declarations("pub struct JSRuntime;"));
-    let partial = std::panic::catch_unwind(|| {
-        contains_complete_jit_declarations("pub struct JSJitFunctionId;")
-    });
+    assert!(try_jit_declarations("pub struct JSRuntime;").is_none());
+    let partial =
+        std::panic::catch_unwind(|| try_jit_declarations("pub struct JSJitFunctionId {}"));
     assert!(partial.is_err());
 }
 
@@ -544,10 +541,9 @@ fn bundled_targets_match_fresh_bindgen_output() {
     // rquickjs-sys for this observation hook. That output is not a fresh JIT
     // binding and therefore cannot be compared to the JIT-enabled bundles.
     // Partial JIT output remains a hard failure above.
-    if !contains_complete_jit_declarations(generated) {
+    let Some(generated) = try_jit_declarations(generated) else {
         return;
-    }
-    let generated = jit_declarations(generated);
+    };
     for target in BUNDLED_TARGETS {
         assert_eq!(
             jit_declarations(&bundled_binding(target)),
