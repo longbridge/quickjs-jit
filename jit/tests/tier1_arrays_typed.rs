@@ -286,7 +286,11 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
                 .expect("arrays-typed workload evaluates")
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Sanitizer instrumentation makes each queued compilation substantially
+    // slower, and this workload discovers many hot functions at once. Keep the
+    // multi-install precondition while allowing the single compiler worker to
+    // make progress through that queue.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         assert_eq!(run(), "33983000:8496750.000:2000");
         jit.poll();
