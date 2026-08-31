@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "wasi"))]
+
 #[path = "../build_support/patch.rs"]
 mod patch;
 
