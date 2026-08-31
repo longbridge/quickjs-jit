@@ -214,7 +214,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo run -p rquickjs-jit --example host_jit_capability --features compiler
+          cargo run -p rquickjs-jit --example host_jit_capability --features compiler,test-support
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
