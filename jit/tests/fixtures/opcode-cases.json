@@ -479,6 +479,13 @@
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
     },
     {
+      "opcode": "call_constructor",
+      "definition": "function f(entries){let map=new Map(entries);return map.size}",
+      "expression": "f([['answer',42]])",
+      "helper": "CallConstructor",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
       "opcode": "push_false",
       "definition": "function f(){ return false }",
       "expression": "f()",

@@ -27,6 +27,7 @@ pub enum HelperId {
     Call,
     NewArray,
     NewObject,
+    CallConstructor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

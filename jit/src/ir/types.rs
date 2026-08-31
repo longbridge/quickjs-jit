@@ -88,6 +88,7 @@ pub enum IrOp {
     SetElement,
     ToPropertyKey,
     Call { argc: u16, has_this: bool },
+    CallConstructor(u16),
     GetArgument(u16),
     GetLocal(u16),
     GetLocalChecked(u16),

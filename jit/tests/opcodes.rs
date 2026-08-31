@@ -104,6 +104,10 @@ fn policies_are_semantic_and_categorized() {
     assert_eq!(by_name("get_var"), Tier1Policy::Helper(HelperId::GetGlobal));
     assert_eq!(by_name("call1"), Tier1Policy::Helper(HelperId::Call));
     assert_eq!(
+        by_name("call_constructor"),
+        Tier1Policy::Helper(HelperId::CallConstructor)
+    );
+    assert_eq!(
         by_name("eval"),
         Tier1Policy::Reject(FallbackReason::DirectEval)
     );

@@ -57,6 +57,7 @@ enum ManifestHelper {
     ToPropertyKey,
     GetGlobal,
     Call,
+    CallConstructor,
     NewArray,
     NewObject,
 }
@@ -78,6 +79,7 @@ impl ManifestHelper {
             Self::ToPropertyKey => HelperId::ToPropertyKey,
             Self::GetGlobal => HelperId::GetGlobal,
             Self::Call => HelperId::Call,
+            Self::CallConstructor => HelperId::CallConstructor,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
         }
@@ -110,6 +112,7 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::SetElement
                 | ManifestHelper::ToPropertyKey
                 | ManifestHelper::Call
+                | ManifestHelper::CallConstructor
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -284,6 +287,29 @@ fn tier1_global_lookup_preserves_json_exceptions_and_gc_ownership() {
 }
 
 #[test]
+fn tier1_constructor_calls_preserve_map_exceptions_and_gc_ownership() {
+    differential(
+        "function f(entries){let map=new Map(entries);return map.size}",
+        "f([['answer',42]])",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("call_constructor")
+    .expect_helper(HelperId::CallConstructor)
+    .assert_same();
+
+    differential(
+        "function f(){return new Map(42)}",
+        "(()=>{try{return f()}catch(error){return error.name}})()",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("call_constructor")
+    .expect_helper(HelperId::CallConstructor)
+    .assert_same();
+}
+
+#[test]
 fn tier1_object_property_reads_and_writes_preserve_values_and_ownership() {
     differential(
         "function f(o){o.answer=42;return o.answer}",
@@ -354,6 +380,12 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f(x=>x+1,41)",
             "call1",
             HelperId::Call,
+        ),
+        (
+            "function f(entries){let map=new Map(entries);return map.size}",
+            "f([['answer',42]])",
+            "call_constructor",
+            HelperId::CallConstructor,
         ),
         (
             "function f(){ return {} }",

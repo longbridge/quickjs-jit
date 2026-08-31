@@ -34,7 +34,7 @@ pub(super) const AUDITED_POLICIES: [AuditedOpcodePolicy; 252] = [
     AuditedOpcodePolicy { id: 30, name: "rot3r", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
     AuditedOpcodePolicy { id: 31, name: "rot4l", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
     AuditedOpcodePolicy { id: 32, name: "rot5l", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
-    AuditedOpcodePolicy { id: 33, name: "call_constructor", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
+    AuditedOpcodePolicy { id: 33, name: "call_constructor", policy: Tier1Policy::Helper(HelperId::CallConstructor) },
     AuditedOpcodePolicy { id: 34, name: "call", policy: Tier1Policy::Helper(HelperId::Call) },
     AuditedOpcodePolicy { id: 35, name: "tail_call", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
     AuditedOpcodePolicy { id: 36, name: "call_method", policy: Tier1Policy::Helper(HelperId::Call) },

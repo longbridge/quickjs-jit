@@ -1969,6 +1969,16 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
+                IrOp::CallConstructor(argc) => {
+                    let pop = usize::from(*argc) + 2;
+                    let new_len = frame
+                        .stack
+                        .len()
+                        .checked_sub(pop)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.truncate(new_len);
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
                         .arguments
@@ -2625,9 +2635,20 @@ fn lower_function(
                     &mut depth,
                     argc,
                     has_this,
+                    false,
                     direct_calls
                         .iter()
                         .find(|target| target.pc == instruction.pc),
+                )?,
+                IrOp::CallConstructor(argc) => lower_call(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    argc,
+                    true,
+                    true,
+                    None,
                 )?,
                 IrOp::GetArgument(index) => {
                     let state = helper_states
@@ -4697,6 +4718,7 @@ fn lower_call(
     depth: &mut usize,
     argc: u16,
     has_this: bool,
+    is_constructor: bool,
     direct: Option<&BaselineDirectCallSite>,
 ) -> Result<(), CompileFailure> {
     let argc = usize::from(argc);
@@ -4725,6 +4747,7 @@ fn lower_call(
     let mut direct_hit = None;
     if let Some(direct) = direct.filter(|target| {
         !has_this
+            && !is_constructor
             && target.call.arity() == argc
             && target.call.callee_identity() != 0
             && target.call.callee_bytecode_identity() != 0
@@ -4854,7 +4877,11 @@ fn lower_call(
         builder.switch_to_block(slow);
         helpers.invoke(
             builder,
-            qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+            if is_constructor {
+                qjs::JSJitHelperId_JS_JIT_HELPER_CALL_CONSTRUCTOR
+            } else {
+                qjs::JSJitHelperId_JS_JIT_HELPER_CALL
+            },
             call_state,
             call_live_depth,
             *depth,
@@ -4880,7 +4907,11 @@ fn lower_call(
     } else {
         helpers.invoke(
             builder,
-            qjs::JSJitHelperId_JS_JIT_HELPER_CALL,
+            if is_constructor {
+                qjs::JSJitHelperId_JS_JIT_HELPER_CALL_CONSTRUCTOR
+            } else {
+                qjs::JSJitHelperId_JS_JIT_HELPER_CALL
+            },
             call_state,
             call_live_depth,
             *depth,
@@ -5951,6 +5982,7 @@ mod tests {
             IrOp::SetElement => "set_element",
             IrOp::ToPropertyKey => "to_property_key",
             IrOp::Call { .. } => "call",
+            IrOp::CallConstructor(_) => "call_constructor",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",
@@ -6014,6 +6046,10 @@ mod tests {
                     argc: 1,
                     has_this: false,
                 },
+            ),
+            linear_ir(
+                vec![numeric_push(), numeric_push()],
+                IrOp::CallConstructor(0),
             ),
             linear_ir(Vec::new(), IrOp::GetArgument(0)),
             linear_ir(Vec::new(), IrOp::GetLocal(0)),

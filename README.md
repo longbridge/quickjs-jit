@@ -48,6 +48,25 @@ It optionally supports mathematical extensions such as big decimal floating poin
     (Data type which holds refs should implement `Trace` trait to get garbage collector works properly)
   - Support for extending defined classes by JS
 
+## Experimental JIT performance
+
+The optional `rquickjs-jit` crate provides a feedback-driven baseline and
+optimizing JIT with automatic fallback to the QuickJS interpreter. Lower
+latency is better in the focused compute results below.
+
+| Scenario | QuickJS | QuickJS + JIT | Bun | QuickJS vs JIT | JIT vs Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Scalar loop | 836.946 us | 25.837 us | 12.983 us | JIT 32.39x faster | JIT 1.99x slower |
+| Numeric loop | 823.818 us | 25.715 us | 12.358 us | JIT 32.04x faster | JIT 2.08x slower |
+| Iterative Fibonacci, `fib(40) x 2000` | 33.780 ms | 753.907 us | 1.093 ms | JIT 44.81x faster | JIT 1.45x faster |
+
+These are medians from 30 interleaved fresh processes after five warmup
+processes. Every engine produced the same checksum. See the
+[benchmark methodology and full evidence](benchmarks/README.md), including
+native-entry, fallback, deoptimization, confidence-interval, lifecycle, and
+provenance data. These focused numbers use forced optimizing Tier 2 and should
+not be read as performance guarantees for arbitrary JavaScript.
+
 ## Community development
 
 This crate doesn't aim to provide system and web APIs. The QuickJS library is close to [V8](https://v8.dev/) in that regard.
