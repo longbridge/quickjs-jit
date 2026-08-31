@@ -45,7 +45,10 @@ fn run_until_native(source: &str, expression: &str) -> (String, rquickjs_jit::Ji
             ))
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Sanitizer builds can take tens of seconds to drain even this bounded,
+    // stable set of function compilations when the test binary runs in
+    // parallel. The function identities above remain fixed while we wait.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut result = String::new();
     while Instant::now() < deadline {
         result = context.with(|ctx| {
