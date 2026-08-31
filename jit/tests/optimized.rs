@@ -1321,7 +1321,7 @@ fn production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch()
 ))]
 #[test]
 fn production_worker_installs_and_enters_narrow_tier2_native_code() {
-    use rquickjs::{Context, Runtime};
+    use rquickjs::{Context, Function, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
 
     let runtime = Runtime::new().unwrap();
@@ -1337,12 +1337,16 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
     context
         .with(|ctx| ctx.eval::<(), _>("function f(n,z){let s=z;for(let i=z;i<n;i++)s+=i;return s}"))
         .unwrap();
-    let first = context
-        .with(|ctx| ctx.eval::<f64, _>("f(50000,0)"))
-        .unwrap();
+    let first = context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get("f").unwrap();
+        function.call::<_, f64>((50_000, 0)).unwrap()
+    });
     assert_eq!(first, 1_249_975_000.0);
     for _ in 0..10_000 {
-        let last = context.with(|ctx| ctx.eval::<f64, _>("f(2000,0)")).unwrap();
+        let last = context.with(|ctx| {
+            let function: Function<'_> = ctx.globals().get("f").unwrap();
+            function.call::<_, f64>((2000, 0)).unwrap()
+        });
         assert_eq!(last, 1_999_000.0);
         jit.poll();
         if jit.metrics().tier2_entries > 0 {
@@ -1358,12 +1362,16 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
     );
 
     let before_strict_exits = jit.metrics();
-    let overflowed = context
-        .with(|ctx| ctx.eval::<f64, _>("f(100000,0)"))
-        .unwrap();
+    let overflowed = context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get("f").unwrap();
+        function.call::<_, f64>((100_000, 0)).unwrap()
+    });
     assert_eq!(overflowed, 4_999_950_000.0);
     jit.poll();
-    let mixed = context.with(|ctx| ctx.eval::<f64, _>("f(2,0.5)")).unwrap();
+    let mixed = context.with(|ctx| {
+        let function: Function<'_> = ctx.globals().get("f").unwrap();
+        function.call::<_, f64>((2, 0.5)).unwrap()
+    });
     assert_eq!(mixed, 2.5);
     jit.poll();
     let after_strict_exits = jit.metrics();
