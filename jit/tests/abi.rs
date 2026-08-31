@@ -20,7 +20,7 @@ fn jit_declarations(source: &str) -> String {
         .expect("JSJitFunctionId declaration");
     let last_function = lines
         .iter()
-        .position(|line| line.contains("pub fn JS_JitInvalidateFunction("))
+        .position(|line| line.contains("JS_JitInvalidateFunction"))
         .expect("JS_JitInvalidateFunction declaration");
     let declarations_end = lines[last_function..]
         .iter()
@@ -49,7 +49,7 @@ fn contains_complete_jit_declarations(source: &str) -> bool {
     let markers = [
         "pub const QJSJIT_ABI_MAJOR",
         "pub struct JSJitFunctionId",
-        "pub fn JS_JitInvalidateFunction(",
+        "JS_JitInvalidateFunction",
     ];
     let present = markers.map(|marker| source.contains(marker));
     assert!(

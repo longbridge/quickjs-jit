@@ -80,12 +80,14 @@ use std::{
     collections::BTreeMap,
     ffi::c_void,
     fmt,
-    ptr::NonNull,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, MutexGuard, OnceLock, Weak,
     },
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::ptr::NonNull;
 
 use crate::code_cache::{RelocationKind, ResolvedRelocation};
 
@@ -960,6 +962,7 @@ fn next_owner_id() -> u64 {
     NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn nonnull_mmap_address_or_cleanup(
     address: *mut c_void,
     len: usize,
@@ -1068,7 +1071,7 @@ mod mac_jit_policy_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod mmap_result_tests {
     use super::{nonnull_mmap_address_or_cleanup, CodeMemoryError};
     use std::ffi::c_void;

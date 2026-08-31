@@ -1266,6 +1266,11 @@ fn retain_unwind_metadata(
 #[derive(Clone, Debug)]
 struct NativeUnwindPlan {
     info: CraneliftUnwindInfo,
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos"),
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     systemv_cie: Option<gimli::write::CommonInformationEntry>,
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     windows_function_len: Option<u32>,
@@ -1277,6 +1282,11 @@ struct NativeUnwindPlan {
 
 impl NativeUnwindPlan {
     fn new(info: CraneliftUnwindInfo, isa: &dyn TargetIsa) -> Result<Self, CompileFailure> {
+        #[cfg(all(
+            any(target_os = "linux", target_os = "macos"),
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         let systemv_cie = if matches!(info, CraneliftUnwindInfo::SystemV(_)) {
             Some(
                 isa.create_systemv_cie()
@@ -1285,8 +1295,19 @@ impl NativeUnwindPlan {
         } else {
             None
         };
+        #[cfg(not(all(
+            any(target_os = "linux", target_os = "macos"),
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        let _ = isa;
         Ok(Self {
             info,
+            #[cfg(all(
+                any(target_os = "linux", target_os = "macos"),
+                target_endian = "little",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
             systemv_cie,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             windows_function_len: None,
