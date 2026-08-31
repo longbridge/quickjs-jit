@@ -108,6 +108,7 @@ jobs:
       - name: Record Rust version
         run: echo "RUST=$(rustc --version)" >> "$GITHUB_ENV"
       - name: Upload to codecov.io
+        continue-on-error: true
         uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: true
