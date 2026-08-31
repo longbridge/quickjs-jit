@@ -470,6 +470,111 @@
       "expression": "f({base:20,add(x){return this.base+x}},22)",
       "helper": "Call",
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "push_false",
+      "definition": "function f(){ return false }",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "push_true",
+      "definition": "function f(){ return true }",
+      "expression": "f()",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
+    },
+    {
+      "opcode": "get_loc0",
+      "definition": "function f(a){ var x=a; x; return x+1 }",
+      "expression": "f(42)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_loc1",
+      "definition": "function f(a){ var x=0,y=a; y; return y+1 }",
+      "expression": "f(42)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_loc2",
+      "definition": "function f(a){ var x=0,y=0,z=a; z; return z+1 }",
+      "expression": "f(42)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_loc3",
+      "definition": "function f(a){ var w=0,x=0,y=0,z=a; z; return z+1 }",
+      "expression": "f(42)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "get_loc8",
+      "definition": "function f(a){ var v0=0,v1=0,v2=0,v3=0,v4=a; v4; return v4+1 }",
+      "expression": "f(42)",
+      "helper": "Dup",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "set_loc0",
+      "definition": "function f(a){ var x=0; return x=a }",
+      "expression": "f(42)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "set_loc1",
+      "definition": "function f(a){ var x=0,y=0; return y=a }",
+      "expression": "f(42)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "set_loc2",
+      "definition": "function f(a){ var x=0,y=0,z=0; return z=a }",
+      "expression": "f(42)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "set_loc3",
+      "definition": "function f(a){ var w=0,x=0,y=0,z=0; return z=a }",
+      "expression": "f(42)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "set_loc8",
+      "definition": "function f(a){ var v0=0,v1=0,v2=0,v3=0,v4=0; return v4=a }",
+      "expression": "f(42)",
+      "helper": "Free",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "if_false",
+      "definition": "function f(a){if(a){a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;}return 42}",
+      "expression": "[f(0),f(1)]",
+      "helper": "ToBool",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "if_true",
+      "definition": "function f(a,b){return a||(a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,b)}",
+      "expression": "[f('live','fallback'),f(0,'fallback')]",
+      "helper": "ToBool",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
+      "opcode": "goto16",
+      "definition": "function f(a){let i=0;while(i<a){i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;}return i}",
+      "expression": "f(42)",
+      "helper": null,
+      "dimensions": ["normal", "exception-or-nonthrow"]
     }
   ]
 }

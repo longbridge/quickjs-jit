@@ -261,3 +261,49 @@ fn packed_and_typed_element_hits_skip_get_set_helpers_and_fallbacks_stay_exact()
         0
     );
 }
+
+#[test]
+fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>(include_str!("../../benchmarks/scripts/arrays-typed.js")))
+        .unwrap();
+
+    let run = || {
+        context.with(|ctx| {
+            ctx.eval::<String, _>("workload(2000, 0)")
+                .expect("arrays-typed workload evaluates")
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        assert_eq!(run(), "33983000:8496750.000:2000");
+        jit.poll();
+        if jit.metrics().installed >= 2 {
+            break;
+        }
+    }
+    assert!(jit.metrics().installed >= 2, "{:?}", jit.metrics());
+
+    let entries_before = jit.metrics().native_entries;
+    for _ in 0..8 {
+        assert_eq!(run(), "33983000:8496750.000:2000");
+    }
+    let entries = jit.metrics().native_entries - entries_before;
+    assert!(
+        entries <= 32,
+        "arrays-typed crossed the native boundary {entries} times for eight workload calls: {:?}",
+        jit.metrics()
+    );
+}

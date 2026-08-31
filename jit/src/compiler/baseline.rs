@@ -2764,19 +2764,19 @@ fn lower_function(
                         let dup_state = helper_states
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        let source = use_pair(builder, stack[source_index]);
+                        lower_dup_local_if_refcounted(
+                            builder,
+                            &helper_lowering,
                             dup_state,
                             depth,
-                            &[destination, flat_stack_slot(ir, source_index)?]
-                        );
-                        reload_pair(
-                            builder,
+                            source,
+                            flat_stack_slot(ir, source_index)?,
+                            destination,
                             locals[index as usize],
                             var_buf,
                             index as usize,
-                            layout,
-                        );
+                        )?;
                     } else {
                         let value = use_pair(builder, stack[source_index]);
                         define_pair(builder, locals[index as usize], value);
@@ -3312,6 +3312,45 @@ fn lower_dup_if_refcounted(
         output_index,
         helpers.layout,
     );
+    builder.ins().jump(continuation, &[]);
+    builder.seal_block(continuation);
+    builder.switch_to_block(continuation);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_dup_local_if_refcounted(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    source: Pair,
+    source_slot: u32,
+    output_slot: u32,
+    output: PairVars,
+    output_base: Value,
+    output_index: usize,
+) -> Result<(), CompileFailure> {
+    let needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
+    let primitive = builder.create_block();
+    let slow = builder.create_block();
+    let continuation = builder.create_block();
+    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    builder.seal_block(primitive);
+    builder.switch_to_block(primitive);
+    define_pair(builder, output, source);
+    builder.ins().jump(continuation, &[]);
+    builder.seal_block(slow);
+    builder.switch_to_block(slow);
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+        state,
+        live_depth,
+        live_depth,
+        &[output_slot, source_slot],
+    )?;
+    reload_pair(builder, output, output_base, output_index, helpers.layout);
     builder.ins().jump(continuation, &[]);
     builder.seal_block(continuation);
     builder.switch_to_block(continuation);

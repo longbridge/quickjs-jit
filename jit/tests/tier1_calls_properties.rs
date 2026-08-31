@@ -77,6 +77,28 @@ fn production_tier1_installs_and_executes_method_property_path() {
 }
 
 #[test]
+fn production_tier1_enters_for_compact_mutable_locals() {
+    let (result, metrics) = run_until_native(
+        "globalThis.f=function f(a){var first=a;var second=0;var third=0;var fourth=0;return first+fourth};",
+        "String(f(42))",
+    );
+    assert_eq!(result, "42");
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert_eq!(metrics.native_entries, metrics.native_exits, "{metrics:?}");
+}
+
+#[test]
+fn production_tier1_enters_for_wide_control_flow() {
+    let (result, metrics) = run_until_native(
+        "globalThis.f=function f(a){let i=0;while(i<a){i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;i++;}return i};",
+        "String(f(42))",
+    );
+    assert_eq!(result, "64");
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert_eq!(metrics.native_entries, metrics.native_exits, "{metrics:?}");
+}
+
+#[test]
 fn suspend_stops_probes_and_resume_reuses_installed_code() {
     let runtime = Runtime::new().unwrap();
     let jit = Jit::attach(
