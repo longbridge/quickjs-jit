@@ -399,7 +399,12 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
-        IrOp::GetElement | IrOp::SetElement | IrOp::ToPropertyKey => 1,
+        // Element lowering reserves one state for the generic helper and one
+        // for each direct ownership-release edge (packed, Int32, Float64).
+        // All of these branches can survive codegen, so no two return PCs may
+        // share a stack-map record.
+        IrOp::GetElement | IrOp::SetElement => 4,
+        IrOp::ToPropertyKey => 1,
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,

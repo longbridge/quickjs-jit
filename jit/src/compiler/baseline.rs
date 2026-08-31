@@ -69,6 +69,13 @@ struct PollLocation {
 // bound (and entry polls remain unconditional).
 const LOOP_POLL_INTERVAL: i64 = 1024;
 
+macro_rules! element_guard {
+    ($builder:expr, $condition:expr, $fallback:expr $(,)?) => {{
+        let element_condition = $condition;
+        emit_element_guard($builder, element_condition, $fallback);
+    }};
+}
+
 struct HelperLowering<'a> {
     ir: &'a BaselineIr,
     frame: Value,
@@ -465,6 +472,9 @@ impl BaselineCompiler {
         let layout = FrameLayout::validated(
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
+        let element_layout = crate::abi::AbiInfo::linked()
+            .map_err(|_| CompileFailure::InvalidArtifact)?
+            .element_layout();
         let ir = match policy {
             CompilePolicy::AdvertisedOnly => BaselineIr::translate(function)?,
             #[cfg(feature = "test-support")]
@@ -503,6 +513,7 @@ impl BaselineCompiler {
                 &ir,
                 &*self.isa,
                 layout,
+                element_layout,
                 &entry_analysis,
                 osr_start,
                 GuardExit::Retry,
@@ -2251,6 +2262,7 @@ fn lower_function(
     ir: &BaselineIr,
     isa: &dyn TargetIsa,
     layout: FrameLayout,
+    element_layout: crate::abi::ElementLayout,
     analysis: &EntryAnalysis,
     osr_start: Option<u32>,
     _guard_exit: GuardExit,
@@ -2571,12 +2583,20 @@ fn lower_function(
                         .find(|site| site.pc == instruction.pc && site.store),
                     property_caches.get(&instruction.pc).copied(),
                 )?,
-                IrOp::GetElement => {
-                    lower_get_element(builder, &helper_lowering, &mut helper_states, &mut depth)?
-                }
-                IrOp::SetElement => {
-                    lower_set_element(builder, &helper_lowering, &mut helper_states, &mut depth)?
-                }
+                IrOp::GetElement => lower_get_element(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    element_layout,
+                )?,
+                IrOp::SetElement => lower_set_element(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    element_layout,
+                )?,
                 IrOp::ToPropertyKey => {
                     lower_to_property_key(builder, &helper_lowering, &mut helper_states, depth)?
                 }
@@ -3840,6 +3860,7 @@ fn lower_get_element(
     helpers: &HelperLowering<'_>,
     states: &mut impl Iterator<Item = FrameStateId>,
     depth: &mut usize,
+    element_layout: crate::abi::ElementLayout,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(2)
@@ -3847,10 +3868,155 @@ fn lower_get_element(
     let key_index = *depth - 1;
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let key = flat_stack_slot(helpers.ir, key_index)?;
+    let state = next_helper_state(states)?;
+    let array_free_state = next_helper_state(states)?;
+    let int32_free_state = next_helper_state(states)?;
+    let float64_free_state = next_helper_state(states)?;
+    let object_value = use_pair(builder, helpers.stack[object_index]);
+    let key_value = use_pair(builder, helpers.stack[key_index]);
+    let direct = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let object_is_object = tag_is(builder, object_value.tag, qjs::JS_TAG_OBJECT);
+    let key_is_int = tag_is(builder, key_value.tag, qjs::JS_TAG_INT);
+    let is_integer_key = builder.ins().band(object_is_object, key_is_int);
+    builder
+        .ins()
+        .brif(is_integer_key, direct, &[], generic, &[]);
+
+    builder.switch_to_block(direct);
+    let index = builder.ins().ireduce(types::I32, key_value.payload);
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0),
+        generic,
+    );
+    let flags = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.object_flags_offset,
+    );
+    let fast = builder
+        .ins()
+        .band_imm(flags, element_layout.object_fast_array_mask);
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, fast, 0),
+        generic,
+    );
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let array = builder.create_block();
+    let int32 = builder.create_block();
+    let float64 = builder.create_block();
+    let not_array = builder.create_block();
+    let is_array = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.array_class_id);
+    builder.ins().brif(is_array, array, &[], not_array, &[]);
+    builder.switch_to_block(not_array);
+    let is_int32 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.int32_array_class_id);
+    let not_int32 = builder.create_block();
+    builder.ins().brif(is_int32, int32, &[], not_int32, &[]);
+    builder.switch_to_block(not_int32);
+    let is_float64 =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, element_layout.float64_array_class_id);
+    builder.ins().brif(is_float64, float64, &[], generic, &[]);
+
+    builder.switch_to_block(array);
+    let size = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.array_size_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp(IntCC::UnsignedLessThan, index, size),
+        generic,
+    );
+    let data = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.array_data_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, data, 0),
+        generic,
+    );
+    let value = load_element_jsvalue(builder, data, index, helpers.layout);
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, value.tag, 0),
+        generic,
+    );
+    lower_free_if_refcounted(
+        builder,
+        helpers,
+        array_free_state,
+        *depth,
+        object_value,
+        object,
+        helpers.stack[object_index],
+        helpers.stack_base,
+        object_index,
+    )?;
+    define_pair(builder, helpers.stack[object_index], value);
+    builder.ins().jump(joined, &[]);
+
+    lower_typed_element_get(
+        builder,
+        helpers,
+        int32_free_state,
+        *depth,
+        object_index,
+        object,
+        object_value,
+        index,
+        int32,
+        generic,
+        joined,
+        element_layout,
+        ElementKind::Int32,
+    )?;
+    lower_typed_element_get(
+        builder,
+        helpers,
+        float64_free_state,
+        *depth,
+        object_index,
+        object,
+        object_value,
+        index,
+        float64,
+        generic,
+        joined,
+        element_layout,
+        ElementKind::Float64,
+    )?;
+
+    builder.seal_block(generic);
+    builder.switch_to_block(generic);
     helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_GET_ELEMENT,
-        next_helper_state(states)?,
+        state,
         *depth,
         *depth,
         &[object, object, key],
@@ -3869,6 +4035,9 @@ fn lower_get_element(
         key_index,
         helpers.layout,
     );
+    builder.ins().jump(joined, &[]);
+    builder.seal_block(joined);
+    builder.switch_to_block(joined);
     *depth = key_index;
     helpers.set_depth(builder, *depth)
 }
@@ -3878,6 +4047,7 @@ fn lower_set_element(
     helpers: &HelperLowering<'_>,
     states: &mut impl Iterator<Item = FrameStateId>,
     depth: &mut usize,
+    element_layout: crate::abi::ElementLayout,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(3)
@@ -3887,10 +4057,169 @@ fn lower_set_element(
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let key = flat_stack_slot(helpers.ir, key_index)?;
     let value = flat_stack_slot(helpers.ir, value_index)?;
+    let state = next_helper_state(states)?;
+    let array_free_state = next_helper_state(states)?;
+    let int32_free_state = next_helper_state(states)?;
+    let float64_free_state = next_helper_state(states)?;
+    let object_value = use_pair(builder, helpers.stack[object_index]);
+    let key_value = use_pair(builder, helpers.stack[key_index]);
+    let value_value = use_pair(builder, helpers.stack[value_index]);
+    let direct = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let object_is_object = tag_is(builder, object_value.tag, qjs::JS_TAG_OBJECT);
+    let key_is_int = tag_is(builder, key_value.tag, qjs::JS_TAG_INT);
+    let is_integer_key = builder.ins().band(object_is_object, key_is_int);
+    builder
+        .ins()
+        .brif(is_integer_key, direct, &[], generic, &[]);
+
+    builder.switch_to_block(direct);
+    let index = builder.ins().ireduce(types::I32, key_value.payload);
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0),
+        generic,
+    );
+    let flags = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.object_flags_offset,
+    );
+    let fast = builder
+        .ins()
+        .band_imm(flags, element_layout.object_fast_array_mask);
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, fast, 0),
+        generic,
+    );
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let array = builder.create_block();
+    let int32 = builder.create_block();
+    let float64 = builder.create_block();
+    let not_array = builder.create_block();
+    let is_array = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.array_class_id);
+    builder.ins().brif(is_array, array, &[], not_array, &[]);
+    builder.switch_to_block(not_array);
+    let is_int32 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.int32_array_class_id);
+    let not_int32 = builder.create_block();
+    builder.ins().brif(is_int32, int32, &[], not_int32, &[]);
+    builder.switch_to_block(not_int32);
+    let is_float64 =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, element_layout.float64_array_class_id);
+    builder.ins().brif(is_float64, float64, &[], generic, &[]);
+
+    builder.switch_to_block(array);
+    let size = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.array_size_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp(IntCC::UnsignedLessThan, index, size),
+        generic,
+    );
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, value_value.tag, 0),
+        generic,
+    );
+    let data = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        object_value.payload,
+        element_layout.array_data_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, data, 0),
+        generic,
+    );
+    let old = load_element_jsvalue(builder, data, index, helpers.layout);
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, old.tag, 0),
+        generic,
+    );
+    store_element_jsvalue(builder, data, index, value_value, helpers.layout);
+    finish_direct_element_set(
+        builder,
+        helpers,
+        array_free_state,
+        *depth,
+        object_index,
+        key_index,
+        value_index,
+        object,
+        object_value,
+        joined,
+    )?;
+
+    lower_typed_element_set(
+        builder,
+        helpers,
+        int32_free_state,
+        *depth,
+        object_index,
+        key_index,
+        value_index,
+        object,
+        object_value,
+        value_value,
+        index,
+        int32,
+        generic,
+        joined,
+        element_layout,
+        ElementKind::Int32,
+    )?;
+    lower_typed_element_set(
+        builder,
+        helpers,
+        float64_free_state,
+        *depth,
+        object_index,
+        key_index,
+        value_index,
+        object,
+        object_value,
+        value_value,
+        index,
+        float64,
+        generic,
+        joined,
+        element_layout,
+        ElementKind::Float64,
+    )?;
+
+    builder.seal_block(generic);
+    builder.switch_to_block(generic);
     helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_SET_ELEMENT,
-        next_helper_state(states)?,
+        state,
         *depth,
         *depth,
         &[object, key, value],
@@ -3904,8 +4233,378 @@ fn lower_set_element(
             helpers.layout,
         );
     }
+    builder.ins().jump(joined, &[]);
+    builder.seal_block(joined);
+    builder.switch_to_block(joined);
     *depth = object_index;
     helpers.set_depth(builder, *depth)
+}
+
+#[derive(Clone, Copy)]
+enum ElementKind {
+    Int32,
+    Float64,
+}
+
+fn emit_element_guard(builder: &mut FunctionBuilder<'_>, condition: Value, fallback: Block) {
+    let success = builder.create_block();
+    builder.ins().brif(condition, success, &[], fallback, &[]);
+    builder.seal_block(success);
+    builder.switch_to_block(success);
+}
+
+fn element_address(
+    builder: &mut FunctionBuilder<'_>,
+    base: Value,
+    index: Value,
+    scale: i64,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    let index = builder.ins().uextend(pointer_type, index);
+    let bytes = builder.ins().imul_imm(index, scale);
+    builder.ins().iadd(base, bytes)
+}
+
+fn load_element_jsvalue(
+    builder: &mut FunctionBuilder<'_>,
+    data: Value,
+    index: Value,
+    layout: FrameLayout,
+) -> Pair {
+    let address = element_address(builder, data, index, 16, types::I64);
+    Pair {
+        payload: builder.ins().load(types::I64, MemFlags::new(), address, 0),
+        tag: builder
+            .ins()
+            .load(types::I64, MemFlags::new(), address, layout.value_tag),
+    }
+}
+
+fn store_element_jsvalue(
+    builder: &mut FunctionBuilder<'_>,
+    data: Value,
+    index: Value,
+    value: Pair,
+    layout: FrameLayout,
+) {
+    let address = element_address(builder, data, index, 16, types::I64);
+    builder
+        .ins()
+        .store(MemFlags::new(), value.payload, address, 0);
+    builder
+        .ins()
+        .store(MemFlags::new(), value.tag, address, layout.value_tag);
+}
+
+fn typed_element_data(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    object: Pair,
+    index: Value,
+    fallback: Block,
+    element_layout: crate::abi::ElementLayout,
+) -> Value {
+    let typed = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.typed_array_ptr_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, typed, 0),
+        fallback,
+    );
+    let tracks_resizable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        typed,
+        element_layout.typed_array_track_rab_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::Equal, tracks_resizable, 0),
+        fallback,
+    );
+    let buffer = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        typed,
+        element_layout.typed_array_buffer_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, buffer, 0),
+        fallback,
+    );
+    let array_buffer = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        buffer,
+        element_layout.object_union_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, array_buffer, 0),
+        fallback,
+    );
+    let detached = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_detached_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::Equal, detached, 0),
+        fallback,
+    );
+    let backing_data = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_data_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, backing_data, 0),
+        fallback,
+    );
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp(IntCC::UnsignedLessThan, index, count),
+        fallback,
+    );
+    let data = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, data, 0),
+        fallback,
+    );
+    data
+}
+
+fn typed_element_is_mutable(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    object: Pair,
+    fallback: Block,
+    element_layout: crate::abi::ElementLayout,
+) {
+    let typed = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.typed_array_ptr_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, typed, 0),
+        fallback,
+    );
+    let buffer = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        typed,
+        element_layout.typed_array_buffer_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::NotEqual, buffer, 0),
+        fallback,
+    );
+    let array_buffer = builder.ins().load(
+        helpers.pointer_type,
+        MemFlags::new(),
+        buffer,
+        element_layout.object_union_offset,
+    );
+    element_guard!(
+        builder,
+        builder
+            .ins()
+            .icmp_imm(IntCC::NotEqual, array_buffer, 0),
+        fallback,
+    );
+    let immutable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_immutable_offset,
+    );
+    element_guard!(
+        builder,
+        builder.ins().icmp_imm(IntCC::Equal, immutable, 0),
+        fallback,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_typed_element_get(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: usize,
+    object_index: usize,
+    object_slot: u32,
+    object: Pair,
+    index: Value,
+    block: Block,
+    fallback: Block,
+    joined: Block,
+    element_layout: crate::abi::ElementLayout,
+    kind: ElementKind,
+) -> Result<(), CompileFailure> {
+    builder.switch_to_block(block);
+    let data = typed_element_data(builder, helpers, object, index, fallback, element_layout);
+    let value = match kind {
+        ElementKind::Int32 => {
+            let address = element_address(builder, data, index, 4, helpers.pointer_type);
+            let raw = builder.ins().load(types::I32, MemFlags::new(), address, 0);
+            Pair {
+                payload: builder.ins().sextend(types::I64, raw),
+                tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+            }
+        }
+        ElementKind::Float64 => {
+            let address = element_address(builder, data, index, 8, helpers.pointer_type);
+            let raw = builder.ins().load(types::F64, MemFlags::new(), address, 0);
+            Pair {
+                payload: builder.ins().bitcast(types::I64, MemFlags::new(), raw),
+                tag: builder
+                    .ins()
+                    .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
+            }
+        }
+    };
+    lower_free_if_refcounted(
+        builder,
+        helpers,
+        state,
+        depth,
+        object,
+        object_slot,
+        helpers.stack[object_index],
+        helpers.stack_base,
+        object_index,
+    )?;
+    define_pair(builder, helpers.stack[object_index], value);
+    builder.ins().jump(joined, &[]);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_typed_element_set(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: usize,
+    object_index: usize,
+    key_index: usize,
+    value_index: usize,
+    object_slot: u32,
+    object: Pair,
+    value: Pair,
+    index: Value,
+    block: Block,
+    fallback: Block,
+    joined: Block,
+    element_layout: crate::abi::ElementLayout,
+    kind: ElementKind,
+) -> Result<(), CompileFailure> {
+    builder.switch_to_block(block);
+    let data = typed_element_data(builder, helpers, object, index, fallback, element_layout);
+    typed_element_is_mutable(builder, helpers, object, fallback, element_layout);
+    match kind {
+        ElementKind::Int32 => {
+            element_guard!(
+                builder,
+                tag_is(builder, value.tag, qjs::JS_TAG_INT),
+                fallback
+            );
+            let address = element_address(builder, data, index, 4, helpers.pointer_type);
+            let narrowed = builder.ins().ireduce(types::I32, value.payload);
+            builder.ins().store(MemFlags::new(), narrowed, address, 0);
+        }
+        ElementKind::Float64 => {
+            element_guard!(builder, emit_numeric_tag(builder, value.tag), fallback);
+            let (_, numeric) = emit_numeric(builder, value);
+            let address = element_address(builder, data, index, 8, helpers.pointer_type);
+            builder.ins().store(MemFlags::new(), numeric, address, 0);
+        }
+    }
+    finish_direct_element_set(
+        builder,
+        helpers,
+        state,
+        depth,
+        object_index,
+        key_index,
+        value_index,
+        object_slot,
+        object,
+        joined,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_direct_element_set(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: usize,
+    object_index: usize,
+    key_index: usize,
+    value_index: usize,
+    object_slot: u32,
+    object: Pair,
+    joined: Block,
+) -> Result<(), CompileFailure> {
+    lower_free_if_refcounted(
+        builder,
+        helpers,
+        state,
+        depth,
+        object,
+        object_slot,
+        helpers.stack[object_index],
+        helpers.stack_base,
+        object_index,
+    )?;
+    clear_pair(
+        builder,
+        helpers.stack[object_index],
+        helpers.stack_base,
+        object_index,
+        helpers.layout,
+    )?;
+    clear_pair(
+        builder,
+        helpers.stack[key_index],
+        helpers.stack_base,
+        key_index,
+        helpers.layout,
+    )?;
+    clear_pair(
+        builder,
+        helpers.stack[value_index],
+        helpers.stack_base,
+        value_index,
+        helpers.layout,
+    )?;
+    builder.ins().jump(joined, &[]);
+    Ok(())
 }
 
 fn lower_to_property_key(
@@ -5192,6 +5891,9 @@ mod tests {
             IrOp::GetProperty(_) => "get_property",
             IrOp::GetPropertyKeep(_) => "get_property_keep",
             IrOp::SetProperty(_) => "set_property",
+            IrOp::GetElement => "get_element",
+            IrOp::SetElement => "set_element",
+            IrOp::ToPropertyKey => "to_property_key",
             IrOp::Call { .. } => "call",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
@@ -5430,7 +6132,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            29,
+            30,
             "every IrOp variant is represented: {seen:?}"
         );
     }

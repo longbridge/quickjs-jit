@@ -22,7 +22,7 @@ done
 missing=()
 grep -q 'rquickjs-jit' "$manifest" || missing+=("Cargo.toml dependency rquickjs-jit")
 grep -q 'quickjs-jit' "$manifest" || missing+=("native quickjs-jit feature")
-grep -q 'JitRuntime' "$engine" || missing+=("ShellRuntime ownership of JitRuntime")
+grep -q 'Jit::attach' "$engine" || missing+=("ShellRuntime ownership of a JIT attachment guard")
 grep -q 'GPUI_SHELL_JIT_SAMPLE' "$benchmark" || missing+=("fresh-process JSON sample emitter")
 if (( ${#missing[@]} > 0 )); then
   echo "gpui-shell is not actually integrated with this JIT:" >&2
@@ -52,7 +52,7 @@ if [[ -z "$test_binary" ]]; then
 fi
 "$test_binary" tests::benchmark::jit_does_not_change_snapshot_or_render_count --exact
 
-sample_dir=$(mktemp -d /tmp/gpui-shell-jit-samples.XXXXXX)
+sample_dir=$(mktemp -d "${TMPDIR:-/tmp}/gpui-shell-jit-samples.XXXXXX")
 trap 'rm -rf "$sample_dir"' EXIT
 sample_test=tests::benchmark::emit_one_jit_acceptance_sample
 for warmup in $(seq 0 4); do

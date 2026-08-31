@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 12;
+pub const QJSJIT_ABI_MINOR: u32 = 13;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -3224,6 +3224,83 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct JSJitElementLayout {
+    pub struct_size: u32,
+    pub object_class_id_offset: u32,
+    pub object_flags_offset: u32,
+    pub object_fast_array_mask: u32,
+    pub object_exotic_mask: u32,
+    pub object_union_offset: u32,
+    pub array_size_offset: u32,
+    pub array_count_offset: u32,
+    pub array_data_offset: u32,
+    pub typed_array_ptr_offset: u32,
+    pub typed_array_buffer_offset: u32,
+    pub typed_array_byte_offset_offset: u32,
+    pub typed_array_byte_length_offset: u32,
+    pub typed_array_track_rab_offset: u32,
+    pub array_buffer_data_offset: u32,
+    pub array_buffer_byte_length_offset: u32,
+    pub array_buffer_max_byte_length_offset: u32,
+    pub array_buffer_detached_offset: u32,
+    pub array_buffer_immutable_offset: u32,
+    pub array_class_id: u32,
+    pub int32_array_class_id: u32,
+    pub float64_array_class_id: u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitElementLayout"][::core::mem::size_of::<JSJitElementLayout>() - 88usize];
+    ["Alignment of JSJitElementLayout"][::core::mem::align_of::<JSJitElementLayout>() - 4usize];
+    ["Offset of field: JSJitElementLayout::struct_size"]
+        [::core::mem::offset_of!(JSJitElementLayout, struct_size) - 0usize];
+    ["Offset of field: JSJitElementLayout::object_class_id_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, object_class_id_offset) - 4usize];
+    ["Offset of field: JSJitElementLayout::object_flags_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, object_flags_offset) - 8usize];
+    ["Offset of field: JSJitElementLayout::object_fast_array_mask"]
+        [::core::mem::offset_of!(JSJitElementLayout, object_fast_array_mask) - 12usize];
+    ["Offset of field: JSJitElementLayout::object_exotic_mask"]
+        [::core::mem::offset_of!(JSJitElementLayout, object_exotic_mask) - 16usize];
+    ["Offset of field: JSJitElementLayout::object_union_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, object_union_offset) - 20usize];
+    ["Offset of field: JSJitElementLayout::array_size_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_size_offset) - 24usize];
+    ["Offset of field: JSJitElementLayout::array_count_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_count_offset) - 28usize];
+    ["Offset of field: JSJitElementLayout::array_data_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_data_offset) - 32usize];
+    ["Offset of field: JSJitElementLayout::typed_array_ptr_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, typed_array_ptr_offset) - 36usize];
+    ["Offset of field: JSJitElementLayout::typed_array_buffer_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, typed_array_buffer_offset) - 40usize];
+    ["Offset of field: JSJitElementLayout::typed_array_byte_offset_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, typed_array_byte_offset_offset) - 44usize];
+    ["Offset of field: JSJitElementLayout::typed_array_byte_length_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, typed_array_byte_length_offset) - 48usize];
+    ["Offset of field: JSJitElementLayout::typed_array_track_rab_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, typed_array_track_rab_offset) - 52usize];
+    ["Offset of field: JSJitElementLayout::array_buffer_data_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_buffer_data_offset) - 56usize];
+    ["Offset of field: JSJitElementLayout::array_buffer_byte_length_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_buffer_byte_length_offset) - 60usize];
+    ["Offset of field: JSJitElementLayout::array_buffer_max_byte_length_offset"][::core::mem::offset_of!(
+        JSJitElementLayout,
+        array_buffer_max_byte_length_offset
+    ) - 64usize];
+    ["Offset of field: JSJitElementLayout::array_buffer_detached_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_buffer_detached_offset) - 68usize];
+    ["Offset of field: JSJitElementLayout::array_buffer_immutable_offset"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_buffer_immutable_offset) - 72usize];
+    ["Offset of field: JSJitElementLayout::array_class_id"]
+        [::core::mem::offset_of!(JSJitElementLayout, array_class_id) - 76usize];
+    ["Offset of field: JSJitElementLayout::int32_array_class_id"]
+        [::core::mem::offset_of!(JSJitElementLayout, int32_array_class_id) - 80usize];
+    ["Offset of field: JSJitElementLayout::float64_array_class_id"]
+        [::core::mem::offset_of!(JSJitElementLayout, float64_array_class_id) - 84usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct JSJitABIInfo {
     pub struct_size: u32,
     pub major: u16,
@@ -3246,10 +3323,12 @@ pub struct JSJitABIInfo {
     pub exit_layout_fingerprint: u64,
     pub runtime_api_layout_fingerprint: u64,
     pub helper_table_fingerprint: u64,
+    pub element_layout_fingerprint: u64,
+    pub element_layout: JSJitElementLayout,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 136usize];
+    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 232usize];
     ["Alignment of JSJitABIInfo"][::core::mem::align_of::<JSJitABIInfo>() - 8usize];
     ["Offset of field: JSJitABIInfo::struct_size"]
         [::core::mem::offset_of!(JSJitABIInfo, struct_size) - 0usize];
@@ -3291,6 +3370,10 @@ const _: () = {
         [::core::mem::offset_of!(JSJitABIInfo, runtime_api_layout_fingerprint) - 120usize];
     ["Offset of field: JSJitABIInfo::helper_table_fingerprint"]
         [::core::mem::offset_of!(JSJitABIInfo, helper_table_fingerprint) - 128usize];
+    ["Offset of field: JSJitABIInfo::element_layout_fingerprint"]
+        [::core::mem::offset_of!(JSJitABIInfo, element_layout_fingerprint) - 136usize];
+    ["Offset of field: JSJitABIInfo::element_layout"]
+        [::core::mem::offset_of!(JSJitABIInfo, element_layout) - 144usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3433,6 +3516,27 @@ const _: () = {
         [::core::mem::offset_of!(JSJitTraceEvent, reserved) - 7usize];
 };
 unsafe extern "C" {
+    pub fn JS_JitGetHelperCount(
+        rt: *mut JSRuntime,
+        helper_id: u32,
+        count: *mut u64,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_JitSetExecutionTrace(
+        rt: *mut JSRuntime,
+        events: *mut JSJitTraceEvent,
+        capacity: u32,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn JS_JitGetExecutionTraceLength(
+        rt: *mut JSRuntime,
+        length: *mut u32,
+        overflowed: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn JS_SetJitBackend(
         rt: *mut JSRuntime,
         vtable: *const JSJitBackendVTable,
@@ -3440,7 +3544,10 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
-    pub fn JS_SetJitSuspended(rt: *mut JSRuntime, suspended: ::core::ffi::c_int) -> ::core::ffi::c_int;
+    pub fn JS_SetJitSuspended(
+        rt: *mut JSRuntime,
+        suspended: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     pub fn JS_IsJitSuspended(rt: *mut JSRuntime) -> ::core::ffi::c_int;

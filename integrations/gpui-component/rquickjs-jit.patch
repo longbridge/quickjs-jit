@@ -58,21 +58,25 @@
  use smallvec::SmallVec;
  
 +#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+use rquickjs_jit::JitRuntime;
++use rquickjs_jit::{Jit, JitConfig};
 +#[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
 +use rquickjs_jit::JitMetrics;
 +
  use crate::{
      entities::{EntityHandle, EntityStore},
      metrics::Metrics,
-@@ -448,6 +453,56 @@
+@@ -448,6 +453,103 @@
      (GpuiFpsModule, "gpui-fps", exports::GPUI_FPS),
  ];
  
 +enum RuntimeOwner {
 +    Interpreter(JsRuntime),
 +    #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+    Jit(JitRuntime),
++    Automatic {
++        runtime: JsRuntime,
++        jit: RefCell<Option<Jit>>,
++        attach_scheduled: Cell<bool>,
++    },
 +}
 +
 +impl std::ops::Deref for RuntimeOwner {
@@ -82,7 +86,7 @@
 +        match self {
 +            Self::Interpreter(runtime) => runtime,
 +            #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+            Self::Jit(runtime) => runtime,
++            Self::Automatic { runtime, .. } => runtime,
 +        }
 +    }
 +}
@@ -95,18 +99,61 @@
 +    fn automatic() -> Result<Self> {
 +        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
 +        {
-+            match JitRuntime::builder().build() {
-+                Ok(runtime) => return Ok(Self::Jit(runtime)),
-+                Err(error) => tracing::warn!(%error, "QuickJS JIT unavailable; continuing interpreted"),
-+            }
++            return Ok(Self::Automatic {
++                runtime: JsRuntime::new().map_err(js_setup_error)?,
++                jit: RefCell::new(None),
++                attach_scheduled: Cell::new(false),
++            });
 +        }
 +        Self::interpreter()
 +    }
 +
 +    fn poll_jit(&self) {
 +        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+        if let Self::Jit(runtime) = self {
-+            runtime.jit().poll();
++        if let Self::Automatic { jit, .. } = self {
++            if let Some(jit) = jit.borrow().as_ref() {
++                jit.poll();
++            }
++        }
++    }
++
++    fn suspend_jit(&self) {
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        if let Self::Automatic { jit, attach_scheduled, .. } = self {
++            if let Some(jit) = jit.borrow().as_ref() {
++                if let Err(error) = jit.suspend() {
++                    tracing::warn!(%error, "could not suspend QuickJS JIT for reload");
++                }
++            }
++            attach_scheduled.set(false);
++        }
++    }
++
++    fn schedule_attach(runtime: &Rc<ShellRuntime>, cx: &mut App) {
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        if let Self::Automatic { attach_scheduled, .. } = &runtime.js_runtime {
++            if attach_scheduled.replace(true) {
++                return;
++            }
++            let runtime = Rc::downgrade(runtime);
++            cx.spawn(async move |cx| {
++                _ = cx.update(|_| {
++                    let Some(runtime) = runtime.upgrade() else { return };
++                    let Self::Automatic { runtime: js, jit, .. } = &runtime.js_runtime else { return };
++                    let mut guard = jit.borrow_mut();
++                    if let Some(guard) = guard.as_ref() {
++                        if let Err(error) = guard.resume() {
++                            tracing::warn!(%error, "could not resume QuickJS JIT after reload");
++                        }
++                    } else {
++                        let config = JitConfig::builder().build().expect("valid gpui-shell JIT configuration");
++                        match Jit::attach(js, config) {
++                            Ok(attached) => *guard = Some(attached),
++                            Err(error) => tracing::warn!(%error, "QuickJS JIT unavailable; continuing interpreted"),
++                        }
++                    }
++                });
++            }).detach();
 +        }
 +    }
 +
@@ -114,7 +161,7 @@
 +    fn jit_metrics(&self) -> Option<JitMetrics> {
 +        match self {
 +            Self::Interpreter(_) => None,
-+            Self::Jit(runtime) => Some(runtime.metrics()),
++            Self::Automatic { jit, .. } => jit.borrow().as_ref().map(Jit::metrics),
 +        }
 +    }
 +}
@@ -171,7 +218,21 @@
      pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
          cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
      }
-@@ -1711,6 +1788,10 @@
+@@ -844,5 +946,6 @@
+     /// deliberately owns multiple isolated runtimes.
+     pub(crate) fn load_app(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
++        self.js_runtime.suspend_jit();
+         let root = crate::runtime::resolve_app_root(dir, entry)?;
+         if let Err(error) = crate::write_type_declarations(&root) {
+             tracing::debug!(
+@@ -887,5 +990,6 @@
+     #[cfg(test)]
+     pub(crate) fn load_source(self: &Rc<Self>, name: &str, source: &str) -> Result<ViewType> {
++        self.js_runtime.suspend_jit();
+         self.load_source_with_lease(name, source, None, None)
+     }
+ 
+@@ -1711,8 +1815,13 @@
                  object.application_generation(),
              );
              (self.call_render(object, generation), policy)
@@ -180,6 +241,7 @@
 +        // released its context lock. Low-level host callbacks may enter
 +        // `with_js` hundreds of times while describing one panel.
 +        self.poll_jit();
++        RuntimeOwner::schedule_attach(self, cx);
  
          let root = match root {
              Ok(root) => root,
@@ -279,7 +341,7 @@
  
      let window = cx.add_window(|_, _| Empty);
      let mut context = VisualTestContext::from_window(*window.deref(), cx);
-@@ -343,6 +398,208 @@
+@@ -343,6 +398,212 @@
      (runtime, context, object)
  }
  
@@ -385,6 +447,9 @@
 +    });
 +    let first_window_ns = first_started.elapsed().as_nanos() as u64;
 +    let expected_tree = first.debug_tree();
++    // The production attachment is intentionally scheduled for the next GPUI
++    // tick so first-window latency excludes deferred maintenance.
++    cx.run_until_parked();
 +
 +    // Cross both production hotness thresholds and leave enough polls for all
 +    // bounded profitability trials before the steady-state clock starts.
@@ -431,6 +496,8 @@
 +        .collect::<Vec<_>>();
 +    render_ns.sort_unstable();
 +    let p99_script_render_ns = render_ns[render_ns.len() - 1];
++    // Reload suspends the guard; retain steady-state native evidence first.
++    let metrics = runtime.jit_metrics();
 +
 +    // A fresh module generation exercises parse/evaluate/instantiate/render,
 +    // which is the synchronous portion of a shell reload. File watching is
@@ -450,7 +517,6 @@
 +    let hot_reload_ns = reload_started.elapsed().as_nanos() as u64;
 +    assert_eq!(reloaded.debug_tree(), expected_tree);
 +
-+    let metrics = runtime.jit_metrics();
 +    let digest = format!("{:x}", Sha256::digest(expected_tree.as_bytes()));
 +    let sample = serde_json::json!({
 +        "mode": if interpreter { "interpreter" } else { "automatic" },

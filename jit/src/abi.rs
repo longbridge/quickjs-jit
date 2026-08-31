@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 12;
+pub const ABI_MINOR: u16 = 13;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -25,6 +25,7 @@ pub enum AbiStructure {
     Exit,
     RuntimeApi,
     HelperTable,
+    ElementLayout,
     BackendVTable,
 }
 
@@ -111,6 +112,29 @@ pub struct AbiInfo {
     raw: qjs::JSJitABIInfo,
 }
 
+/// Runtime-exported, append-only offsets for element fast paths.  QuickJS
+/// keeps these internals private; code generation must only use this
+/// fingerprinted descriptor, never Rust-side assumptions about object layout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ElementLayout {
+    pub object_class_id_offset: i32,
+    pub object_flags_offset: i32,
+    pub object_fast_array_mask: i64,
+    pub object_union_offset: i32,
+    pub array_size_offset: i32,
+    pub array_count_offset: i32,
+    pub array_data_offset: i32,
+    pub typed_array_ptr_offset: i32,
+    pub typed_array_buffer_offset: i32,
+    pub typed_array_track_rab_offset: i32,
+    pub array_buffer_data_offset: i32,
+    pub array_buffer_detached_offset: i32,
+    pub array_buffer_immutable_offset: i32,
+    pub array_class_id: i64,
+    pub int32_array_class_id: i64,
+    pub float64_array_class_id: i64,
+}
+
 impl AbiInfo {
     pub fn linked() -> Result<Self, AbiError> {
         let info = Self::query_linked()?;
@@ -144,6 +168,28 @@ impl AbiInfo {
 
     pub const fn build_fingerprint(&self) -> u64 {
         self.raw.build_fingerprint
+    }
+
+    pub(crate) fn element_layout(&self) -> ElementLayout {
+        let raw = self.raw.element_layout;
+        ElementLayout {
+            object_class_id_offset: raw.object_class_id_offset as i32,
+            object_flags_offset: raw.object_flags_offset as i32,
+            object_fast_array_mask: raw.object_fast_array_mask as i64,
+            object_union_offset: raw.object_union_offset as i32,
+            array_size_offset: raw.array_size_offset as i32,
+            array_count_offset: raw.array_count_offset as i32,
+            array_data_offset: raw.array_data_offset as i32,
+            typed_array_ptr_offset: raw.typed_array_ptr_offset as i32,
+            typed_array_buffer_offset: raw.typed_array_buffer_offset as i32,
+            typed_array_track_rab_offset: raw.typed_array_track_rab_offset as i32,
+            array_buffer_data_offset: raw.array_buffer_data_offset as i32,
+            array_buffer_detached_offset: raw.array_buffer_detached_offset as i32,
+            array_buffer_immutable_offset: raw.array_buffer_immutable_offset as i32,
+            array_class_id: raw.array_class_id as i64,
+            int32_array_class_id: raw.int32_array_class_id as i64,
+            float64_array_class_id: raw.float64_array_class_id as i64,
+        }
     }
 
     pub(crate) fn query_linked() -> Result<Self, AbiError> {
@@ -198,6 +244,10 @@ impl AbiInfo {
             Some(AbiMismatch::StructureLayout(AbiStructure::RuntimeApi))
         } else if raw.helper_table_fingerprint != HELPER_TABLE_FINGERPRINT {
             Some(AbiMismatch::StructureLayout(AbiStructure::HelperTable))
+        } else if raw.element_layout.struct_size != mem::size_of::<qjs::JSJitElementLayout>() as u32
+            || raw.element_layout_fingerprint != element_layout_fingerprint()
+        {
+            Some(AbiMismatch::StructureLayout(AbiStructure::ElementLayout))
         } else if raw.backend_vtable_layout_fingerprint != backend_vtable_layout_fingerprint() {
             Some(AbiMismatch::StructureLayout(AbiStructure::BackendVTable))
         } else if raw.build_fingerprint != expected_build_fingerprint() {
@@ -248,6 +298,9 @@ impl AbiInfo {
             }
             AbiMismatch::StructureLayout(AbiStructure::HelperTable) => {
                 self.raw.helper_table_fingerprint ^= 1
+            }
+            AbiMismatch::StructureLayout(AbiStructure::ElementLayout) => {
+                self.raw.element_layout_fingerprint ^= 1
             }
             AbiMismatch::StructureLayout(AbiStructure::BackendVTable) => {
                 self.raw.backend_vtable_layout_fingerprint ^= 1
@@ -640,6 +693,105 @@ fn abi_info_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitABIInfo, helper_table_fingerprint),
             8,
         ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, element_layout_fingerprint),
+            8,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, element_layout),
+            mem::size_of::<qjs::JSJitElementLayout>(),
+        ),
+    ] {
+        hash = layout_field(hash, offset, size);
+    }
+    hash
+}
+
+fn element_layout_fingerprint() -> u64 {
+    let mut hash = layout_start::<qjs::JSJitElementLayout>();
+    for (offset, size) in [
+        (mem::offset_of!(qjs::JSJitElementLayout, struct_size), 4),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, object_class_id_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, object_flags_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, object_fast_array_mask),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, object_exotic_mask),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, object_union_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_size_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_count_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_data_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, typed_array_ptr_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, typed_array_buffer_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, typed_array_byte_offset_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, typed_array_byte_length_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, typed_array_track_rab_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_buffer_data_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_buffer_byte_length_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_buffer_max_byte_length_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_buffer_detached_offset),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, array_buffer_immutable_offset),
+            4,
+        ),
+        (mem::offset_of!(qjs::JSJitElementLayout, array_class_id), 4),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, int32_array_class_id),
+            4,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitElementLayout, float64_array_class_id),
+            4,
+        ),
     ] {
         hash = layout_field(hash, offset, size);
     }
@@ -667,5 +819,6 @@ fn expected_build_fingerprint() -> u64 {
     hash = hash_u64(hash, exec_frame_layout_fingerprint());
     hash = hash_u64(hash, exit_layout_fingerprint());
     hash = hash_u64(hash, runtime_api_layout_fingerprint());
-    hash_u64(hash, HELPER_TABLE_FINGERPRINT)
+    hash = hash_u64(hash, HELPER_TABLE_FINGERPRINT);
+    hash_u64(hash, element_layout_fingerprint())
 }
