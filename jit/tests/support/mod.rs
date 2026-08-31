@@ -250,6 +250,24 @@ struct ForcedEntryPin {
     stress_gc: bool,
 }
 
+#[cfg(all(feature = "compiler", rquickjs_memory_sanitizer))]
+unsafe fn unpoison_native_outcome(
+    exit: *const rquickjs_core::qjs::JSJitExit,
+    frame: *const rquickjs_core::qjs::JSJitExecFrame,
+) {
+    unsafe extern "C" {
+        fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+    }
+
+    unsafe {
+        __msan_unpoison(exit.cast(), mem::size_of::<rquickjs_core::qjs::JSJitExit>());
+        __msan_unpoison(
+            frame.cast(),
+            mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
+        );
+    }
+}
+
 #[cfg(feature = "compiler")]
 unsafe extern "C" fn forced_entry_trampoline(
     frame: *mut rquickjs_core::qjs::JSJitExecFrame,
@@ -264,6 +282,10 @@ unsafe extern "C" fn forced_entry_trampoline(
     pin.entries.fetch_add(1, Ordering::SeqCst);
     let native: Entry = unsafe { mem::transmute(pin.code.as_ptr()) };
     let exit = unsafe { native(frame) };
+    #[cfg(rquickjs_memory_sanitizer)]
+    unsafe {
+        unpoison_native_outcome(ptr::addr_of!(exit), frame);
+    }
     if exit.kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
         pin.retries.fetch_add(1, Ordering::SeqCst);
     }
@@ -1398,18 +1420,7 @@ impl SyntheticFrame {
         let exit = unsafe { entry(ptr::addr_of_mut!(self.frame)) };
         #[cfg(rquickjs_memory_sanitizer)]
         unsafe {
-            unsafe extern "C" {
-                fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
-            }
-
-            __msan_unpoison(
-                ptr::addr_of!(exit).cast(),
-                mem::size_of::<rquickjs_core::qjs::JSJitExit>(),
-            );
-            __msan_unpoison(
-                ptr::addr_of!(self.frame).cast(),
-                mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
-            );
+            unpoison_native_outcome(ptr::addr_of!(exit), ptr::addr_of!(self.frame));
         }
         SyntheticOutcome {
             exit,
