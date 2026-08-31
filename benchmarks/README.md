@@ -43,6 +43,12 @@ a comma-separated list of exact workload names. A reduced run remains useful
 for checking checksums, tier counters, and harness behavior, but is not
 statistically meaningful.
 
+Scripts receive exactly `(iterations, seed)` unless they define
+`globalThis.workloadArgument`; only then does the harness pass a third
+argument. This preserves the declared two-argument signature required for
+bounded Int32/Float64 specialization while still supporting focused
+call/property workloads that need a stable object or callable input.
+
 The focused Fibonacci pair separates loop optimization from call support:
 `fibonacci-iterative` computes bounded-Int32 fib(40) as a loop/Phi probe;
 it is a designated compute kernel and must enter its requested native tier.

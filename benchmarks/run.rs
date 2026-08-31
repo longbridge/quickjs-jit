@@ -461,7 +461,11 @@ fn invoke_workload(context: &Context) -> Result<String, String> {
             // function. This keeps the benchmark honest about call/property
             // bytecodes while making the function independently tierable.
             let argument: Value = ctx.globals().get("workloadArgument")?;
-            let result: Value = workload.call((2_000, 0, argument))?;
+            let result: Value = if argument.is_undefined() {
+                workload.call((2_000, 0))?
+            } else {
+                workload.call((2_000, 0, argument))?
+            };
             let result = if let Some(promise) = result.as_promise() {
                 promise.finish::<Value>()?
             } else {
@@ -963,11 +967,11 @@ mod tests {
         let mut metrics = rquickjs_jit::JitMetrics::default();
         metrics.native_entries = 8;
         metrics.profitability_evaluations = 1;
-        assert!(!native_ready("automatic", &metrics));
+        assert!(!native_ready("automatic", &metrics, 1));
         metrics.profitability_approved = 1;
-        assert!(!native_ready("automatic", &metrics));
+        assert!(!native_ready("automatic", &metrics, 1));
         metrics.tier2_entries = 1;
-        assert!(native_ready("automatic", &metrics));
+        assert!(native_ready("automatic", &metrics, 1));
     }
     #[test]
     fn focused_performance_categories_are_present_and_designated() {
@@ -1074,5 +1078,50 @@ mod tests {
                 workload.name
             );
         }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn harness_omits_the_optional_argument_for_two_parameter_numeric_kernels() {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .call_threshold(1)
+                .loop_threshold(1)
+                .tier_policy(JitTierPolicy::Optimize)
+                .force_optimized_for_test(true)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let source = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("scalar-loop.js"),
+        )
+        .unwrap();
+        context
+            .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            invoke_workload(&context).unwrap();
+            jit.poll();
+            if jit.metrics().tier2_entries > 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        panic!(
+            "the harness changed the two-argument kernel signature: {:?}",
+            jit.metrics()
+        );
     }
 }

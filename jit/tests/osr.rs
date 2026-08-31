@@ -393,6 +393,10 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
         // invocation reaches its loop probe; Automatic may legitimately
         // demote helper-heavy code after its bounded profitability trials.
         .tier_policy(rquickjs_jit::JitTierPolicy::BaselineOnly)
+        // This test exercises the loop-triggered OSR request.  Suppress
+        // independent callback requests so the one worker cannot be occupied
+        // compiling unrelated short helper functions first.
+        .call_threshold(u32::MAX)
         .stress_gc(true)
         .build()
         .unwrap();
@@ -412,17 +416,17 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
     );
     let result = context.with(|ctx| {
         ctx.eval::<i32, _>(
-            "let events=0,reentered=0; function nested(){reentered++} let state={limit:20000,get next(){events++;nested();return events}}; function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s} f(state,0)",
+            "let events=0,reentered=0; function nested(){reentered++} let state={limit:50000,get next(){events++;nested();return events}}; function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s} f(state,0)",
         )
     }).unwrap_or_else(|error| panic!("{error:?}; {:?}", jit.metrics()));
-    assert_eq!(result, 20001);
+    assert_eq!(result, 50001);
     assert_eq!(
         context.with(|ctx| ctx.eval::<i32, _>("events").unwrap()),
-        20001
+        50001
     );
     assert_eq!(
         context.with(|ctx| ctx.eval::<i32, _>("reentered").unwrap()),
-        20001
+        50001
     );
     let mut counters: rquickjs_core::qjs::JSJitHelperCounters = unsafe { core::mem::zeroed() };
     counters.struct_size = core::mem::size_of_val(&counters) as u32;
@@ -466,6 +470,16 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
 ))]
 #[test]
 fn production_compile_failure_retries_through_backoff_without_duplicates() {
+    let failure_fixture =
+        SnapshotFixture::compile("(function f(n,z){let i=z;while(i<n)i++;return i%2})");
+    let verified = failure_fixture
+        .snapshot()
+        .verify(Default::default())
+        .unwrap();
+    assert!(
+        BaselineCompiler::host().compile(&verified).is_err(),
+        "fixture must reach the worker then fail Tier1 compilation"
+    );
     let runtime = Runtime::new().unwrap();
     let config = rquickjs_jit::JitConfig::builder()
         .loop_threshold(1)
@@ -475,9 +489,10 @@ fn production_compile_failure_retries_through_backoff_without_duplicates() {
     let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
     let context = Context::full(&runtime).unwrap();
     let value = context.with(|ctx| {
-        ctx.eval::<i32, _>("function f(n,z,unsupported){let i=z;while(i<n)i++;return i+unsupported} f(1000000,0,0)").unwrap()
+        ctx.eval::<i32, _>("function f(n,z){let i=z;while(i<n)i++;return i%2} f(1000000,0)")
+            .unwrap()
     });
-    assert_eq!(value, 1_000_000);
+    assert_eq!(value, 0);
     let metrics = jit.metrics();
     assert_eq!(
         metrics.queued, 4,

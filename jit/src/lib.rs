@@ -1785,7 +1785,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         };
         let key = runtime::FunctionKey::new(snapshot.function_id(), snapshot.generation());
         if snapshot.owned_bytes() > self.config.max_snapshot_bytes() {
-            self.feedback_disabled.insert(key);
+            // The configured copy budget is a transient admission failure, not
+            // a property of this immutable bytecode generation.  Keep hot
+            // probes enabled so `fail_before_queue` can perform its bounded
+            // prequeue retries.
             self.coordinator.record_resource_limit_rejection();
             self.fail_before_queue(key);
             self.maintenance();
