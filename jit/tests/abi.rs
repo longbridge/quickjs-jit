@@ -16,7 +16,7 @@ fn jit_declarations(source: &str) -> String {
     let lines: Vec<_> = source.lines().collect();
     let first_struct = lines
         .iter()
-        .position(|line| line.starts_with("pub struct JSJitFunctionId"))
+        .position(|line| line.trim_start().starts_with("pub struct JSJitFunctionId"))
         .expect("JSJitFunctionId declaration");
     let last_function = lines
         .iter()
@@ -24,7 +24,7 @@ fn jit_declarations(source: &str) -> String {
         .expect("JS_JitInvalidateFunction declaration");
     let declarations_end = lines[last_function..]
         .iter()
-        .position(|line| *line == "}")
+        .position(|line| line.trim() == "}")
         .map(|offset| last_function + offset + 1)
         .expect("end of JS_JitInvalidateFunction extern block");
     assert!(
@@ -33,13 +33,14 @@ fn jit_declarations(source: &str) -> String {
     );
     let mut normalized = String::from("pub type size_t = NORMALIZED;\n");
     for line in &lines {
+        let line = line.trim_start();
         if line.starts_with("pub const QJSJIT_ABI_") {
             normalized.push_str(line);
             normalized.push('\n');
         }
     }
     for line in &lines[first_struct - 2..declarations_end] {
-        normalized.push_str(line);
+        normalized.push_str(line.trim_start());
         normalized.push('\n');
     }
     normalized
@@ -72,6 +73,13 @@ fn jit_declaration_extraction_does_not_depend_on_atom_bindings() {
         jit_declarations(&canonical),
         jit_declarations(&without_atoms)
     );
+
+    let indented = canonical
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(jit_declarations(&canonical), jit_declarations(&indented));
 }
 
 #[test]
