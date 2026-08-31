@@ -95,7 +95,7 @@ unsafe extern "C" fn unpoison_jit_frame(frame: *mut rquickjs_core::qjs::JSJitExe
             frame.cast(),
             core::mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
         );
-        let start = (*frame).var_buf.cast::<u8>();
+        let start = (*frame).stack_base.cast::<u8>();
         let end = (*frame).stack_capacity.cast::<u8>();
         if !start.is_null() {
             if let Some(size) = (end as usize).checked_sub(start as usize) {
