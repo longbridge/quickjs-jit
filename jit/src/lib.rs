@@ -1,3 +1,5 @@
+#![cfg_attr(rquickjs_memory_sanitizer, feature(thread_local))]
+
 //! Optional tiered JIT integration for `rquickjs`.
 //!
 //! The runtime attaches through a versioned engine ABI while execution remains

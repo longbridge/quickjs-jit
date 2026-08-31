@@ -61,6 +61,26 @@ pub mod optimized;
 pub mod mock;
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(rquickjs_memory_sanitizer)]
+unsafe extern "C" fn clear_msan_param_shadow() {
+    unsafe extern "C" {
+        #[thread_local]
+        static mut __msan_param_tls: [usize; 100];
+    }
+
+    unsafe {
+        let address = core::ptr::addr_of_mut!(__msan_param_tls).cast::<usize>();
+        core::arch::asm!(
+            "rep stosq",
+            inout("rcx") 100usize => _,
+            inout("rdi") address => _,
+            inout("rax") 0usize => _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn emit_external_call(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     signature: cranelift_codegen::ir::SigRef,
@@ -71,26 +91,20 @@ fn emit_external_call(
 ) -> cranelift_codegen::ir::Inst {
     use cranelift_codegen::ir::InstBuilder;
     #[cfg(rquickjs_memory_sanitizer)]
-    use cranelift_codegen::ir::{AbiParam, Signature};
+    use cranelift_codegen::ir::Signature;
 
     #[cfg(rquickjs_memory_sanitizer)]
     {
-        unsafe extern "C" {
-            fn __msan_unpoison_param(parameter_count: usize);
-        }
-
         builder.set_srcloc(Default::default());
-        let mut msan_signature = Signature::new(builder.func.signature.call_conv);
-        msan_signature.params.push(AbiParam::new(pointer_type));
+        let msan_signature = Signature::new(builder.func.signature.call_conv);
         let msan_signature = builder.import_signature(msan_signature);
         let msan_target = builder.ins().iconst(
             pointer_type,
-            __msan_unpoison_param as *const () as usize as i64,
+            clear_msan_param_shadow as *const () as usize as i64,
         );
-        let parameter_count = builder.ins().iconst(pointer_type, params.len() as i64);
         builder
             .ins()
-            .call_indirect(msan_signature, msan_target, &[parameter_count]);
+            .call_indirect(msan_signature, msan_target, &[]);
     }
 
     #[cfg(not(rquickjs_memory_sanitizer))]
