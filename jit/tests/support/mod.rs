@@ -277,11 +277,13 @@ unsafe fn unpoison_quickjs_frame_values(frame: *const rquickjs_core::qjs::JSJitE
     }
 
     unsafe {
-        let values_start = (*frame).var_buf.cast::<u8>();
+        let values_start = (*frame).arg_buf.cast::<u8>();
         let values_end = (*frame).stack_capacity.cast::<u8>();
         if !values_start.is_null() {
             if let Some(values_size) = (values_end as usize).checked_sub(values_start as usize) {
-                __msan_unpoison(values_start.cast(), values_size);
+                if values_size <= 64 * 1024 * 1024 {
+                    __msan_unpoison(values_start.cast(), values_size);
+                }
             }
         }
     }

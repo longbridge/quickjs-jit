@@ -95,6 +95,15 @@ unsafe extern "C" fn unpoison_jit_frame(frame: *mut rquickjs_core::qjs::JSJitExe
             frame.cast(),
             core::mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
         );
+        let values_start = (*frame).arg_buf.cast::<u8>();
+        let values_end = (*frame).stack_capacity.cast::<u8>();
+        if !values_start.is_null() {
+            if let Some(values_size) = (values_end as usize).checked_sub(values_start as usize) {
+                if values_size <= 64 * 1024 * 1024 {
+                    __msan_unpoison(values_start.cast(), values_size);
+                }
+            }
+        }
         let start = (*frame).stack_base.cast::<u8>();
         let end = (*frame).stack_capacity.cast::<u8>();
         if !start.is_null() {
