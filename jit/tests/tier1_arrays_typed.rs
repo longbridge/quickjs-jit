@@ -64,7 +64,9 @@ fn arrays_typed_arrays_proxy_and_accessor_enter_native_with_exact_checksum() {
         .unwrap()
     });
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Keep the stable workload identity while allowing instrumented builds to
+    // drain the bounded set of hot call and loop compilations.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut checksum = 0_i32;
     while Instant::now() < deadline {
         checksum = context.with(|ctx| ctx.eval("elementKernel(a,t,p,1,40)").unwrap());
