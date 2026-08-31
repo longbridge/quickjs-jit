@@ -72,7 +72,8 @@ fn with_optimized_binary<T>(
         .with(|ctx| ctx.eval::<(), _>(format!("function f(a,b){{return {body}}}")))
         .unwrap();
 
-    for _ in 0..256 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         context.with(|ctx| {
             let function: Function<'_> = ctx.globals().get("f").unwrap();
             let _: f64 = function.call((warm_lhs, warm_rhs)).unwrap();

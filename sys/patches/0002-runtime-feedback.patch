@@ -166,9 +166,9 @@ diff --git a/quickjs.c b/quickjs.c
 +    const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
 +    JSObject *callee_object;
 +    JSFunctionBytecode *callee;
-+    uint32_t types[argc >= 0 ? (size_t)argc + 1 : 1];
++    uint32_t types[9];
 +    int i;
-+    if (!vtable || !vtable->record_feedback || argc < 0 ||
++    if (!vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
 +        JS_VALUE_GET_TAG(callee_value) != JS_TAG_OBJECT)
 +        return;
 +    callee_object = JS_VALUE_GET_OBJ(callee_value);
@@ -207,8 +207,8 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
  #ifdef CONFIG_JIT_ABI
-+    if (rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
-+        uint32_t call_types[argc > 0 ? argc : 1];
++    if (argc >= 0 && argc <= 8 && rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
++        uint32_t call_types[8];
 +        for (i = 0; i < argc; i++)
 +            call_types[i] = qjsjit_feedback_type(arg_buf[i]);
 +        qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
@@ -931,10 +931,10 @@ diff --git a/quickjs.c b/quickjs.c
      memset(&event, 0, sizeof(event));
 @@ -2401,7 +2403,7 @@
      JSFunctionBytecode *callee;
-     uint32_t types[argc >= 0 ? (size_t)argc + 1 : 1];
+     uint32_t types[9];
      int i;
--    if (!vtable || !vtable->record_feedback || argc < 0 ||
-+    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 ||
+-    if (!vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
++    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
          JS_VALUE_GET_TAG(callee_value) != JS_TAG_OBJECT)
          return;
      callee_object = JS_VALUE_GET_OBJ(callee_value);
@@ -1296,8 +1296,8 @@ diff --git a/quickjs.c b/quickjs.c
 +    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
          qjsjit_ensure_function_identity(rt, b))
 @@ -2406,1 +2407,1 @@ static void qjsjit_record_callsite_feedback(JSRuntime *rt,
--    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 ||
-+    if (rt->jit_suspended || caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 ||
+-    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
++    if (rt->jit_suspended || caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
 @@ -2486,1 +2488,1 @@ static void qjsjit_record_property_feedback(JSRuntime *rt,
 -    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
 +    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
@@ -1325,8 +1325,8 @@ diff --git a/quickjs.c b/quickjs.c
 +}
  #endif /* CONFIG_JIT_ABI */
 @@ -19583,1 +19601,2 @@ restart:
--    if (rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
-+    if (!rt->jit_suspended && rt->jit_backend_vtable &&
+-    if (argc >= 0 && argc <= 8 && rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
++    if (argc >= 0 && argc <= 8 && !rt->jit_suspended && rt->jit_backend_vtable &&
 +        rt->jit_backend_vtable->record_feedback) {
 @@ -19597,1 +19616,1 @@ restart:
 -    if (!b->jit_feedback_disabled &&

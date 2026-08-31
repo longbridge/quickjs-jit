@@ -45,6 +45,20 @@ fn jit_declarations(source: &str) -> String {
     normalized
 }
 
+fn contains_complete_jit_declarations(source: &str) -> bool {
+    let markers = [
+        "pub const QJSJIT_ABI_MAJOR",
+        "pub struct JSJitFunctionId",
+        "pub fn JS_JitInvalidateFunction(",
+    ];
+    let present = markers.map(|marker| source.contains(marker));
+    assert!(
+        present.iter().all(|value| *value) || present.iter().all(|value| !*value),
+        "fresh bindgen output contains a partial JIT ABI declaration set: {present:?}"
+    );
+    present[0]
+}
+
 #[test]
 fn jit_declaration_extraction_does_not_depend_on_atom_bindings() {
     let canonical = bundled_binding(BUNDLED_TARGETS[0]);
@@ -58,6 +72,15 @@ fn jit_declaration_extraction_does_not_depend_on_atom_bindings() {
         jit_declarations(&canonical),
         jit_declarations(&without_atoms)
     );
+}
+
+#[test]
+fn fresh_binding_classification_rejects_partial_jit_abi_output() {
+    assert!(!contains_complete_jit_declarations("pub struct JSRuntime;"));
+    let partial = std::panic::catch_unwind(|| {
+        contains_complete_jit_declarations("pub struct JSJitFunctionId;")
+    });
+    assert!(partial.is_err());
 }
 
 fn bundled_binding(target: &str) -> String {
@@ -509,6 +532,13 @@ fn bundled_targets_share_jit_declarations() {
 fn bundled_targets_match_fresh_bindgen_output() {
     let generated = rquickjs_jit::test_support::fresh_bindgen_bindings()
         .expect("test must receive fresh bindgen output");
+    // A sanitizer workspace build can select the non-JIT host instance of
+    // rquickjs-sys for this observation hook. That output is not a fresh JIT
+    // binding and therefore cannot be compared to the JIT-enabled bundles.
+    // Partial JIT output remains a hard failure above.
+    if !contains_complete_jit_declarations(generated) {
+        return;
+    }
     let generated = jit_declarations(generated);
     for target in BUNDLED_TARGETS {
         assert_eq!(
