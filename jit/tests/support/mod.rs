@@ -260,11 +260,30 @@ unsafe fn unpoison_native_outcome(
     }
 
     unsafe {
-        __msan_unpoison(exit.cast(), mem::size_of::<rquickjs_core::qjs::JSJitExit>());
+        if !exit.is_null() {
+            __msan_unpoison(exit.cast(), mem::size_of::<rquickjs_core::qjs::JSJitExit>());
+        }
         __msan_unpoison(
             frame.cast(),
             mem::size_of::<rquickjs_core::qjs::JSJitExecFrame>(),
         );
+    }
+}
+
+#[cfg(all(feature = "compiler", rquickjs_memory_sanitizer))]
+unsafe fn unpoison_quickjs_frame_values(frame: *const rquickjs_core::qjs::JSJitExecFrame) {
+    unsafe extern "C" {
+        fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+    }
+
+    unsafe {
+        let values_start = (*frame).var_buf.cast::<u8>();
+        let values_end = (*frame).stack_capacity.cast::<u8>();
+        if !values_start.is_null() {
+            if let Some(values_size) = (values_end as usize).checked_sub(values_start as usize) {
+                __msan_unpoison(values_start.cast(), values_size);
+            }
+        }
     }
 }
 
@@ -281,6 +300,11 @@ unsafe extern "C" fn forced_entry_trampoline(
     }
     pin.entries.fetch_add(1, Ordering::SeqCst);
     let native: Entry = unsafe { mem::transmute(pin.code.as_ptr()) };
+    #[cfg(rquickjs_memory_sanitizer)]
+    unsafe {
+        unpoison_native_outcome(ptr::null(), frame);
+        unpoison_quickjs_frame_values(frame);
+    }
     let exit = unsafe { native(frame) };
     #[cfg(rquickjs_memory_sanitizer)]
     unsafe {

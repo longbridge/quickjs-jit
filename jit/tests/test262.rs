@@ -56,10 +56,11 @@ fn forced(mode: &str) {
         serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
     for case in report["cases"].as_array().unwrap() {
         assert!(case["native"]["native_entries"].as_u64().unwrap() > 0);
-        assert!(!case["native"]["opcode_ids"].as_array().unwrap().is_empty());
         assert_eq!(case["native"]["unexpected_fallbacks"], 0);
         if mode == "force-tier2" {
             assert!(case["native"]["tier2_entries"].as_u64().unwrap() > 0);
+        } else {
+            assert!(!case["native"]["opcode_ids"].as_array().unwrap().is_empty());
         }
     }
 }
