@@ -7,7 +7,9 @@ checked, accountable exclusions in
 `jit/tests/fixtures/test262-exclusions.json`, the pinned QuickJS
 `test262.conf`, and exact paths in the pinned `test262_errors.txt` baseline.
 
-## 2026-08-30 full run
+## 2026-08-31 full run
+
+Commit: `fee96bb02b6cb11fd07226a77a6e00fb3ca9124a`
 
 | Mode | Files discovered | Variants | Passed | Accountable skips | Failed |
 | --- | ---: | ---: | ---: | ---: | ---: |
