@@ -55,8 +55,11 @@ fn hash_u64(mut hash: u64, mut value: u64) -> u64 {
 #[cfg(feature = "jit-abi")]
 fn preprocess(expansion_source: &Path, src_dir: &Path, description: &str) -> String {
     let compiler = cc::Build::new().get_compiler();
-    let mut command = process::Command::new(compiler.path());
-    command.args(compiler.args());
+    // `cc::Tool` carries the Visual Studio environment discovered by `cc`
+    // (notably INCLUDE, LIB, PATH and LIBPATH).  Reconstructing a Command from
+    // only its executable and arguments drops that environment, so cl.exe
+    // cannot even find SDK headers such as stdint.h on clean Windows runners.
+    let mut command = compiler.to_command();
     if compiler.is_like_msvc() {
         command
             .arg("/nologo")

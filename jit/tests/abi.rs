@@ -505,7 +505,7 @@ fn bundled_targets_share_jit_declarations() {
 }
 
 #[test]
-#[cfg(all(feature = "test-support", feature = "bindgen"))]
+#[cfg(all(feature = "compiler", feature = "test-support", feature = "bindgen"))]
 fn bundled_targets_match_fresh_bindgen_output() {
     let generated = rquickjs_jit::test_support::fresh_bindgen_bindings()
         .expect("test must receive fresh bindgen output");

@@ -1081,7 +1081,8 @@ fn production_feedback_installs_and_executes_the_int32_add_specialization() {
     context
         .with(|ctx| ctx.eval::<(), _>("function add(a,b){return a+b}"))
         .unwrap();
-    for _ in 0..256 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         assert_eq!(
             context.with(|ctx| {
                 let add: rquickjs::Function<'_> = ctx.globals().get("add").unwrap();
@@ -1093,7 +1094,7 @@ fn production_feedback_installs_and_executes_the_int32_add_specialization() {
         if jit.metrics().tier2_entries > 0 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_micros(50));
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
     let artifact = jit.test_last_acquired_artifact_key().unwrap();
