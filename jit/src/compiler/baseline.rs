@@ -189,6 +189,7 @@ impl HelperLowering<'_> {
             helper,
             &params,
             self.pointer_type,
+            None,
         );
         Ok(builder.inst_results(call)[0])
     }
@@ -4938,7 +4939,14 @@ fn lower_call(
                 }
             });
         }
-        let call = emit_external_call(builder, signature, target, &params, helpers.pointer_type);
+        let call = emit_external_call(
+            builder,
+            signature,
+            target,
+            &params,
+            helpers.pointer_type,
+            None,
+        );
         let status = builder.inst_results(call)[0];
         let success = builder.ins().icmp_imm(IntCC::Equal, status, 0);
         builder.ins().brif(success, direct_done, &[], slow, &[]);
@@ -5345,7 +5353,15 @@ fn emit_helper_call(
     params.push(frame);
     params.extend_from_slice(arguments);
     builder.set_srcloc(frame_state_source_loc(state)?);
-    let call = emit_external_call(builder, signature, helper, &params, pointer_type);
+    let source_location = frame_state_source_loc(state)?;
+    let call = emit_external_call(
+        builder,
+        signature,
+        helper,
+        &params,
+        pointer_type,
+        Some(source_location),
+    );
     builder.set_srcloc(SourceLoc::default());
     let status = builder.inst_results(call)[0];
     let succeeded = builder.ins().icmp_imm(IntCC::Equal, status, 0);
@@ -5654,7 +5670,14 @@ fn emit_poll(
 ) {
     let flags = MemFlags::new();
     builder.set_srcloc(location.source_location);
-    let call = emit_external_call(builder, signature, poll, &[frame], pointer_type);
+    let call = emit_external_call(
+        builder,
+        signature,
+        poll,
+        &[frame],
+        pointer_type,
+        Some(location.source_location),
+    );
     builder.set_srcloc(SourceLoc::default());
     let interrupted = builder.inst_results(call)[0];
     let interrupted = builder.ins().icmp_imm(IntCC::NotEqual, interrupted, 0);

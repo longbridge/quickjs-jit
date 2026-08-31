@@ -67,6 +67,7 @@ fn emit_external_call(
     target: cranelift_codegen::ir::Value,
     params: &[cranelift_codegen::ir::Value],
     pointer_type: cranelift_codegen::ir::Type,
+    source_location: Option<cranelift_codegen::ir::SourceLoc>,
 ) -> cranelift_codegen::ir::Inst {
     use cranelift_codegen::ir::InstBuilder;
     #[cfg(rquickjs_memory_sanitizer)]
@@ -78,12 +79,14 @@ fn emit_external_call(
             fn __msan_unpoison_param(parameter_count: usize);
         }
 
+        builder.set_srcloc(Default::default());
         let mut msan_signature = Signature::new(builder.func.signature.call_conv);
         msan_signature.params.push(AbiParam::new(pointer_type));
         let msan_signature = builder.import_signature(msan_signature);
-        let msan_target = builder
-            .ins()
-            .iconst(pointer_type, __msan_unpoison_param as usize as i64);
+        let msan_target = builder.ins().iconst(
+            pointer_type,
+            __msan_unpoison_param as *const () as usize as i64,
+        );
         let parameter_count = builder.ins().iconst(pointer_type, params.len() as i64);
         builder
             .ins()
@@ -92,6 +95,10 @@ fn emit_external_call(
 
     #[cfg(not(rquickjs_memory_sanitizer))]
     let _ = pointer_type;
+
+    if let Some(source_location) = source_location {
+        builder.set_srcloc(source_location);
+    }
 
     builder.ins().call_indirect(signature, target, params)
 }
