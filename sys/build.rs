@@ -215,7 +215,7 @@ QJSJIT_HELPER_LIST(QJSJIT_EMIT)
             flags,
         });
     }
-    assert_eq!(helpers.len(), 20, "canonical append-only helper count");
+    assert_eq!(helpers.len(), 21, "canonical append-only helper count");
 
     let u32_args = |signature: &str| match signature {
         "FRAME" => 0,

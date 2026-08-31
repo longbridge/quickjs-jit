@@ -1979,6 +1979,15 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
+                IrOp::Regexp => {
+                    let new_len = frame
+                        .stack
+                        .len()
+                        .checked_sub(2)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.truncate(new_len);
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
                         .arguments
@@ -2650,6 +2659,39 @@ fn lower_function(
                     true,
                     None,
                 )?,
+                IrOp::Regexp => {
+                    let pattern_index = depth
+                        .checked_sub(2)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let bytecode_index = depth - 1;
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let pattern = flat_stack_slot(ir, pattern_index)?;
+                    let bytecode = flat_stack_slot(ir, bytecode_index)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_REGEXP,
+                        state,
+                        depth,
+                        &[pattern, pattern, bytecode]
+                    );
+                    reload_pair(
+                        builder,
+                        stack[pattern_index],
+                        stack_base,
+                        pattern_index,
+                        layout,
+                    );
+                    clear_pair(
+                        builder,
+                        stack[bytecode_index],
+                        stack_base,
+                        bytecode_index,
+                        layout,
+                    )?;
+                    depth = pattern_index + 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
                 IrOp::GetArgument(index) => {
                     let state = helper_states
                         .next()
@@ -5983,6 +6025,7 @@ mod tests {
             IrOp::ToPropertyKey => "to_property_key",
             IrOp::Call { .. } => "call",
             IrOp::CallConstructor(_) => "call_constructor",
+            IrOp::Regexp => "regexp",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",
@@ -6051,6 +6094,7 @@ mod tests {
                 vec![numeric_push(), numeric_push()],
                 IrOp::CallConstructor(0),
             ),
+            linear_ir(vec![numeric_push(), numeric_push()], IrOp::Regexp),
             linear_ir(Vec::new(), IrOp::GetArgument(0)),
             linear_ir(Vec::new(), IrOp::GetLocal(0)),
             linear_ir(Vec::new(), IrOp::GetLocalChecked(0)),

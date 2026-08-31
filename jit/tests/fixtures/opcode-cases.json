@@ -486,6 +486,13 @@
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
     },
     {
+      "opcode": "regexp",
+      "definition": "function f(value){let regexp=/^[a-z]+-[0-9]+$/i;let result=regexp.test(value);return result}",
+      "expression": "f('quickjs-2026')",
+      "helper": "Regexp",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
       "opcode": "push_false",
       "definition": "function f(){ return false }",
       "expression": "f()",

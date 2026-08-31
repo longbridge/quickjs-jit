@@ -128,5 +128,9 @@ name = "tier1_constructors"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_regexp"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "test262"
 required-features = ["compiler", "test-support"]

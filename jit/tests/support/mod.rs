@@ -639,6 +639,7 @@ impl DifferentialRun {
                 HelperId::CallConstructor => {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL_CONSTRUCTOR
                 }
+                HelperId::Regexp => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_REGEXP,
                 HelperId::NewArray => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_ARRAY,
                 HelperId::NewObject => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_NEW_OBJECT,
                 HelperId::GetElement => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_ELEMENT,
@@ -1087,6 +1088,16 @@ unsafe extern "C" fn synthetic_map_call_unavailable(
     -1
 }
 
+unsafe extern "C" fn synthetic_map_out_two_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _left: u32,
+    _right: u32,
+) -> i32 {
+    -1
+}
+
 unsafe extern "C" fn synthetic_get_unavailable(
     _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
     _stack_map_id: u32,
@@ -1198,6 +1209,7 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         to_propkey: Some(synthetic_map_out_in_unavailable),
         get_global: Some(synthetic_map_out_in_unavailable),
         call_constructor: Some(synthetic_map_call_unavailable),
+        regexp: Some(synthetic_map_out_two_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

@@ -53,7 +53,7 @@ pub(super) const AUDITED_POLICIES: [AuditedOpcodePolicy; 252] = [
     AuditedOpcodePolicy { id: 49, name: "throw_error", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
     AuditedOpcodePolicy { id: 50, name: "eval", policy: Tier1Policy::Reject(FallbackReason::DirectEval) },
     AuditedOpcodePolicy { id: 51, name: "apply_eval", policy: Tier1Policy::Reject(FallbackReason::DirectEval) },
-    AuditedOpcodePolicy { id: 52, name: "regexp", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
+    AuditedOpcodePolicy { id: 52, name: "regexp", policy: Tier1Policy::Helper(HelperId::Regexp) },
     AuditedOpcodePolicy { id: 53, name: "get_super", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },
     AuditedOpcodePolicy { id: 54, name: "import", policy: Tier1Policy::Reject(FallbackReason::DynamicImport) },
     AuditedOpcodePolicy { id: 55, name: "get_var_undef", policy: Tier1Policy::Reject(FallbackReason::UnsupportedOpcode) },

@@ -407,6 +407,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::ToPropertyKey => 1,
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
+        IrOp::Regexp => 1,
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
         IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
@@ -620,6 +621,7 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
             has_this: true,
         },
         "call_constructor" => IrOp::CallConstructor(instruction.operand_u16(1)),
+        "regexp" => IrOp::Regexp,
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

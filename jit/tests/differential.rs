@@ -58,6 +58,7 @@ enum ManifestHelper {
     GetGlobal,
     Call,
     CallConstructor,
+    Regexp,
     NewArray,
     NewObject,
 }
@@ -80,6 +81,7 @@ impl ManifestHelper {
             Self::GetGlobal => HelperId::GetGlobal,
             Self::Call => HelperId::Call,
             Self::CallConstructor => HelperId::CallConstructor,
+            Self::Regexp => HelperId::Regexp,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
         }
@@ -310,6 +312,19 @@ fn tier1_constructor_calls_preserve_map_exceptions_and_gc_ownership() {
 }
 
 #[test]
+fn tier1_regexp_literal_preserves_strings_and_gc_ownership() {
+    differential(
+        "function f(value){let regexp=/^[a-z]+-[0-9]+$/i;let result=regexp.test(value);return result}",
+        "[f('quickjs-2026'),f('not a match')]",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("regexp")
+    .expect_helper(HelperId::Regexp)
+    .assert_same();
+}
+
+#[test]
 fn tier1_object_property_reads_and_writes_preserve_values_and_ownership() {
     differential(
         "function f(o){o.answer=42;return o.answer}",
@@ -386,6 +401,12 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f([['answer',42]])",
             "call_constructor",
             HelperId::CallConstructor,
+        ),
+        (
+            "function f(value){let regexp=/^[a-z]+-[0-9]+$/i;let result=regexp.test(value);return result}",
+            "f('quickjs-2026')",
+            "regexp",
+            HelperId::Regexp,
         ),
         (
             "function f(){ return {} }",

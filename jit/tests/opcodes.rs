@@ -107,6 +107,7 @@ fn policies_are_semantic_and_categorized() {
         by_name("call_constructor"),
         Tier1Policy::Helper(HelperId::CallConstructor)
     );
+    assert_eq!(by_name("regexp"), Tier1Policy::Helper(HelperId::Regexp));
     assert_eq!(
         by_name("eval"),
         Tier1Policy::Reject(FallbackReason::DirectEval)
