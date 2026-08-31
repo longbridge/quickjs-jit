@@ -5,7 +5,7 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Function, Runtime};
 use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
 use std::time::{Duration, Instant};
 
@@ -38,10 +38,20 @@ fn run_until_native(source: &str, expression: &str) -> (String, rquickjs_jit::Ji
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
 
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(format!(
+                "globalThis.__jitTestInvoke=function(){{return {expression}}}"
+            ))
+        })
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut result = String::new();
     while Instant::now() < deadline {
-        result = context.with(|ctx| ctx.eval(expression)).unwrap();
+        result = context.with(|ctx| {
+            let invoke: Function<'_> = ctx.globals().get("__jitTestInvoke").unwrap();
+            invoke.call(()).unwrap()
+        });
         jit.poll();
         if jit.metrics().native_entries > 0 {
             break;

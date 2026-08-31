@@ -5,7 +5,7 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Function, Runtime};
 use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
 use std::time::{Duration, Instant};
 
@@ -280,19 +280,17 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
         .with(|ctx| ctx.eval::<(), _>(include_str!("../../benchmarks/scripts/arrays-typed.js")))
         .unwrap();
 
-    let run = || {
-        context.with(|ctx| {
-            ctx.eval::<String, _>("workload(2000, 0)")
-                .expect("arrays-typed workload evaluates")
-        })
-    };
-    // Sanitizer instrumentation makes each queued compilation substantially
-    // slower, and this workload discovers many hot functions at once. Keep the
-    // multi-install precondition while allowing the single compiler worker to
-    // make progress through that queue.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        assert_eq!(run(), "33983000:8496750.000:2000");
+        context.with(|ctx| {
+            let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+            assert_eq!(
+                workload
+                    .call::<_, String>((2000, 0))
+                    .expect("arrays-typed workload evaluates"),
+                "33983000:8496750.000:2000"
+            );
+        });
         jit.poll();
         if jit.metrics().installed >= 2 {
             break;
@@ -302,7 +300,13 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
 
     let entries_before = jit.metrics().native_entries;
     for _ in 0..8 {
-        assert_eq!(run(), "33983000:8496750.000:2000");
+        context.with(|ctx| {
+            let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+            assert_eq!(
+                workload.call::<_, String>((2000, 0)).unwrap(),
+                "33983000:8496750.000:2000"
+            );
+        });
     }
     let entries = jit.metrics().native_entries - entries_before;
     assert!(
