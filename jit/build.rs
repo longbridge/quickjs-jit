@@ -1,6 +1,19 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(rquickjs_memory_sanitizer)");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_SANITIZE");
+    println!("cargo:rerun-if-env-changed=RUSTFLAGS");
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    let memory_sanitizer = env::var("CARGO_CFG_SANITIZE")
+        .is_ok_and(|value| value.split(',').any(|value| value == "memory"))
+        || env::var("RUSTFLAGS").is_ok_and(|value| value.contains("sanitizer=memory"))
+        || env::var("CARGO_ENCODED_RUSTFLAGS")
+            .is_ok_and(|value| value.contains("sanitizer=memory"));
+    if memory_sanitizer {
+        println!("cargo:rustc-cfg=rquickjs_memory_sanitizer");
+    }
+
     const EXPECTED_COUNT: usize = 252;
     const EXPECTED_FINGERPRINT: u64 = 0x05d5_c086_7521_c077;
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));

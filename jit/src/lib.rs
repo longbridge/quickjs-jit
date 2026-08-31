@@ -818,6 +818,16 @@ unsafe extern "C" fn production_entry_trampoline(
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
     let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
     let mut exit = unsafe { native(frame as *const _ as *mut _) };
+    #[cfg(rquickjs_memory_sanitizer)]
+    unsafe {
+        unsafe extern "C" {
+            fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+        }
+        __msan_unpoison(
+            core::ptr::addr_of!(exit).cast(),
+            core::mem::size_of::<qjs::JSJitExit>(),
+        );
+    }
     if frame.flags & qjs::JS_JIT_FRAME_SIDE_PATH_HIT != 0 {
         frame.flags &= !qjs::JS_JIT_FRAME_SIDE_PATH_HIT;
         pin.validation
