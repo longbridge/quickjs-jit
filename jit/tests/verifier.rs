@@ -1,8 +1,8 @@
+use rquickjs::{Context, Function, Runtime};
 use rquickjs_jit::bytecode::{
     decode_raw, linked_opcode_table, opcode, CompileSnapshot, DecodeError, DeoptPoint,
     FallbackReason, OsrPoint, Resource, SlotKind, VerifierMetadata, VerifyErrorKind, VerifyLimits,
 };
-use rquickjs::{Context, Function, Runtime};
 
 fn snapshot_from_parts(
     bytecode: Vec<u8>,

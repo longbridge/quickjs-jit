@@ -101,6 +101,7 @@ fn policies_are_semantic_and_categorized() {
         by_name("get_field"),
         Tier1Policy::Helper(HelperId::GetProperty)
     );
+    assert_eq!(by_name("get_var"), Tier1Policy::Helper(HelperId::GetGlobal));
     assert_eq!(by_name("call1"), Tier1Policy::Helper(HelperId::Call));
     assert_eq!(
         by_name("eval"),

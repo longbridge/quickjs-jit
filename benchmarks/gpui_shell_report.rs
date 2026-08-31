@@ -315,10 +315,10 @@ mod tests {
                 .map(|pair_index| LifecycleSample {
                     pair_index,
                     first_window_ns: time,
-                hot_reload_ns: time,
-                snapshot_sha256: "snapshot".into(),
-                script_renders: 1,
-                reload_observations: vec![serde_json::json!({}); 5],
+                    hot_reload_ns: time,
+                    snapshot_sha256: "snapshot".into(),
+                    script_renders: 1,
+                    reload_observations: vec![serde_json::json!({}); 5],
                 })
                 .collect()
         };

@@ -168,9 +168,17 @@ fn repeated_failures_blacklist_only_the_generation() {
 fn profitability_demoted_baseline_is_not_terminal_for_tier2_feedback() {
     let mut coordinator = coordinator(4);
     let key = FunctionKey::new(91, 1);
-    install_empty(&mut coordinator, key, Tier::Baseline, coordinator_snapshot());
+    install_empty(
+        &mut coordinator,
+        key,
+        Tier::Baseline,
+        coordinator_snapshot(),
+    );
     assert!(coordinator.demote_baseline_to_interpreter(key));
-    assert_eq!(coordinator.tier_state(key, Tier::Baseline), CompileState::Blacklisted);
+    assert_eq!(
+        coordinator.tier_state(key, Tier::Baseline),
+        CompileState::Blacklisted
+    );
     assert!(!coordinator.is_terminally_blacklisted(key));
 }
 

@@ -27,11 +27,13 @@ fn copy_patches(destination: &std::path::Path) {
         destination.join("0001-rquickjs-jit.patch"),
     )
     .unwrap();
-    fs::copy(
-        source.join("0002-runtime-feedback.patch"),
-        destination.join("0002-runtime-feedback.patch"),
-    )
-    .unwrap();
+    for patch in [
+        "0002-runtime-feedback.patch",
+        "0003-element-layout.patch",
+        "0004-tier1-globals.patch",
+    ] {
+        fs::copy(source.join(patch), destination.join(patch)).unwrap();
+    }
 }
 
 #[test]
@@ -47,7 +49,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 12u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 14u"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
     assert!(quickjs.contains("JS_JitHelperMaterializeOwner"));
     assert!(quickjs.contains(
@@ -61,7 +63,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
             .count(),
         3
     );
-    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 4u"));
+    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 5u"));
     assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_LOCAL = 1"));
@@ -70,6 +72,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(helper_header.contains("X(GET_ELEMENT, get_element"));
     assert!(helper_header.contains("X(SET_ELEMENT, set_element"));
     assert!(helper_header.contains("X(TO_PROPKEY, to_propkey"));
+    assert!(helper_header.contains("X(GET_GLOBAL, get_global"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
@@ -93,7 +96,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 12;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 14;"),
             "{target}"
         );
         assert!(
@@ -111,11 +114,12 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
         assert!(
             binding.contains("pub get_element: ::core::option::Option")
                 && binding.contains("pub set_element: ::core::option::Option")
-                && binding.contains("pub to_propkey: ::core::option::Option"),
+                && binding.contains("pub to_propkey: ::core::option::Option")
+                && binding.contains("pub get_global: ::core::option::Option"),
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 152usize"),
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 160usize"),
             "{target}"
         );
     }

@@ -395,7 +395,7 @@ fn operation_may_exit(operation: &IrOp) -> bool {
 
 fn operation_helper_call_count(operation: &IrOp) -> usize {
     match operation {
-        IrOp::ResolveConstant(_) | IrOp::NewObject => 1,
+        IrOp::ResolveConstant(_) | IrOp::GetGlobal(_) | IrOp::NewObject => 1,
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
@@ -561,6 +561,10 @@ fn constant_operand(instruction: &Instruction) -> Option<u32> {
     }
 }
 
+fn atom_operand(instruction: &Instruction) -> Option<u32> {
+    matches!(instruction.opcode().format(), OperandFormat::Atom).then(|| instruction.operand_u32(1))
+}
+
 fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailure> {
     let name = instruction.opcode().name();
     let int = |value: i32| TaggedValue::new(value as i64 as u64, qjs::JS_TAG_INT as i64);
@@ -584,6 +588,9 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "push_const" | "push_const8" => IrOp::ResolveConstant(
             constant_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
         ),
+        "get_var" => {
+            IrOp::GetGlobal(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
         "object" => IrOp::NewObject,
         "array_from" => IrOp::NewArrayFrom(instruction.operand_u16(1)),
         "get_field" => IrOp::GetProperty(instruction.operand_u32(1)),

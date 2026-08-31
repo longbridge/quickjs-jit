@@ -117,7 +117,10 @@ fn suspend_stops_probes_and_resume_reuses_installed_code() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && jit.metrics().native_entries == 0 {
-        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(),
+            42
+        );
         jit.poll();
     }
     let installed = jit.metrics();
@@ -126,7 +129,10 @@ fn suspend_stops_probes_and_resume_reuses_installed_code() {
     jit.suspend().unwrap();
     assert!(jit.is_suspended());
     for _ in 0..32 {
-        assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(),
+            42
+        );
         jit.poll();
     }
     let suspended = jit.metrics();
@@ -137,7 +143,10 @@ fn suspend_stops_probes_and_resume_reuses_installed_code() {
 
     jit.resume().unwrap();
     assert!(!jit.is_suspended());
-    assert_eq!(context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(), 42);
+    assert_eq!(
+        context.with(|ctx| ctx.eval::<i32, _>("hot(41)")).unwrap(),
+        42
+    );
     assert!(jit.metrics().native_entries > suspended.native_entries);
 }
 

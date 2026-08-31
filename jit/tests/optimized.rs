@@ -1630,7 +1630,10 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         if saw_demotion && metrics.tier2_entries > 0 {
             assert!(metrics.profitability_rejected >= 5, "{metrics:?}");
             assert_eq!(metrics.deopts, 0, "{metrics:?}");
-            assert!(metrics.queued >= 3, "Tier2 trial was not queued: {metrics:?}");
+            assert!(
+                metrics.queued >= 3,
+                "Tier2 trial was not queued: {metrics:?}"
+            );
             assert!(
                 metrics.compile_failures > 0,
                 "terminal host function must remain unsupported without blocking the profitable kernel: {metrics:?}"
@@ -1639,7 +1642,10 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
-    panic!("harmful Tier1 never reached bounded Tier2 trial: {:?}", jit.metrics());
+    panic!(
+        "harmful Tier1 never reached bounded Tier2 trial: {:?}",
+        jit.metrics()
+    );
 }
 
 #[cfg(all(

@@ -78,6 +78,7 @@ pub enum IrOp {
     Nop,
     Push(TaggedValue),
     ResolveConstant(u32),
+    GetGlobal(u32),
     NewObject,
     NewArrayFrom(u16),
     GetProperty(u32),

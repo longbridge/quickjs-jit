@@ -1918,6 +1918,9 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 IrOp::ResolveConstant(_) => {
                     frame.stack.push(AbstractValue::unknown());
                 }
+                IrOp::GetGlobal(_) => {
+                    frame.stack.push(AbstractValue::unknown());
+                }
                 IrOp::NewObject => {
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
@@ -2527,6 +2530,21 @@ fn lower_function(
                         state,
                         depth,
                         &[output, index]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::GetGlobal(atom) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL,
+                        state,
+                        depth,
+                        &[output, atom]
                     );
                     reload_pair(builder, stack[depth], stack_base, depth, layout);
                     depth += 1;
@@ -4471,9 +4489,7 @@ fn typed_element_is_mutable(
     );
     element_guard!(
         builder,
-        builder
-            .ins()
-            .icmp_imm(IntCC::NotEqual, array_buffer, 0),
+        builder.ins().icmp_imm(IntCC::NotEqual, array_buffer, 0),
         fallback,
     );
     let immutable = builder.ins().load(
@@ -5925,6 +5941,7 @@ mod tests {
             IrOp::Nop => "nop",
             IrOp::Push(_) => "push",
             IrOp::ResolveConstant(_) => "resolve_constant",
+            IrOp::GetGlobal(_) => "get_global",
             IrOp::NewObject => "new_object",
             IrOp::NewArrayFrom(_) => "new_array_from",
             IrOp::GetProperty(_) => "get_property",
@@ -5985,6 +6002,7 @@ mod tests {
                 IrOp::Push(TaggedValue::new(1, qjs::JS_TAG_INT as i64)),
             ),
             linear_ir(Vec::new(), IrOp::ResolveConstant(0)),
+            linear_ir(Vec::new(), IrOp::GetGlobal(0)),
             linear_ir(Vec::new(), IrOp::NewObject),
             linear_ir(vec![numeric_push(), numeric_push()], IrOp::NewArrayFrom(2)),
             linear_ir(vec![numeric_push()], IrOp::GetProperty(1)),

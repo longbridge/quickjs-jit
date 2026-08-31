@@ -120,6 +120,13 @@
       ]
     },
     {
+      "opcode": "get_var",
+      "definition": "function f(value){let result=JSON.stringify(value);return result}",
+      "expression": "f({answer:42})",
+      "helper": "GetGlobal",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
       "opcode": "put_field",
       "definition": "function f(o,a){ o.answer=a; return o.answer }",
       "expression": "(()=>{const events=[];const target={};const proxy=new Proxy(target,{set(o,k,v){events.push('set:'+k);o[k]=v;return true}});return [f(proxy,42),events]})()",

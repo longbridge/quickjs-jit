@@ -55,6 +55,7 @@ enum ManifestHelper {
     GetElement,
     SetElement,
     ToPropertyKey,
+    GetGlobal,
     Call,
     NewArray,
     NewObject,
@@ -75,6 +76,7 @@ impl ManifestHelper {
             Self::GetElement => HelperId::GetElement,
             Self::SetElement => HelperId::SetElement,
             Self::ToPropertyKey => HelperId::ToPropertyKey,
+            Self::GetGlobal => HelperId::GetGlobal,
             Self::Call => HelperId::Call,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
@@ -255,6 +257,29 @@ fn tier1_calls_and_method_calls_preserve_values_and_ownership() {
     .stress_gc()
     .expect_executed_opcode("call_method")
     .expect_helper(HelperId::Call)
+    .assert_same();
+}
+
+#[test]
+fn tier1_global_lookup_preserves_json_exceptions_and_gc_ownership() {
+    differential(
+        "function f(value){let result=JSON.stringify(value);return result}",
+        "f({answer:42})",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("get_var")
+    .expect_helper(HelperId::GetGlobal)
+    .assert_same();
+
+    differential(
+        "function f(){return missingGlobal}",
+        "(()=>{try{return f()}catch(error){return error.name}})()",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("get_var")
+    .expect_helper(HelperId::GetGlobal)
     .assert_same();
 }
 

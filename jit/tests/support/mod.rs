@@ -643,6 +643,7 @@ impl DifferentialRun {
                 HelperId::ToPropertyKey => {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_PROPKEY
                 }
+                HelperId::GetGlobal => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL,
             };
             let expected_opcode = self
                 .expected_opcode
@@ -1180,6 +1181,7 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         get_element: Some(synthetic_get_unavailable),
         set_element: Some(synthetic_get_unavailable),
         to_propkey: Some(synthetic_map_out_in_unavailable),
+        get_global: Some(synthetic_map_out_in_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

@@ -23,6 +23,7 @@ pub enum HelperId {
     GetElement,
     SetElement,
     ToPropertyKey,
+    GetGlobal,
     Call,
     NewArray,
     NewObject,

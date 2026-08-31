@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rquickjs::{Context, Runtime};
 use rquickjs_core::{
@@ -105,7 +105,11 @@ fn terminal_backend_response_disables_hot_and_feedback_callbacks_in_quickjs() {
         })
         .unwrap();
 
-    assert_eq!(hot.load(Ordering::Relaxed), 2, "top-level and terminal function");
+    assert_eq!(
+        hot.load(Ordering::Relaxed),
+        2,
+        "top-level and terminal function"
+    );
     assert_eq!(
         acquire.load(Ordering::Relaxed),
         0,
