@@ -1370,7 +1370,7 @@ impl NativeUnwindPlan {
             return Err(CodeMemoryError::SizeOverflow);
         }
         let extended = code_words > 31;
-        let header_words = if extended { 2 } else { 1 };
+        let header_words: usize = if extended { 2 } else { 1 };
         let xdata_len = header_words
             .checked_add(code_words)
             .and_then(|words| words.checked_mul(4))
