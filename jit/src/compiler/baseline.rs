@@ -1441,8 +1441,13 @@ impl NativeUnwindPlan {
             bytes.extend_from_slice(&0_u32.to_ne_bytes());
             let bytes = bytes.into_boxed_slice();
             let registration_offset = systemv_registration_offset(&bytes)?;
-            unsafe {
-                systemv_register_frame(bytes.as_ptr().add(registration_offset).cast());
+            {
+                let _registration_guard = systemv_registration_lock()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                unsafe {
+                    systemv_register_frame(bytes.as_ptr().add(registration_offset).cast());
+                }
             }
             return Ok(NativeUnwindRegistration {
                 systemv_eh_frame: Some(bytes),
@@ -1557,6 +1562,9 @@ impl Drop for NativeUnwindRegistration {
             any(target_arch = "x86_64", target_arch = "aarch64")
         ))]
         if let Some(bytes) = self.systemv_eh_frame.as_ref() {
+            let _registration_guard = systemv_registration_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             unsafe {
                 systemv_deregister_frame(
                     bytes.as_ptr().add(self.systemv_registration_offset).cast(),
@@ -1582,6 +1590,16 @@ impl Drop for NativeUnwindRegistration {
             }
         }
     }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn systemv_registration_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
 }
 
 #[cfg(all(
