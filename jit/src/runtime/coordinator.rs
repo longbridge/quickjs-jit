@@ -354,6 +354,9 @@ struct CompletionQueueSignals {
 }
 
 impl CompletionQueueSignals {
+    // `Atomic::try_update` would avoid this deprecation, but it is unavailable
+    // on the crate's Rust 1.87 MSRV.
+    #[allow(deprecated)]
     fn increment_pending(&self) {
         let _ = self
             .pending
@@ -362,6 +365,8 @@ impl CompletionQueueSignals {
             });
     }
 
+    // See `increment_pending` for the MSRV compatibility rationale.
+    #[allow(deprecated)]
     fn decrement_pending(&self) {
         let _ = self
             .pending
@@ -370,6 +375,8 @@ impl CompletionQueueSignals {
             });
     }
 
+    // See `increment_pending` for the MSRV compatibility rationale.
+    #[allow(deprecated)]
     fn record_saturation(&self) {
         let _ = self
             .saturated

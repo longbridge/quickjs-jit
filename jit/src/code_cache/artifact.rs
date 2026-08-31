@@ -423,6 +423,9 @@ struct BenefitCounters {
 }
 
 impl BenefitCounters {
+    // `Atomic::try_update` would avoid this deprecation, but it is unavailable
+    // on the crate's Rust 1.87 MSRV.
+    #[allow(deprecated)]
     fn record(&self, score: u64) {
         let _ = self
             .executions

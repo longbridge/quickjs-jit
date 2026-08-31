@@ -214,7 +214,8 @@ impl ShapeFeedbackTable {
     pub fn snapshot(&self, function: FunctionKey) -> Vec<(u32, ShapeFeedbackSite)> {
         self.sites
             .iter()
-            .filter_map(|(key, site)| (key.function == function).then(|| (key.pc, site.clone())))
+            .filter(|(key, _)| key.function == function)
+            .map(|(key, site)| (key.pc, site.clone()))
             .collect()
     }
 }

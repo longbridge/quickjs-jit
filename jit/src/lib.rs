@@ -1194,15 +1194,14 @@ impl ProductionBackend {
                 })
                 .collect::<Vec<_>>();
             for (key, snapshot, feedback, property_ready) in refreshes {
-                if self.coordinator.prepare_baseline_direct_refresh(key) {
-                    if self
+                if self.coordinator.prepare_baseline_direct_refresh(key)
+                    && self
                         .coordinator
                         .queue_with_feedback(key, runtime::Tier::Baseline, snapshot, feedback)
                         .is_ok()
-                        && property_ready
-                    {
-                        self.baseline_property_refreshed.insert(key);
-                    }
+                    && property_ready
+                {
+                    self.baseline_property_refreshed.insert(key);
                 }
             }
         }
@@ -1689,8 +1688,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                             key,
                             event.pc,
                             callee,
-                            event.shape_identity as u64,
-                            event.prototype_identity as u64,
+                            event.shape_identity,
+                            event.prototype_identity,
                             arguments,
                             result,
                         );

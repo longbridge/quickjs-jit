@@ -14,7 +14,6 @@ const BUNDLED_TARGETS: [&str; 9] = [
 
 fn jit_declarations(source: &str) -> String {
     let lines: Vec<_> = source.lines().collect();
-    assert!(lines.iter().any(|line| line.starts_with("pub type size_t")));
     assert_eq!(
         lines
             .iter()

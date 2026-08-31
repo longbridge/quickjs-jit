@@ -86,14 +86,22 @@ pub fn apply_patch_set(source_dir: &Path, patch_dir: &Path) -> io::Result<()> {
     if actual_names != expected_names {
         return invalid("QuickJS patch-set manifest mismatch");
     }
-    for (patch, (_, expected_digest)) in patches.iter().zip(EXPECTED_PATCHES) {
-        let bytes = fs::read(patch)?;
-        if fnv1a64(&bytes) != expected_digest {
-            return invalid("QuickJS integration patch digest mismatch");
-        }
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "patch is not UTF-8"))?;
-        apply_unified_patch(source_dir, text)?;
+    let patch_texts = patches
+        .iter()
+        .zip(EXPECTED_PATCHES)
+        .map(|(patch, (_, expected_digest))| {
+            let bytes = fs::read(patch)?;
+            if fnv1a64(&bytes) != expected_digest {
+                return invalid("QuickJS integration patch digest mismatch");
+            }
+            std::str::from_utf8(&bytes)
+                .map(str::to_owned)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "patch is not UTF-8"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    normalize_baseline_newlines(source_dir)?;
+    for patch in &patch_texts {
+        apply_unified_patch(source_dir, patch)?;
     }
     for (file, expected) in PATCHED_FILE_FINGERPRINTS {
         let actual = fnv1a64(&fs::read(source_dir.join(file))?);
@@ -125,9 +133,35 @@ fn baseline_fingerprint(source_dir: &Path) -> io::Result<u64> {
     for file in BASELINE_FILES {
         hash = fnv1a64_from(hash, file.as_bytes());
         hash = fnv1a64_from(hash, &[0]);
-        hash = fnv1a64_from(hash, &fs::read(source_dir.join(file))?);
+        let bytes = fs::read(source_dir.join(file))?;
+        hash = fnv1a64_from(hash, &canonicalize_crlf(&bytes));
     }
     Ok(hash)
+}
+
+fn normalize_baseline_newlines(source_dir: &Path) -> io::Result<()> {
+    for file in BASELINE_FILES {
+        let path = source_dir.join(file);
+        let bytes = fs::read(&path)?;
+        let canonical = canonicalize_crlf(&bytes);
+        if bytes != canonical {
+            fs::write(path, canonical)?;
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_crlf(bytes: &[u8]) -> Vec<u8> {
+    let mut canonical = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 1;
+        }
+        canonical.push(bytes[index]);
+        index += 1;
+    }
+    canonical
 }
 
 fn apply_unified_patch(root: &Path, patch: &str) -> io::Result<()> {

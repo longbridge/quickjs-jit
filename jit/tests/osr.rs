@@ -5,10 +5,23 @@ use rquickjs_jit::compiler::baseline::BaselineCompiler;
 use rquickjs_jit::runtime::{FunctionKey, OsrKey, OsrMap};
 use rquickjs_jit::test_support::SnapshotFixture;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "test-support")]
+#[cfg(all(
+    feature = "compiler",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(all(
+    feature = "compiler",
+    feature = "test-support",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe extern "C" {
     fn JS_JitSetExecutionTrace(
         rt: *mut rquickjs_core::qjs::JSRuntime,
@@ -236,6 +249,12 @@ fn compiler_emits_one_independent_entry_per_verified_loop_header() {
     assert_eq!(code.osr_entry_count(), expected);
 }
 
+#[cfg(all(
+    feature = "compiler",
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn counted_loop(jit: bool) -> (f64, usize, u64) {
     let runtime = Runtime::new().unwrap();
     let attached = jit

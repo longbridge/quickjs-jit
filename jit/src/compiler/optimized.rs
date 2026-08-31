@@ -433,9 +433,8 @@ fn lower_optimized_machine(
         let mut builder = FunctionBuilder::new(&mut clif, &mut context);
         let generated_signatures = super::helpers::generated_signatures(&**isa)?;
         let poll_signature = generated_signatures
-            .iter()
+            .get(rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize)
             .cloned()
-            .nth(rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL as usize)
             .ok_or(CompileFailure::InvalidArtifact)?;
         let poll_signature = builder.import_signature(poll_signature);
         let shape_guard_signature = generated_signatures
@@ -2227,8 +2226,13 @@ fn emit_opt_specialized_call(
         let value = opt_load(builder, stack_base, index);
         opt_define(builder, stack[index], value);
     }
-    for index in (base + 1)..=output_index {
-        opt_define(builder, stack[index], undefined);
+    for (index, &stack_slot) in stack
+        .iter()
+        .enumerate()
+        .take(output_index + 1)
+        .skip(base + 1)
+    {
+        opt_define(builder, stack_slot, undefined);
         opt_store(builder, stack_base, index, undefined);
     }
     stack_provenance[base] = OptProvenance::ImmediatePrimitive;
@@ -2476,6 +2480,7 @@ fn emit_opt_poll(
     builder.switch_to_block(continuation);
 }
 
+#[allow(clippy::too_many_arguments)] // Poll ABI parameters mirror the generated helper signature.
 fn emit_opt_amortized_poll(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     frame: cranelift_codegen::ir::Value,

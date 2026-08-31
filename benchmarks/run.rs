@@ -705,9 +705,11 @@ console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
         checksum: String,
     }
     let out: BunOut = serde_json::from_slice(&output.stdout).map_err(err)?;
-    let mut phases = PhaseTiming::default();
-    phases.steady_state_ns = out.elapsed_ns;
-    phases.total_ns = ns(started.elapsed());
+    let phases = PhaseTiming {
+        steady_state_ns: out.elapsed_ns,
+        total_ns: ns(started.elapsed()),
+        ..Default::default()
+    };
     Ok(WorkerResult {
         elapsed_ns: out.elapsed_ns,
         checksum: out.checksum,

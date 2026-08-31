@@ -38,6 +38,25 @@ fn copy_patches(destination: &std::path::Path) {
     }
 }
 
+fn convert_baseline_to_crlf(destination: &std::path::Path) {
+    for file in patch::BASELINE_FILES {
+        let source = destination.join(file);
+        let bytes = fs::read(&source).unwrap();
+        assert!(
+            !bytes.windows(2).any(|pair| pair == b"\r\n"),
+            "bundled baseline unexpectedly contains CRLF: {file}"
+        );
+        let mut crlf = Vec::with_capacity(bytes.len());
+        for byte in bytes {
+            if byte == b'\n' {
+                crlf.push(b'\r');
+            }
+            crlf.push(byte);
+        }
+        fs::write(source, crlf).unwrap();
+    }
+}
+
 #[test]
 fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -79,6 +98,27 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(helper_header.contains("X(REGEXP, regexp"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn pinned_public_quickjs_baseline_with_crlf_applies_cleanly() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let destination = scratch_dir();
+    copy_baseline(&destination);
+    convert_baseline_to_crlf(&destination);
+
+    patch::apply_patch_set(&destination, &manifest.join("patches")).unwrap();
+
+    for file in patch::BASELINE_FILES {
+        assert!(
+            !fs::read(destination.join(file))
+                .unwrap()
+                .windows(2)
+                .any(|pair| pair == b"\r\n"),
+            "patched source retains CRLF: {file}"
+        );
+    }
     fs::remove_dir_all(destination).unwrap();
 }
 
@@ -137,6 +177,24 @@ fn wrong_quickjs_baseline_is_rejected_before_writing_outputs() {
     let destination = scratch_dir();
     copy_baseline(&destination);
     fs::write(destination.join("quickjs.c"), "not the pinned baseline\n").unwrap();
+
+    let error = patch::apply_patch_set(&destination, &manifest.join("patches")).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(!destination.join("quickjs-jit.h").exists());
+
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn crlf_quickjs_baseline_with_content_tampering_is_rejected() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let destination = scratch_dir();
+    copy_baseline(&destination);
+    convert_baseline_to_crlf(&destination);
+    let source = destination.join("quickjs.c");
+    let mut bytes = fs::read(&source).unwrap();
+    bytes.extend_from_slice(b"/* tampered */\r\n");
+    fs::write(source, bytes).unwrap();
 
     let error = patch::apply_patch_set(&destination, &manifest.join("patches")).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);

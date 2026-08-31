@@ -863,6 +863,7 @@ impl FeedbackTable {
         self.observe_call_signature_with_identity(caller, pc, callee, 0, 0, arguments, result)
     }
 
+    #[allow(clippy::too_many_arguments)] // The feedback record's fields are sampled independently at each call site.
     pub fn observe_call_signature_with_identity(
         &mut self,
         caller: FunctionKey,

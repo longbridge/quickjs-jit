@@ -115,6 +115,7 @@ pub struct AbiInfo {
 /// Runtime-exported, append-only offsets for element fast paths.  QuickJS
 /// keeps these internals private; code generation must only use this
 /// fingerprinted descriptor, never Rust-side assumptions about object layout.
+#[cfg(feature = "compiler")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ElementLayout {
     pub object_class_id_offset: i32,
@@ -170,6 +171,7 @@ impl AbiInfo {
         self.raw.build_fingerprint
     }
 
+    #[cfg(feature = "compiler")]
     pub(crate) fn element_layout(&self) -> ElementLayout {
         let raw = self.raw.element_layout;
         ElementLayout {

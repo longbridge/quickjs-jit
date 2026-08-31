@@ -450,6 +450,7 @@ impl BaselineCompiler {
         .map(|code| code.clif().to_owned())
     }
 
+    #[allow(clippy::too_many_arguments)] // Compiler inputs intentionally remain explicit at this boundary.
     fn compile_with_policy_start(
         &self,
         function: &VerifiedFunction,
@@ -2279,6 +2280,7 @@ fn apply_abstract_stack_operation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Lowering state is passed explicitly to keep it borrow-scoped.
 fn lower_function(
     builder: &mut FunctionBuilder<'_>,
     ir: &BaselineIr,
@@ -4753,6 +4755,7 @@ fn lower_to_property_key(
     helpers.set_depth(builder, depth)
 }
 
+#[allow(clippy::too_many_arguments)] // Call bytecode operands and lowering state are separate by design.
 fn lower_call(
     builder: &mut FunctionBuilder<'_>,
     helpers: &HelperLowering<'_>,
@@ -5594,6 +5597,7 @@ fn emit_frame_state_marker(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Poll ABI parameters mirror the generated helper signature.
 fn emit_poll(
     builder: &mut FunctionBuilder<'_>,
     frame: Value,
