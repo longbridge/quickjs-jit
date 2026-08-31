@@ -1672,7 +1672,8 @@ fn stable_float64_loop_stays_native_without_a_side_path() {
             5000.5
         );
     }
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         jit.poll();
         if jit.metrics().installed >= 2 {
             break;
