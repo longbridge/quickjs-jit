@@ -14,7 +14,8 @@ cargo test -p gpui-shell --release \
 
 The patch:
 
-- enables a native-default, non-Wasm `quickjs-jit` dependency while retaining
+- switches the shell to the published `quickjs-jit` distribution, enables a
+  native-default, non-Wasm `quickjs-jit-runtime` dependency, and retains
   the ordinary interpreter runtime as an explicit benchmark mode;
 - owns `JitRuntime` for the full QuickJS context lifetime and polls bounded JIT
   maintenance only after `Context::with` releases its lock;

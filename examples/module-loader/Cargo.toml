@@ -6,6 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies.rquickjs]
+package = "quickjs-jit"
 path = "../.."
 default-features = false
 features = ["futures", "rust-alloc", "loader", "dyn-load", "std"]

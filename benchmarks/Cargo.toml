@@ -25,7 +25,7 @@ name = "jit-size-jit"
 path = "size-jit.rs"
 
 [dependencies]
-rquickjs = { path = "..", features = ["jit-abi"] }
-rquickjs-jit = { path = "../jit", features = ["compiler", "test-support"] }
+rquickjs = { package = "quickjs-jit", path = "..", features = ["jit-abi"] }
+rquickjs-jit = { package = "quickjs-jit-runtime", path = "../jit", features = ["compiler", "test-support"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

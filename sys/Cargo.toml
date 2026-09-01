@@ -1,14 +1,14 @@
 [package]
-name = "rquickjs-sys"
+name = "quickjs-jit-sys"
 version = "0.12.2"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
 edition = "2021"
 license = "MIT"
 readme = "README.md"
-description = "QuickJS bindings for rquickjs"
+description = "QuickJS native bindings with the versioned JIT ABI"
 keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
 categories = ["external-ffi-bindings"]
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/longbridge/rquickjs.git"
 include = [
     "Cargo.toml",
     "README.md",
@@ -39,6 +39,9 @@ include = [
     "src/**/*.rs",
     "tests/jit_patch.rs",
 ]
+
+[lib]
+name = "rquickjs_sys"
 
 [build-dependencies]
 cc = "1"

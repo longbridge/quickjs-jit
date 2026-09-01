@@ -9,8 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rquickjs-jit = { path = "..", features = ["compiler", "test-support"] }
-rquickjs-core = { path = "../../core", features = ["jit-abi"] }
+rquickjs-jit = { package = "quickjs-jit-runtime", path = "..", features = ["compiler", "test-support"] }
+rquickjs-core = { package = "quickjs-jit-core", path = "../../core", features = ["jit-abi"] }
 
 [workspace]
 members = ["."]

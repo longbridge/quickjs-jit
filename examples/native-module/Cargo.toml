@@ -9,6 +9,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies.rquickjs]
+package = "quickjs-jit"
 path = "../.."
 default-features = false
 features = ["futures", "rust-alloc", "std"]

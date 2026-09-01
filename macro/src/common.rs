@@ -72,15 +72,41 @@ impl Case {
     }
 }
 
-pub(crate) fn crate_ident() -> Result<String> {
-    match proc_macro_crate::crate_name("rquickjs") {
-        Err(e) => Err(Error::new(
-            Span::call_site(),
-            format_args!("could not find rquickjs package: {e}"),
-        )),
-        Ok(FoundCrate::Itself) => Ok("rquickjs".to_owned()),
-        Ok(FoundCrate::Name(x)) => Ok(x.to_string()),
+const JIT_PACKAGE: &str = "quickjs-jit";
+const UPSTREAM_PACKAGE: &str = "rquickjs";
+const JIT_DEFAULT_CRATE_IDENT: &str = "quickjs_jit";
+const COMPATIBLE_LIB_IDENT: &str = "rquickjs";
+
+fn top_level_package_candidates() -> [&'static str; 2] {
+    [JIT_PACKAGE, UPSTREAM_PACKAGE]
+}
+
+fn normalize_crate_name(name: &str) -> &str {
+    // proc-macro-crate derives this identifier from the package name when the
+    // dependency is not explicitly aliased, but our compatible lib target is
+    // intentionally still named `rquickjs`.
+    match name {
+        JIT_DEFAULT_CRATE_IDENT => COMPATIBLE_LIB_IDENT,
+        name => name,
     }
+}
+
+pub(crate) fn crate_ident() -> Result<String> {
+    let mut last_error = None;
+    for package in top_level_package_candidates() {
+        match proc_macro_crate::crate_name(package) {
+            Ok(FoundCrate::Itself) => return Ok(COMPATIBLE_LIB_IDENT.to_owned()),
+            Ok(FoundCrate::Name(name)) => return Ok(normalize_crate_name(&name).to_owned()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(Error::new(
+        Span::call_site(),
+        format_args!(
+            "could not find quickjs-jit or rquickjs package: {}",
+            last_error.expect("package candidates are non-empty")
+        ),
+    ))
 }
 
 /// Add the 'js lifetime to a list of existing lifetimes, if it doesn't already exits.
@@ -146,4 +172,21 @@ pub(crate) mod kw {
     syn::custom_keyword!(has);
     syn::custom_keyword!(get_own_property);
     syn::custom_keyword!(get_own_property_names);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn top_level_package_candidates_prefer_jit_distribution() {
+        assert_eq!(
+            super::top_level_package_candidates(),
+            ["quickjs-jit", "rquickjs"]
+        );
+    }
+
+    #[test]
+    fn default_jit_package_name_maps_to_compatible_library_name() {
+        assert_eq!(super::normalize_crate_name("quickjs_jit"), "rquickjs");
+        assert_eq!(super::normalize_crate_name("js"), "js");
+    }
 }

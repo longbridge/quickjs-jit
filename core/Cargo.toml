@@ -1,14 +1,17 @@
 [package]
-name = "rquickjs-core"
+name = "quickjs-jit-core"
 version = "0.12.2"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>", "K. <kayo@illumium.org>"]
 edition = "2021"
 license = "MIT"
 readme = "README.md"
-description = "High level bindings to the QuickJS JavaScript engine"
+description = "Core bindings for the quickjs-jit distribution"
 keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
 categories = ["api-bindings"]
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/longbridge/rquickjs.git"
+
+[lib]
+name = "rquickjs_core"
 
 [package.metadata.docs.rs]
 features = ["full-async", "doc-cfg"]
@@ -36,7 +39,7 @@ tokio = { version = "1", default-features = false, features = [
   "macros",
   "sync",
 ] }
-rquickjs.path = "../"
+rquickjs = { package = "quickjs-jit", path = "../" }
 approx = "0.5"
 trybuild = "1"
 

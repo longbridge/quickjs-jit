@@ -1,15 +1,18 @@
 [package]
-name = "rquickjs"
+name = "quickjs-jit"
 version = "0.12.2"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>", "K. <kayo@illumium.org>"]
 edition = "2021"
 rust-version = "1.87"
 license = "MIT"
 readme = "README.md"
-description = "High level bindings to the QuickJS JavaScript engine"
+description = "JIT-enabled high level bindings to the QuickJS JavaScript engine"
 keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
 categories = ["api-bindings"]
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/longbridge/rquickjs.git"
+
+[lib]
+name = "rquickjs"
 
 
 [workspace]
@@ -28,10 +31,10 @@ members = [
 ]
 
 [workspace.dependencies]
-rquickjs-core = { version = "0.12.2", path = "core", default-features = false }
-rquickjs-macro = { version = "0.12.2", path = "macro", default-features = false }
-rquickjs-sys = { version = "0.12.2", path = "sys", default-features = false }
-rquickjs = { version = "0.12.2", path = "./", default-features = false }
+rquickjs-core = { package = "quickjs-jit-core", version = "0.12.2", path = "core", default-features = false }
+rquickjs-macro = { package = "quickjs-jit-macro", version = "0.12.2", path = "macro", default-features = false }
+rquickjs-sys = { package = "quickjs-jit-sys", version = "0.12.2", path = "sys", default-features = false }
+rquickjs = { package = "quickjs-jit", version = "0.12.2", path = "./", default-features = false }
 
 [dependencies]
 indexmap-rs = { package = "indexmap", version = "2", optional = true }

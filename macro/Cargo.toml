@@ -1,16 +1,17 @@
 [package]
-name = "rquickjs-macro"
+name = "quickjs-jit-macro"
 version = "0.12.2"
 authors = ["K. <kayo@illumium.org>", "Mees Delzenne <mees.delzenne@gmail.com>"]
 edition = "2021"
 license = "MIT"
 readme = "README.md"
-description = "Procedural macros for rquickjs"
+description = "Procedural macros for the quickjs-jit distribution"
 keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
 categories = ["api-bindings"]
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/longbridge/rquickjs.git"
 
 [lib]
+name = "rquickjs_macro"
 proc-macro = true
 
 [dependencies]
@@ -27,7 +28,7 @@ phf_shared = { version = "0.14", optional = true }
 phf_generator = { version = "0.14", optional = true }
 
 [dev-dependencies]
-rquickjs = { path = "../", features = ["macro", "futures", "phf"] }
+rquickjs = { package = "quickjs-jit", path = "../", features = ["macro", "futures", "phf"] }
 difference = "2"
 
 
