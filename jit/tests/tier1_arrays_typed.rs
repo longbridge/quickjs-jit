@@ -282,7 +282,11 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
         .with(|ctx| ctx.eval::<(), _>(include_str!("../../benchmarks/scripts/arrays-typed.js")))
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Sanitizer instrumentation makes each queued compilation substantially
+    // slower, and this workload discovers many hot functions at once. Keep the
+    // multi-install precondition while allowing the single compiler worker to
+    // make progress through that queue.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         context.with(|ctx| {
             let workload: Function<'_> = ctx.globals().get("workload").unwrap();
