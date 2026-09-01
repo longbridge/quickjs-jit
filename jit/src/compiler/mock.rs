@@ -86,6 +86,14 @@ impl FakeCompilerControl {
             .ok()
     }
 
+    pub fn request_within(&self, timeout: std::time::Duration) -> Option<CompileRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recv_timeout(timeout)
+            .ok()
+    }
+
     pub fn complete(&self, artifact: CompiledArtifact) {
         let _ = self.releases.send(Ok(artifact));
     }

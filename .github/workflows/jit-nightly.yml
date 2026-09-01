@@ -30,13 +30,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs submodule update --init test262
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
       - name: Interpreter shard
-        run: cargo run -p rquickjs-jit --release --features compiler,test-support --bin jit-test262 -- --mode interpreter --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/interpreter-${{ matrix.shard }}.json
+        run: cargo run -p quickjs-jit-runtime --release --features compiler,test-support --bin jit-test262 -- --mode interpreter --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/interpreter-${{ matrix.shard }}.json
       - name: Automatic JIT shard
-        run: cargo run -p rquickjs-jit --release --features compiler,test-support --bin jit-test262 -- --mode automatic --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/automatic-${{ matrix.shard }}.json
+        run: cargo run -p quickjs-jit-runtime --release --features compiler,test-support --bin jit-test262 -- --mode automatic --shard-index ${{ matrix.shard }} --shard-count 256 --output target/nightly/automatic-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v7
         with:
           name: test262-${{ matrix.shard }}
@@ -86,6 +88,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs submodule update --init test262
       - name: Build and run pinned QuickJS reference tests
         run: make -C sys/quickjs test
 
@@ -99,8 +103,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs submodule update --init test262
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo test -p rquickjs-jit --release --features compiler,test-support --test test262 -- --test-threads=1
+      - run: cargo test -p quickjs-jit-runtime --release --features compiler,test-support --test test262 -- --test-threads=1
 
   wasm-interpreter-only:
     runs-on: ubuntu-latest
@@ -114,8 +120,8 @@ jobs:
       - name: WASM builds without the native compiler tier
         shell: bash
         run: |
-          cargo check -p rquickjs --target wasm32-wasip1 --no-default-features
-          if cargo tree -p rquickjs --target wasm32-wasip1 --no-default-features -e normal | grep -q cranelift; then
+          cargo check -p quickjs-jit --target wasm32-wasip1 --no-default-features
+          if cargo tree -p quickjs-jit --target wasm32-wasip1 --no-default-features -e normal | grep -q cranelift; then
             echo "Cranelift unexpectedly present in the WebAssembly interpreter graph" >&2
             exit 1
           fi

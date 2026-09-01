@@ -23,6 +23,13 @@
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
     },
     {
+      "opcode": "push_atom_value",
+      "definition": "function f(a){ return a ? 'quickjs-jit-atom' : 'fallback-atom' }",
+      "expression": "f(true)+'|'+f(false)",
+      "helper": "AtomValue",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc"]
+    },
+    {
       "opcode": "dup",
       "definition": "function f(a,b){let x=b;let y=b;while(x<a){y=y+x;x++;}return y}",
       "expression": "f(10,0)",
@@ -139,6 +146,18 @@
       ]
     },
     {
+      "opcode": "define_field",
+      "definition": "function f(value){ return {kind:'panel',value:value} }",
+      "expression": "JSON.stringify(f(42))",
+      "helper": "SetProperty",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
       "opcode": "get_array_el",
       "definition": "function f(o,k){ return o[k] }",
       "expression": "f(new Proxy([20,42],{get(o,k){return o[k]}}),1)",
@@ -156,6 +175,13 @@
       "opcode": "put_array_el",
       "definition": "function f(o,k,v){ o[k]=v; return v }",
       "expression": "(()=>{const a=new Int32Array(2);return [f(a,1,42),a[1]]})()",
+      "helper": "SetElement",
+      "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
+    },
+    {
+      "opcode": "define_array_el",
+      "definition": "function f(key,value){ return {[key]:value} }",
+      "expression": "JSON.stringify(f('panel',42))",
       "helper": "SetElement",
       "dimensions": ["normal", "exception-or-nonthrow", "ownership-gc", "coercion-reentrancy"]
     },

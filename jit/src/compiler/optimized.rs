@@ -254,6 +254,14 @@ enum OptProvenance {
     Unknown,
 }
 
+#[derive(Clone, Copy)]
+struct GuardedElementSource {
+    provenance: OptProvenance,
+    data: cranelift_codegen::ir::Value,
+    count: cranelift_codegen::ir::Value,
+    kind: cranelift_codegen::ir::Value,
+}
+
 #[derive(Clone, Copy, Default)]
 enum EntryRepresentation {
     #[default]
@@ -261,16 +269,19 @@ enum EntryRepresentation {
     Numeric,
     Int32,
     Float64,
+    HeapRef,
 }
 
 #[derive(Default)]
 struct NumericSpecialization {
     entry: EntryRepresentation,
+    arguments: Box<[EntryRepresentation]>,
     int_pcs: std::collections::BTreeSet<u32>,
     float_pcs: std::collections::BTreeSet<u32>,
     calls: std::collections::BTreeMap<u32, crate::runtime::CallSpecializationKey>,
     properties: std::collections::BTreeMap<u32, Box<[crate::runtime::ShapeObservation]>>,
     direct_calls: std::collections::BTreeMap<u32, DirectCallSite>,
+    numeric_constants: std::collections::BTreeMap<u32, crate::ir::TaggedValue>,
 }
 
 #[derive(Clone)]
@@ -332,24 +343,44 @@ impl NumericSpecialization {
                 safe.then_some((instruction.pc(), observations.to_vec().into_boxed_slice()))
             })
             .collect();
+        let numeric_constants = function
+            .snapshot()
+            .constants()
+            .iter()
+            .filter_map(|constant| {
+                matches!(
+                    constant.tag(),
+                    rquickjs_core::qjs::JS_TAG_INT | rquickjs_core::qjs::JS_TAG_FLOAT64
+                )
+                .then_some((
+                    constant.index(),
+                    crate::ir::TaggedValue::new(constant.payload(), i64::from(constant.tag())),
+                ))
+            })
+            .collect();
         let argument_count = usize::from(function.snapshot().arg_count());
-        let Some(representation) = feedback.bounded_specialization(key).and_then(|signature| {
-            (signature.arity() == argument_count
-                && signature
-                    .arguments()
-                    .iter()
-                    .all(|argument| *argument == signature.result()))
-            .then_some(signature.result())
-        }) else {
+        let Some(signature) = feedback
+            .bounded_specialization(key)
+            .filter(|signature| signature.arity() == argument_count)
+        else {
             return Self {
                 calls,
                 properties,
+                numeric_constants,
                 ..Self::default()
             };
         };
+        let representation = signature.result();
         let observed = match representation {
             FeedbackRepresentation::Int32 => ObservedType::Int32,
             FeedbackRepresentation::Float64 => ObservedType::Float64,
+            FeedbackRepresentation::HeapRef => {
+                return Self {
+                    calls,
+                    properties,
+                    ..Self::default()
+                }
+            }
         };
         let int_pcs = function
             .instructions()
@@ -384,15 +415,35 @@ impl NumericSpecialization {
             })
             .collect();
         Self {
-            entry: match representation {
-                FeedbackRepresentation::Int32 => EntryRepresentation::Int32,
-                FeedbackRepresentation::Float64 => EntryRepresentation::Float64,
+            entry: if signature
+                .arguments()
+                .iter()
+                .all(|argument| *argument == representation)
+            {
+                match representation {
+                    FeedbackRepresentation::Int32 => EntryRepresentation::Int32,
+                    FeedbackRepresentation::Float64 => EntryRepresentation::Float64,
+                    FeedbackRepresentation::HeapRef => EntryRepresentation::Any,
+                }
+            } else {
+                EntryRepresentation::Any
             },
+            arguments: signature
+                .arguments()
+                .iter()
+                .map(|argument| match argument {
+                    FeedbackRepresentation::Int32 => EntryRepresentation::Int32,
+                    FeedbackRepresentation::Float64 => EntryRepresentation::Float64,
+                    FeedbackRepresentation::HeapRef => EntryRepresentation::HeapRef,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             int_pcs,
             float_pcs,
             calls,
             properties,
             direct_calls: Default::default(),
+            numeric_constants,
         }
     }
 }
@@ -414,6 +465,9 @@ fn lower_optimized_machine(
         return Err(CompileFailure::InvalidArtifact);
     }
     let layout = super::helpers::FrameLayout::validated(8)?;
+    let element_layout = crate::abi::AbiInfo::linked()
+        .map_err(|_| CompileFailure::InvalidArtifact)?
+        .element_layout();
     let Some(entry_site) = ir.guard_maps().first() else {
         return Err(CompileFailure::InvalidArtifact);
     };
@@ -478,6 +532,7 @@ fn lower_optimized_machine(
             .ok_or(CompileFailure::ResourceLimit)?;
         let stack = (0..stack_slots).map(|_| alloc()).collect::<Vec<_>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
+        let mut guarded_element_source = None;
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         for vars in arguments.iter().chain(&locals).chain(&stack) {
             builder.declare_var(vars.payload, payload_type);
@@ -535,6 +590,7 @@ fn lower_optimized_machine(
             entry,
             side_path.filter(|profile| profile.guard().get() == entry_site.guard()),
             specialization.entry,
+            &specialization.arguments,
         );
         for block in ir.blocks() {
             let clif_block = blocks[&block.start_pc()];
@@ -591,6 +647,7 @@ fn lower_optimized_machine(
                                 pass,
                                 side_path.filter(|profile| profile.guard().get() == *guard),
                                 EntryRepresentation::Numeric,
+                                &specialization.arguments,
                             );
                             builder.switch_to_block(pass);
                         }
@@ -606,6 +663,9 @@ fn lower_optimized_machine(
                     }
                     crate::ir::OptimizedNodeKind::Bytecode { opcode } => {
                         let name = opcode.as_ref();
+                        if node.effect() == crate::ir::OptimizedEffect::Reentrant {
+                            guarded_element_source = None;
+                        }
                         match name {
                             "set_loc_uninitialized" => {
                                 let index = opt_u16(node.bytes())?;
@@ -670,6 +730,38 @@ fn lower_optimized_machine(
                                 stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
                                 depth += 1;
                             }
+                            "push_const" | "push_const8" => {
+                                let constant = if name == "push_const8" {
+                                    u32::from(
+                                        *node
+                                            .bytes()
+                                            .get(1)
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                    )
+                                } else {
+                                    u32::from_le_bytes(
+                                        node.bytes()
+                                            .get(1..5)
+                                            .ok_or(CompileFailure::InvalidArtifact)?
+                                            .try_into()
+                                            .map_err(|_| CompileFailure::InvalidArtifact)?,
+                                    )
+                                };
+                                let constant = specialization
+                                    .numeric_constants
+                                    .get(&constant)
+                                    .copied()
+                                    .ok_or(CompileFailure::UnsupportedOpcode)?;
+                                let pair = OptPair {
+                                    payload: builder
+                                        .ins()
+                                        .iconst(types::I64, constant.payload as i64),
+                                    tag: builder.ins().iconst(types::I64, constant.tag),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
+                                depth += 1;
+                            }
                             "push_0" | "push_1" | "push_2" | "push_3" | "push_4" | "push_5"
                             | "push_6" | "push_7" => {
                                 let value = i64::from(name.as_bytes()[5] - b'0');
@@ -723,6 +815,63 @@ fn lower_optimized_machine(
                                 stack_provenance[depth] = stack_provenance[source];
                                 depth += 1;
                             }
+                            "swap" => {
+                                let lhs = depth
+                                    .checked_sub(2)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let rhs = lhs + 1;
+                                let lhs_value = opt_use(&mut builder, stack[lhs]);
+                                let rhs_value = opt_use(&mut builder, stack[rhs]);
+                                opt_define(&mut builder, stack[lhs], rhs_value);
+                                opt_define(&mut builder, stack[rhs], lhs_value);
+                                stack_provenance.swap(lhs, rhs);
+                            }
+                            "is_undefined_or_null" => {
+                                let index = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let value = opt_use(&mut builder, stack[index]);
+                                let undefined = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    value.tag,
+                                    i64::from(qjs::JS_TAG_UNDEFINED),
+                                );
+                                let null = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    value.tag,
+                                    i64::from(qjs::JS_TAG_NULL),
+                                );
+                                let truth = builder.ins().bor(undefined, null);
+                                let payload = builder.ins().uextend(types::I64, truth);
+                                let result = OptPair {
+                                    payload,
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_BOOL)),
+                                };
+                                opt_define(&mut builder, stack[index], result);
+                                stack_provenance[index] = OptProvenance::ImmediatePrimitive;
+                            }
+                            "to_propkey" => {
+                                depth = emit_opt_guarded_propkey(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    arg_buf,
+                                    var_buf,
+                                    stack_base,
+                                    &arguments,
+                                    &locals,
+                                    &stack,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    &helper_signatures,
+                                    pointer_type,
+                                    layout,
+                                )?;
+                            }
                             "drop" => {
                                 depth = depth
                                     .checked_sub(1)
@@ -754,6 +903,74 @@ fn lower_optimized_machine(
                                     pointer_type,
                                     layout,
                                 )?;
+                            }
+                            "get_array_el" => {
+                                depth = emit_opt_element_get(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    arg_buf,
+                                    var_buf,
+                                    stack_base,
+                                    &arguments,
+                                    &locals,
+                                    &stack,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    &helper_signatures,
+                                    pointer_type,
+                                    layout,
+                                    element_layout,
+                                    guarded_element_source,
+                                )?;
+                            }
+                            "get_length" => {
+                                let source_provenance = stack_provenance[depth - 1];
+                                depth = emit_opt_array_length(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    arg_buf,
+                                    var_buf,
+                                    stack_base,
+                                    &arguments,
+                                    &locals,
+                                    &stack,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    &helper_signatures,
+                                    pointer_type,
+                                    layout,
+                                    element_layout,
+                                    source_provenance,
+                                    &mut guarded_element_source,
+                                )?;
+                            }
+                            "put_array_el" => {
+                                depth = emit_opt_element_put(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    arg_buf,
+                                    var_buf,
+                                    stack_base,
+                                    &arguments,
+                                    &locals,
+                                    &stack,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    &helper_signatures,
+                                    pointer_type,
+                                    layout,
+                                    element_layout,
+                                )?;
+                                guarded_element_source = None;
                             }
                             "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
                                 let Some(call) = specialization.calls.get(&node.pc()) else {
@@ -835,6 +1052,24 @@ fn lower_optimized_machine(
                                     continue;
                                 }
                                 if specialization.int_pcs.contains(&node.pc()) {
+                                    let deopt = builder.create_block();
+                                    if !int32_loop {
+                                        use cranelift_codegen::ir::condcodes::IntCC;
+                                        let lhs_int = builder.ins().icmp_imm(
+                                            IntCC::Equal,
+                                            lhs.tag,
+                                            i64::from(qjs::JS_TAG_INT),
+                                        );
+                                        let rhs_int = builder.ins().icmp_imm(
+                                            IntCC::Equal,
+                                            rhs.tag,
+                                            i64::from(qjs::JS_TAG_INT),
+                                        );
+                                        let both_int = builder.ins().band(lhs_int, rhs_int);
+                                        let arithmetic = builder.create_block();
+                                        builder.ins().brif(both_int, arithmetic, &[], deopt, &[]);
+                                        builder.switch_to_block(arithmetic);
+                                    }
                                     let li = if int32_loop {
                                         lhs.payload
                                     } else {
@@ -845,7 +1080,6 @@ fn lower_optimized_machine(
                                     } else {
                                         builder.ins().ireduce(types::I32, rhs.payload)
                                     };
-                                    let deopt = builder.create_block();
                                     let pass = builder.create_block();
                                     builder.append_block_param(pass, types::I32);
                                     if name == "div" {
@@ -1016,6 +1250,27 @@ fn lower_optimized_machine(
                                 reusable_values.insert(*node_id, pair);
                                 depth += 1;
                             }
+                            "or" | "and" | "xor" | "shl" | "sar" => {
+                                depth = emit_opt_guarded_int_binary(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    arg_buf,
+                                    var_buf,
+                                    stack_base,
+                                    &arguments,
+                                    &locals,
+                                    &stack,
+                                    &mut stack_provenance,
+                                    depth,
+                                    name,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    &helper_signatures,
+                                    pointer_type,
+                                    layout,
+                                )?;
+                            }
                             "lt" | "lte" | "gt" | "gte" => {
                                 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
                                 depth = depth
@@ -1063,18 +1318,40 @@ fn lower_optimized_machine(
                                         tag: old.tag,
                                     }
                                 } else {
+                                    use cranelift_codegen::ir::condcodes::IntCC;
+                                    let old_is_int = builder.ins().icmp_imm(
+                                        IntCC::Equal,
+                                        old.tag,
+                                        i64::from(qjs::JS_TAG_INT),
+                                    );
+                                    let old_int = builder.ins().ireduce(types::I32, old.payload);
+                                    let one_int = builder.ins().iconst(types::I32, 1);
+                                    let (int_result, overflow) =
+                                        builder.ins().sadd_overflow(old_int, one_int);
+                                    let no_overflow = builder.ins().bnot(overflow);
+                                    let keep_int = builder.ins().band(old_is_int, no_overflow);
                                     let one = builder.ins().f64const(1.0);
-                                    let old = opt_f64(&mut builder, old);
-                                    let result = builder.ins().fadd(old, one);
+                                    let old_float = opt_f64(&mut builder, old);
+                                    let float_result = builder.ins().fadd(old_float, one);
+                                    let int_payload = builder.ins().sextend(types::I64, int_result);
+                                    let float_payload = builder.ins().bitcast(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        float_result,
+                                    );
+                                    let int_tag = builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+                                    let float_tag = builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
                                     OptPair {
-                                        payload: builder.ins().bitcast(
-                                            types::I64,
-                                            MemFlags::new(),
-                                            result,
+                                        payload: builder.ins().select(
+                                            keep_int,
+                                            int_payload,
+                                            float_payload,
                                         ),
-                                        tag: builder
-                                            .ins()
-                                            .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
+                                        tag: builder.ins().select(keep_int, int_tag, float_tag),
                                     }
                                 };
                                 if name == "post_inc" {
@@ -1331,6 +1608,7 @@ pub(crate) fn lower_direct_call_machine(
     let scalar = match representation {
         FeedbackRepresentation::Int32 => types::I32,
         FeedbackRepresentation::Float64 => types::F64,
+        FeedbackRepresentation::HeapRef => return Err(CompileFailure::InvalidArtifact),
     };
     let mut abi = Signature::new(isa.default_call_conv());
     abi.params.push(AbiParam::new(isa.pointer_type()));
@@ -1357,6 +1635,9 @@ pub(crate) fn lower_direct_call_machine(
                     stack.push(match representation {
                         FeedbackRepresentation::Int32 => builder.ins().iconst(types::I32, value),
                         FeedbackRepresentation::Float64 => builder.ins().f64const(value as f64),
+                        FeedbackRepresentation::HeapRef => {
+                            unreachable!("direct calls are scalar-only")
+                        }
                     });
                 };
             match name {
@@ -1421,6 +1702,9 @@ pub(crate) fn lower_direct_call_machine(
                             builder.ins().return_(&[status]);
                             builder.switch_to_block(ok);
                             builder.block_params(ok)[0]
+                        }
+                        FeedbackRepresentation::HeapRef => {
+                            unreachable!("direct calls are scalar-only")
                         }
                     };
                     stack.push(value);
@@ -1541,6 +1825,1125 @@ fn opt_index(name: &str, bytes: &[u8], prefix: &str) -> Result<Option<usize>, Co
         return Ok(Some(usize::from(*last - b'0')));
     }
     Ok(Some(opt_u16(bytes)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_guarded_propkey(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    let index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let value = opt_use(builder, stack[index]);
+    let int = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_INT));
+    let string = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_STRING));
+    let symbol = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_SYMBOL));
+    let valid = builder.ins().bor(int, string);
+    let valid = builder.ins().bor(valid, symbol);
+    let continuation = builder.create_block();
+    let deopt = builder.create_block();
+    builder.ins().brif(valid, continuation, &[], deopt, &[]);
+    builder.switch_to_block(deopt);
+    for (slot, vars) in arguments.iter().enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, slot, current);
+    }
+    for (slot, vars) in locals.iter().enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, var_buf, slot, current);
+    }
+    for (slot, vars) in stack.iter().take(depth).enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, stack_base, slot, current);
+    }
+    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+    builder.switch_to_block(continuation);
+    Ok(depth)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_guarded_int_binary(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    operation: &str,
+    pc: u32,
+    guard: u32,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+
+    let output = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let lhs = opt_use(builder, stack[output]);
+    let rhs = opt_use(builder, stack[output + 1]);
+    let lhs_int = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, lhs.tag, i64::from(qjs::JS_TAG_INT));
+    let rhs_int = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, rhs.tag, i64::from(qjs::JS_TAG_INT));
+    let both_int = builder.ins().band(lhs_int, rhs_int);
+    let direct = builder.create_block();
+    let deopt = builder.create_block();
+    builder.ins().brif(both_int, direct, &[], deopt, &[]);
+
+    builder.switch_to_block(direct);
+    let lhs = builder.ins().ireduce(types::I32, lhs.payload);
+    let rhs = builder.ins().ireduce(types::I32, rhs.payload);
+    let value = match operation {
+        "or" => builder.ins().bor(lhs, rhs),
+        "and" => builder.ins().band(lhs, rhs),
+        "xor" => builder.ins().bxor(lhs, rhs),
+        "shl" => builder.ins().ishl(lhs, rhs),
+        "sar" => builder.ins().sshr(lhs, rhs),
+        _ => return Err(CompileFailure::UnsupportedOpcode),
+    };
+    let payload = if builder.func.dfg.value_type(lhs) == types::I32 {
+        builder.ins().sextend(types::I64, value)
+    } else {
+        value
+    };
+    let result = OptPair {
+        payload,
+        tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+    };
+    opt_define(builder, stack[output], result);
+    let continuation = builder.create_block();
+    builder.ins().jump(continuation, &[]);
+
+    builder.switch_to_block(deopt);
+    for (index, vars) in arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, index, value);
+    }
+    for (index, vars) in locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, var_buf, index, value);
+    }
+    for (index, vars) in stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, stack_base, index, value);
+    }
+    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+    builder.switch_to_block(continuation);
+    stack_provenance[output] = OptProvenance::ImmediatePrimitive;
+    stack_provenance[output + 1] = OptProvenance::Unknown;
+    Ok(output + 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_array_length(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    element_layout: crate::abi::ElementLayout,
+    source_provenance: OptProvenance,
+    guarded_source: &mut Option<GuardedElementSource>,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+
+    let index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let object = opt_use(builder, stack[index]);
+    let classify = builder.create_block();
+    let deopt = builder.create_block();
+    let packed = builder.create_block();
+    let typed = builder.create_block();
+    let continuation = builder.create_block();
+    builder.append_block_param(typed, types::I8);
+    builder.append_block_param(continuation, types::I32);
+    builder.append_block_param(continuation, pointer_type);
+    builder.append_block_param(continuation, types::I8);
+    let object_ok = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
+    builder.ins().brif(object_ok, classify, &[], deopt, &[]);
+
+    builder.switch_to_block(classify);
+    let flags = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_flags_offset,
+    );
+    let fast = builder
+        .ins()
+        .band_imm(flags, element_layout.object_fast_array_mask);
+    let fast = builder.ins().icmp_imm(IntCC::NotEqual, fast, 0);
+    let class_check = builder.create_block();
+    builder.ins().brif(fast, class_check, &[], deopt, &[]);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.array_class_id);
+    let typed_check = builder.create_block();
+    builder.ins().brif(is_array, packed, &[], typed_check, &[]);
+    builder.switch_to_block(typed_check);
+    let is_i32 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.int32_array_class_id);
+    let is_f64 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.float64_array_class_id);
+    let is_typed = builder.ins().bor(is_i32, is_f64);
+    let int_kind = builder.ins().iconst(types::I8, 1);
+    let float_kind = builder.ins().iconst(types::I8, 2);
+    let typed_kind = builder.ins().select(is_i32, int_kind, float_kind);
+    let typed_accepted = builder.create_block();
+    builder
+        .ins()
+        .brif(is_typed, typed_accepted, &[], deopt, &[]);
+    builder.switch_to_block(typed_accepted);
+    builder.ins().jump(typed, &[typed_kind]);
+
+    builder.switch_to_block(packed);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let packed_ready = builder.create_block();
+    builder.ins().brif(has_data, packed_ready, &[], deopt, &[]);
+    builder.switch_to_block(packed_ready);
+    let kind = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(continuation, &[count, data, kind]);
+
+    builder.switch_to_block(typed);
+    let typed_data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.typed_array_ptr_offset,
+    );
+    let has_typed = builder.ins().icmp_imm(IntCC::NotEqual, typed_data, 0);
+    let stable_check = builder.create_block();
+    builder.ins().brif(has_typed, stable_check, &[], deopt, &[]);
+    builder.switch_to_block(stable_check);
+    let tracks_resizable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        typed_data,
+        element_layout.typed_array_track_rab_offset,
+    );
+    let stable = builder.ins().icmp_imm(IntCC::Equal, tracks_resizable, 0);
+    let buffer_check = builder.create_block();
+    builder.ins().brif(stable, buffer_check, &[], deopt, &[]);
+    builder.switch_to_block(buffer_check);
+    let buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        typed_data,
+        element_layout.typed_array_buffer_offset,
+    );
+    let has_buffer = builder.ins().icmp_imm(IntCC::NotEqual, buffer, 0);
+    let array_buffer_check = builder.create_block();
+    builder
+        .ins()
+        .brif(has_buffer, array_buffer_check, &[], deopt, &[]);
+    builder.switch_to_block(array_buffer_check);
+    let array_buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        buffer,
+        element_layout.object_union_offset,
+    );
+    let has_array_buffer = builder.ins().icmp_imm(IntCC::NotEqual, array_buffer, 0);
+    let detach_check = builder.create_block();
+    builder
+        .ins()
+        .brif(has_array_buffer, detach_check, &[], deopt, &[]);
+    builder.switch_to_block(detach_check);
+    let detached = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_detached_offset,
+    );
+    let attached = builder.ins().icmp_imm(IntCC::Equal, detached, 0);
+    let load_count = builder.create_block();
+    builder.ins().brif(attached, load_count, &[], deopt, &[]);
+    builder.switch_to_block(load_count);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let typed_ready = builder.create_block();
+    builder.ins().brif(has_data, typed_ready, &[], deopt, &[]);
+    builder.switch_to_block(typed_ready);
+    let kind = builder.block_params(typed)[0];
+    builder.ins().jump(continuation, &[count, data, kind]);
+
+    builder.switch_to_block(deopt);
+    for (slot, vars) in arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, slot, value);
+    }
+    for (slot, vars) in locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, var_buf, slot, value);
+    }
+    for (slot, vars) in stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, stack_base, slot, value);
+    }
+    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+
+    builder.switch_to_block(continuation);
+    let count = builder.block_params(continuation)[0];
+    let data = builder.block_params(continuation)[1];
+    let kind = builder.block_params(continuation)[2];
+    let result = OptPair {
+        payload: builder.ins().sextend(types::I64, count),
+        tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+    };
+    opt_define(builder, stack[index], result);
+    stack_provenance[index] = OptProvenance::ImmediatePrimitive;
+    *guarded_source = Some(GuardedElementSource {
+        provenance: source_provenance,
+        data,
+        count,
+        kind,
+    });
+    Ok(depth)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_element_get(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    element_layout: crate::abi::ElementLayout,
+    guarded_source: Option<GuardedElementSource>,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+
+    let object_index = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let object = opt_use(builder, stack[object_index]);
+    let key = opt_use(builder, stack[object_index + 1]);
+    let direct = builder.create_block();
+    let deopt = builder.create_block();
+    let classify = builder.create_block();
+    let packed = builder.create_block();
+    let int32 = builder.create_block();
+    let float64 = builder.create_block();
+    let typed_common = builder.create_block();
+    let continuation = builder.create_block();
+    builder.append_block_param(typed_common, types::I8);
+    builder.append_block_param(continuation, types::I64);
+    builder.append_block_param(continuation, types::I64);
+
+    let object_ok = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
+    let key_ok = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, key.tag, i64::from(qjs::JS_TAG_INT));
+    let tags_ok = builder.ins().band(object_ok, key_ok);
+    let cached = guarded_source.filter(|source| {
+        source.provenance == stack_provenance[object_index]
+            && matches!(
+                source.provenance,
+                OptProvenance::Argument(_) | OptProvenance::Local(_)
+            )
+    });
+    let cached_index = cached.map(|_| builder.create_block());
+    builder
+        .ins()
+        .brif(tags_ok, cached_index.unwrap_or(direct), &[], deopt, &[]);
+
+    if let (Some(source), Some(cached_index)) = (cached, cached_index) {
+        builder.switch_to_block(cached_index);
+        let index = builder.ins().ireduce(types::I32, key.payload);
+        let in_bounds = builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, index, source.count);
+        let cached_dispatch = builder.create_block();
+        builder
+            .ins()
+            .brif(in_bounds, cached_dispatch, &[], deopt, &[]);
+        builder.switch_to_block(cached_dispatch);
+        let packed_kind = builder.ins().icmp_imm(IntCC::Equal, source.kind, 0);
+        let cached_packed = builder.create_block();
+        let cached_typed = builder.create_block();
+        builder
+            .ins()
+            .brif(packed_kind, cached_packed, &[], cached_typed, &[]);
+        builder.switch_to_block(cached_packed);
+        let offset = builder.ins().imul_imm(index, 16);
+        let offset = builder.ins().uextend(pointer_type, offset);
+        let address = builder.ins().iadd(source.data, offset);
+        let payload = builder.ins().load(types::I64, MemFlags::new(), address, 0);
+        let tag = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), address, layout.value_tag);
+        let primitive = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, tag, 0);
+        let cached_packed_done = builder.create_block();
+        builder
+            .ins()
+            .brif(primitive, cached_packed_done, &[], deopt, &[]);
+        builder.switch_to_block(cached_packed_done);
+        builder.ins().jump(continuation, &[payload, tag]);
+        builder.switch_to_block(cached_typed);
+        let int_kind = builder.ins().icmp_imm(IntCC::Equal, source.kind, 1);
+        let cached_int = builder.create_block();
+        let cached_float = builder.create_block();
+        builder
+            .ins()
+            .brif(int_kind, cached_int, &[], cached_float, &[]);
+        builder.switch_to_block(cached_int);
+        let offset = builder.ins().imul_imm(index, 4);
+        let offset = builder.ins().uextend(pointer_type, offset);
+        let address = builder.ins().iadd(source.data, offset);
+        let value = builder.ins().load(types::I32, MemFlags::new(), address, 0);
+        let value = builder.ins().sextend(types::I64, value);
+        let tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+        builder.ins().jump(continuation, &[value, tag]);
+        builder.switch_to_block(cached_float);
+        let offset = builder.ins().imul_imm(index, 8);
+        let offset = builder.ins().uextend(pointer_type, offset);
+        let address = builder.ins().iadd(source.data, offset);
+        let value = builder.ins().load(types::F64, MemFlags::new(), address, 0);
+        let value = builder.ins().bitcast(types::I64, MemFlags::new(), value);
+        let tag = builder
+            .ins()
+            .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+        builder.ins().jump(continuation, &[value, tag]);
+    }
+
+    builder.switch_to_block(direct);
+    let index = builder.ins().ireduce(types::I32, key.payload);
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    builder.ins().brif(non_negative, classify, &[], deopt, &[]);
+
+    builder.switch_to_block(classify);
+    let flags = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_flags_offset,
+    );
+    let fast = builder
+        .ins()
+        .band_imm(flags, element_layout.object_fast_array_mask);
+    let fast = builder.ins().icmp_imm(IntCC::NotEqual, fast, 0);
+    let class_check = builder.create_block();
+    builder.ins().brif(fast, class_check, &[], deopt, &[]);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_packed = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.array_class_id);
+    let not_packed = builder.create_block();
+    builder.ins().brif(is_packed, packed, &[], not_packed, &[]);
+    builder.switch_to_block(not_packed);
+    let is_int32 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.int32_array_class_id);
+    let not_int32 = builder.create_block();
+    builder.ins().brif(is_int32, int32, &[], not_int32, &[]);
+    builder.switch_to_block(not_int32);
+    let is_float64 =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, element_layout.float64_array_class_id);
+    builder.ins().brif(is_float64, float64, &[], deopt, &[]);
+
+    builder.switch_to_block(packed);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, index, count);
+    let packed_load = builder.create_block();
+    builder.ins().brif(in_bounds, packed_load, &[], deopt, &[]);
+    builder.switch_to_block(packed_load);
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let packed_value = builder.create_block();
+    builder.ins().brif(has_data, packed_value, &[], deopt, &[]);
+    builder.switch_to_block(packed_value);
+    let scaled = builder.ins().imul_imm(index, 16);
+    let scaled = builder.ins().uextend(pointer_type, scaled);
+    let address = builder.ins().iadd(data, scaled);
+    let payload = builder.ins().load(types::I64, MemFlags::new(), address, 0);
+    let tag = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), address, layout.value_tag);
+    let primitive = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, tag, 0);
+    let packed_done = builder.create_block();
+    builder.ins().brif(primitive, packed_done, &[], deopt, &[]);
+    builder.switch_to_block(packed_done);
+    builder.ins().jump(continuation, &[payload, tag]);
+
+    builder.switch_to_block(int32);
+    let kind = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(typed_common, &[kind]);
+    builder.switch_to_block(float64);
+    let kind = builder.ins().iconst(types::I8, 1);
+    builder.ins().jump(typed_common, &[kind]);
+
+    builder.switch_to_block(typed_common);
+    let typed = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.typed_array_ptr_offset,
+    );
+    let has_typed = builder.ins().icmp_imm(IntCC::NotEqual, typed, 0);
+    let typed_guard = builder.create_block();
+    builder.ins().brif(has_typed, typed_guard, &[], deopt, &[]);
+    builder.switch_to_block(typed_guard);
+    let tracks_resizable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        typed,
+        element_layout.typed_array_track_rab_offset,
+    );
+    let stable = builder.ins().icmp_imm(IntCC::Equal, tracks_resizable, 0);
+    let stable_buffer = builder.create_block();
+    builder.ins().brif(stable, stable_buffer, &[], deopt, &[]);
+    builder.switch_to_block(stable_buffer);
+    let buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        typed,
+        element_layout.typed_array_buffer_offset,
+    );
+    let has_buffer = builder.ins().icmp_imm(IntCC::NotEqual, buffer, 0);
+    let buffer_object = builder.create_block();
+    builder
+        .ins()
+        .brif(has_buffer, buffer_object, &[], deopt, &[]);
+    builder.switch_to_block(buffer_object);
+    let array_buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        buffer,
+        element_layout.object_union_offset,
+    );
+    let has_array_buffer = builder.ins().icmp_imm(IntCC::NotEqual, array_buffer, 0);
+    let detach_guard = builder.create_block();
+    builder
+        .ins()
+        .brif(has_array_buffer, detach_guard, &[], deopt, &[]);
+    builder.switch_to_block(detach_guard);
+    let detached = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_detached_offset,
+    );
+    let attached = builder.ins().icmp_imm(IntCC::Equal, detached, 0);
+    let typed_bounds = builder.create_block();
+    builder.ins().brif(attached, typed_bounds, &[], deopt, &[]);
+    builder.switch_to_block(typed_bounds);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, index, count);
+    let typed_data = builder.create_block();
+    builder.ins().brif(in_bounds, typed_data, &[], deopt, &[]);
+    builder.switch_to_block(typed_data);
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let typed_load = builder.create_block();
+    builder.ins().brif(has_data, typed_load, &[], deopt, &[]);
+    builder.switch_to_block(typed_load);
+    let kind = builder.block_params(typed_common)[0];
+    let is_float = builder.ins().icmp_imm(IntCC::NotEqual, kind, 0);
+    let load_i32 = builder.create_block();
+    let load_f64 = builder.create_block();
+    builder.ins().brif(is_float, load_f64, &[], load_i32, &[]);
+    builder.switch_to_block(load_i32);
+    let offset = builder.ins().imul_imm(index, 4);
+    let offset = builder.ins().uextend(pointer_type, offset);
+    let address = builder.ins().iadd(data, offset);
+    let value = builder.ins().load(types::I32, MemFlags::new(), address, 0);
+    let value = builder.ins().sextend(types::I64, value);
+    let tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+    builder.ins().jump(continuation, &[value, tag]);
+    builder.switch_to_block(load_f64);
+    let offset = builder.ins().imul_imm(index, 8);
+    let offset = builder.ins().uextend(pointer_type, offset);
+    let address = builder.ins().iadd(data, offset);
+    let value = builder.ins().load(types::F64, MemFlags::new(), address, 0);
+    let value = builder.ins().bitcast(types::I64, MemFlags::new(), value);
+    let tag = builder
+        .ins()
+        .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+    builder.ins().jump(continuation, &[value, tag]);
+
+    builder.switch_to_block(deopt);
+    for (index, vars) in arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, index, value);
+    }
+    for (index, vars) in locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, var_buf, index, value);
+    }
+    for (index, vars) in stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, stack_base, index, value);
+    }
+    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+
+    builder.switch_to_block(continuation);
+    let result = OptPair {
+        payload: builder.block_params(continuation)[0],
+        tag: builder.block_params(continuation)[1],
+    };
+    opt_define(builder, stack[object_index], result);
+    stack_provenance[object_index] = OptProvenance::ImmediatePrimitive;
+    stack_provenance[object_index + 1] = OptProvenance::Unknown;
+    Ok(object_index + 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_element_put(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+    helper_signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    element_layout: crate::abi::ElementLayout,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+
+    let object_index = depth
+        .checked_sub(3)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let object = opt_use(builder, stack[object_index]);
+    let key = opt_use(builder, stack[object_index + 1]);
+    let value = opt_use(builder, stack[object_index + 2]);
+    let direct = builder.create_block();
+    let deopt = builder.create_block();
+    let classify = builder.create_block();
+    let packed = builder.create_block();
+    let int32 = builder.create_block();
+    let float64 = builder.create_block();
+    let typed_common = builder.create_block();
+    let continuation = builder.create_block();
+    builder.append_block_param(typed_common, types::I8);
+
+    let object_ok = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
+    let key_ok = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, key.tag, i64::from(qjs::JS_TAG_INT));
+    let tags_ok = builder.ins().band(object_ok, key_ok);
+    builder.ins().brif(tags_ok, direct, &[], deopt, &[]);
+    builder.switch_to_block(direct);
+    let index = builder.ins().ireduce(types::I32, key.payload);
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    builder.ins().brif(non_negative, classify, &[], deopt, &[]);
+
+    builder.switch_to_block(classify);
+    let flags = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_flags_offset,
+    );
+    let fast = builder
+        .ins()
+        .band_imm(flags, element_layout.object_fast_array_mask);
+    let fast = builder.ins().icmp_imm(IntCC::NotEqual, fast, 0);
+    let class_check = builder.create_block();
+    builder.ins().brif(fast, class_check, &[], deopt, &[]);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::new(),
+        object.payload,
+        element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_packed = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.array_class_id);
+    let not_packed = builder.create_block();
+    builder.ins().brif(is_packed, packed, &[], not_packed, &[]);
+    builder.switch_to_block(not_packed);
+    let is_int32 = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, class, element_layout.int32_array_class_id);
+    let not_int32 = builder.create_block();
+    builder.ins().brif(is_int32, int32, &[], not_int32, &[]);
+    builder.switch_to_block(not_int32);
+    let is_float64 =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, element_layout.float64_array_class_id);
+    builder.ins().brif(is_float64, float64, &[], deopt, &[]);
+
+    builder.switch_to_block(packed);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, index, count);
+    let primitive = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, value.tag, 0);
+    let packed_ok = builder.ins().band(in_bounds, primitive);
+    let packed_data = builder.create_block();
+    builder.ins().brif(packed_ok, packed_data, &[], deopt, &[]);
+    builder.switch_to_block(packed_data);
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let packed_store = builder.create_block();
+    builder.ins().brif(has_data, packed_store, &[], deopt, &[]);
+    builder.switch_to_block(packed_store);
+    let offset = builder.ins().imul_imm(index, 16);
+    let offset = builder.ins().uextend(pointer_type, offset);
+    let address = builder.ins().iadd(data, offset);
+    let old_tag = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), address, layout.value_tag);
+    let old_primitive = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, old_tag, 0);
+    let do_packed_store = builder.create_block();
+    builder
+        .ins()
+        .brif(old_primitive, do_packed_store, &[], deopt, &[]);
+    builder.switch_to_block(do_packed_store);
+    builder
+        .ins()
+        .store(MemFlags::new(), value.payload, address, 0);
+    builder
+        .ins()
+        .store(MemFlags::new(), value.tag, address, layout.value_tag);
+    builder.ins().jump(continuation, &[]);
+
+    builder.switch_to_block(int32);
+    let int_value = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_INT));
+    let int_typed = builder.create_block();
+    builder.ins().brif(int_value, int_typed, &[], deopt, &[]);
+    builder.switch_to_block(int_typed);
+    let kind = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(typed_common, &[kind]);
+    builder.switch_to_block(float64);
+    let value_int = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_INT));
+    let value_float =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, value.tag, i64::from(qjs::JS_TAG_FLOAT64));
+    let numeric = builder.ins().bor(value_int, value_float);
+    let float_typed = builder.create_block();
+    builder.ins().brif(numeric, float_typed, &[], deopt, &[]);
+    builder.switch_to_block(float_typed);
+    let kind = builder.ins().iconst(types::I8, 1);
+    builder.ins().jump(typed_common, &[kind]);
+
+    builder.switch_to_block(typed_common);
+    let typed_data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.typed_array_ptr_offset,
+    );
+    let has_typed = builder.ins().icmp_imm(IntCC::NotEqual, typed_data, 0);
+    let stable_check = builder.create_block();
+    builder.ins().brif(has_typed, stable_check, &[], deopt, &[]);
+    builder.switch_to_block(stable_check);
+    let tracks_resizable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        typed_data,
+        element_layout.typed_array_track_rab_offset,
+    );
+    let stable = builder.ins().icmp_imm(IntCC::Equal, tracks_resizable, 0);
+    let buffer_check = builder.create_block();
+    builder.ins().brif(stable, buffer_check, &[], deopt, &[]);
+    builder.switch_to_block(buffer_check);
+    let buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        typed_data,
+        element_layout.typed_array_buffer_offset,
+    );
+    let has_buffer = builder.ins().icmp_imm(IntCC::NotEqual, buffer, 0);
+    let array_buffer_check = builder.create_block();
+    builder
+        .ins()
+        .brif(has_buffer, array_buffer_check, &[], deopt, &[]);
+    builder.switch_to_block(array_buffer_check);
+    let array_buffer = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        buffer,
+        element_layout.object_union_offset,
+    );
+    let has_array_buffer = builder.ins().icmp_imm(IntCC::NotEqual, array_buffer, 0);
+    let buffer_state = builder.create_block();
+    builder
+        .ins()
+        .brif(has_array_buffer, buffer_state, &[], deopt, &[]);
+    builder.switch_to_block(buffer_state);
+    let detached = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_detached_offset,
+    );
+    let immutable = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        array_buffer,
+        element_layout.array_buffer_immutable_offset,
+    );
+    let attached = builder.ins().icmp_imm(IntCC::Equal, detached, 0);
+    let mutable = builder.ins().icmp_imm(IntCC::Equal, immutable, 0);
+    let usable = builder.ins().band(attached, mutable);
+    let bounds_check = builder.create_block();
+    builder.ins().brif(usable, bounds_check, &[], deopt, &[]);
+    builder.switch_to_block(bounds_check);
+    let count = builder.ins().load(
+        types::I32,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_count_offset,
+    );
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, index, count);
+    let data_check = builder.create_block();
+    builder.ins().brif(in_bounds, data_check, &[], deopt, &[]);
+    builder.switch_to_block(data_check);
+    let data = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        element_layout.array_data_offset,
+    );
+    let has_data = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let typed_store = builder.create_block();
+    builder.ins().brif(has_data, typed_store, &[], deopt, &[]);
+    builder.switch_to_block(typed_store);
+    let kind = builder.block_params(typed_common)[0];
+    let is_float = builder.ins().icmp_imm(IntCC::NotEqual, kind, 0);
+    let store_i32 = builder.create_block();
+    let store_f64 = builder.create_block();
+    builder.ins().brif(is_float, store_f64, &[], store_i32, &[]);
+    builder.switch_to_block(store_i32);
+    let offset = builder.ins().imul_imm(index, 4);
+    let offset = builder.ins().uextend(pointer_type, offset);
+    let address = builder.ins().iadd(data, offset);
+    let scalar = builder.ins().ireduce(types::I32, value.payload);
+    builder.ins().store(MemFlags::new(), scalar, address, 0);
+    builder.ins().jump(continuation, &[]);
+    builder.switch_to_block(store_f64);
+    let offset = builder.ins().imul_imm(index, 8);
+    let offset = builder.ins().uextend(pointer_type, offset);
+    let address = builder.ins().iadd(data, offset);
+    let scalar = opt_f64(builder, value);
+    builder.ins().store(MemFlags::new(), scalar, address, 0);
+    builder.ins().jump(continuation, &[]);
+
+    builder.switch_to_block(deopt);
+    for (slot, vars) in arguments.iter().enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, slot, current);
+    }
+    for (slot, vars) in locals.iter().enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, var_buf, slot, current);
+    }
+    for (slot, vars) in stack.iter().take(depth).enumerate() {
+        let current = opt_use(builder, *vars);
+        opt_store(builder, stack_base, slot, current);
+    }
+    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+
+    builder.switch_to_block(continuation);
+    for provenance in &mut stack_provenance[object_index..depth] {
+        *provenance = OptProvenance::Unknown;
+    }
+    Ok(object_index)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1978,42 +3381,33 @@ fn emit_opt_specialized_call(
         use cranelift_codegen::ir::condcodes::IntCC;
         use cranelift_codegen::ir::{AbiParam, Signature, StackSlotData, StackSlotKind};
         let function = opt_use(builder, stack[function_index]);
-        let mut matches =
-            builder
-                .ins()
-                .icmp_imm(IntCC::Equal, function.tag, i64::from(qjs::JS_TAG_OBJECT));
-        let identity_matches = builder.ins().icmp_imm(
-            IntCC::Equal,
+        let signature = builder.create_block();
+        let invoke = builder.create_block();
+        let deopt = builder.create_block();
+        super::emit_guarded_direct_callee_identity(
+            builder,
+            function.tag,
             function.payload,
-            direct.call.callee_identity() as i64,
+            direct.call.callee_identity(),
+            direct.call.callee_bytecode_identity(),
+            pointer_type,
+            signature,
+            deopt,
         );
-        matches = builder.ins().band(matches, identity_matches);
-        // JSObject::u.func.function_bytecode is at byte offset 48 on the
-        // validated 64-bit QuickJS layout. Checking both the rooted object
-        // and its bytecode identity prevents allocator address reuse from
-        // aliasing a different function target.
-        let bytecode = builder
-            .ins()
-            .load(pointer_type, MemFlags::new(), function.payload, 48);
-        let bytecode_matches = builder.ins().icmp_imm(
-            IntCC::Equal,
-            bytecode,
-            direct.call.callee_bytecode_identity() as i64,
-        );
-        matches = builder.ins().band(matches, bytecode_matches);
+        builder.switch_to_block(signature);
+        let mut matches = builder.ins().iconst(types::I8, 1);
         for (index, representation) in direct.call.arguments().iter().enumerate() {
             let value = opt_use(builder, stack[argv_index + index]);
             let tag = match representation {
                 FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
                 FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             };
             let typed = builder
                 .ins()
                 .icmp_imm(IntCC::Equal, value.tag, i64::from(tag));
             matches = builder.ins().band(matches, typed);
         }
-        let invoke = builder.create_block();
-        let deopt = builder.create_block();
         builder.ins().brif(matches, invoke, &[], deopt, &[]);
         builder.switch_to_block(deopt);
         for (index, vars) in arguments.iter().enumerate() {
@@ -2060,6 +3454,7 @@ fn emit_opt_specialized_call(
         let scalar = match direct.call.result() {
             FeedbackRepresentation::Int32 => types::I32,
             FeedbackRepresentation::Float64 => types::F64,
+            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
         };
         let mut signature = Signature::new(builder.func.signature.call_conv);
         signature.params.push(AbiParam::new(pointer_type));
@@ -2067,6 +3462,7 @@ fn emit_opt_specialized_call(
             signature.params.push(AbiParam::new(match argument {
                 FeedbackRepresentation::Int32 => types::I32,
                 FeedbackRepresentation::Float64 => types::F64,
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             }));
         }
         signature.returns.push(AbiParam::new(types::I32));
@@ -2089,6 +3485,7 @@ fn emit_opt_specialized_call(
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), value.payload)
                 }
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             });
         }
         let call = super::emit_external_call(
@@ -2122,6 +3519,7 @@ fn emit_opt_specialized_call(
                     .ins()
                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
             },
+            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
         };
         opt_define(builder, stack[base], result);
         stack_provenance[base] = OptProvenance::ImmediatePrimitive;
@@ -2395,13 +3793,14 @@ fn emit_opt_numeric_guard(
     pass: cranelift_codegen::ir::Block,
     side_path: Option<crate::runtime::SidePathProfile>,
     representation: EntryRepresentation,
+    argument_representations: &[EntryRepresentation],
 ) {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     let mut numeric = builder.ins().iconst(types::I8, 1);
     let mut alternate_numeric = builder.ins().iconst(types::I8, 1);
     let mut alternate_seen = builder.ins().iconst(types::I8, 0);
-    for vars in arguments.iter().chain(locals) {
+    for (index, vars) in arguments.iter().chain(locals).enumerate() {
         let pair = opt_use(builder, *vars);
         let int = builder.ins().icmp_imm(
             IntCC::Equal,
@@ -2413,11 +3812,20 @@ fn emit_opt_numeric_guard(
             pair.tag,
             i64::from(rquickjs_core::qjs::JS_TAG_FLOAT64),
         );
-        let valid = match representation {
+        let required = argument_representations
+            .get(index)
+            .copied()
+            .unwrap_or(representation);
+        let valid = match required {
             EntryRepresentation::Any => builder.ins().iconst(types::I8, 1),
             EntryRepresentation::Numeric => builder.ins().bor(int, float),
             EntryRepresentation::Int32 => int,
             EntryRepresentation::Float64 => float,
+            EntryRepresentation::HeapRef => builder.ins().icmp_imm(
+                IntCC::Equal,
+                pair.tag,
+                i64::from(rquickjs_core::qjs::JS_TAG_OBJECT),
+            ),
         };
         numeric = builder.ins().band(numeric, valid);
         let either_numeric = builder.ins().bor(int, float);

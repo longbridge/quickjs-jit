@@ -1,7 +1,7 @@
 use std::{fs, io, path::Path};
 
 const QUICKJS_BASELINE_FNV64: u64 = 0x3302_116a_b0fc_269c;
-const EXPECTED_PATCHES: [(&str, u64); 7] = [
+const EXPECTED_PATCHES: [(&str, u64); 8] = [
     ("0001-rquickjs-jit.patch", 0x18d7_40cc_6943_30cf),
     ("0002-runtime-feedback.patch", 0xe4c1_ed52_ee5d_d469),
     ("0003-element-layout.patch", 0xa12c_ccd2_7420_e880),
@@ -9,6 +9,7 @@ const EXPECTED_PATCHES: [(&str, u64); 7] = [
     ("0005-tier1-constructors.patch", 0x3c31_80b9_bfda_1693),
     ("0006-tier1-regexp.patch", 0x2244_ae9d_c124_6612),
     ("0007-msan-slot-boundary.patch", 0xa9b9_35b0_e775_152e),
+    ("0008-tier1-atom-values.patch", 0xbc5e_d1f3_3fef_4069),
 ];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
@@ -48,9 +49,9 @@ const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("list.h", 0xb337_70f7_b76d_a3d8),
     ("quickjs-atom.h", 0x30b4_9116_b6a2_aa99),
     ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
-    ("quickjs.c", 0xf1ab_6340_e0ae_d862),
-    ("quickjs-jit.h", 0x288c_21e4_c708_01de),
-    ("quickjs-jit-helpers.h", 0x79f3_f421_7140_c407),
+    ("quickjs.c", 0x7213_5f56_c0b9_da30),
+    ("quickjs-jit.h", 0xc8ff_a72f_bab6_a759),
+    ("quickjs-jit-helpers.h", 0x3840_ab68_b70f_8953),
     ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
     ("quickjs.h", 0x4831_2cde_9c2f_a5ee),
 ];

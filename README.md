@@ -64,7 +64,7 @@ The optional `quickjs-jit-runtime` package (normally imported as
 optimizing JIT with automatic fallback to the QuickJS interpreter. Lower
 latency is better in the focused compute results below.
 
-| Scenario | QuickJS | QuickJS + JIT | Bun | QuickJS vs JIT | JIT vs Bun |
+| Scenario | QuickJS | QuickJS + forced Tier 2 | Bun | QuickJS vs JIT | JIT vs Bun |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Scalar loop | 836.946 us | 25.837 us | 12.983 us | JIT 32.39x faster | JIT 1.99x slower |
 | Numeric loop | 823.818 us | 25.715 us | 12.358 us | JIT 32.04x faster | JIT 2.08x slower |

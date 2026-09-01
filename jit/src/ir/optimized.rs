@@ -244,7 +244,13 @@ impl OptimizedIr {
             for instruction in &function.instructions()[block.instruction_range()] {
                 let name = instruction.opcode().name();
                 let (representation, effect) = classify_optimized_opcode(name)?;
-                let deopt_guard = if is_guarded_arithmetic(name) || name.starts_with("call") {
+                let deopt_guard = if is_guarded_arithmetic(name)
+                    || name.starts_with("call")
+                    || matches!(name, "get_array_el" | "put_array_el")
+                    || name == "get_length"
+                    || name == "to_propkey"
+                    || matches!(name, "or" | "and" | "xor" | "shl" | "sar")
+                {
                     let guard = next_guard;
                     next_guard = next_guard
                         .checked_add(1)
@@ -620,9 +626,11 @@ fn classify_optimized_opcode(
         }
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" | "get_loc" | "get_loc8"
         | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3" | "get_loc_check" | "get_loc0_loc1"
-        | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3" => {
-            (ValueRepresentation::Tagged, OptimizedEffect::Pure)
-        }
+        | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3"
+        | "swap" => (ValueRepresentation::Tagged, OptimizedEffect::Pure),
+        "push_const" | "push_const8" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "is_undefined_or_null" => (ValueRepresentation::Int32, OptimizedEffect::Pure),
+        "to_propkey" => (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite),
         "put_arg"
         | "put_loc"
         | "put_loc8"
@@ -638,7 +646,10 @@ fn classify_optimized_opcode(
             (ValueRepresentation::Tagged, OptimizedEffect::Reentrant)
         }
         "get_field" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "get_length" => (ValueRepresentation::Int32, OptimizedEffect::FrameWrite),
+        "get_array_el" => (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite),
         "put_field" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
+        "put_array_el" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
         "if_false" | "if_true" | "if_false8" | "if_true8" | "goto" | "goto8" | "goto16"
         | "return" | "return_undef" | "lt" | "lte" | "gt" | "gte" | "eq" | "neq" | "strict_eq"
         | "strict_neq" | "lnot" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),

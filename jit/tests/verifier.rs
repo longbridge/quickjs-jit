@@ -29,7 +29,7 @@ fn i32_operand(value: i32) -> [u8; 4] {
 }
 
 #[test]
-fn representative_typed_array_assignment_verifies_before_tier1_policy() {
+fn representative_typed_array_assignment_is_tier1_eligible() {
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| {
@@ -46,10 +46,9 @@ fn representative_typed_array_assignment_verifies_before_tier1_policy() {
         let verified = snapshot
             .verify(VerifyLimits::default())
             .expect("representative typed-array bytecode is structurally valid");
-        assert!(matches!(
-            verified.tier1_eligibility(),
-            Err(rejection) if rejection.reason() == FallbackReason::UnsupportedOpcode
-        ));
+        verified
+            .tier1_eligibility()
+            .expect("representative typed-array bytecode is Tier 1 eligible");
     });
 }
 

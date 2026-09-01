@@ -395,15 +395,17 @@ fn operation_may_exit(operation: &IrOp) -> bool {
 
 fn operation_helper_call_count(operation: &IrOp) -> usize {
     match operation {
-        IrOp::ResolveConstant(_) | IrOp::GetGlobal(_) | IrOp::NewObject => 1,
+        IrOp::ResolveConstant(_) | IrOp::ResolveAtom(_) | IrOp::GetGlobal(_) | IrOp::NewObject => 1,
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
+        IrOp::DefineProperty(_) => 1,
         IrOp::GetPropertyKeep(_) => 1,
         // Element lowering reserves one state for the generic helper and one
         // for each direct ownership-release edge (packed, Int32, Float64).
         // All of these branches can survive codegen, so no two return PCs may
         // share a stack-map record.
         IrOp::GetElement | IrOp::SetElement => 4,
+        IrOp::DefineElement => 3,
         IrOp::ToPropertyKey => 1,
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
@@ -455,6 +457,7 @@ fn helper_stack_depth(
         IrOp::GetProperty(_) | IrOp::Call { .. } | IrOp::CallConstructor(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
         IrOp::NewArrayFrom(count) if *count != 0 => 2,
+        IrOp::DefineElement => 2,
         IrOp::NewArrayFrom(_) => 0,
         _ => 0,
     };
@@ -590,6 +593,9 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "push_const" | "push_const8" => IrOp::ResolveConstant(
             constant_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
         ),
+        "push_atom_value" => {
+            IrOp::ResolveAtom(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
         "get_var" => {
             IrOp::GetGlobal(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
@@ -599,8 +605,10 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "get_length" => IrOp::GetProperty(qjs::JS_ATOM_length),
         "get_field2" => IrOp::GetPropertyKeep(instruction.operand_u32(1)),
         "put_field" => IrOp::SetProperty(instruction.operand_u32(1)),
+        "define_field" => IrOp::DefineProperty(instruction.operand_u32(1)),
         "get_array_el" => IrOp::GetElement,
         "put_array_el" => IrOp::SetElement,
+        "define_array_el" => IrOp::DefineElement,
         "to_propkey" => IrOp::ToPropertyKey,
         "call" => IrOp::Call {
             argc: instruction.operand_u16(1),

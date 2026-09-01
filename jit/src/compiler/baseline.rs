@@ -1962,7 +1962,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 // after ResolveConst. Classifying every constant as `Other`
                 // made valid Float64 constants force an unconditional entry
                 // retry, so nominal native entries never executed code.
-                IrOp::ResolveConstant(_) => {
+                IrOp::ResolveConstant(_) | IrOp::ResolveAtom(_) => {
                     frame.stack.push(AbstractValue::unknown());
                 }
                 IrOp::GetGlobal(_) => {
@@ -1992,6 +1992,10 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                 }
+                IrOp::DefineProperty(_) => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
+                }
                 IrOp::GetElement => {
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
@@ -2000,6 +2004,12 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 IrOp::SetElement => {
                     for _ in 0..3 {
                         frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    }
+                }
+                IrOp::DefineElement => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    if frame.stack.len() < 2 {
+                        return Err(CompileFailure::InvalidArtifact);
                     }
                 }
                 IrOp::ToPropertyKey => {
@@ -2405,7 +2415,10 @@ fn lower_function(
     };
     let arguments: Vec<PairVars> = (0..ir.argument_count).map(|_| allocate_pair()).collect();
     let locals: Vec<PairVars> = (0..ir.local_count).map(|_| allocate_pair()).collect();
-    let stack: Vec<PairVars> = (0..ir.max_stack_depth).map(|_| allocate_pair()).collect();
+    let stack_var_count = usize::from(ir.max_stack_depth)
+        .checked_add(MAX_HELPER_SCRATCH_SLOTS)
+        .ok_or(CompileFailure::ResourceLimit)?;
+    let stack: Vec<PairVars> = (0..stack_var_count).map(|_| allocate_pair()).collect();
     let loop_poll_budget = Variable::from_u32(next_variable);
     for pair in arguments.iter().chain(&locals).chain(&stack) {
         builder.declare_var(pair.payload, types::I64);
@@ -2602,6 +2615,21 @@ fn lower_function(
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
+                IrOp::ResolveAtom(atom) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_ATOM_VALUE,
+                        state,
+                        depth,
+                        &[output, atom]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
                 IrOp::GetGlobal(atom) => {
                     let state = helper_states
                         .next()
@@ -2668,6 +2696,13 @@ fn lower_function(
                         .find(|site| site.pc == instruction.pc && site.store),
                     property_caches.get(&instruction.pc).copied(),
                 )?,
+                IrOp::DefineProperty(atom) => lower_define_property(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    atom,
+                )?,
                 IrOp::GetElement => lower_get_element(
                     builder,
                     &helper_lowering,
@@ -2682,6 +2717,9 @@ fn lower_function(
                     &mut depth,
                     element_layout,
                 )?,
+                IrOp::DefineElement => {
+                    lower_define_element(builder, &helper_lowering, &mut helper_states, &mut depth)?
+                }
                 IrOp::ToPropertyKey => {
                     lower_to_property_key(builder, &helper_lowering, &mut helper_states, depth)?
                 }
@@ -4023,6 +4061,116 @@ fn lower_set_property(
     helpers.set_depth(builder, *depth)
 }
 
+fn lower_define_property(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    atom: u32,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let value_index = *depth - 1;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let value = flat_stack_slot(helpers.ir, value_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY,
+        next_helper_state(states)?,
+        *depth,
+        *depth,
+        &[object, atom, value],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[value_index],
+        helpers.stack_base,
+        value_index,
+        helpers.layout,
+    );
+    *depth = object_index + 1;
+    helpers.set_depth(builder, *depth)
+}
+
+fn lower_define_element(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+) -> Result<(), CompileFailure> {
+    let object_index = depth
+        .checked_sub(3)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let key_index = object_index + 1;
+    let value_index = object_index + 2;
+    let key_copy_index = *depth;
+    let value_copy_index = depth.checked_add(1).ok_or(CompileFailure::ResourceLimit)?;
+
+    move_stack_pair(
+        builder,
+        helpers.stack,
+        helpers.stack_base,
+        value_index,
+        value_copy_index,
+        helpers.layout,
+    )?;
+    let object = flat_stack_slot(helpers.ir, object_index)?;
+    let key = flat_stack_slot(helpers.ir, key_index)?;
+    let object_copy = flat_stack_slot(helpers.ir, value_index)?;
+    let key_copy = flat_stack_slot(helpers.ir, key_copy_index)?;
+    let value_copy = flat_stack_slot(helpers.ir, value_copy_index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+        next_helper_state(states)?,
+        *depth + 2,
+        *depth,
+        &[object_copy, object],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[value_index],
+        helpers.stack_base,
+        value_index,
+        helpers.layout,
+    );
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+        next_helper_state(states)?,
+        *depth + 2,
+        *depth,
+        &[key_copy, key],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[key_copy_index],
+        helpers.stack_base,
+        key_copy_index,
+        helpers.layout,
+    );
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_SET_ELEMENT,
+        next_helper_state(states)?,
+        *depth + 2,
+        *depth,
+        &[object_copy, key_copy, value_copy],
+    )?;
+    for index in value_index..=value_copy_index {
+        reload_pair(
+            builder,
+            helpers.stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        );
+    }
+    *depth = object_index + 2;
+    helpers.set_depth(builder, *depth)
+}
+
 fn lower_get_element(
     builder: &mut FunctionBuilder<'_>,
     helpers: &HelperLowering<'_>,
@@ -4104,15 +4252,15 @@ fn lower_get_element(
     builder.ins().brif(is_float64, float64, &[], generic, &[]);
 
     builder.switch_to_block(array);
-    let size = builder.ins().load(
+    let count = builder.ins().load(
         types::I32,
         MemFlags::new(),
         object_value.payload,
-        element_layout.array_size_offset,
+        element_layout.array_count_offset,
     );
     element_guard!(
         builder,
-        builder.ins().icmp(IntCC::UnsignedLessThan, index, size),
+        builder.ins().icmp(IntCC::UnsignedLessThan, index, count),
         generic,
     );
     let data = builder.ins().load(
@@ -4294,15 +4442,15 @@ fn lower_set_element(
     builder.ins().brif(is_float64, float64, &[], generic, &[]);
 
     builder.switch_to_block(array);
-    let size = builder.ins().load(
+    let count = builder.ins().load(
         types::I32,
         MemFlags::new(),
         object_value.payload,
-        element_layout.array_size_offset,
+        element_layout.array_count_offset,
     );
     element_guard!(
         builder,
-        builder.ins().icmp(IntCC::UnsignedLessThan, index, size),
+        builder.ins().icmp(IntCC::UnsignedLessThan, index, count),
         generic,
     );
     element_guard!(
@@ -4848,47 +4996,30 @@ fn lower_call(
         use cranelift_codegen::ir::{AbiParam, Signature, StackSlotData, StackSlotKind};
 
         let slow = builder.create_block();
-        let identity = builder.create_block();
-        let bytecode = builder.create_block();
+        let signature = builder.create_block();
         let invoke = builder.create_block();
         let direct_done = builder.create_block();
         let joined = builder.create_block();
         builder.append_block_param(joined, types::I8);
         let callable = use_pair(builder, helpers.stack[function_index]);
-        let object_tag =
-            builder
-                .ins()
-                .icmp_imm(IntCC::Equal, callable.tag, i64::from(qjs::JS_TAG_OBJECT));
-        builder.ins().brif(object_tag, identity, &[], slow, &[]);
-
-        // Do not dereference the payload until both the object tag and exact
-        // rooted JSObject identity have matched. Primitive misses therefore
-        // remain memory-safe and take the ordinary CALL helper path.
-        builder.switch_to_block(identity);
-        let identity_matches = builder.ins().icmp_imm(
-            IntCC::Equal,
+        super::emit_guarded_direct_callee_identity(
+            builder,
+            callable.tag,
             callable.payload,
-            direct.call.callee_identity() as i64,
+            direct.call.callee_identity(),
+            direct.call.callee_bytecode_identity(),
+            helpers.pointer_type,
+            signature,
+            slow,
         );
-        builder
-            .ins()
-            .brif(identity_matches, bytecode, &[], slow, &[]);
-
-        builder.switch_to_block(bytecode);
-        let function_bytecode =
-            builder
-                .ins()
-                .load(helpers.pointer_type, MemFlags::new(), callable.payload, 48);
-        let mut signature_matches = builder.ins().icmp_imm(
-            IntCC::Equal,
-            function_bytecode,
-            direct.call.callee_bytecode_identity() as i64,
-        );
+        builder.switch_to_block(signature);
+        let mut signature_matches = builder.ins().iconst(types::I8, 1);
         for (index, representation) in direct.call.arguments().iter().enumerate() {
             let argument = use_pair(builder, helpers.stack[argv_index + index]);
             let tag = match representation {
                 FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
                 FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             };
             let typed = builder
                 .ins()
@@ -4903,6 +5034,7 @@ fn lower_call(
         let scalar = match direct.call.result() {
             FeedbackRepresentation::Int32 => types::I32,
             FeedbackRepresentation::Float64 => types::F64,
+            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
         };
         let mut signature = Signature::new(builder.func.signature.call_conv);
         signature.params.push(AbiParam::new(helpers.pointer_type));
@@ -4910,6 +5042,7 @@ fn lower_call(
             signature.params.push(AbiParam::new(match representation {
                 FeedbackRepresentation::Int32 => types::I32,
                 FeedbackRepresentation::Float64 => types::F64,
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             }));
         }
         signature.returns.push(AbiParam::new(types::I32));
@@ -4938,6 +5071,7 @@ fn lower_call(
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), argument.payload)
                 }
+                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
             });
         }
         let call = emit_external_call(
@@ -4968,6 +5102,7 @@ fn lower_call(
                     .ins()
                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
             },
+            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
         };
         define_pair(builder, helpers.stack[output_index], result);
         let hit = builder.ins().iconst(types::I8, 1);
@@ -6089,14 +6224,17 @@ mod tests {
             IrOp::Nop => "nop",
             IrOp::Push(_) => "push",
             IrOp::ResolveConstant(_) => "resolve_constant",
+            IrOp::ResolveAtom(_) => "resolve_atom",
             IrOp::GetGlobal(_) => "get_global",
             IrOp::NewObject => "new_object",
             IrOp::NewArrayFrom(_) => "new_array_from",
             IrOp::GetProperty(_) => "get_property",
             IrOp::GetPropertyKeep(_) => "get_property_keep",
             IrOp::SetProperty(_) => "set_property",
+            IrOp::DefineProperty(_) => "define_property",
             IrOp::GetElement => "get_element",
             IrOp::SetElement => "set_element",
+            IrOp::DefineElement => "define_element",
             IrOp::ToPropertyKey => "to_property_key",
             IrOp::Call { .. } => "call",
             IrOp::CallConstructor(_) => "call_constructor",

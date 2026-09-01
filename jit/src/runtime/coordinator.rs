@@ -27,6 +27,7 @@ fn call_specialization_fingerprint(key: &CallSpecializationKey) -> u64 {
         match representation {
             FeedbackRepresentation::Int32 => 1,
             FeedbackRepresentation::Float64 => 2,
+            FeedbackRepresentation::HeapRef => 3,
         }
     }
     let mut state = 0xcbf2_9ce4_8422_2325;

@@ -28,6 +28,9 @@ pub enum ObservedType {
 pub enum FeedbackRepresentation {
     Int32,
     Float64,
+    /// A tagged QuickJS heap reference. Tier 2 keeps the tagged payload and
+    /// guards the object tag at entry; element-specific class guards follow.
+    HeapRef,
 }
 
 /// Prevent feedback instability from creating an unbounded signature key.
@@ -120,6 +123,7 @@ const fn representation_tag(representation: FeedbackRepresentation) -> u64 {
     match representation {
         FeedbackRepresentation::Int32 => 1,
         FeedbackRepresentation::Float64 => 2,
+        FeedbackRepresentation::HeapRef => 3,
     }
 }
 
@@ -476,7 +480,7 @@ impl FeedbackSnapshot {
             .iter()
             .map(|observations| {
                 (observations.len() == 1)
-                    .then(|| observed_representation(observations[0]))
+                    .then(|| observed_scalar_representation(observations[0]))
                     .flatten()
             })
             .collect::<Option<Vec<_>>>()?;
@@ -487,7 +491,7 @@ impl FeedbackSnapshot {
             caller,
             callee: call.targets[0],
             arguments: arguments.into_boxed_slice(),
-            result: observed_representation(call.results[0])?,
+            result: observed_scalar_representation(call.results[0])?,
             feedback_epoch: self.epoch,
             callee_identity: call.callee_identity,
             callee_bytecode_identity: call.callee_bytecode_identity,
@@ -585,15 +589,11 @@ impl FeedbackSnapshot {
             ObservedType::Float64 => FeedbackRepresentation::Float64,
             _ => return None,
         };
-        if argument_types.iter().any(|observed| {
-            !matches!(
-                (representation, observed),
-                (FeedbackRepresentation::Int32, ObservedType::Int32)
-                    | (FeedbackRepresentation::Float64, ObservedType::Float64)
-            )
-        }) {
-            return None;
-        }
+        let arguments = argument_types
+            .iter()
+            .copied()
+            .map(observed_representation)
+            .collect::<Option<Vec<_>>>()?;
 
         let binaries = self
             .binaries
@@ -604,6 +604,7 @@ impl FeedbackSnapshot {
             let expected = match representation {
                 FeedbackRepresentation::Int32 => ObservedType::Int32,
                 FeedbackRepresentation::Float64 => ObservedType::Float64,
+                FeedbackRepresentation::HeapRef => return None,
             };
             if binary.state == FeedbackState::Monomorphic
                 && binary.lhs.as_ref() == [expected]
@@ -619,7 +620,7 @@ impl FeedbackSnapshot {
 
         Some(BoundedSpecializationSignature {
             function,
-            arguments: vec![representation; arity].into_boxed_slice(),
+            arguments: arguments.into_boxed_slice(),
             result: representation,
             feedback_epoch: self.epoch,
         })
@@ -627,6 +628,15 @@ impl FeedbackSnapshot {
 }
 
 const fn observed_representation(observed: ObservedType) -> Option<FeedbackRepresentation> {
+    match observed {
+        ObservedType::Int32 => Some(FeedbackRepresentation::Int32),
+        ObservedType::Float64 => Some(FeedbackRepresentation::Float64),
+        ObservedType::Object => Some(FeedbackRepresentation::HeapRef),
+        _ => None,
+    }
+}
+
+const fn observed_scalar_representation(observed: ObservedType) -> Option<FeedbackRepresentation> {
     match observed {
         ObservedType::Int32 => Some(FeedbackRepresentation::Int32),
         ObservedType::Float64 => Some(FeedbackRepresentation::Float64),

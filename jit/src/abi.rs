@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 16;
+pub const ABI_MINOR: u16 = 18;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -122,7 +122,6 @@ pub(crate) struct ElementLayout {
     pub object_flags_offset: i32,
     pub object_fast_array_mask: i64,
     pub object_union_offset: i32,
-    pub array_size_offset: i32,
     pub array_count_offset: i32,
     pub array_data_offset: i32,
     pub typed_array_ptr_offset: i32,
@@ -179,7 +178,6 @@ impl AbiInfo {
             object_flags_offset: raw.object_flags_offset as i32,
             object_fast_array_mask: raw.object_fast_array_mask as i64,
             object_union_offset: raw.object_union_offset as i32,
-            array_size_offset: raw.array_size_offset as i32,
             array_count_offset: raw.array_count_offset as i32,
             array_data_offset: raw.array_data_offset as i32,
             typed_array_ptr_offset: raw.typed_array_ptr_offset as i32,
@@ -618,6 +616,10 @@ fn runtime_api_layout_fingerprint() -> u64 {
         ),
         (
             mem::offset_of!(qjs::JSJitRuntimeAPI, regexp),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, atom_value),
             mem::size_of::<usize>(),
         ),
     ] {

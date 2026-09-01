@@ -393,6 +393,35 @@ fn stable_numeric_feedback_produces_a_tier2_signature() {
 }
 
 #[test]
+fn stable_object_and_int_feedback_produces_a_tier2_loop_signature() {
+    let function = FunctionKey::new(171, 4);
+    let mut feedback = FeedbackTable::new(32, 2);
+    feedback.observe_call(function, &[ObservedType::Object, ObservedType::Int32]);
+    feedback.observe_return(function, 19, ObservedType::Int32);
+    feedback.observe_binary(
+        function,
+        7,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        BinaryFeedbackFlags::NONE,
+    );
+
+    let signature = feedback
+        .snapshot(23)
+        .bounded_specialization(function)
+        .expect("stable element-loop signature");
+    assert_eq!(
+        signature.arguments(),
+        &[
+            FeedbackRepresentation::HeapRef,
+            FeedbackRepresentation::Int32,
+        ]
+    );
+    assert_eq!(signature.result(), FeedbackRepresentation::Int32);
+}
+
+#[test]
 fn float_feedback_is_supported_but_mixed_or_unstable_feedback_is_not() {
     let stable = FunctionKey::new(72, 1);
     let mixed_binary = FunctionKey::new(73, 1);
