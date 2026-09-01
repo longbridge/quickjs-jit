@@ -257,6 +257,7 @@ enum OptProvenance {
 #[derive(Clone, Copy)]
 struct GuardedElementSource {
     provenance: OptProvenance,
+    block_pc: u32,
     data: cranelift_codegen::ir::Value,
     count: cranelift_codegen::ir::Value,
     kind: cranelift_codegen::ir::Value,
@@ -532,7 +533,7 @@ fn lower_optimized_machine(
             .ok_or(CompileFailure::ResourceLimit)?;
         let stack = (0..stack_slots).map(|_| alloc()).collect::<Vec<_>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
-        let mut guarded_element_source = None;
+        let mut guarded_element_source: Option<GuardedElementSource> = None;
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         for vars in arguments.iter().chain(&locals).chain(&stack) {
             builder.declare_var(vars.payload, payload_type);
@@ -576,6 +577,15 @@ fn lower_optimized_machine(
             .iter()
             .map(|block| (block.start_pc(), builder.create_block()))
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut predecessors = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+        for block in ir.blocks() {
+            for successor in block.successors() {
+                predecessors
+                    .entry(*successor)
+                    .or_default()
+                    .push(block.start_pc());
+            }
+        }
         let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
         emit_opt_numeric_guard(
             &mut builder,
@@ -593,6 +603,13 @@ fn lower_optimized_machine(
             &specialization.arguments,
         );
         for block in ir.blocks() {
+            guarded_element_source = guarded_element_source.filter(|source| {
+                source.block_pc == block.start_pc()
+                    || (matches!(source.provenance, OptProvenance::Argument(_))
+                        && predecessors
+                            .get(&block.start_pc())
+                            .is_some_and(|incoming| incoming.as_slice() == [source.block_pc]))
+            });
             let clif_block = blocks[&block.start_pc()];
             builder.switch_to_block(clif_block);
             let mut depth = usize::from(block.stack_depth());
@@ -668,6 +685,7 @@ fn lower_optimized_machine(
                         }
                         match name {
                             "set_loc_uninitialized" => {
+                                guarded_element_source = None;
                                 let index = opt_u16(node.bytes())?;
                                 opt_define(&mut builder, locals[index], undefined);
                                 if !int32_loop {
@@ -795,6 +813,7 @@ fn lower_optimized_machine(
                             n if opt_index(n, node.bytes(), "put_loc")?.is_some()
                                 || matches!(n, "put_loc_check" | "put_loc_check_init") =>
                             {
+                                guarded_element_source = None;
                                 let index = opt_index(n, node.bytes(), "put_loc")?
                                     .map_or_else(|| opt_u16(node.bytes()), Ok)?;
                                 depth = depth
@@ -946,6 +965,7 @@ fn lower_optimized_machine(
                                     pointer_type,
                                     layout,
                                     element_layout,
+                                    block.start_pc(),
                                     source_provenance,
                                     &mut guarded_element_source,
                                 )?;
@@ -2042,6 +2062,7 @@ fn emit_opt_array_length(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
     element_layout: crate::abi::ElementLayout,
+    block_pc: u32,
     source_provenance: OptProvenance,
     guarded_source: &mut Option<GuardedElementSource>,
 ) -> Result<usize, CompileFailure> {
@@ -2259,6 +2280,7 @@ fn emit_opt_array_length(
     stack_provenance[index] = OptProvenance::ImmediatePrimitive;
     *guarded_source = Some(GuardedElementSource {
         provenance: source_provenance,
+        block_pc,
         data,
         count,
         kind,

@@ -1120,7 +1120,20 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
                   for (let i = 0; i < values.length; i++) sum = (sum + values[i]) | 0;
                   return sum;
                 }
+                function reassignedElement(x, y) {
+                  let values = x;
+                  let originalLength = values.length;
+                  values = y;
+                  return (originalLength + values[0]) | 0;
+                }
+                function branchedElement(x, y, select) {
+                  let values = x;
+                  let originalLength = values.length;
+                  if (select) values = y;
+                  return (originalLength + values[0]) | 0;
+                }
                 globalThis.packed = [1,2,3,4,5,6,7,8];
+                globalThis.otherPacked = [99,98];
                 globalThis.typed = new Int32Array(packed);
                 globalThis.floatTyped = new Float64Array([1.5, 2.5]);
                 globalThis.proxied = new Proxy([1, 2], {});
@@ -1159,6 +1172,27 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
     assert!(after.tier2_entries >= before.tier2_entries + 2, "{after:?}");
     assert_eq!(after.deopts, before.deopts, "{after:?}");
     assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    for select in 0..2 {
+        for _ in 0..64 {
+            assert_eq!(
+                context
+                    .with(|ctx| { ctx.eval::<i32, _>("reassignedElement(packed, otherPacked)") })
+                    .unwrap(),
+                107
+            );
+            assert_eq!(
+                context
+                    .with(|ctx| {
+                        ctx.eval::<i32, _>(format!(
+                            "branchedElement(packed, otherPacked, {select})"
+                        ))
+                    })
+                    .unwrap(),
+                if select == 0 { 9 } else { 107 }
+            );
+            jit.poll();
+        }
+    }
     assert_eq!(
         context
             .with(|ctx| ctx.eval::<i32, _>("elementSum(floatTyped)"))
