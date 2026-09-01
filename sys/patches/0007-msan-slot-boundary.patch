@@ -46,3 +46,14 @@ diff --git a/quickjs.c b/quickjs.c
 +    qjsjit_unpoison_slot(*value);
      return true;
  }
+@@ -19785,7 +19802,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         rt->jit_backend_vtable->record_feedback) {
+         uint32_t call_types[8];
+-        for (i = 0; i < argc; i++)
++        for (i = 0; i < argc; i++) {
++            qjsjit_unpoison_slot(&arg_buf[i]);
+             call_types[i] = qjsjit_feedback_type(arg_buf[i]);
++        }
+         qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
+                                call_types, (uint32_t)argc, 0);
+     }
