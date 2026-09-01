@@ -3410,8 +3410,10 @@ fn emit_opt_specialized_call(
             builder,
             function.tag,
             function.payload,
-            direct.call.callee_identity(),
-            direct.call.callee_bytecode_identity(),
+            super::DirectCalleeIdentity {
+                object: direct.call.callee_identity(),
+                bytecode: direct.call.callee_bytecode_identity(),
+            },
             pointer_type,
             signature,
             deopt,

@@ -5006,8 +5006,10 @@ fn lower_call(
             builder,
             callable.tag,
             callable.payload,
-            direct.call.callee_identity(),
-            direct.call.callee_bytecode_identity(),
+            super::DirectCalleeIdentity {
+                object: direct.call.callee_identity(),
+                bytecode: direct.call.callee_bytecode_identity(),
+            },
             helpers.pointer_type,
             signature,
             slow,

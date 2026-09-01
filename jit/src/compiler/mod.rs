@@ -58,12 +58,17 @@ mod helpers;
 pub mod optimized;
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct DirectCalleeIdentity {
+    object: u64,
+    bytecode: u64,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn emit_guarded_direct_callee_identity(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     tag: cranelift_codegen::ir::Value,
     payload: cranelift_codegen::ir::Value,
-    callee_identity: u64,
-    bytecode_identity: u64,
+    callee_identity: DirectCalleeIdentity,
     pointer_type: cranelift_codegen::ir::Type,
     matched: cranelift_codegen::ir::Block,
     miss: cranelift_codegen::ir::Block,
@@ -80,9 +85,10 @@ fn emit_guarded_direct_callee_identity(
     builder.ins().brif(object_tag, identity, &[], miss, &[]);
 
     builder.switch_to_block(identity);
-    let identity_matches = builder
-        .ins()
-        .icmp_imm(IntCC::Equal, payload, callee_identity as i64);
+    let identity_matches =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, payload, callee_identity.object as i64);
     builder
         .ins()
         .brif(identity_matches, bytecode, &[], miss, &[]);
@@ -94,10 +100,11 @@ fn emit_guarded_direct_callee_identity(
     let function_bytecode = builder
         .ins()
         .load(pointer_type, MemFlags::new(), payload, 48);
-    let bytecode_matches =
-        builder
-            .ins()
-            .icmp_imm(IntCC::Equal, function_bytecode, bytecode_identity as i64);
+    let bytecode_matches = builder.ins().icmp_imm(
+        IntCC::Equal,
+        function_bytecode,
+        callee_identity.bytecode as i64,
+    );
     builder
         .ins()
         .brif(bytecode_matches, matched, &[], miss, &[]);
