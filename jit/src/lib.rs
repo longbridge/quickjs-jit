@@ -842,6 +842,14 @@ unsafe extern "C" fn production_entry_trampoline(
                 }
             }
         }
+        let locals_start = frame.var_buf.cast::<u8>();
+        if !locals_start.is_null() {
+            if let Some(locals_size) = (values_end as usize).checked_sub(locals_start as usize) {
+                if locals_size <= 64 * 1024 * 1024 {
+                    __msan_unpoison(locals_start.cast(), locals_size);
+                }
+            }
+        }
     }
     if frame.flags & qjs::JS_JIT_FRAME_SIDE_PATH_HIT != 0 {
         frame.flags &= !qjs::JS_JIT_FRAME_SIDE_PATH_HIT;

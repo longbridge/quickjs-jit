@@ -286,6 +286,14 @@ unsafe fn unpoison_quickjs_frame_values(frame: *const rquickjs_core::qjs::JSJitE
                 }
             }
         }
+        let locals_start = (*frame).var_buf.cast::<u8>();
+        if !locals_start.is_null() {
+            if let Some(locals_size) = (values_end as usize).checked_sub(locals_start as usize) {
+                if locals_size <= 64 * 1024 * 1024 {
+                    __msan_unpoison(locals_start.cast(), locals_size);
+                }
+            }
+        }
     }
 }
 

@@ -104,6 +104,14 @@ unsafe extern "C" fn unpoison_jit_frame(frame: *mut rquickjs_core::qjs::JSJitExe
                 }
             }
         }
+        let locals_start = (*frame).var_buf.cast::<u8>();
+        if !locals_start.is_null() {
+            if let Some(locals_size) = (values_end as usize).checked_sub(locals_start as usize) {
+                if locals_size <= 64 * 1024 * 1024 {
+                    __msan_unpoison(locals_start.cast(), locals_size);
+                }
+            }
+        }
         let start = (*frame).stack_base.cast::<u8>();
         let end = (*frame).stack_capacity.cast::<u8>();
         if !start.is_null() {
