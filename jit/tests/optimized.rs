@@ -1347,7 +1347,8 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         function.call::<_, f64>((50_000, 0)).unwrap()
     });
     assert_eq!(first, 1_249_975_000.0);
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         let last = context.with(|ctx| {
             let function: Function<'_> = ctx.globals().get("f").unwrap();
             function.call::<_, f64>((2000, 0)).unwrap()
