@@ -1,0 +1,31 @@
+[package]
+name = "rquickjs-jit-benchmarks"
+version = "0.12.2"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "jit-bench"
+path = "run.rs"
+
+[[bin]]
+name = "jit-bench-report"
+path = "report.rs"
+
+[[bin]]
+name = "jit-gpui-shell-report"
+path = "gpui_shell_report.rs"
+
+[[bin]]
+name = "jit-size-no-jit"
+path = "size-no-jit.rs"
+
+[[bin]]
+name = "jit-size-jit"
+path = "size-jit.rs"
+
+[dependencies]
+rquickjs = { path = "..", features = ["jit-abi"] }
+rquickjs-jit = { path = "../jit", features = ["compiler", "test-support"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

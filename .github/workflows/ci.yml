@@ -92,6 +92,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs -c submodule.test262.update=checkout submodule update --init --depth 1 test262
       - name: Install stable
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -106,6 +108,7 @@ jobs:
       - name: Record Rust version
         run: echo "RUST=$(rustc --version)" >> "$GITHUB_ENV"
       - name: Upload to codecov.io
+        continue-on-error: true
         uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: true
@@ -119,6 +122,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs -c submodule.test262.update=checkout submodule update --init --depth 1 test262
       - name: Install stable
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -127,12 +132,117 @@ jobs:
       - name: cargo generate-lockfile
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
+      - name: Run tests with memory sanitizer
+        run: |
+          symbolizer="$(command -v llvm-symbolizer-18 || command -v llvm-symbolizer)"
+          CC=clang CARGO_PROFILE_DEV_DEBUG=1 MSAN_OPTIONS="external_symbolizer_path=$symbolizer" RUSTFLAGS=-Zsanitizer=memory cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
       - name: Run tests with address sanitizer
         run: CC=clang RUSTFLAGS=-Zsanitizer=address cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
       - name: Run tests with thread sanitizer
         run: CC=clang RUSTFLAGS=-Zsanitizer=thread cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
-      - name: Run tests with memory sanitizer
-        run: CC=clang RUSTFLAGS=-Zsanitizer=memory cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
+
+  jit-semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Initialize pinned Test262 corpus
+        run: git -C sys/quickjs -c submodule.test262.update=checkout submodule update --init --depth 1 test262
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Verify native semantic test feature gates
+        run: cargo test -p rquickjs-jit --test required_features
+      - name: Run native semantic tests
+        run: cargo test -p rquickjs-jit --features compiler,test-support --test helpers --test semantics --test gpui_shell_surface -- --test-threads=1
+      - name: Gate closed opcode policy and executed Tier 1 manifest
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test opcodes --test differential -- --test-threads=1
+      - name: Run bounded Test262 in interpreter, automatic, and strict eligible tiers
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test correctness_runner --test regressions --test test262 -- --test-threads=1
+      - name: Install bounded fuzz runner
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Run all six byte-driven fuzz targets
+        working-directory: jit/fuzz
+        run: |
+          set -o pipefail
+          mkdir -p ../../target/jit-fuzz-artifacts ../../target/jit-fuzz-logs
+          for target in snapshot verifier frame_state lowering relocations; do
+            cargo +nightly fuzz run "$target" "corpus/$target" -- -runs=128 -artifact_prefix="../../target/jit-fuzz-artifacts/$target-" -print_final_stats=1 2>&1 | tee "../../target/jit-fuzz-logs/$target.log"
+          done
+          cargo +nightly fuzz run differential corpus/differential -- -runs=16 -artifact_prefix=../../target/jit-fuzz-artifacts/differential- -print_final_stats=1 2>&1 | tee ../../target/jit-fuzz-logs/differential.log
+      - name: Upload fuzz logs and reproducers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-fuzz-${{ github.run_id }}
+          path: |
+            target/jit-fuzz-logs
+            target/jit-fuzz-artifacts
+
+  jit-platform-compiler:
+    name: ${{ matrix.platform }} / JIT compiler graph and native smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-latest
+            smoke: differential
+          - platform: Linux AArch64
+            os: ubuntu-24.04-arm
+            smoke: differential
+          - platform: macOS x86_64
+            os: macos-15-intel
+            smoke: differential
+          - platform: macOS AArch64
+            os: macos-14
+            smoke: differential
+          - platform: Windows x86_64
+            os: windows-latest
+            smoke: differential
+          - platform: Windows AArch64
+            os: windows-11-arm
+            smoke: windows-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Check the complete compiler build graph
+        run: cargo check -p rquickjs-jit --all-targets --features compiler,test-support
+      - name: Probe executable-memory support
+        id: jit-capability
+        shell: bash
+        run: |
+          set +e
+          cargo run -p rquickjs-jit --example host_jit_capability --features compiler,test-support
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "native=true" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 77 ]; then
+            echo "native=false" >> "$GITHUB_OUTPUT"
+            echo "Host lacks pthread JIT write protection; native execution tests are unavailable."
+          else
+            exit "$status"
+          fi
+      - name: Exercise executable-memory publication on the host
+        if: steps.jit-capability.outputs.native == 'true'
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test platform -- --test-threads=1
+      - name: Smoke published native execution on the host
+        if: matrix.smoke == 'differential' && steps.jit-capability.outputs.native == 'true'
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test differential ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter -- --exact --test-threads=1
+      - name: Exercise native Windows ARM64 unwind publication
+        if: matrix.smoke == 'windows-arm64' && steps.jit-capability.outputs.native == 'true'
+        run: cargo test -p rquickjs-jit --release --features compiler,test-support --test baseline_windows_arm64 -- --test-threads=1
 
   examples:
     runs-on: ubuntu-latest
@@ -516,7 +626,7 @@ jobs:
           RUST_LOG: bindgen=warn,bindgen::ir=error,bindgen::codegen=error
           BUILD_TARGET: ${{ matrix.target }}
         run: |
-          cargo build ${{ matrix.optimization && '--release' || '' }} --manifest-path sys/Cargo.toml --target ${{ matrix.target }} --features bindgen,update-bindings,logging
+          cargo build ${{ matrix.optimization && '--release' || '' }} --manifest-path sys/Cargo.toml --target ${{ matrix.target }} --features bindgen,update-bindings,logging${{ ((startsWith(matrix.target, 'x86_64-') || startsWith(matrix.target, 'aarch64-')) && (contains(matrix.target, '-linux-') || contains(matrix.target, 'apple-darwin') || contains(matrix.target, 'windows'))) && ',jit-abi' || '' }}
           cat sys/src/bindings/${{ matrix.target }}.rs
       - name: Upload bindings
         if: matrix.task == 'bindings'
@@ -541,7 +651,7 @@ jobs:
           # Limit test threads to 1 for QEMU-emulated targets to work around an intermittent
           # QEMU user-mode emulation bug: "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}"
           # This is a race condition in QEMU's thread emulation, not a bug in rquickjs.
-          ${{ (startsWith(matrix.target, 'loongarch64') || startsWith(matrix.target, 'riscv64') || startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'armv7') || startsWith(matrix.target, 'powerpc64')) && 'RUST_TEST_THREADS=1' || '' }} ${{ matrix.target == 'wasm32-wasip1' && 'CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime' || '' }} ${{ matrix.target == 'wasm32-wasip2' && 'CARGO_TARGET_WASM32_WASIP2_RUNNER=wasmtime' || '' }} cargo test ${{ matrix.optimization && '--release' || '' }} --all ${{ (matrix.target == 'wasm32-wasip1' || matrix.target == 'wasm32-wasip2') && '--exclude module-loader' || ''  }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+          ${{ (startsWith(matrix.target, 'loongarch64') || startsWith(matrix.target, 'riscv64') || startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'armv7') || startsWith(matrix.target, 'powerpc64')) && 'RUST_TEST_THREADS=1' || '' }} ${{ matrix.target == 'wasm32-wasip1' && 'CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime' || '' }} ${{ matrix.target == 'wasm32-wasip2' && 'CARGO_TARGET_WASM32_WASIP2_RUNNER=wasmtime' || '' }} cargo test ${{ matrix.optimization && '--release' || '' }} --all --exclude rquickjs-jit --exclude rquickjs-jit-benchmarks ${{ (matrix.target == 'wasm32-wasip1' || matrix.target == 'wasm32-wasip2') && '--exclude module-loader' || ''  }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
 
   update-bindings:
     if: ${{ github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/') }}

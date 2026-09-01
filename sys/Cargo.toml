@@ -9,6 +9,36 @@ description = "QuickJS bindings for rquickjs"
 keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
 categories = ["external-ffi-bindings"]
 repository = "https://github.com/DelSkayn/rquickjs.git"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "build.rs",
+    "build_support/patch.rs",
+    "patches/*.patch",
+    "patches/README.md",
+    "quickjs.bind.h",
+    "quickjs/api-test.c",
+    "quickjs/builtin-array-fromasync.h",
+    "quickjs/builtin-iterator-zip-keyed.h",
+    "quickjs/builtin-iterator-zip.h",
+    "quickjs/cutils.h",
+    "quickjs/dtoa.c",
+    "quickjs/dtoa.h",
+    "quickjs/libregexp-opcode.h",
+    "quickjs/libregexp.c",
+    "quickjs/libregexp.h",
+    "quickjs/libunicode-table.h",
+    "quickjs/libunicode.c",
+    "quickjs/libunicode.h",
+    "quickjs/list.h",
+    "quickjs/quickjs-atom.h",
+    "quickjs/quickjs-c-atomics.h",
+    "quickjs/quickjs-opcode.h",
+    "quickjs/quickjs.c",
+    "quickjs/quickjs.h",
+    "src/**/*.rs",
+    "tests/jit_patch.rs",
+]
 
 [build-dependencies]
 cc = "1"
@@ -24,6 +54,12 @@ optional = true
 
 [features]
 bindgen = ["bindgen-rs"]
+
+# Enable the versioned QuickJS JIT ABI.
+jit-abi = []
+
+# Expose generated-binding source to downstream ABI integration tests.
+jit-test-support = ["jit-abi"]
 
 # Debug logging
 logging = ["pretty_env_logger"]

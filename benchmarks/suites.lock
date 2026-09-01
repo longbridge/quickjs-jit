@@ -1,0 +1,161 @@
+schema = 1
+
+[[suite]]
+name = "quickjs-ng"
+repository = "https://github.com/quickjs-ng/quickjs.git"
+commit = "ddf43e5e9872538a2c1ef693b84424beb0163195"
+subdirectory = "tests/microbench.js:int_arith"
+license = "MIT"
+upstream_sha256 = "8745b6b1d616153ba1f0a19349ee37e6d83804af25062d0ee7451f6d6edaad6c"
+adapted_sha256 = "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e"
+
+[[suite]]
+name = "rquickjs-jit-local-bitops"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/quickjs-bitops.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "382fab47164d9a4e6bc2080140b41b40a797d967ef605345b07a22daad08e5c7"
+
+[[suite]]
+name = "rquickjs-jit-local-fibonacci"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/quickjs-fibonacci.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "96ad95758210c1f9b99c5046a2e062a60d1415dceb58fdbf6173a1a28a1381e1"
+
+[[suite]]
+name = "rquickjs-jit-focused-scalar-loop"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/scalar-loop.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45"
+
+[[suite]]
+name = "rquickjs-jit-focused-call-heavy"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/call-heavy.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "596e2e860b92e275a0cb75ddaac1666716d1ec289acd15f0b845c496a8292b26"
+
+[[suite]]
+name = "rquickjs-jit-focused-property-heavy"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/property-heavy.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "a7cf0d0becdccf186b5318d414ea4775a8d68332e205550bb013d382b19390f7"
+
+[[suite]]
+name = "rquickjs-jit-focused-fibonacci-iterative"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/fibonacci-iterative.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "7f7c397e968bd4d88a70cd4eaad43e861f456f996bd93a2eecb3d583d31b39f4"
+
+[[suite]]
+name = "rquickjs-jit-focused-fibonacci-recursive"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/fibonacci-recursive.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "19af48c9602fd18c911d1d19daf48a3608209712f1205e7959680a0bf5fde3a0"
+
+[[suite]]
+name = "rquickjs-jit-matrix-float64"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/float64-dense.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "103f871a1964ff7fe96afdaf93465c2e4870da09cc81c3cbe916b744a00d0240"
+
+[[suite]]
+name = "rquickjs-jit-matrix-strings-regexp"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/strings-regexp.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "709bb01131e108922bf9843d561c74c2097e58ba2fe42988c079bc3683e50889"
+
+[[suite]]
+name = "rquickjs-jit-matrix-arrays-typed"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/arrays-typed.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "b44c77ea68743bb98d503e9ce194e9ef07c0c7d29bb4ff5ea7e9d2c05f9cbf13"
+
+[[suite]]
+name = "rquickjs-jit-matrix-objects-polymorphic"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/objects-polymorphic.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "0b43980bee67f25de8a453d191e113cd427f57b730b7f136435ca6ab4f9bbd69"
+
+[[suite]]
+name = "rquickjs-jit-matrix-calls-recursion-closures"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/calls-recursion-closures.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "e2c2f192b5915b77c20f852feb6e21b15dbf879507ee851f4da514f9c9300757"
+
+[[suite]]
+name = "rquickjs-jit-matrix-json-codec"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/json-codec.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "36526695061ee1fa90c7bfee357064af6d28c11af1a00145bf28fe1712e268e3"
+
+[[suite]]
+name = "rquickjs-jit-matrix-map-set-bigint"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/map-set-bigint.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "2ec0a33414b8c230cfd5028cf1a5aa769b3033da4f797fbb421ea63e1e66b954"
+
+[[suite]]
+name = "rquickjs-jit-matrix-exceptions-promises-async"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/exceptions-promises-async.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "78236c5910b41a1e4d57aea88a78fd3941236b999793d605de8976a9cc6f99a1"
+
+[[suite]]
+name = "sunspider"
+repository = "https://github.com/WebKit/WebKit.git"
+commit = "excluded-not-imported"
+subdirectory = "PerformanceTests/SunSpider"
+license = "BSD-2-Clause"
+sha256 = "excluded-not-imported"
+
+[[suite]]
+name = "jetstream"
+repository = "https://github.com/WebKit/Speedometer.git"
+commit = "excluded-not-imported"
+subdirectory = "resources/tests/JetStream3"
+license = "BSD-2-Clause"
+sha256 = "excluded-not-imported"

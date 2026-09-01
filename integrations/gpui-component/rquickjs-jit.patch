@@ -1,0 +1,658 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -30,6 +30,13 @@
+ ]
+ resolver = "2"
+ 
++[patch.crates-io]
++rquickjs = { path = "../rquickjs" }
++rquickjs-jit = { path = "../rquickjs/jit" }
++rquickjs-core = { path = "../rquickjs/core" }
++rquickjs-macro = { path = "../rquickjs/macro" }
++rquickjs-sys = { path = "../rquickjs/sys" }
++
+ [workspace.package]
+ publish = false
+ edition = "2024"
+--- a/crates/shell/Cargo.toml
++++ b/crates/shell/Cargo.toml
+@@ -18,7 +18,7 @@
+ path = "src/bin/gpui-shell.rs"
+ 
+ [features]
+-default = ["quickjs"]
++default = ["quickjs", "quickjs-jit"]
+ # The scripting engine. See `src/engine/mod.rs` for the surface an engine has
+ # to provide; QuickJS is the only implementation today, and the feature exists
+ # so a second one can be added without the seam having to be invented first.
+@@ -32,6 +32,7 @@
+     "dep:reqwest",
+     "dep:tungstenite",
+ ]
++quickjs-jit = ["quickjs", "dep:rquickjs-jit", "rquickjs/jit-abi"]
+ 
+ [dependencies]
+ gpui.workspace = true
+@@ -45,6 +46,9 @@
+     "classes",
+     "properties",
+ ], optional = true }
++
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
++rquickjs-jit = { version = "0.12.2", features = ["compiler"], optional = true }
+ # LLRT is still pre-release. Keep every module on the same audited revision;
+ # crates.io's 0.8.1-beta release uses rquickjs 0.11 and cannot share our VM.
+ llrt_buffer = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", optional = true }
+@@ -71,6 +75,7 @@
+ 
+ [dev-dependencies]
+ gpui = { workspace = true, features = ["test-support"] }
++sha2 = "0.10"
+ 
+ [target.'cfg(unix)'.dependencies]
+ libc = "0.2"
+--- a/crates/shell/src/engine/quickjs/mod.rs
++++ b/crates/shell/src/engine/quickjs/mod.rs
+@@ -33,6 +33,11 @@
+ };
+ use smallvec::SmallVec;
+ 
++#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++use rquickjs_jit::{Jit, JitConfig};
++#[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
++use rquickjs_jit::JitMetrics;
++
+ use crate::{
+     entities::{EntityHandle, EntityStore},
+     metrics::Metrics,
+@@ -448,6 +453,124 @@
+     (GpuiFpsModule, "gpui-fps", exports::GPUI_FPS),
+ ];
+ 
++enum RuntimeOwner {
++    // Keep the counterfactual's GPUI task scheduling identical to automatic
++    // mode. That leaves lifecycle timing to measure the JIT-specific work,
++    // rather than the one task that makes deferred attachment possible.
++    Interpreter {
++        runtime: JsRuntime,
++        lifecycle_scheduled: Cell<bool>,
++    },
++    #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++    Automatic {
++        runtime: JsRuntime,
++        jit: RefCell<Option<Jit>>,
++        attach_scheduled: Cell<bool>,
++    },
++}
++
++impl std::ops::Deref for RuntimeOwner {
++    type Target = JsRuntime;
++
++    fn deref(&self) -> &Self::Target {
++        match self {
++            Self::Interpreter { runtime, .. } => runtime,
++            #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++            Self::Automatic { runtime, .. } => runtime,
++        }
++    }
++}
++
++impl RuntimeOwner {
++    fn interpreter() -> Result<Self> {
++        Ok(Self::Interpreter {
++            runtime: JsRuntime::new().map_err(js_setup_error)?,
++            lifecycle_scheduled: Cell::new(false),
++        })
++    }
++
++    fn automatic() -> Result<Self> {
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        {
++            return Ok(Self::Automatic {
++                runtime: JsRuntime::new().map_err(js_setup_error)?,
++                jit: RefCell::new(None),
++                attach_scheduled: Cell::new(false),
++            });
++        }
++        Self::interpreter()
++    }
++
++    fn poll_jit(&self) {
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        if let Self::Automatic { jit, .. } = self {
++            if let Some(jit) = jit.borrow().as_ref() {
++                jit.poll();
++            }
++        }
++    }
++
++    fn suspend_jit(&self) {
++        if let Self::Interpreter { lifecycle_scheduled, .. } = self {
++            lifecycle_scheduled.set(false);
++        }
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        if let Self::Automatic { jit, attach_scheduled, .. } = self {
++            if let Some(jit) = jit.borrow().as_ref() {
++                if let Err(error) = jit.suspend() {
++                    tracing::warn!(%error, "could not suspend QuickJS JIT for reload");
++                }
++            }
++            attach_scheduled.set(false);
++        }
++    }
++
++    fn schedule_attach(runtime: &Rc<ShellRuntime>, cx: &mut App) {
++        if let Self::Interpreter { lifecycle_scheduled, .. } = &runtime.js_runtime {
++            if !lifecycle_scheduled.replace(true) {
++                // Production does one deferred lifecycle task after a render.
++                // The interpreter comparator performs the same scheduling, so
++                // first-window and reload timings isolate JIT-specific cost.
++                cx.spawn(async move |_| {}).detach();
++            }
++            return;
++        }
++        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++        if let Self::Automatic { attach_scheduled, .. } = &runtime.js_runtime {
++            if attach_scheduled.replace(true) {
++                return;
++            }
++            let runtime = Rc::downgrade(runtime);
++            cx.spawn(async move |cx| {
++                _ = cx.update(|_| {
++                    let Some(runtime) = runtime.upgrade() else { return };
++                    let Self::Automatic { runtime: js, jit, .. } = &runtime.js_runtime else { return };
++                    let mut guard = jit.borrow_mut();
++                    if let Some(guard) = guard.as_ref() {
++                        if let Err(error) = guard.resume() {
++                            tracing::warn!(%error, "could not resume QuickJS JIT after reload");
++                        }
++                    } else {
++                        let config = JitConfig::builder().build().expect("valid gpui-shell JIT configuration");
++                        match Jit::attach(js, config) {
++                            Ok(attached) => *guard = Some(attached),
++                            Err(error) => tracing::warn!(%error, "QuickJS JIT unavailable; continuing interpreted"),
++                        }
++                    }
++                });
++            }).detach();
++        }
++    }
++
++    #[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
++    fn jit_metrics(&self) -> Option<JitMetrics> {
++        match self {
++            Self::Interpreter { .. } => None,
++            Self::Automatic { jit, .. } => jit.borrow().as_ref().map(Jit::metrics),
++        }
++    }
++}
++
+ pub struct ShellRuntime {
+     /// Declared first because fields drop in declaration order and every
+     /// `Persistent` handle must be released while the context still exists.
+@@ -523,7 +578,7 @@
+     next_application_generation: Cell<u64>,
+     /// Held so the context stays alive, and so the module loader can be scoped
+     /// to an application directory when one is loaded.
+-    js_runtime: JsRuntime,
++    js_runtime: RuntimeOwner,
+ }
+ 
+ impl Drop for ShellRuntime {
+@@ -575,9 +630,22 @@
+     /// call frame rather than in runtime-global state. Use this only when a host
+     /// deliberately owns multiple isolated runtimes.
+     pub fn new_isolated() -> Result<Rc<Self>> {
++        Self::new_isolated_with_mode(false)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn new_isolated_interpreter() -> Result<Rc<Self>> {
++        Self::new_isolated_with_mode(true)
++    }
++
++    fn new_isolated_with_mode(force_interpreter: bool) -> Result<Rc<Self>> {
+         let entities = EntityStore::try_new()
+             .ok_or_else(|| anyhow!("gpui-shell entity store id space is exhausted"))?;
+-        let js_runtime = JsRuntime::new().map_err(js_setup_error)?;
++        let js_runtime = if force_interpreter {
++            RuntimeOwner::interpreter()?
++        } else {
++            RuntimeOwner::automatic()?
++        };
+         let context = JsContext::full(&js_runtime).map_err(js_setup_error)?;
+ 
+         let app_modules = AppModules::default();
+@@ -638,6 +706,15 @@
+         Ok(runtime)
+     }
+ 
++    #[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
++    pub(crate) fn jit_metrics(&self) -> Option<JitMetrics> {
++        self.js_runtime.jit_metrics()
++    }
++
++    fn poll_jit(&self) {
++        self.js_runtime.poll_jit();
++    }
++
+     pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
+         cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
+     }
+@@ -844,5 +946,6 @@
+     /// deliberately owns multiple isolated runtimes.
+     pub(crate) fn load_app(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
++        self.js_runtime.suspend_jit();
+         let root = crate::runtime::resolve_app_root(dir, entry)?;
+         if let Err(error) = crate::write_type_declarations(&root) {
+             tracing::debug!(
+@@ -887,5 +990,23 @@
+     #[cfg(test)]
+     pub(crate) fn load_source(self: &Rc<Self>, name: &str, source: &str) -> Result<ViewType> {
++        self.js_runtime.suspend_jit();
+         self.load_source_with_lease(name, source, None, None)
+     }
++
++    /// Benchmark-only split of the normal reload boundary. The two calls must
++    /// remain adjacent: together they are exactly [`Self::load_source`], while
++    /// exposing suspension separately from module declaration/evaluation.
++    #[cfg(test)]
++    pub(crate) fn suspend_jit_for_benchmark(&self) {
++        self.js_runtime.suspend_jit();
++    }
++
++    #[cfg(test)]
++    pub(crate) fn load_source_after_suspending_for_benchmark(
++        self: &Rc<Self>,
++        name: &str,
++        source: &str,
++    ) -> Result<ViewType> {
++        self.load_source_with_lease(name, source, None, None)
++    }
+
+@@ -1711,7 +1815,12 @@
+                 object.application_generation(),
+             );
+             (self.call_render(object, generation), policy)
+         });
++        // One bounded maintenance pass per outer render, after QuickJS has
++        // released its context lock. Low-level host callbacks may enter
++        // `with_js` hundreds of times while describing one panel.
++        self.poll_jit();
++        RuntimeOwner::schedule_attach(self, cx);
+ 
+         let root = match root {
+             Ok(root) => root,
+--- a/crates/shell/src/tests/benchmark.rs
++++ b/crates/shell/src/tests/benchmark.rs
+@@ -26,12 +26,20 @@
+ 
+ use crate::{RenderSnapshot, ScriptView, ShellRuntime, materialize::materialize};
+ use gpui::{AppContext as _, Entity, IntoElement as _, TestAppContext, VisualTestContext};
++#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++use sha2::{Digest as _, Sha256};
+ 
+ /// Rows and columns chosen to land near the doc's "typical panel" figure:
+ /// 40 rows x 5 cells plus wrappers is ~250 nodes, each carrying 8-12 ops.
+ const ROWS: usize = 40;
+ const COLUMNS: usize = 5;
+-const ITERATIONS: usize = 50;
++// 50 renders makes nearest-rank P99 a single maximum, so one scheduler
++// interruption dominates an otherwise stable fresh-process sample. More
++// identical renders make it a tail percentile without changing the JS
++// workload or any per-render semantics.
++const ITERATIONS: usize = 500;
++const JIT_WARMUP_RENDERS: usize = 64;
++const RELOAD_OBSERVATIONS: usize = 5;
+ /// How many batches of [`ITERATIONS`] a timing takes before believing the
+ /// fastest one.
+ const ROUNDS: usize = 7;
+@@ -90,6 +94,57 @@
+ }
+ "#;
+ 
++const COMPUTE_TEMPLATE: &str = r#"
++import { View, div } from "gpui";
++
++function layoutKernel(batches, seed) {
++  let checksum = seed;
++  for (let batch = 0; batch < batches; batch += 1) {
++    let a = 0;
++    let b = 1;
++    for (let i = 0; i < 40; i += 1) {
++      const next = a + b;
++      a = b;
++      b = next;
++    }
++    checksum = b;
++  }
++  return checksum;
++}
++
++export default class NumericLayout extends View {
++  render(cx) {
++    return div().child(`layout:${layoutKernel(2000, 0)}`);
++  }
++}
++"#;
++
+ const _: () = assert!(ROWS > 0 && COLUMNS > 0);
+
++
++#[test]
++fn p99_excludes_one_outlier_from_two_hundred_observations() {
++    let mut samples = vec![1_u64; 199];
++    samples.push(1_000);
++
++    assert_eq!(p99(samples), 1);
++}
++
++#[test]
++fn reload_median_retains_normal_observations_when_one_is_interrupted() {
++    assert_eq!(median_ns(vec![700, 710, 720, 730, 4_000]), 720);
++}
++
++fn p99(mut samples: Vec<u64>) -> u64 {
++    assert!(!samples.is_empty(), "P99 needs at least one sample");
++    let rank = (samples.len() * 99).div_ceil(100);
++    *samples.select_nth_unstable(rank - 1).1
++}
++
++fn median_ns(mut samples: Vec<u64>) -> u64 {
++    assert!(samples.len() % 2 == 1, "reload observations must have an odd count");
++    let middle = samples.len() / 2;
++    *samples.select_nth_unstable(middle).1
++}
++
+ fn source(rows: usize, columns: usize) -> String {
+@@ -325,14 +353,41 @@
+     VisualTestContext,
+     crate::engine::ViewObject,
+ ) {
++    grid_with_mode(cx, rows, columns, false)
++}
++
++fn grid_with_mode(
++    cx: &mut TestAppContext,
++    rows: usize,
++    columns: usize,
++    interpreter: bool,
++) -> (
++    std::rc::Rc<ShellRuntime>,
++    VisualTestContext,
++    crate::engine::ViewObject,
++) {
++    runtime_with_source(cx, &source(rows, columns), interpreter)
++}
++
++fn runtime_with_source(
++    cx: &mut TestAppContext,
++    source: &str,
++    interpreter: bool,
++) -> (
++    std::rc::Rc<ShellRuntime>,
++    VisualTestContext,
++    crate::engine::ViewObject,
++) {
+     cx.update(|cx| crate::init(cx));
+ 
+-    let runtime = ShellRuntime::new_isolated().expect("runtime");
++    let runtime = if interpreter {
++        ShellRuntime::new_isolated_interpreter().expect("interpreter runtime")
++    } else {
++        ShellRuntime::new_isolated().expect("automatic JIT runtime")
++    };
+     cx.update(|cx| runtime.set_global(cx));
+ 
+-    let view_type = runtime
+-        .load_source("grid", &source(rows, columns))
+-        .expect("load");
++    let view_type = runtime.load_source("benchmark-view", source).expect("load");
+ 
+     let window = cx.add_window(|_, _| Empty);
+     let mut context = VisualTestContext::from_window(*window.deref(), cx);
+@@ -343,6 +398,244 @@
+     (runtime, context, object)
+ }
+ 
++#[gpui::test]
++#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++fn jit_does_not_change_snapshot_or_render_count(cx: &mut TestAppContext) {
++    let (interpreter, mut interpreter_context, interpreter_object) =
++        grid_with_mode(cx, ROWS, COLUMNS, true);
++    let interpreted = interpreter_context.update(|window, cx| {
++        interpreter
++            .build_snapshot(
++                &interpreter_object,
++                None,
++                crate::policy::default(),
++                window,
++                cx,
++            )
++            .expect("interpreter render")
++    });
++    let interpreter_renders = interpreter.read_metrics().script_renders();
++
++    let (automatic, mut automatic_context, automatic_object) =
++        grid_with_mode(cx, ROWS, COLUMNS, false);
++    let jitted = automatic_context.update(|window, cx| {
++        automatic
++            .build_snapshot(
++                &automatic_object,
++                None,
++                crate::policy::default(),
++                window,
++                cx,
++            )
++            .expect("JIT render")
++    });
++    assert_eq!(jitted.debug_tree(), interpreted.debug_tree());
++    assert_eq!(
++        automatic.read_metrics().script_renders(),
++        interpreter_renders
++    );
++
++    let (interpreter, mut interpreter_context, interpreter_object) =
++        runtime_with_source(cx, COMPUTE_TEMPLATE, true);
++    let interpreted = interpreter_context.update(|window, cx| {
++        interpreter
++            .build_snapshot(
++                &interpreter_object,
++                None,
++                crate::policy::default(),
++                window,
++                cx,
++            )
++            .expect("interpreter compute render")
++    });
++    let (automatic, mut automatic_context, automatic_object) =
++        runtime_with_source(cx, COMPUTE_TEMPLATE, false);
++    let jitted = automatic_context.update(|window, cx| {
++        automatic
++            .build_snapshot(
++                &automatic_object,
++                None,
++                crate::policy::default(),
++                window,
++                cx,
++            )
++            .expect("JIT compute render")
++    });
++    assert_eq!(jitted.debug_tree(), interpreted.debug_tree());
++    assert!(jitted.debug_tree().contains("layout:165580141"));
++}
++
++/// Emits one real-process sample. `scripts/bench-gpui-shell.sh` launches this
++/// exact test in interleaved interpreter/automatic process pairs and aggregates
++/// the JSON objects; this test never claims several in-process timings are
++/// independent samples.
++#[gpui::test]
++#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++fn emit_one_jit_acceptance_sample(cx: &mut TestAppContext) {
++    let Ok(path) = std::env::var("GPUI_SHELL_JIT_SAMPLE") else {
++        return;
++    };
++    let interpreter = match std::env::var("GPUI_SHELL_JIT_MODE").as_deref() {
++        Ok("interpreter") => true,
++        Ok("automatic") => false,
++        _ => panic!("GPUI_SHELL_JIT_MODE must be interpreter or automatic"),
++    };
++    let pair_index: usize = std::env::var("GPUI_SHELL_JIT_PAIR")
++        .expect("GPUI_SHELL_JIT_PAIR")
++        .parse()
++        .expect("numeric pair index");
++    let workload = std::env::var("GPUI_SHELL_JIT_WORKLOAD").unwrap_or_else(|_| "panel".into());
++    let benchmark_source = match workload.as_str() {
++        "panel" => source(ROWS, COLUMNS),
++        "compute" => COMPUTE_TEMPLATE.to_owned(),
++        _ => panic!("GPUI_SHELL_JIT_WORKLOAD must be panel or compute"),
++    };
++
++    let first_started = Instant::now();
++    let (runtime, mut context, object) = runtime_with_source(cx, &benchmark_source, interpreter);
++    let first = context.update(|window, cx| {
++        runtime
++            .build_snapshot(&object, None, crate::policy::default(), window, cx)
++            .expect("first render")
++    });
++    let first_window_ns = first_started.elapsed().as_nanos() as u64;
++    let expected_tree = first.debug_tree();
++    // The production attachment is intentionally scheduled for the next GPUI
++    // tick so first-window latency excludes deferred maintenance.
++    cx.run_until_parked();
++
++    // Cross both production hotness thresholds and leave enough polls for all
++    // bounded profitability trials before the steady-state clock starts.
++    for _ in 0..JIT_WARMUP_RENDERS {
++        context.update(|window, cx| {
++            runtime
++                .build_snapshot(&object, None, crate::policy::default(), window, cx)
++                .expect("warmup render");
++        });
++    }
++    let mut metric_windows = Vec::new();
++    let capture_metrics = |runtime: &ShellRuntime| {
++        let metrics = runtime.jit_metrics();
++        serde_json::json!({
++            "installed": metrics.as_ref().map_or(0, |m| m.installed),
++            "compile_failures": metrics.as_ref().map_or(0, |m| m.compile_failures),
++            "native_entries": metrics.as_ref().map_or(0, |m| m.native_entries),
++            "tier2_entries": metrics.as_ref().map_or(0, |m| m.tier2_entries),
++            "deopts": metrics.as_ref().map_or(0, |m| m.deopts),
++            "profitability_rejected": metrics.as_ref().map_or(0, |m| m.profitability_rejected),
++            "interpreter_demotions": metrics.as_ref().map_or(0, |m| m.interpreter_demotions),
++        })
++    };
++    metric_windows.push(capture_metrics(&runtime));
++    let mut render_ns = Vec::with_capacity(ITERATIONS);
++    let steady_started = Instant::now();
++    for _ in 0..ITERATIONS {
++        let started = Instant::now();
++        let snapshot = context.update(|window, cx| {
++            runtime
++                .build_snapshot(&object, None, crate::policy::default(), window, cx)
++                .expect("measured render")
++        });
++        assert_eq!(snapshot.debug_tree(), expected_tree);
++        render_ns.push(started.elapsed().as_nanos() as u64);
++        if render_ns.len() % 10 == 0 {
++            metric_windows.push(capture_metrics(&runtime));
++        }
++    }
++    let steady_state_ns = steady_started.elapsed().as_nanos() as u64 / ITERATIONS as u64;
++    let render_windows_ns = render_ns
++        .chunks_exact(10)
++        .map(|window| window.iter().sum::<u64>() / window.len() as u64)
++        .collect::<Vec<_>>();
++    let p99_script_render_ns = p99(render_ns);
++    // Reload suspends the guard; retain steady-state native evidence first.
++    let metrics = runtime.jit_metrics();
++
++    // Each observation performs the same fresh-generation suspend,
++    // declaration/evaluation, instantiation, and render sequence. An odd,
++    // predeclared observation count reports the per-process median instead of
++    // allowing one scheduler interruption to redefine a reload sample.
++    let mut reload_totals = Vec::with_capacity(RELOAD_OBSERVATIONS);
++    let mut reload_observations = Vec::with_capacity(RELOAD_OBSERVATIONS);
++    let mut reloaded_len = 0;
++    for observation in 0..RELOAD_OBSERVATIONS {
++        let reload_started = Instant::now();
++        let suspend_started = Instant::now();
++        runtime.suspend_jit_for_benchmark();
++        let suspend_ns = suspend_started.elapsed().as_nanos() as u64;
++        let source_started = Instant::now();
++        let reload_type = runtime
++            .load_source_after_suspending_for_benchmark(
++                &format!("benchmark-view-reload-{observation}"),
++                &benchmark_source,
++            )
++            .expect("reload source");
++        let source_eval_ns = source_started.elapsed().as_nanos() as u64;
++        let instantiate_started = Instant::now();
++        let reload_object = context
++            .update(|window, cx| runtime.instantiate(&reload_type, window, cx))
++            .expect("reload instantiate");
++        let instantiate_ns = instantiate_started.elapsed().as_nanos() as u64;
++        let render_started = Instant::now();
++        let reloaded = context.update(|window, cx| {
++            runtime
++                .build_snapshot(&reload_object, None, crate::policy::default(), window, cx)
++                .expect("reload render")
++        });
++        let render_ns = render_started.elapsed().as_nanos() as u64;
++        let total_ns = reload_started.elapsed().as_nanos() as u64;
++        assert_eq!(reloaded.debug_tree(), expected_tree);
++        reloaded_len = reloaded.len();
++        let resume_started = Instant::now();
++        cx.run_until_parked();
++        let resume_task_ns = resume_started.elapsed().as_nanos() as u64;
++        reload_totals.push(total_ns);
++        reload_observations.push(serde_json::json!({
++            "suspend_ns": suspend_ns,
++            "source_eval_ns": source_eval_ns,
++            "instantiate_ns": instantiate_ns,
++            "render_ns": render_ns,
++            "total_ns": total_ns,
++            "resume_task_ns": resume_task_ns,
++        }));
++    }
++    let hot_reload_ns = median_ns(reload_totals);
++
++    let digest = format!("{:x}", Sha256::digest(expected_tree.as_bytes()));
++    let sample = serde_json::json!({
++        "mode": if interpreter { "interpreter" } else { "automatic" },
++        "workload": workload,
++        "pair_index": pair_index,
++        "steady_state_ns": steady_state_ns,
++        "p99_script_render_ns": p99_script_render_ns,
++        "first_window_ns": first_window_ns,
++        "hot_reload_ns": hot_reload_ns,
++        "checksum": format!("{}:{}", reloaded_len, digest),
++        "snapshot_sha256": digest,
++        "script_renders": runtime.read_metrics().script_renders(),
++        "native_entries": metrics.as_ref().map_or(0, |m| m.native_entries),
++        "fallback_count": metrics.as_ref().map_or(0, |m| m.native_fallbacks),
++        "installed": metrics.as_ref().map_or(0, |m| m.installed),
++        "compile_failures": metrics.as_ref().map_or(0, |m| m.compile_failures),
++        "tier2_entries": metrics.as_ref().map_or(0, |m| m.tier2_entries),
++        "deopts": metrics.as_ref().map_or(0, |m| m.deopts),
++        "profitability_evaluations": metrics.as_ref().map_or(0, |m| m.profitability_evaluations),
++        "profitability_approved": metrics.as_ref().map_or(0, |m| m.profitability_approved),
++        "profitability_rejected": metrics.as_ref().map_or(0, |m| m.profitability_rejected),
++        "interpreter_demotions": metrics.as_ref().map_or(0, |m| m.interpreter_demotions),
++        "hot_call_queues": metrics.as_ref().map_or(0, |m| m.hot_call_queues),
++        "hot_loop_queues": metrics.as_ref().map_or(0, |m| m.hot_loop_queues),
++        "metric_windows": metric_windows,
++        "render_windows_ns": render_windows_ns,
++        "reload_observations": reload_observations,
++    });
++    std::fs::write(
++        path,
++        serde_json::to_vec_pretty(&sample).expect("serialize sample"),
++    )
++    .expect("write sample");
++}
++
+ struct Empty;
+ 
+ impl gpui::Render for Empty {

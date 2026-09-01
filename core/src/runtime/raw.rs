@@ -34,6 +34,40 @@ const DUMP_OBJECTS: u64 = 0x20000;
 const DUMP_ATOMS: u64 = 0x40000;
 const DUMP_SHAPES: u64 = 0x80000;
 
+#[cfg(feature = "jit-test-support")]
+struct RuntimeDropProbe(Option<Box<dyn FnOnce() + Send + 'static>>);
+
+#[cfg(feature = "jit-abi")]
+struct JitBackendAttachment {
+    token: u64,
+    _backend: Box<super::jit::BackendState>,
+}
+
+#[cfg(feature = "jit-abi")]
+impl core::fmt::Debug for JitBackendAttachment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JitBackendAttachment")
+            .field("token", &self.token)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "jit-test-support")]
+impl core::fmt::Debug for RuntimeDropProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RuntimeDropProbe(..)")
+    }
+}
+
+#[cfg(feature = "jit-test-support")]
+impl RuntimeDropProbe {
+    fn run(mut self) {
+        if let Some(probe) = self.0.take() {
+            probe();
+        }
+    }
+}
+
 // Build the flags using `#[cfg]` at compile time
 const fn build_dump_flags() -> u64 {
     #[allow(unused_mut)]
@@ -112,6 +146,12 @@ pub(crate) struct RawRuntime {
 
     #[allow(dead_code)]
     pub allocator: Option<AllocatorHolder>,
+    #[cfg(feature = "jit-abi")]
+    jit_backend: Option<JitBackendAttachment>,
+    #[cfg(feature = "jit-abi")]
+    jit_next_attach_token: u64,
+    #[cfg(feature = "jit-test-support")]
+    runtime_drop_probe: Option<RuntimeDropProbe>,
     #[cfg(feature = "loader")]
     #[allow(dead_code)]
     pub loader: Option<LoaderHolder>,
@@ -122,12 +162,25 @@ unsafe impl Send for RawRuntime {}
 
 impl Drop for RawRuntime {
     fn drop(&mut self) {
+        #[cfg(feature = "jit-abi")]
+        unsafe {
+            // Runtime execution and teardown both hold the same runtime lock,
+            // so no native entry pin can still be active here. The backend's
+            // detach callback drains/cancels any queued work before its box is
+            // released and before QuickJS begins finalization.
+            let detached = self.detach_jit_backend_for_runtime_drop();
+            debug_assert!(detached.is_ok(), "QuickJS rejected forced JIT detach");
+        }
         unsafe {
             let ptr = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr());
             let mut opaque: Box<Opaque> = Box::from_raw(ptr as *mut _);
             opaque.clear();
             qjs::JS_FreeRuntime(self.rt.as_ptr());
             mem::drop(opaque);
+        }
+        #[cfg(feature = "jit-test-support")]
+        if let Some(probe) = self.runtime_drop_probe.take() {
+            probe.run();
         }
     }
 }
@@ -158,6 +211,12 @@ impl RawRuntime {
             rt,
             info: None,
             allocator: None,
+            #[cfg(feature = "jit-abi")]
+            jit_backend: None,
+            #[cfg(feature = "jit-abi")]
+            jit_next_attach_token: 0,
+            #[cfg(feature = "jit-test-support")]
+            runtime_drop_probe: None,
             #[cfg(feature = "loader")]
             loader: None,
         })
@@ -186,6 +245,12 @@ impl RawRuntime {
             rt,
             info: None,
             allocator: Some(allocator),
+            #[cfg(feature = "jit-abi")]
+            jit_backend: None,
+            #[cfg(feature = "jit-abi")]
+            jit_next_attach_token: 0,
+            #[cfg(feature = "jit-test-support")]
+            runtime_drop_probe: None,
             #[cfg(feature = "loader")]
             loader: None,
         })
@@ -198,6 +263,118 @@ impl RawRuntime {
         }
     }
 
+    #[cfg(feature = "jit-abi")]
+    pub(super) unsafe fn attach_jit_backend(
+        &mut self,
+        vtable: *const qjs::JSJitBackendVTable,
+        backend: Box<dyn super::jit::JitBackend>,
+    ) -> StdResult<u64, super::JitBackendAttachError> {
+        if self.jit_backend.is_some() {
+            return Err(super::JitBackendAttachError::AlreadyAttached);
+        }
+        let token = self
+            .jit_next_attach_token
+            .checked_add(1)
+            .ok_or(super::JitBackendAttachError::EngineRejected)?;
+        let mut backend = Box::new(super::jit::BackendState::new(self.rt, backend));
+        let opaque = backend.as_opaque();
+        let status = unsafe { qjs::JS_SetJitBackend(self.rt.as_ptr(), vtable, opaque) };
+        match status {
+            qjs::JS_JIT_BACKEND_OK => {
+                self.jit_next_attach_token = token;
+                self.jit_backend = Some(JitBackendAttachment {
+                    token,
+                    _backend: backend,
+                });
+                Ok(token)
+            }
+            qjs::JS_JIT_BACKEND_ALREADY_ATTACHED => {
+                Err(super::JitBackendAttachError::AlreadyAttached)
+            }
+            qjs::JS_JIT_BACKEND_INVALID_VTABLE => Err(super::JitBackendAttachError::InvalidVTable),
+            _ => Err(super::JitBackendAttachError::EngineRejected),
+        }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) unsafe fn detach_jit_backend(
+        &mut self,
+        token: u64,
+    ) -> StdResult<(), super::JitBackendAttachError> {
+        let Some(attachment) = self.jit_backend.as_ref() else {
+            return Ok(());
+        };
+        if attachment.token != token {
+            return Ok(());
+        }
+        unsafe { self.detach_jit_backend_for_runtime_drop() }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn jit_backend_token(&self) -> Option<u64> {
+        self.jit_backend.as_ref().map(|attachment| attachment.token)
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn poll_jit_backend(&mut self) {
+        if let Some(attachment) = self.jit_backend.as_mut() {
+            attachment._backend.poll();
+        }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn set_jit_suspended(
+        &mut self,
+        suspended: bool,
+    ) -> StdResult<(), super::JitBackendAttachError> {
+        let status = unsafe { qjs::JS_SetJitSuspended(self.rt.as_ptr(), i32::from(suspended)) };
+        if status == qjs::JS_JIT_BACKEND_OK {
+            Ok(())
+        } else {
+            Err(super::JitBackendAttachError::EngineRejected)
+        }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn is_jit_suspended(&self) -> bool {
+        unsafe { qjs::JS_IsJitSuspended(self.rt.as_ptr()) > 0 }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    pub(super) fn jit_runtime_id(&self) -> u64 {
+        unsafe { qjs::JS_GetJitRuntimeId(self.rt.as_ptr()) }
+    }
+
+    #[cfg(feature = "jit-abi")]
+    unsafe fn detach_jit_backend_for_runtime_drop(
+        &mut self,
+    ) -> StdResult<(), super::JitBackendAttachError> {
+        if self.jit_backend.is_none() {
+            return Ok(());
+        }
+        let status = unsafe {
+            qjs::JS_SetJitBackend(self.rt.as_ptr(), core::ptr::null(), core::ptr::null_mut())
+        };
+        if status == qjs::JS_JIT_BACKEND_OK {
+            drop(self.jit_backend.take());
+            Ok(())
+        } else {
+            Err(super::JitBackendAttachError::EngineRejected)
+        }
+    }
+
+    #[cfg(feature = "jit-test-support")]
+    pub(super) fn set_jit_runtime_drop_probe<F>(&mut self, probe: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        assert!(
+            self.runtime_drop_probe.is_none(),
+            "runtime drop probe already installed"
+        );
+        self.runtime_drop_probe = Some(RuntimeDropProbe(Some(Box::new(probe))));
+    }
+
     pub fn get_opaque<'js>(&self) -> &Opaque<'js> {
         unsafe { &*(qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()) as *mut _) }
     }
@@ -207,8 +384,12 @@ impl RawRuntime {
     }
 
     pub fn execute_pending_job(&mut self) -> StdResult<bool, *mut qjs::JSContext> {
+        #[cfg(feature = "jit-abi")]
+        self.poll_jit_backend();
         let mut ctx_ptr = mem::MaybeUninit::<*mut qjs::JSContext>::uninit();
         let result = unsafe { qjs::JS_ExecutePendingJob(self.rt.as_ptr(), ctx_ptr.as_mut_ptr()) };
+        #[cfg(feature = "jit-abi")]
+        self.poll_jit_backend();
         if result == 0 {
             // no jobs executed
             return Ok(false);

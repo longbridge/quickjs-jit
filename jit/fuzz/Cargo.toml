@@ -1,0 +1,52 @@
+[package]
+name = "rquickjs-jit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rquickjs-jit = { path = "..", features = ["compiler", "test-support"] }
+rquickjs-core = { path = "../../core", features = ["jit-abi"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "verifier"
+path = "fuzz_targets/verifier.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "frame_state"
+path = "fuzz_targets/frame_state.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lowering"
+path = "fuzz_targets/lowering.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "relocations"
+path = "fuzz_targets/relocations.rs"
+test = false
+doc = false

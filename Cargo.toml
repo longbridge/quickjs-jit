@@ -16,6 +16,8 @@ repository = "https://github.com/DelSkayn/rquickjs.git"
 members = [
   "sys",
   "core",
+  "jit",
+  "benchmarks",
   "macro",
   "examples/native-module",
   "examples/module-loader",
@@ -64,6 +66,9 @@ full-async-wasi = ["full-wasi", "futures"]
 
 # Enable use of the rust standard library
 std = ["rquickjs-core/std"]
+
+# Enable the versioned QuickJS JIT ABI.
+jit-abi = ["rquickjs-core/jit-abi"]
 
 # Chrono support.
 chrono = ["rquickjs-core/chrono"]
