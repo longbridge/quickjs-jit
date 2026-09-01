@@ -1,5 +1,8 @@
 use super::TaggedValue;
-use crate::{bytecode::VerifiedFunction, compiler::CompileFailure};
+use crate::{
+    bytecode::{Instruction, OperandFormat, VerifiedFunction},
+    compiler::CompileFailure,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueRepresentation {
@@ -35,7 +38,7 @@ pub struct OptimizedNode {
     eliminated: bool,
     bytes: Box<[u8]>,
     branch_target: Option<u32>,
-    pops: u8,
+    pops: u16,
     pushes: u8,
     deopt_guard: Option<u32>,
 }
@@ -65,7 +68,7 @@ impl OptimizedNode {
     pub const fn branch_target(&self) -> Option<u32> {
         self.branch_target
     }
-    pub const fn pops(&self) -> u8 {
+    pub const fn pops(&self) -> u16 {
         self.pops
     }
     pub const fn pushes(&self) -> u8 {
@@ -244,6 +247,8 @@ impl OptimizedIr {
             for instruction in &function.instructions()[block.instruction_range()] {
                 let name = instruction.opcode().name();
                 let (representation, effect) = classify_optimized_opcode(name)?;
+                let pops = u16::try_from(effective_pop(instruction))
+                    .map_err(|_| CompileFailure::ResourceLimit)?;
                 let deopt_guard = if is_guarded_arithmetic(name)
                     || name.starts_with("call")
                     || matches!(name, "get_array_el" | "put_array_el")
@@ -292,13 +297,13 @@ impl OptimizedIr {
                     branch_target: instruction
                         .branch_target()
                         .and_then(|target| u32::try_from(target).ok()),
-                    pops: instruction.opcode().n_pop(),
+                    pops,
                     pushes: instruction.opcode().n_push(),
                     deopt_guard,
                 });
                 block_nodes.push(id);
                 stack_depth = stack_depth
-                    .checked_sub(u16::from(instruction.opcode().n_pop()))
+                    .checked_sub(pops)
                     .and_then(|depth| depth.checked_add(u16::from(instruction.opcode().n_push())))
                     .ok_or(CompileFailure::InvalidArtifact)?;
                 if effect != OptimizedEffect::Pure {
@@ -357,6 +362,23 @@ impl OptimizedIr {
     }
     pub const fn max_stack(&self) -> u16 {
         self.max_stack
+    }
+}
+
+fn effective_pop(instruction: &Instruction) -> usize {
+    let base = instruction.opcode().n_pop() as usize;
+    match instruction.opcode().format() {
+        OperandFormat::NPop | OperandFormat::NPopU16 => {
+            base.saturating_add(instruction.operand_u16(1) as usize)
+        }
+        OperandFormat::NPopFixed => instruction
+            .opcode()
+            .name()
+            .as_bytes()
+            .last()
+            .and_then(|value| value.is_ascii_digit().then_some((value - b'0') as usize))
+            .map_or(base, |arguments| base.saturating_add(arguments)),
+        _ => base,
     }
 }
 
@@ -590,8 +612,10 @@ fn optimized_block_depths(
             .ok_or(CompileFailure::InvalidArtifact)?;
         let mut depth = *depths.get(&pc).ok_or(CompileFailure::InvalidArtifact)?;
         for instruction in &function.instructions()[block.instruction_range()] {
+            let pops = u16::try_from(effective_pop(instruction))
+                .map_err(|_| CompileFailure::ResourceLimit)?;
             depth = depth
-                .checked_sub(u16::from(instruction.opcode().n_pop()))
+                .checked_sub(pops)
                 .ok_or(CompileFailure::InvalidArtifact)?;
             depth = depth
                 .checked_add(u16::from(instruction.opcode().n_push()))

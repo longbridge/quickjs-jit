@@ -115,6 +115,19 @@ impl DirectCallTarget {
     }
 }
 
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn artifact_matches_direct_call(artifact: &CompiledArtifact, call: &CallSpecializationKey) -> bool {
+    artifact.direct_call_published().is_some()
+        && artifact
+            .optimized_metadata()
+            .and_then(|metadata| metadata.direct_call_signature())
+            .is_some_and(|signature| {
+                signature.function() == call.callee()
+                    && signature.arguments() == call.arguments()
+                    && signature.result() == call.result()
+            })
+}
+
 impl CompiledCallTarget {
     pub const fn identity(&self) -> ArtifactVersionIdentity {
         self.identity
@@ -1269,6 +1282,13 @@ impl Coordinator {
     /// whose scalar callee entry is now published, but the caller artifact was
     /// compiled before that dependency became available.
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn direct_call_ready(&mut self, call: &CallSpecializationKey) -> bool {
+        self.pin(call.callee(), Tier::Optimizing)
+            .or_else(|| self.pin(call.callee(), Tier::Baseline))
+            .is_some_and(|pin| artifact_matches_direct_call(pin.artifact(), call))
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn baseline_direct_refresh_ready(
         &mut self,
         key: FunctionKey,
@@ -1291,18 +1311,7 @@ impl Coordinator {
             let callee_pin = self
                 .pin(call.callee(), Tier::Optimizing)
                 .or_else(|| self.pin(call.callee(), Tier::Baseline));
-            callee_pin.is_some_and(|pin| {
-                let artifact = pin.artifact();
-                artifact.direct_call_published().is_some()
-                    && artifact
-                        .optimized_metadata()
-                        .and_then(|metadata| metadata.direct_call_signature())
-                        .is_some_and(|signature| {
-                            signature.function() == call.callee()
-                                && signature.arguments() == call.arguments()
-                                && signature.result() == call.result()
-                        })
-            })
+            callee_pin.is_some_and(|pin| artifact_matches_direct_call(pin.artifact(), &call))
         })
     }
 

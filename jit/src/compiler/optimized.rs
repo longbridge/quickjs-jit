@@ -360,11 +360,28 @@ impl NumericSpecialization {
             })
             .collect();
         let argument_count = usize::from(function.snapshot().arg_count());
+        let entry_arguments = feedback
+            .call_argument_types(key)
+            .filter(|arguments| arguments.len() == argument_count)
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        ObservedType::Int32 => EntryRepresentation::Int32,
+                        ObservedType::Float64 => EntryRepresentation::Float64,
+                        ObservedType::Object => EntryRepresentation::HeapRef,
+                        _ => EntryRepresentation::Any,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .unwrap_or_default();
         let Some(signature) = feedback
             .bounded_specialization(key)
             .filter(|signature| signature.arity() == argument_count)
         else {
             return Self {
+                arguments: entry_arguments,
                 calls,
                 properties,
                 numeric_constants,
@@ -971,6 +988,9 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "put_array_el" => {
+                                let source_provenance = stack_provenance[depth
+                                    .checked_sub(3)
+                                    .ok_or(CompileFailure::InvalidArtifact)?];
                                 depth = emit_opt_element_put(
                                     &mut builder,
                                     frame,
@@ -989,8 +1009,10 @@ fn lower_optimized_machine(
                                     pointer_type,
                                     layout,
                                     element_layout,
+                                    block.start_pc(),
+                                    source_provenance,
+                                    &mut guarded_element_source,
                                 )?;
-                                guarded_element_source = None;
                             }
                             "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
                                 let Some(call) = specialization.calls.get(&node.pc()) else {
@@ -2670,6 +2692,9 @@ fn emit_opt_element_put(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
     element_layout: crate::abi::ElementLayout,
+    block_pc: u32,
+    source_provenance: OptProvenance,
+    guarded_source: &mut Option<GuardedElementSource>,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
@@ -2690,6 +2715,9 @@ fn emit_opt_element_put(
     let typed_common = builder.create_block();
     let continuation = builder.create_block();
     builder.append_block_param(typed_common, types::I8);
+    builder.append_block_param(continuation, types::I32);
+    builder.append_block_param(continuation, pointer_type);
+    builder.append_block_param(continuation, types::I8);
 
     let object_ok = builder
         .ins()
@@ -2790,7 +2818,8 @@ fn emit_opt_element_put(
     builder
         .ins()
         .store(MemFlags::new(), value.tag, address, layout.value_tag);
-    builder.ins().jump(continuation, &[]);
+    let kind = builder.ins().iconst(types::I8, 0);
+    builder.ins().jump(continuation, &[count, data, kind]);
 
     builder.switch_to_block(int32);
     let int_value = builder
@@ -2910,14 +2939,20 @@ fn emit_opt_element_put(
     let address = builder.ins().iadd(data, offset);
     let scalar = builder.ins().ireduce(types::I32, value.payload);
     builder.ins().store(MemFlags::new(), scalar, address, 0);
-    builder.ins().jump(continuation, &[]);
+    let cached_kind = builder.ins().iconst(types::I8, 1);
+    builder
+        .ins()
+        .jump(continuation, &[count, data, cached_kind]);
     builder.switch_to_block(store_f64);
     let offset = builder.ins().imul_imm(index, 8);
     let offset = builder.ins().uextend(pointer_type, offset);
     let address = builder.ins().iadd(data, offset);
     let scalar = opt_f64(builder, value);
     builder.ins().store(MemFlags::new(), scalar, address, 0);
-    builder.ins().jump(continuation, &[]);
+    let cached_kind = builder.ins().iconst(types::I8, 2);
+    builder
+        .ins()
+        .jump(continuation, &[count, data, cached_kind]);
 
     builder.switch_to_block(deopt);
     for (slot, vars) in arguments.iter().enumerate() {
@@ -2962,6 +2997,14 @@ fn emit_opt_element_put(
     );
 
     builder.switch_to_block(continuation);
+    let params = builder.block_params(continuation);
+    *guarded_source = Some(GuardedElementSource {
+        provenance: source_provenance,
+        block_pc,
+        count: params[0],
+        data: params[1],
+        kind: params[2],
+    });
     for provenance in &mut stack_provenance[object_index..depth] {
         *provenance = OptProvenance::Unknown;
     }

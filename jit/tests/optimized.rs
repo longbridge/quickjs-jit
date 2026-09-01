@@ -790,6 +790,11 @@ fn stable_typed_element_loop_lowers_native_loads_and_stores() {
     );
     assert!(clif.contains("load.f64"), "typed load missing: {clif}");
     assert!(clif.contains("load.i8"), "detached guard missing: {clif}");
+    assert_eq!(
+        clif.matches("icmp ult").count(),
+        1,
+        "the load immediately following a stable in-bounds typed store did not reuse its guarded count and data pointer: {clif}"
+    );
 }
 
 #[test]
@@ -1475,6 +1480,82 @@ fn production_tier2_caller_executes_a_monomorphic_compiled_callee() {
     jit.poll();
     let after = jit.metrics();
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_waits_for_and_calls_a_direct_callee() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(16)
+            .workers(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function increment(value,delta){return value+delta}\n\
+                 function workload(iterations,seed,target){\n\
+                   let value=seed;let delta=0;\n\
+                   for(let i=0;i<iterations;i++){\n\
+                     value=target(value,delta);\n\
+                     delta++;if(delta<8){}else{delta=0;}\n\
+                   }\n\
+                   return value;\n\
+                 }",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(
+            context.with(|ctx| {
+                let increment: Function<'_> = ctx.globals().get("increment").unwrap();
+                let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+                workload.call::<_, i32>((128, 0, increment)).unwrap()
+            }),
+            448
+        );
+        jit.poll();
+        if jit.metrics().installed >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+
+    let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
+    for _ in 0..8 {
+        assert_eq!(
+            context.with(|ctx| {
+                let increment: Function<'_> = ctx.globals().get("increment").unwrap();
+                let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+                workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+            }),
+            7_000
+        );
+    }
+    let after = jit.metrics();
+    assert!(
+        after.tier2_entries.saturating_sub(before.tier2_entries) <= 16,
+        "stable direct calls re-entered through QuickJS: before={before:?} after={after:?}"
+    );
     assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
     assert_eq!(after.native_retries, before.native_retries, "{after:?}");
 }

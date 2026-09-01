@@ -1278,6 +1278,21 @@ impl ProductionBackend {
                 .feedback
                 .snapshot(self.clock.max(1))
                 .with_properties(self.shape_feedback.snapshot(key));
+            let direct_call_pending = snapshot.instructions().iter().any(|instruction| {
+                let Some(call) = observed.call_specialization_at(key, instruction.pc()) else {
+                    return false;
+                };
+                call.callee() != key && !self.coordinator.direct_call_ready(&call)
+            });
+            /* A caller queued while its monomorphic callee is still compiling
+             * permanently lowers the site through the generic CALL bridge.
+             * Keep the caller at its installed baseline until the callee's
+             * scalar entry is publishable, then capture that pinned target in
+             * the first Tier2 artifact. Self-recursive and non-specializable
+             * calls keep their existing generic lowering. */
+            if direct_call_pending {
+                continue;
+            }
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
                 matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
             }) && !snapshot.instructions().iter().any(|instruction| {
