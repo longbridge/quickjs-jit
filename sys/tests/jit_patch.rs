@@ -35,6 +35,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0004-tier1-globals.patch",
         "0005-tier1-constructors.patch",
         "0006-tier1-regexp.patch",
+        "0007-msan-slot-boundary.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
