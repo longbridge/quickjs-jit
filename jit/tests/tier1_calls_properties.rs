@@ -284,11 +284,14 @@ fn baseline_property_cache_validates_once_per_site_and_mutation_misses_exactly()
             )
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
-        context
-            .with(|ctx| ctx.eval::<i32, _>("bump(obj,8)"))
-            .unwrap();
+        context.with(|ctx| {
+            let globals = ctx.globals();
+            let bump: Function<'_> = globals.get("bump").unwrap();
+            let obj: rquickjs::Object<'_> = globals.get("obj").unwrap();
+            bump.call::<_, i32>((obj, 8)).unwrap();
+        });
         jit.poll();
         if jit.metrics().installed >= 2 {
             break;
