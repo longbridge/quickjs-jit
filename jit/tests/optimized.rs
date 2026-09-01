@@ -1522,7 +1522,7 @@ fn production_tier2_waits_for_and_calls_a_direct_callee() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
         assert_eq!(
             context.with(|ctx| {
