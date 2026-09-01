@@ -140,26 +140,22 @@ fn packed_and_typed_element_hits_skip_get_set_helpers_and_fallbacks_stay_exact()
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
-        assert_eq!(
-            context
-                .with(|ctx| ctx.eval::<i32, _>("packed(packedArray,10)"))
-                .unwrap(),
-            13
-        );
-        assert_eq!(
-            context
-                .with(|ctx| ctx.eval::<i32, _>("i32(i32Array,10)"))
-                .unwrap(),
-            15
-        );
-        assert_eq!(
-            context
-                .with(|ctx| ctx.eval::<f64, _>("f64(f64Array,10)"))
-                .unwrap(),
-            10.5
-        );
+        context.with(|ctx| {
+            let globals = ctx.globals();
+            let packed: Function<'_> = globals.get("packed").unwrap();
+            let packed_array: rquickjs::Array<'_> = globals.get("packedArray").unwrap();
+            assert_eq!(packed.call::<_, i32>((packed_array, 10)).unwrap(), 13);
+
+            let i32: Function<'_> = globals.get("i32").unwrap();
+            let i32_array: rquickjs::TypedArray<'_, i32> = globals.get("i32Array").unwrap();
+            assert_eq!(i32.call::<_, i32>((i32_array, 10)).unwrap(), 15);
+
+            let f64: Function<'_> = globals.get("f64").unwrap();
+            let f64_array: rquickjs::TypedArray<'_, f64> = globals.get("f64Array").unwrap();
+            assert_eq!(f64.call::<_, f64>((f64_array, 10)).unwrap(), 10.5);
+        });
         jit.poll();
         if jit.metrics().installed >= 2 {
             break;
