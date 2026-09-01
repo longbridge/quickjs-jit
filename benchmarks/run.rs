@@ -1117,7 +1117,10 @@ mod tests {
             .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // MemorySanitizer makes both the workload and background compilation
+        // substantially slower. Keep requiring a real Tier 2 entry while
+        // giving the stable workload enough time to install and execute it.
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             invoke_workload(&context).unwrap();
             jit.poll();
