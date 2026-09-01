@@ -234,9 +234,14 @@ fn bounded_polymorphic_property_emits_one_shape_guard_per_layout() {
     };
     let monomorphic = compile(&[(0x1000, 1)]);
     let polymorphic = compile(&[(0x1000, 1), (0x2000, 3), (0x3000, 2)]);
+    let call_width = if cfg!(rquickjs_memory_sanitizer) {
+        4
+    } else {
+        1
+    };
     assert_eq!(
         polymorphic.matches("call_indirect").count(),
-        monomorphic.matches("call_indirect").count() + 2,
+        monomorphic.matches("call_indirect").count() + 2 * call_width,
         "{polymorphic}"
     );
     assert!(polymorphic.contains("iconst.i32 8192"), "{polymorphic}");
@@ -276,7 +281,16 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
         )
         .expect("bounded primitive store PIC");
     // Two owner materializations + two SHAPE_GUARD calls + two balanced FREEs.
-    assert_eq!(clif.matches("call_indirect").count(), 6, "{clif}");
+    let call_width = if cfg!(rquickjs_memory_sanitizer) {
+        4
+    } else {
+        1
+    };
+    assert_eq!(
+        clif.matches("call_indirect").count(),
+        6 * call_width,
+        "{clif}"
+    );
     assert!(clif.matches("store.i64").count() >= 4, "{clif}");
     assert!(clif.contains("iconst.i32 8192"), "{clif}");
 }
