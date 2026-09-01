@@ -669,9 +669,14 @@ fn stable_int32_loop_carries_unboxed_i32_ssa_through_the_header() {
         2,
         "only the two entry arguments may be unboxed: {clif}"
     );
+    let expected_calls = if cfg!(rquickjs_memory_sanitizer) {
+        4
+    } else {
+        1
+    };
     assert_eq!(
         clif.matches("call_indirect").count(),
-        1,
+        expected_calls,
         "only the amortized interrupt poll helper is permitted: {clif}"
     );
 }
