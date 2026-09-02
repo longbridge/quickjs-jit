@@ -3719,14 +3719,22 @@ fn production_tier2_runs_the_int_arith_kernel_end_to_end() {
     )
     .unwrap();
     let context = Context::full(&runtime).unwrap();
-    context.with(|ctx| ctx.eval::<(), _>(INT_ARITH_KERNEL).unwrap());
+    // Warm through one predefined caller: evaluating a fresh script per
+    // iteration would queue a throwaway compilation ahead of the kernel's
+    // Tier 2 job every time and starve it under slow instrumented builds.
+    context.with(|ctx| {
+        ctx.eval::<(), _>(INT_ARITH_KERNEL).unwrap();
+        ctx.eval::<(), _>("globalThis.__warm=function(){return workload(4096)}")
+            .unwrap();
+    });
     let run = || {
         context.with(|ctx| {
-            ctx.eval::<String, _>("workload(4096)")
+            let warm: rquickjs::Function<'_> = ctx.globals().get("__warm").unwrap();
+            warm.call::<_, String>(())
                 .unwrap_or_else(|error| panic!("{error} {:?}", ctx.catch()))
         })
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while std::time::Instant::now() < deadline {
         assert_eq!(run(), expected);
         jit.poll();

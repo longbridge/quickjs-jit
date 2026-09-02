@@ -194,6 +194,14 @@ fn manifest_executes_every_advertised_opcode_at_its_native_pc() {
         serde_json::from_str(include_str!("fixtures/opcode-cases.json")).unwrap();
     validate_dimensions(&manifest).expect("manifest has semantic dimension evidence");
     for case in manifest.cases {
+        // The 32-bit `goto` case needs a 6,000-statement dead block to push a
+        // jump offset past 16 bits. Under sanitizer instrumentation compiling
+        // that block takes over an hour on CI runners, so only the
+        // uninstrumented jobs execute it; the opcode manifest gate in
+        // `opcodes.rs` still requires the case to exist.
+        if cfg!(rquickjs_sanitizer) && case.opcode == "goto" {
+            continue;
+        }
         let mut run = differential(&case.definition, &case.expression)
             .force_baseline()
             .expect_executed_opcode(&case.opcode);

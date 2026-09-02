@@ -2,6 +2,7 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(rquickjs_memory_sanitizer)");
+    println!("cargo:rustc-check-cfg=cfg(rquickjs_sanitizer)");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_SANITIZE");
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
@@ -12,6 +13,12 @@ fn main() {
             .is_ok_and(|value| value.contains("sanitizer=memory"));
     if memory_sanitizer {
         println!("cargo:rustc-cfg=rquickjs_memory_sanitizer");
+    }
+    let any_sanitizer = env::var("CARGO_CFG_SANITIZE").is_ok_and(|value| !value.is_empty())
+        || env::var("RUSTFLAGS").is_ok_and(|value| value.contains("sanitizer="))
+        || env::var("CARGO_ENCODED_RUSTFLAGS").is_ok_and(|value| value.contains("sanitizer="));
+    if any_sanitizer {
+        println!("cargo:rustc-cfg=rquickjs_sanitizer");
     }
 
     const EXPECTED_COUNT: usize = 252;
