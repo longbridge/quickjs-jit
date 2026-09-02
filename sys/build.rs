@@ -218,13 +218,14 @@ QJSJIT_HELPER_LIST(QJSJIT_EMIT)
             flags,
         });
     }
-    assert_eq!(helpers.len(), 22, "canonical append-only helper count");
+    assert_eq!(helpers.len(), 24, "canonical append-only helper count");
 
     let u32_args = |signature: &str| match signature {
         "FRAME" => 0,
         "MAP_IN" | "MAP_OUT" => 2,
         "MAP_OUT_IN" | "MAP_OUT_INDEX" => 3,
         "MAP_OUT_TWO"
+        | "MAP_OUT_IN_OP"
         | "MAP_OUT_OBJECT_ATOM"
         | "MAP_OBJECT_ATOM_VALUE"
         | "MAP_MATERIALIZE_OWNER" => 4,

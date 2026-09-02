@@ -683,6 +683,12 @@ impl DifferentialRun {
                 HelperId::ToNumeric => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_NUMERIC,
                 HelperId::ToBool => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
                 HelperId::AddSlow => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW,
+                HelperId::BinaryArithSlow => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW
+                }
+                HelperId::UnaryArithSlow => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_UNARY_ARITH_SLOW
+                }
                 HelperId::CompareSlow => {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW
                 }
@@ -1155,6 +1161,27 @@ unsafe extern "C" fn synthetic_map_out_two_unavailable(
     -1
 }
 
+unsafe extern "C" fn synthetic_map_out_two_op_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _left: u32,
+    _right: u32,
+    _opcode: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_map_out_in_op_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _input: u32,
+    _opcode: u32,
+) -> i32 {
+    -1
+}
+
 unsafe extern "C" fn synthetic_get_unavailable(
     _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
     _stack_map_id: u32,
@@ -1268,6 +1295,8 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         get_global: Some(synthetic_map_out_in_unavailable),
         call_constructor: Some(synthetic_map_call_unavailable),
         regexp: Some(synthetic_map_out_two_unavailable),
+        binary_arith_slow: Some(synthetic_map_out_two_op_unavailable),
+        unary_arith_slow: Some(synthetic_map_out_in_op_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

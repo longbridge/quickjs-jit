@@ -25,6 +25,19 @@ enum Operation {
     Add {
         stress: bool,
     },
+    BinaryArith {
+        opcode: u32,
+        consumed: Arc<AtomicBool>,
+    },
+    UnaryArith {
+        opcode: u32,
+        consumed: Arc<AtomicBool>,
+    },
+    InvalidArith {
+        binary: bool,
+        opcode: u32,
+        untouched: Arc<AtomicBool>,
+    },
     Compare(u32),
     Get(u32),
     Set {
@@ -185,6 +198,70 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                 } else {
                     finish_slot(frame, (*frame).arg_buf)
                 }
+            }
+            Operation::BinaryArith { opcode, consumed } => {
+                (*frame).flags |= qjs::JS_JIT_FRAME_STRESS_GC;
+                let status = api.binary_arith_slow.expect("BINARY_ARITH_SLOW helper")(
+                    frame, 0, 0, 0, 1, *opcode,
+                );
+                // Both operands are consumed on success and on exception; the
+                // output only holds a value on success.
+                let right_cleared = qjs::JS_IsUndefined(*(*frame).arg_buf.add(1));
+                let left_cleared = qjs::JS_IsUndefined(*(*frame).arg_buf);
+                consumed.store(
+                    right_cleared && (status >= 0 || left_cleared),
+                    Ordering::SeqCst,
+                );
+                if status < 0 {
+                    qjs::JSJitExit::exception()
+                } else {
+                    finish_slot(frame, (*frame).arg_buf)
+                }
+            }
+            Operation::UnaryArith { opcode, consumed } => {
+                (*frame).flags |= qjs::JS_JIT_FRAME_STRESS_GC;
+                set_stack_depth(frame, 1);
+                let status = api.unary_arith_slow.expect("UNARY_ARITH_SLOW helper")(
+                    frame, 0, stack_slot, 0, *opcode,
+                );
+                let input_cleared = qjs::JS_IsUndefined(*(*frame).arg_buf);
+                let output_cleared = qjs::JS_IsUndefined(*(*frame).stack_base);
+                consumed.store(
+                    input_cleared && (status >= 0 || output_cleared),
+                    Ordering::SeqCst,
+                );
+                if status < 0 {
+                    qjs::JSJitExit::exception()
+                } else {
+                    finish_slot(frame, (*frame).stack_base)
+                }
+            }
+            Operation::InvalidArith {
+                binary,
+                opcode,
+                untouched,
+            } => {
+                let before_left = *(*frame).arg_buf;
+                let before_right = *(*frame).arg_buf.add(1);
+                let status = if *binary {
+                    api.binary_arith_slow.expect("BINARY_ARITH_SLOW helper")(
+                        frame, 0, 0, 0, 1, *opcode,
+                    )
+                } else {
+                    api.unary_arith_slow.expect("UNARY_ARITH_SLOW helper")(frame, 0, 0, 0, *opcode)
+                };
+                let after_left = *(*frame).arg_buf;
+                let after_right = *(*frame).arg_buf.add(1);
+                untouched.store(
+                    status == qjs::JS_JIT_HELPER_EXCEPTION
+                        && qjs::JS_HasException((*frame).ctx)
+                        && before_left.tag == after_left.tag
+                        && before_left.u.ptr == after_left.u.ptr
+                        && before_right.tag == after_right.tag
+                        && before_right.u.ptr == after_right.u.ptr,
+                    Ordering::SeqCst,
+                );
+                qjs::JSJitExit::exception()
             }
             Operation::Compare(operation) => {
                 let status =
@@ -549,6 +626,241 @@ fn add_slow_preserves_symbol_to_primitive_order_and_exception_order() {
     });
     assert_eq!(thrown, r#"["boom",["left","right"]]"#);
     assert_eq!(entries.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn binary_arith_slow_matches_interpreter_semantics_and_consumes_both_operands() {
+    let cases = [
+        (
+            "function target(a, b) { return a % b }",
+            qjs::QJS_JIT_OP_MOD,
+            "String(target(7, 3))",
+            "1",
+        ),
+        (
+            "function target(a, b) { return a % b }",
+            qjs::QJS_JIT_OP_MOD,
+            "String(Object.is(target(-4, 2), -0))",
+            "true",
+        ),
+        (
+            "function target(a, b) { return a % b }",
+            qjs::QJS_JIT_OP_MOD,
+            "String(target(5, 0))",
+            "NaN",
+        ),
+        (
+            "function target(a, b) { return a ** b }",
+            qjs::QJS_JIT_OP_POW,
+            "String(target(2, 10))",
+            "1024",
+        ),
+        (
+            "function target(a, b) { return a << b }",
+            qjs::QJS_JIT_OP_SHL,
+            "String(target(1, 33))",
+            "2",
+        ),
+        (
+            "function target(a, b) { return a >>> b }",
+            qjs::QJS_JIT_OP_SHR,
+            "String(target(-1, 0))",
+            "4294967295",
+        ),
+        (
+            "function target(a, b) { return a >> b }",
+            qjs::QJS_JIT_OP_SAR,
+            "String(target(-8, 1))",
+            "-4",
+        ),
+        (
+            "function target(a, b) { return a * b }",
+            qjs::QJS_JIT_OP_MUL,
+            "String(target('5', '2'))",
+            "10",
+        ),
+        (
+            "function target(a, b) { return a / b }",
+            qjs::QJS_JIT_OP_DIV,
+            "String(target(1, 4))",
+            "0.25",
+        ),
+        (
+            "function target(a, b) { return a & b }",
+            qjs::QJS_JIT_OP_AND,
+            "String(target(6, 3))",
+            "2",
+        ),
+        (
+            "function target(a, b) { return a | b }",
+            qjs::QJS_JIT_OP_OR,
+            "String(target(6n, 3n))",
+            "7",
+        ),
+        (
+            "function target(a, b) { return a ^ b }",
+            qjs::QJS_JIT_OP_XOR,
+            "String(target('6', 3))",
+            "5",
+        ),
+        (
+            "function target(a, b) { return a - b }",
+            qjs::QJS_JIT_OP_SUB,
+            "(() => { try { target({ valueOf() { throw new Error('x') } }, 1) } catch (error) { return error.message } })()",
+            "x",
+        ),
+        (
+            "function target(a, b) { return a % b }",
+            qjs::QJS_JIT_OP_MOD,
+            "(() => { try { target(1, { valueOf() { throw new Error('y') } }) } catch (error) { return error.message } })()",
+            "y",
+        ),
+    ];
+    for (definition, opcode, expression, expected) in cases {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let snapshot = context.with(|ctx| {
+            ctx.eval::<(), _>(format!("globalThis.target = {definition}"))
+                .unwrap();
+            let function: Function<'_> = ctx.globals().get("target").unwrap();
+            snapshot(&ctx, &function)
+        });
+        let consumed = Arc::new(AtomicBool::new(false));
+        let (_guard, entries) = install(
+            &runtime,
+            &snapshot,
+            Operation::BinaryArith {
+                opcode: u32::from(opcode),
+                consumed: Arc::clone(&consumed),
+            },
+        );
+        let result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
+        assert_eq!(result, expected, "{expression}");
+        assert!(
+            consumed.load(Ordering::SeqCst),
+            "{expression} left operands"
+        );
+        assert_eq!(entries.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn unary_arith_slow_matches_interpreter_semantics_and_consumes_the_input() {
+    let cases = [
+        (
+            "function target(v) { return -v }",
+            qjs::QJS_JIT_OP_NEG,
+            "String(target('3'))",
+            "-3",
+        ),
+        (
+            "function target(v) { return -v }",
+            qjs::QJS_JIT_OP_NEG,
+            "String(Object.is(target(0), -0))",
+            "true",
+        ),
+        (
+            "function target(v) { return ~v }",
+            qjs::QJS_JIT_OP_NOT,
+            "String(target('7'))",
+            "-8",
+        ),
+        (
+            "function target(v) { return +v }",
+            qjs::QJS_JIT_OP_PLUS,
+            "String(target('12'))",
+            "12",
+        ),
+        (
+            "function target(v) { return ++v }",
+            qjs::QJS_JIT_OP_INC,
+            "String(target('41'))",
+            "42",
+        ),
+        (
+            "function target(v) { return --v }",
+            qjs::QJS_JIT_OP_DEC,
+            "String(target(2147483648))",
+            "2147483647",
+        ),
+        (
+            "function target(v) { return -v }",
+            qjs::QJS_JIT_OP_NEG,
+            "(() => { try { target({ valueOf() { throw new Error('z') } }) } catch (error) { return error.message } })()",
+            "z",
+        ),
+        (
+            "function target(v) { return +v }",
+            qjs::QJS_JIT_OP_PLUS,
+            "(() => { try { target(1n) } catch (error) { return error.constructor.name } })()",
+            "TypeError",
+        ),
+    ];
+    for (definition, opcode, expression, expected) in cases {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let snapshot = context.with(|ctx| {
+            ctx.eval::<(), _>(format!("globalThis.target = {definition}"))
+                .unwrap();
+            let function: Function<'_> = ctx.globals().get("target").unwrap();
+            snapshot(&ctx, &function)
+        });
+        let consumed = Arc::new(AtomicBool::new(false));
+        let (_guard, entries) = install(
+            &runtime,
+            &snapshot,
+            Operation::UnaryArith {
+                opcode: u32::from(opcode),
+                consumed: Arc::clone(&consumed),
+            },
+        );
+        let result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
+        assert_eq!(result, expected, "{expression}");
+        assert!(
+            consumed.load(Ordering::SeqCst),
+            "{expression} left its input"
+        );
+        assert_eq!(entries.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn arith_slow_helpers_reject_foreign_opcodes_without_touching_operands() {
+    let cases = [
+        (true, u32::from(qjs::QJS_JIT_OP_ADD)),
+        (true, u32::from(qjs::QJS_JIT_OP_NEG)),
+        (true, u32::MAX),
+        (false, u32::from(qjs::QJS_JIT_OP_SUB)),
+        (false, u32::from(qjs::QJS_JIT_OP_TYPEOF)),
+        (false, u32::MAX),
+    ];
+    for (binary, opcode) in cases {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let snapshot = context.with(|ctx| {
+            ctx.eval::<(), _>("globalThis.target = function target(a, b) { return a - b }")
+                .unwrap();
+            let function: Function<'_> = ctx.globals().get("target").unwrap();
+            snapshot(&ctx, &function)
+        });
+        let untouched = Arc::new(AtomicBool::new(false));
+        let (_guard, entries) = install(
+            &runtime,
+            &snapshot,
+            Operation::InvalidArith {
+                binary,
+                opcode,
+                untouched: Arc::clone(&untouched),
+            },
+        );
+        let result = context.with(|ctx| ctx.eval::<(), _>("target({ marker: 1 }, { marker: 2 })"));
+        assert!(result.is_err(), "binary={binary} opcode={opcode} returned");
+        assert!(
+            untouched.load(Ordering::SeqCst),
+            "binary={binary} opcode={opcode} touched operands"
+        );
+        assert_eq!(entries.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[test]
