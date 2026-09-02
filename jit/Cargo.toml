@@ -13,10 +13,10 @@ build = "build.rs"
 name = "rquickjs_jit"
 
 [build-dependencies]
-rquickjs-sys = { package = "quickjs-jit-sys", version = "0.12.3", path = "../sys", features = ["jit-abi"] }
+rquickjs-sys = { package = "quickjs-jit-sys", version = "=0.12.3", path = "../sys", features = ["jit-abi"] }
 
 [dependencies]
-rquickjs-core = { package = "quickjs-jit-core", version = "0.12.3", path = "../core", features = ["jit-abi", "loader"] }
+rquickjs-core = { package = "quickjs-jit-core", version = "=0.12.3", path = "../core", features = ["jit-abi", "loader"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
