@@ -2025,7 +2025,10 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         .unwrap();
 
     let mut saw_demotion = false;
-    for _ in 0..64 {
+    // Background compilation is far slower under sanitizer or coverage
+    // instrumentation; bound the wait by time rather than by iterations.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         let result = context.with(|ctx| {
             let function: Function = ctx.globals().get("layoutKernel").unwrap();
             let result = function.call::<_, i32>((2_000, 0)).unwrap();

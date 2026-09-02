@@ -427,6 +427,12 @@ impl BaselineCompiler {
         flag_builder
             .set("opt_level", "speed")
             .expect("Cranelift opt_level setting");
+        // Cranelift's IR verifier is a development aid that runs superlinear
+        // passes over every function; production artifacts are validated by
+        // the compiler's own frame-state and stack-map proofs instead.
+        flag_builder
+            .set("enable_verifier", "false")
+            .expect("Cranelift enable_verifier setting");
         let flags = settings::Flags::new(flag_builder);
         let isa = cranelift_native::builder()
             .expect("host architecture is supported by Cranelift")

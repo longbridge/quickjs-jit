@@ -5622,6 +5622,11 @@ impl Tier2Compiler {
         settings
             .set("opt_level", "speed")
             .expect("Cranelift opt_level setting");
+        // See BaselineCompiler::host: the IR verifier is a development aid
+        // whose superlinear passes dominate large-function compile time.
+        settings
+            .set("enable_verifier", "false")
+            .expect("Cranelift enable_verifier setting");
         let isa = cranelift_native::builder()
             .expect("host architecture is supported by Cranelift")
             .finish(settings::Flags::new(settings))
