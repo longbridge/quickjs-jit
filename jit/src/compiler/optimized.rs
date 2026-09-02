@@ -251,6 +251,11 @@ enum OptProvenance {
     Argument(usize),
     Local(usize),
     ImmediatePrimitive,
+    /// The interpreter stack slot at this index owns the value (a helper
+    /// wrote it there). Exits and the call bridge leave it in place; it may
+    /// be consumed by a call, returned, freed by `drop`, or moved into a
+    /// local, but never copied.
+    OwnedSlot,
     Unknown,
 }
 
@@ -376,12 +381,31 @@ impl NumericSpecialization {
                     .into_boxed_slice()
             })
             .unwrap_or_default();
+        // The checked Int32 arithmetic path guards both operand tags at
+        // run time, so stable per-site Int32 feedback selects it whatever the
+        // function's own signature is (a kernel may well return a string).
+        let int_pcs = function
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+            })
+            .filter_map(|instruction| {
+                let site = feedback.binary_at(key, instruction.pc())?;
+                (site.state() == FeedbackState::Monomorphic
+                    && site.lhs() == [ObservedType::Int32]
+                    && site.rhs() == [ObservedType::Int32]
+                    && site.result() == [ObservedType::Int32])
+                .then_some(instruction.pc())
+            })
+            .collect();
         let Some(signature) = feedback
             .bounded_specialization(key)
             .filter(|signature| signature.arity() == argument_count)
         else {
             return Self {
                 arguments: entry_arguments,
+                int_pcs,
                 calls,
                 properties,
                 numeric_constants,
@@ -394,28 +418,14 @@ impl NumericSpecialization {
             FeedbackRepresentation::Float64 => ObservedType::Float64,
             FeedbackRepresentation::HeapRef => {
                 return Self {
+                    int_pcs,
                     calls,
                     properties,
+                    numeric_constants,
                     ..Self::default()
                 }
             }
         };
-        let int_pcs = function
-            .instructions()
-            .iter()
-            .filter(|instruction| {
-                matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
-            })
-            .filter_map(|instruction| {
-                let site = feedback.binary_at(key, instruction.pc())?;
-                (representation == FeedbackRepresentation::Int32
-                    && site.state() == FeedbackState::Monomorphic
-                    && site.lhs() == [observed]
-                    && site.rhs() == [observed]
-                    && site.result() == [observed])
-                .then_some(instruction.pc())
-            })
-            .collect();
         let float_pcs = function
             .instructions()
             .iter()
@@ -551,6 +561,7 @@ fn lower_optimized_machine(
         let stack = (0..stack_slots).map(|_| alloc()).collect::<Vec<_>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
         let mut guarded_element_source: Option<GuardedElementSource> = None;
+        let owned_locals = owned_local_targets(ir, specialization)?;
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         let env = OptEnv {
             frame,
@@ -653,6 +664,14 @@ fn lower_optimized_machine(
                     .get(*node_id as usize)
                     .ok_or(CompileFailure::InvalidArtifact)?;
                 if node.eliminated() {
+                    if node.pops() == 1
+                        && node.pushes() == 0
+                        && depth
+                            .checked_sub(1)
+                            .is_some_and(|top| stack_provenance[top] == OptProvenance::OwnedSlot)
+                    {
+                        emit_opt_free_stack_slot(&mut builder, &env, depth - 1)?;
+                    }
                     depth = depth
                         .checked_sub(usize::from(node.pops()))
                         .and_then(|value| value.checked_add(usize::from(node.pushes())))
@@ -719,6 +738,9 @@ fn lower_optimized_machine(
                             "set_loc_uninitialized" => {
                                 guarded_element_source = None;
                                 let index = opt_u16(node.bytes())?;
+                                if owned_locals[index] {
+                                    emit_opt_free_local_slot(&mut builder, &env, index)?;
+                                }
                                 opt_define(&mut builder, locals[index], undefined);
                                 if !int32_loop {
                                     opt_store(&mut builder, var_buf, index, undefined);
@@ -853,6 +875,13 @@ fn lower_optimized_machine(
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let pair = opt_use(&mut builder, stack[depth]);
+                                // A value owned by its stack slot moves into
+                                // the local exactly like the interpreter's
+                                // set_value: release what the local owned,
+                                // then let var_buf own the new value.
+                                if owned_locals[index] {
+                                    emit_opt_free_local_slot(&mut builder, &env, index)?;
+                                }
                                 opt_define(&mut builder, locals[index], pair);
                                 if !int32_loop {
                                     opt_store(&mut builder, var_buf, index, pair);
@@ -863,7 +892,39 @@ fn lower_optimized_machine(
                                     OptProvenance::Local(index),
                                 );
                             }
+                            "get_var" => {
+                                let atom = opt_u32(node.bytes())?;
+                                depth = emit_opt_owned_helper_push(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    qjs::JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL as usize,
+                                    &[atom],
+                                )?;
+                            }
+                            "get_field2" => {
+                                let atom = opt_u32(node.bytes())?;
+                                let receiver = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let receiver_slot = opt_flat_stack_slot(&env, receiver)?;
+                                depth = emit_opt_owned_helper_push(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY as usize,
+                                    &[receiver_slot, atom],
+                                )?;
+                            }
                             "is_undefined_or_null" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
@@ -884,6 +945,10 @@ fn lower_optimized_machine(
                                 stack_provenance[index] = OptProvenance::ImmediatePrimitive;
                             }
                             "to_propkey" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 depth = emit_opt_guarded_propkey(
                                     &mut builder,
                                     frame,
@@ -909,6 +974,10 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                             }
                             "get_field" | "put_field" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(2)..depth,
+                                )?;
                                 let property = specialization
                                     .properties
                                     .get(&node.pc())
@@ -936,6 +1005,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "get_array_el" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(2)..depth,
+                                )?;
                                 depth = emit_opt_element_get(
                                     &mut builder,
                                     frame,
@@ -958,6 +1031,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "get_length" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let source_provenance = stack_provenance[depth - 1];
                                 depth = emit_opt_array_length(
                                     &mut builder,
@@ -983,6 +1060,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "put_array_el" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(3)..depth,
+                                )?;
                                 let source_provenance = stack_provenance[depth
                                     .checked_sub(3)
                                     .ok_or(CompileFailure::InvalidArtifact)?];
@@ -1010,9 +1091,13 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
-                                let Some(call) = specialization.calls.get(&node.pc()) else {
+                                // Native callees (Math.max, String, ...) never
+                                // record call-site feedback; they take the
+                                // generic CALL bridge with an owned result.
+                                let call = specialization.calls.get(&node.pc());
+                                if call.is_none() && int32_loop {
                                     return Err(CompileFailure::InvalidArtifact);
-                                };
+                                }
                                 let argc = if name == "call" || name == "call_method" {
                                     opt_u16(node.bytes())?
                                 } else {
@@ -1024,7 +1109,7 @@ fn lower_optimized_machine(
                                             - b'0',
                                     )
                                 };
-                                if argc != call.arguments().len() {
+                                if call.is_some_and(|call| argc != call.arguments().len()) {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
                                 let has_this = name == "call_method";
@@ -1048,6 +1133,7 @@ fn lower_optimized_machine(
                                     layout,
                                     specialization.direct_calls.get(&node.pc()),
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    call.is_some(),
                                 )?;
                             }
                             "add" | "sub" | "mul" | "div" => {
@@ -1236,6 +1322,27 @@ fn lower_optimized_machine(
                                     depth += 1;
                                     continue;
                                 }
+                                // Without stable feedback the Float64 path
+                                // still requires two numbers; string
+                                // concatenation and object coercion deopt.
+                                let lhs_int = opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_INT);
+                                let rhs_int = opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_INT);
+                                let lhs_float =
+                                    opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_FLOAT64);
+                                let rhs_float =
+                                    opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_FLOAT64);
+                                let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
+                                let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
+                                let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+                                emit_opt_guard_branch(
+                                    &mut builder,
+                                    &env,
+                                    &stack_provenance,
+                                    depth + 2,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    numeric,
+                                )?;
                                 let lf = opt_f64(&mut builder, lhs);
                                 let rf = opt_f64(&mut builder, rhs);
                                 let result = match name {
@@ -1334,6 +1441,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "is_undefined" | "is_null" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
@@ -1449,6 +1560,10 @@ fn lower_optimized_machine(
                             }
                             n if opt_index(n, node.bytes(), "put_arg")?.is_some() => {
                                 guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = opt_index(n, node.bytes(), "put_arg")?.unwrap();
                                 depth = depth
                                     .checked_sub(1)
@@ -1464,6 +1579,10 @@ fn lower_optimized_machine(
                             }
                             n if opt_index(n, node.bytes(), "set_arg")?.is_some() => {
                                 guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = opt_index(n, node.bytes(), "set_arg")?.unwrap();
                                 let top = depth
                                     .checked_sub(1)
@@ -1481,6 +1600,10 @@ fn lower_optimized_machine(
                             }
                             n if opt_index(n, node.bytes(), "set_loc")?.is_some() => {
                                 guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = opt_index(n, node.bytes(), "set_loc")?.unwrap();
                                 let top = depth
                                     .checked_sub(1)
@@ -1501,6 +1624,7 @@ fn lower_optimized_machine(
                                 let start = depth
                                     .checked_sub(take)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                opt_reject_owned(&stack_provenance, start..depth)?;
                                 if start + order.len() > stack.len() {
                                     return Err(CompileFailure::ResourceLimit);
                                 }
@@ -1530,6 +1654,33 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let lhs_pair = opt_use(&mut builder, stack[depth]);
                                 let rhs_pair = opt_use(&mut builder, stack[depth + 1]);
+                                // Only numbers compare natively; strings,
+                                // objects and nullish operands coerce in the
+                                // interpreter.
+                                let lhs_int =
+                                    opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_INT);
+                                let rhs_int =
+                                    opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_INT);
+                                let numeric = if int32_loop {
+                                    builder.ins().band(lhs_int, rhs_int)
+                                } else {
+                                    let lhs_float =
+                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_FLOAT64);
+                                    let rhs_float =
+                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_FLOAT64);
+                                    let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
+                                    let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
+                                    builder.ins().band(lhs_numeric, rhs_numeric)
+                                };
+                                emit_opt_guard_branch(
+                                    &mut builder,
+                                    &env,
+                                    &stack_provenance,
+                                    depth + 2,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    numeric,
+                                )?;
                                 let value = if int32_loop {
                                     let cc = match name {
                                         "lt" => IntCC::SignedLessThan,
@@ -1800,7 +1951,15 @@ fn lower_optimized_machine(
         builder.seal_all_blocks();
         builder.finalize();
     }
-    super::baseline::finalize_optimized_machine(isa, clif, control, false)
+    // Helpers that validate a stack map (CALL, GET_GLOBAL, GET_PROPERTY, ...)
+    // are always invoked with map 0, so an artifact that calls anything must
+    // publish the single helper stack map the runtime checks that id against.
+    let calls_helpers = clif.layout.blocks().any(|block| {
+        clif.layout
+            .block_insts(block)
+            .any(|inst| clif.dfg.insts[inst].opcode().is_call())
+    });
+    super::baseline::finalize_optimized_machine(isa, clif, control, calls_helpers)
 }
 
 /// Builds the secondary, scalar-only entry used by monomorphic native call
@@ -4079,7 +4238,10 @@ fn opt_own_stack_for_exit(
     };
     opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
     for index in 0..depth {
-        if provenance.get(index) == Some(&OptProvenance::ImmediatePrimitive) {
+        if matches!(
+            provenance.get(index),
+            Some(OptProvenance::ImmediatePrimitive | OptProvenance::OwnedSlot)
+        ) {
             opt_set_stack_top(builder, frame, stack_base, index + 1, pointer_type, layout);
             continue;
         }
@@ -4168,6 +4330,7 @@ fn emit_opt_specialized_call(
     layout: super::helpers::FrameLayout,
     direct: Option<&DirectCallSite>,
     guard: u32,
+    scalar_result: bool,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     use rquickjs_core::qjs;
@@ -4481,12 +4644,280 @@ fn emit_opt_specialized_call(
         opt_define(builder, stack_slot, undefined);
         opt_store(builder, stack_base, index, undefined);
     }
-    stack_provenance[base] = OptProvenance::ImmediatePrimitive;
+    // Feedback-specialized results are scalars; anything else stays owned
+    // by the interpreter stack slot the CALL helper wrote it to.
+    stack_provenance[base] = if scalar_result {
+        OptProvenance::ImmediatePrimitive
+    } else {
+        OptProvenance::OwnedSlot
+    };
     for provenance in &mut stack_provenance[(base + 1)..=output_index] {
         *provenance = OptProvenance::Unknown;
     }
     opt_set_stack_top(builder, frame, stack_base, base + 1, pointer_type, layout);
     Ok(base + 1)
+}
+
+/// Locals that ever receive a value owned by its interpreter stack slot
+/// (helper results: global lookups, kept-receiver property loads and
+/// non-specialized call results). Stores into such a local must first
+/// release whatever it currently owns, exactly like the interpreter's
+/// `set_value`. The walk mirrors the lowering's linear stack model, so the
+/// set over-approximates every path; releasing a primitive is a no-op.
+fn owned_local_targets(
+    ir: &OptimizedIr,
+    specialization: &NumericSpecialization,
+) -> Result<Vec<bool>, CompileFailure> {
+    let Some(entry) = ir.guard_maps().first() else {
+        return Err(CompileFailure::InvalidArtifact);
+    };
+    let mut owned_locals = vec![false; usize::from(entry.shape().locals())];
+    let mut owned = vec![false; usize::from(ir.max_stack()) + crate::ir::MAX_HELPER_SCRATCH_SLOTS];
+    for block in ir.blocks() {
+        let mut depth = usize::from(block.stack_depth());
+        for node_id in block.nodes() {
+            let node = ir
+                .nodes()
+                .get(*node_id as usize)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            let name = match node.kind() {
+                crate::ir::OptimizedNodeKind::Bytecode { opcode } => opcode.as_ref(),
+                _ => "",
+            };
+            let pops = usize::from(node.pops());
+            let pushes = usize::from(node.pushes());
+            let base = depth
+                .checked_sub(pops)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            if base + pushes > owned.len() {
+                return Err(CompileFailure::ResourceLimit);
+            }
+            let top_owned = pops > 0 && owned[depth - 1];
+            let produces_owned = match name {
+                "get_var" => true,
+                "get_field2" => true,
+                n if n.starts_with("call") => !specialization.calls.contains_key(&node.pc()),
+                _ => false,
+            };
+            if top_owned {
+                let target = if name.starts_with("put_loc") {
+                    opt_index(name, node.bytes(), "put_loc")?
+                } else if name.starts_with("set_loc") && name != "set_loc_uninitialized" {
+                    opt_index(name, node.bytes(), "set_loc")?
+                } else {
+                    None
+                };
+                if let Some(slot) = target.and_then(|local| owned_locals.get_mut(local)) {
+                    *slot = true;
+                }
+            }
+            match name {
+                "get_field2" => {
+                    // The receiver stays; the loaded property is owned.
+                    owned[base + 1] = true;
+                }
+                _ => {
+                    for slot in &mut owned[base..base + pushes] {
+                        *slot = produces_owned;
+                    }
+                }
+            }
+            depth = base + pushes;
+        }
+    }
+    Ok(owned_locals)
+}
+
+fn opt_u32(bytes: &[u8]) -> Result<u32, CompileFailure> {
+    bytes
+        .get(1..5)
+        .and_then(|raw| raw.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or(CompileFailure::InvalidArtifact)
+}
+
+/// Flat frame slot index (arguments, locals, then stack) of a stack slot.
+fn opt_flat_stack_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFailure> {
+    env.arguments
+        .len()
+        .checked_add(env.locals.len())
+        .and_then(|base| base.checked_add(index))
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+fn opt_flat_local_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFailure> {
+    env.arguments
+        .len()
+        .checked_add(index)
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// Compilation fails closed when an opcode would copy or silently discard a
+/// value owned by its interpreter stack slot.
+fn opt_reject_owned(
+    provenance: &[OptProvenance],
+    range: core::ops::Range<usize>,
+) -> Result<(), CompileFailure> {
+    if provenance[range].contains(&OptProvenance::OwnedSlot) {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    Ok(())
+}
+
+/// Releases the value an interpreter stack slot owns (the slot must hold
+/// the current SSA value, which every owned slot does by construction).
+fn emit_opt_free_stack_slot(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    let pair = opt_use(builder, env.stack[index]);
+    opt_store(builder, env.stack_base, index, pair);
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        index + 1,
+        env.pointer_type,
+        env.layout,
+    );
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        index + 1,
+        env.helper_signatures,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, opt_flat_stack_slot(env, index)?],
+        env.pointer_type,
+        env.layout,
+    )
+}
+
+/// Releases the value a local owns before it is redefined.
+fn emit_opt_free_local_slot(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    if env.int32_loop {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    let pair = opt_use(builder, env.locals[index]);
+    opt_store(builder, env.var_buf, index, pair);
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        0,
+        env.helper_signatures,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, opt_flat_local_slot(env, index)?],
+        env.pointer_type,
+        env.layout,
+    )
+}
+
+/// Invokes a helper that writes an owned value into the pushed stack slot
+/// (GET_GLOBAL, GET_PROPERTY with the receiver kept). Every live stack slot
+/// is turned into a real interpreter owner first, exactly as the CALL bridge
+/// does, so an exception unwinds the frame correctly and the helper sees a
+/// consistent stack; `helper_arguments` follow the output slot.
+fn emit_opt_owned_helper_push(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    helper_id: usize,
+    helper_arguments: &[u32],
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    if env.int32_loop {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    if depth >= env.stack.len() {
+        return Err(CompileFailure::ResourceLimit);
+    }
+    let undefined = OptPair {
+        payload: builder.ins().iconst(types::I64, 0),
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
+    };
+    opt_define(builder, env.stack[depth], undefined);
+    for (index, vars) in env.arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.arg_buf, index, value);
+    }
+    for (index, vars) in env.locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.var_buf, index, value);
+    }
+    for (index, vars) in env.stack.iter().take(depth + 1).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.stack_base, index, value);
+    }
+    let bytecode = builder.ins().load(
+        env.pointer_type,
+        MemFlags::new(),
+        env.frame,
+        env.layout.bytecode_start,
+    );
+    let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), current_pc, env.frame, env.layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.arguments.len() + env.locals.len(),
+        provenance,
+        env.helper_signatures,
+        env.pointer_type,
+        env.layout,
+    )?;
+    for slot in provenance.iter_mut().take(depth) {
+        if matches!(slot, OptProvenance::Argument(_) | OptProvenance::Local(_)) {
+            *slot = OptProvenance::OwnedSlot;
+        }
+    }
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        depth + 1,
+        env.pointer_type,
+        env.layout,
+    );
+    let mut arguments = Vec::with_capacity(helper_arguments.len() + 2);
+    arguments.push(0);
+    arguments.push(opt_flat_stack_slot(env, depth)?);
+    arguments.extend_from_slice(helper_arguments);
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.helper_signatures,
+        helper_id,
+        &arguments,
+        env.pointer_type,
+        env.layout,
+    )?;
+    let result = opt_load(builder, env.stack_base, depth);
+    opt_define(builder, env.stack[depth], result);
+    provenance[depth] = OptProvenance::OwnedSlot;
+    Ok(depth + 1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4642,6 +5073,25 @@ fn emit_opt_numeric_guard(
             .unwrap_or(representation);
         let valid = match required {
             EntryRepresentation::Any => builder.ins().iconst(types::I8, 1),
+            EntryRepresentation::Numeric if index >= arguments.len() => {
+                // A `let` declared inside the loop body is still
+                // uninitialized or undefined at the header. Every numeric
+                // consumer guards its operand tags itself, so such locals
+                // need no proof here.
+                let numeric = builder.ins().bor(int, float);
+                let undefined = builder.ins().icmp_imm(
+                    IntCC::Equal,
+                    pair.tag,
+                    i64::from(rquickjs_core::qjs::JS_TAG_UNDEFINED),
+                );
+                let uninitialized = builder.ins().icmp_imm(
+                    IntCC::Equal,
+                    pair.tag,
+                    i64::from(rquickjs_core::qjs::JS_TAG_UNINITIALIZED),
+                );
+                let unset = builder.ins().bor(undefined, uninitialized);
+                builder.ins().bor(numeric, unset)
+            }
             EntryRepresentation::Numeric => builder.ins().bor(int, float),
             EntryRepresentation::Int32 => int,
             EntryRepresentation::Float64 => float,

@@ -341,7 +341,7 @@ fn dependency_invalidation_is_transitive_and_generation_exact() {
 }
 
 #[test]
-fn tier2_plan_is_exact_for_numeric_locals_and_rejects_property_semantics() {
+fn tier2_plan_is_exact_for_numeric_locals_and_rejects_unsupported_semantics() {
     let numeric = SnapshotFixture::compile(
         "(function(n,zero){let s=zero; for(let i=zero;i<n;i++) s=s+i; return s})",
     );
@@ -357,7 +357,14 @@ fn tier2_plan_is_exact_for_numeric_locals_and_rejects_property_semantics() {
 
     let property = SnapshotFixture::compile("(function(){return globalThis.answer})");
     let property = property.snapshot().verify(VerifyLimits::default()).unwrap();
-    assert!(Tier2Compiler::plan(&property, 24).is_err());
+    Tier2Compiler::plan(&property, 24).expect("global lookups and property loads are exact");
+
+    let arguments_object = SnapshotFixture::compile("(function(){return arguments.length})");
+    let arguments_object = arguments_object
+        .snapshot()
+        .verify(VerifyLimits::default())
+        .unwrap();
+    assert!(Tier2Compiler::plan(&arguments_object, 25).is_err());
 }
 
 #[test]
@@ -2509,9 +2516,21 @@ fn modulo_loop_lowers_to_a_guarded_srem() {
 fn comparisons_lower_to_native_compares_without_helper_calls() {
     let lte = tier2_clif("(function(n){return n<=0})");
     assert!(lte.contains("fcmp"), "{lte}");
+    let lte_immediate = raw_clif(
+        vec![
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            1,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_0,
+            rquickjs_core::qjs::QJS_JIT_OP_LTE,
+            rquickjs_core::qjs::QJS_JIT_OP_RETURN,
+        ],
+        0,
+        0,
+    );
+    assert!(lte_immediate.contains("fcmp"), "{lte_immediate}");
     assert!(
-        !lte.contains("call_indirect"),
-        "`n <= 0` must not call CompareSlow: {lte}"
+        !lte_immediate.contains("call_indirect"),
+        "`<=` must not call CompareSlow: {lte_immediate}"
     );
     let strict = tier2_clif("(function(x){return x===0})");
     assert!(strict.contains("fcmp"), "{strict}");
@@ -2591,12 +2610,12 @@ fn tail_call_lowers_as_a_guarded_call_followed_by_the_done_exit() {
         .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(73))
         .expect("tail call lowers through the audited call helper");
     assert!(clif.contains("call_indirect"), "{clif}");
-    assert!(
-        Tier2Compiler::host(73)
-            .lower_for_test(&verified, 73)
-            .is_err(),
-        "a tail call without call-site feedback cannot be specialized"
-    );
+    // Native callees never record call-site feedback; the tail call then
+    // takes the generic CALL bridge and returns its owned result.
+    let generic = Tier2Compiler::host(73)
+        .lower_for_test(&verified, 73)
+        .expect("a tail call without call-site feedback uses the generic bridge");
+    assert!(generic.contains("call_indirect"), "{generic}");
 }
 
 /// Exact semantics of the M2 core opcodes, observed by executing the
@@ -3539,4 +3558,159 @@ mod m2_core_opcodes {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The designated int-arith benchmark kernel: global lookups, a kept-receiver
+// property load, native callees and a tail call around unboxed Int32 loops.
+// ---------------------------------------------------------------------------
+
+const INT_ARITH_KERNEL: &str = include_str!("../../benchmarks/scripts/quickjs-int-arith.js");
+
+#[test]
+fn int_arith_kernel_inner_loop_is_an_unboxed_int32_loop_around_native_calls() {
+    let fixture = SnapshotFixture::compile(&format!("{INT_ARITH_KERNEL}\nworkload"));
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let names = verified
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.opcode().name())
+        .collect::<Vec<_>>();
+    for required in ["get_var", "get_field2", "call_method", "tail_call", "mul"] {
+        assert!(names.contains(&required), "{required} missing: {names:?}");
+    }
+    let ir = OptimizedIr::translate(&verified, 81)
+        .unwrap_or_else(|error| panic!("kernel IR translation failed: {error:?}"));
+    // The innermost loop is the last loop header; its body runs up to the
+    // block that branches back to it. No node in it may reach a helper.
+    let inner = ir
+        .blocks()
+        .iter()
+        .rposition(|block| block.is_loop_header())
+        .expect("nested loops");
+    let header_pc = ir.blocks()[inner].start_pc();
+    let back_edge = ir
+        .blocks()
+        .iter()
+        .rposition(|block| block.successors().contains(&header_pc))
+        .expect("inner loop back edge");
+    assert!(back_edge >= inner);
+    for node in ir.blocks()[inner..=back_edge]
+        .iter()
+        .flat_map(|block| block.nodes())
+        .map(|id| &ir.nodes()[*id as usize])
+    {
+        assert_ne!(
+            node.effect(),
+            OptimizedEffect::Reentrant,
+            "helper-backed node inside the inner loop: {node:?}"
+        );
+    }
+    assert!(ir.blocks()[inner..=back_edge]
+        .iter()
+        .flat_map(|block| block.nodes())
+        .any(|id| matches!(
+            ir.nodes()[*id as usize].kind(),
+            OptimizedNodeKind::Bytecode { opcode } if &**opcode == "mul"
+        )));
+
+    // Generic lowering (no feedback) must accept the whole kernel.
+    Tier2Compiler::host(81)
+        .lower_for_test(&verified, 81)
+        .unwrap_or_else(|error| panic!("kernel did not lower: {error:?}"));
+
+    // Stable Int32 feedback on the products and sums selects the checked
+    // Int32 paths even though the kernel returns a string.
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..8 {
+        for instruction in verified
+            .instructions()
+            .iter()
+            .filter(|instruction| matches!(instruction.opcode().name(), "add" | "mul"))
+        {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+    }
+    let clif = Tier2Compiler::host(81)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(81))
+        .unwrap_or_else(|error| panic!("kernel did not lower with feedback: {error:?}"));
+    assert!(clif.contains("smul_overflow"), "{clif}");
+    assert!(clif.contains("sadd_overflow"), "{clif}");
+    assert!(
+        !clif.contains("fmul"),
+        "the inner product must stay Int32: {clif}"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_runs_the_int_arith_kernel_end_to_end() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
+
+    let expected = {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(INT_ARITH_KERNEL).unwrap();
+            ctx.eval::<String, _>("workload(4096)").unwrap()
+        })
+    };
+    assert_eq!(expected, "10650672000");
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .tier_policy(JitTierPolicy::Optimize)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(INT_ARITH_KERNEL).unwrap());
+    let run = || {
+        context.with(|ctx| {
+            ctx.eval::<String, _>("workload(4096)")
+                .unwrap_or_else(|error| panic!("{error} {:?}", ctx.catch()))
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(run(), expected);
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let entered = jit.metrics();
+    assert!(entered.tier2_entries > 0, "{entered:?}");
+    for _ in 0..8 {
+        assert_eq!(run(), expected);
+        jit.poll();
+    }
+    let metrics = jit.metrics();
+    assert!(metrics.tier2_entries > entered.tier2_entries, "{metrics:?}");
+    assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
+    assert_eq!(metrics.native_retries, 0, "{metrics:?}");
+    assert_eq!(metrics.deopts, 0, "{metrics:?}");
 }

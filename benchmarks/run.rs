@@ -385,8 +385,14 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
                 install_poll = install_poll.saturating_add(poll_ns);
             }
             before = now;
+            // A blacklist is only final for this sample once the worker
+            // queue has drained: the one-shot top-level script is rejected
+            // on the first poll while the workload's own tiers are still
+            // compiling behind it.
             if native_ready(mode, &before, tier1_ready_installs)
-                || (mode != "automatic" && before.blacklisted > 0)
+                || (mode != "automatic"
+                    && before.blacklisted > 0
+                    && before.pending_worker_jobs == 0)
             {
                 break;
             }
