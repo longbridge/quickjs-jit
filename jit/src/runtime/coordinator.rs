@@ -1181,6 +1181,33 @@ impl Coordinator {
         self.record_failure(key, tier);
     }
 
+    pub(crate) fn reject_tier1(
+        &mut self,
+        key: FunctionKey,
+        tier: Tier,
+        reason: crate::bytecode::FallbackReason,
+    ) {
+        if self
+            .current_generations
+            .get(&key.id)
+            .is_none_or(|generation| key.generation > *generation)
+        {
+            self.retire_older_generations(key);
+            self.current_generations.insert(key.id, key.generation);
+        }
+        self.functions.entry(key).or_default();
+        self.record_compile_failure(key, tier, CompileFailure::Tier1Rejected(reason));
+        let tier_record = self
+            .functions
+            .get_mut(&key)
+            .expect("Tier 1 rejection registered the function")
+            .tier_mut(tier);
+        if tier_record.state != CompileState::Blacklisted {
+            tier_record.state = CompileState::Blacklisted;
+            self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+        }
+    }
+
     fn record_invalid_artifact(&mut self, key: FunctionKey, tier: Tier) {
         self.metrics.invalid_artifacts = self.metrics.invalid_artifacts.saturating_add(1);
         self.record_failure(key, tier);

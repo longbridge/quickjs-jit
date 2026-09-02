@@ -1869,6 +1869,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.fail_before_queue(key);
             return;
         };
+        if let Err(rejection) = verified.tier1_eligibility() {
+            self.coordinator
+                .reject_tier1(key, runtime::Tier::Baseline, rejection.reason());
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
         let adaptive = runtime::AdaptiveInputs {
             bytecode_bytes: verified
                 .snapshot()

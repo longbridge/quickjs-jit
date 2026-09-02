@@ -7,7 +7,7 @@ use std::sync::{
 
 use rquickjs::{
     loader::{BuiltinLoader, BuiltinResolver},
-    Context as JsContext, Module,
+    Context as JsContext, Function, Module,
 };
 use rquickjs_jit::JitRuntime;
 
@@ -186,6 +186,37 @@ fn rendering_events_and_async_continuations_share_live_script_state() {
             .expect("continued event state")
     });
     assert_eq!(after_jobs, "5/settled:4");
+}
+
+#[test]
+fn deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing() {
+    let runtime = JitRuntime::builder().build().expect("JIT runtime");
+    let context = JsContext::full(&runtime).expect("full shell context");
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.__terminalHost = value => JSON.stringify({ value, kind: 'panel' });",
+            )
+        })
+        .unwrap();
+
+    for _ in 0..256 {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("__terminalHost").unwrap();
+            assert_eq!(
+                function.call::<_, String>((42,)).unwrap(),
+                r#"{"value":42,"kind":"panel"}"#
+            );
+        });
+        runtime.jit().poll();
+    }
+
+    let metrics = runtime.metrics();
+    assert_eq!(metrics.snapshot_requests, 1, "{metrics:?}");
+    assert_eq!(metrics.queued, 0, "{metrics:?}");
+    assert_eq!(metrics.compile_failures, 1, "{metrics:?}");
+    assert_eq!(metrics.tier1_rejections, 1, "{metrics:?}");
+    assert_eq!(metrics.pending_worker_jobs, 0, "{metrics:?}");
 }
 
 #[test]
