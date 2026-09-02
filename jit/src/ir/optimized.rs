@@ -422,6 +422,10 @@ fn is_guarded_arithmetic(name: &str) -> bool {
             | "neq"
             | "strict_eq"
             | "strict_neq"
+            | "lt"
+            | "lte"
+            | "gt"
+            | "gte"
             | "if_false"
             | "if_true"
             | "if_false8"
@@ -727,7 +731,9 @@ fn classify_optimized_opcode(
         | "perm5" | "swap2" | "rot3l" | "rot3r" | "rot4l" | "rot5l" => {
             (ValueRepresentation::Tagged, OptimizedEffect::Pure)
         }
-        "push_const" | "push_const8" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "push_const" | "push_const8" | "get_var" | "get_field2" => {
+            (ValueRepresentation::Tagged, OptimizedEffect::Reentrant)
+        }
         "is_undefined_or_null" | "is_undefined" | "is_null" | "lnot" => {
             (ValueRepresentation::Int32, OptimizedEffect::Pure)
         }
