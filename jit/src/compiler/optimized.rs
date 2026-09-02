@@ -874,6 +874,17 @@ fn lower_optimized_machine(
                                 depth = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth + 1,
+                                    depth,
+                                    OptProvenance::Local(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
                                 let pair = opt_use(&mut builder, stack[depth]);
                                 // A value owned by its stack slot moves into
                                 // the local exactly like the interpreter's
@@ -1568,6 +1579,17 @@ fn lower_optimized_machine(
                                 depth = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth + 1,
+                                    depth,
+                                    OptProvenance::Argument(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
                                 let pair = opt_use(&mut builder, stack[depth]);
                                 opt_define(&mut builder, arguments[index], pair);
                                 opt_store(&mut builder, arg_buf, index, pair);
@@ -1587,6 +1609,17 @@ fn lower_optimized_machine(
                                 let top = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth,
+                                    top,
+                                    OptProvenance::Argument(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
                                 let pair = opt_use(&mut builder, stack[top]);
                                 opt_define(&mut builder, arguments[index], pair);
                                 opt_store(&mut builder, arg_buf, index, pair);
@@ -1608,6 +1641,17 @@ fn lower_optimized_machine(
                                 let top = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth,
+                                    top,
+                                    OptProvenance::Local(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
                                 let pair = opt_use(&mut builder, stack[top]);
                                 opt_define(&mut builder, locals[index], pair);
                                 if !int32_loop {
@@ -4143,6 +4187,22 @@ fn emit_opt_guarded_property(
         guard,
     );
     builder.switch_to_block(continuation);
+    // Every borrowed alias below the operands was materialized as an owner
+    // for the guard's exception path; hand those references back before the
+    // operand slots are released, or each guarded access leaks one.
+    opt_release_materialized_aliases(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        stack_provenance,
+        0..object_index,
+        depth,
+        arguments.len() + locals.len(),
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
     opt_release_owned_stack(
         builder,
         frame,
@@ -4172,6 +4232,53 @@ fn emit_opt_guarded_property(
         opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
         Ok(depth)
     }
+}
+
+/// Releases the owned duplicates that `opt_own_stack_for_exit` created for
+/// borrowed argument/local aliases *below* an operation's operands, once
+/// that operation continues natively. The aliases keep their provenance:
+/// the SSA value still borrows from the argument or local buffer, and the
+/// interpreter slot must not own a reference that nobody consumes.
+#[allow(clippy::too_many_arguments)]
+fn opt_release_materialized_aliases(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    provenance: &[OptProvenance],
+    range: core::ops::Range<usize>,
+    exception_depth: usize,
+    flat_stack_base: usize,
+    signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<(), CompileFailure> {
+    use rquickjs_core::qjs;
+    for index in range {
+        if !matches!(
+            provenance.get(index),
+            Some(OptProvenance::Argument(_) | OptProvenance::Local(_))
+        ) {
+            continue;
+        }
+        let slot = flat_stack_base
+            .checked_add(index)
+            .and_then(|slot| u32::try_from(slot).ok())
+            .ok_or(CompileFailure::ResourceLimit)?;
+        emit_opt_helper(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            exception_depth,
+            signatures,
+            qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+            &[0, slot],
+            pointer_type,
+            layout,
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4644,6 +4751,22 @@ fn emit_opt_specialized_call(
         opt_define(builder, stack_slot, undefined);
         opt_store(builder, stack_base, index, undefined);
     }
+    // The CALL bridge materialized every borrowed alias below the callee as
+    // an owner for its exception path; release those duplicates now that
+    // the call continued natively.
+    opt_release_materialized_aliases(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        stack_provenance,
+        0..base,
+        free_depth,
+        flat_base,
+        signatures,
+        pointer_type,
+        layout,
+    )?;
     // Feedback-specialized results are scalars; anything else stays owned
     // by the interpreter stack slot the CALL helper wrote it to.
     stack_provenance[base] = if scalar_result {
@@ -4752,6 +4875,94 @@ fn opt_flat_local_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFai
         .checked_add(index)
         .and_then(|slot| u32::try_from(slot).ok())
         .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// How a value may be stored into an interpreter-owned argument or local
+/// buffer. Tier 2 spills borrowed SSA aliases into those buffers at every
+/// exit without transferring ownership (deoptimization maps carry identity
+/// recipes only), so an alias that is a heap reference must never be copied
+/// into a *different* slot: the interpreter would inherit an unowned pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AliasStore {
+    /// Proven scalar, slot-owned (moved by the caller), or the slot's own value.
+    Safe,
+    /// Unproven representation: check the tag at run time and deoptimize
+    /// before the store when the value is reference counted.
+    GuardHeap,
+    /// Proven or unknowable heap alias: fail closed.
+    Reject,
+}
+
+fn opt_alias_store(
+    specialization: &NumericSpecialization,
+    argument_count: usize,
+    source: OptProvenance,
+    destination: OptProvenance,
+) -> AliasStore {
+    if source == destination {
+        return AliasStore::Safe;
+    }
+    let representation = |slot: usize| {
+        specialization
+            .arguments
+            .get(slot)
+            .copied()
+            .unwrap_or(specialization.entry)
+    };
+    let classify = |representation: EntryRepresentation| match representation {
+        EntryRepresentation::Numeric
+        | EntryRepresentation::Int32
+        | EntryRepresentation::Float64 => AliasStore::Safe,
+        EntryRepresentation::Any => AliasStore::GuardHeap,
+        EntryRepresentation::HeapRef => AliasStore::Reject,
+    };
+    match source {
+        OptProvenance::ImmediatePrimitive | OptProvenance::OwnedSlot => AliasStore::Safe,
+        OptProvenance::Argument(slot) => classify(representation(slot)),
+        OptProvenance::Local(slot) => classify(representation(argument_count + slot)),
+        OptProvenance::Unknown => AliasStore::Reject,
+    }
+}
+
+/// Applies [`opt_alias_store`] for the value at stack index `source_index`
+/// before it is stored into `destination`; `depth` is the operand-stack
+/// depth before the storing instruction pops anything.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_alias_store_guard(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    specialization: &NumericSpecialization,
+    provenance: &[OptProvenance],
+    depth: usize,
+    source_index: usize,
+    destination: OptProvenance,
+    pc: u32,
+    guard: Option<u32>,
+) -> Result<(), CompileFailure> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    if env.int32_loop {
+        return Ok(());
+    }
+    match opt_alias_store(
+        specialization,
+        env.arguments.len(),
+        provenance[source_index],
+        destination,
+    ) {
+        AliasStore::Safe => Ok(()),
+        AliasStore::Reject => Err(CompileFailure::UnsupportedOpcode),
+        AliasStore::GuardHeap => {
+            // QuickJS reference-counted tags are the negative ones.
+            let pair = opt_use(builder, env.stack[source_index]);
+            let not_refcounted =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::SignedGreaterThanOrEqual, pair.tag, 0);
+            let guard = guard.ok_or(CompileFailure::InvalidArtifact)?;
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, not_refcounted)?;
+            Ok(())
+        }
+    }
 }
 
 /// Compilation fails closed when an opcode would copy or silently discard a

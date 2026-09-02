@@ -2402,10 +2402,17 @@ fn guard_specific_float_side_path_changes_machine_guard_and_preserves_profile() 
         verified.snapshot().generation(),
     );
     let ir = OptimizedIr::translate(&verified, 55).unwrap();
+    // Frame stores carry their own guard sites; the side path targets the
+    // loop-header representation guard specifically.
     let loop_guard = ir
         .guard_maps()
         .iter()
-        .find(|site| site.guard() != 0)
+        .find(|site| {
+            site.guard() != 0
+                && verified
+                    .control_flow_graph()
+                    .is_loop_header(site.map().resume_pc())
+        })
         .unwrap();
     let profile = SidePathProfile::new(
         key,
@@ -3713,4 +3720,97 @@ fn production_tier2_runs_the_int_arith_kernel_end_to_end() {
     assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
     assert_eq!(metrics.native_retries, 0, "{metrics:?}");
     assert_eq!(metrics.deopts, 0, "{metrics:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Ownership of borrowed argument/local aliases in interpreter-owned storage.
+
+fn heap_argument_feedback(
+    verified: &rquickjs_jit::bytecode::VerifiedFunction,
+    key: FunctionKey,
+) -> FeedbackTable {
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(
+            key,
+            &[
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Object,
+            ],
+        );
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    feedback
+}
+
+#[test]
+fn storing_a_proven_heap_argument_alias_into_a_local_fails_closed() {
+    // Deoptimization maps carry identity recipes only, so a borrowed heap
+    // alias spilled into a different interpreter-owned slot would hand the
+    // interpreter an unowned reference. Such functions stay on Tier 1.
+    let fixture = SnapshotFixture::compile(
+        "(function(n,s,p){ let q=p; let t=0; for(let i=0;i<n;i++){ t = t + q.x } return t })",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let feedback = heap_argument_feedback(&verified, key);
+    let error = Tier2Compiler::host(171)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(171))
+        .expect_err("heap alias store must not lower");
+    assert!(
+        matches!(
+            error,
+            rquickjs_jit::compiler::CompileFailure::UnsupportedOpcode
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn storing_an_unproven_alias_into_a_local_guards_the_tag_before_the_spill() {
+    // Without feedback every argument is `Any`: the store keeps compiling but
+    // checks at run time that the value is not reference counted, and
+    // deoptimizes exactly at the store otherwise.
+    let fixture =
+        SnapshotFixture::compile("(function(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 172).unwrap();
+    let store_guards = ir
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.starts_with("put_loc"))
+        })
+        .filter(|node| node.deopt_guard().is_some())
+        .count();
+    assert!(store_guards >= 2, "every local store carries a guard site");
+    let clif = Tier2Compiler::host(172)
+        .lower_for_test(&verified, 172)
+        .unwrap();
+    assert!(
+        clif.contains("icmp_imm sge") || clif.contains("icmp_imm.i64 sge"),
+        "non-refcounted tag guard missing: {clif}"
+    );
 }

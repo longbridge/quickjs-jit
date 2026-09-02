@@ -404,7 +404,7 @@ fn m2_numeric_opcodes_own_instruction_local_deopt_sites() {
 }
 
 #[test]
-fn constants_stack_shuffles_and_frame_stores_carry_no_guard() {
+fn constants_and_stack_shuffles_carry_no_guard_but_frame_stores_do() {
     use rquickjs_core::qjs;
     let ir = translate(
         vec![
@@ -423,14 +423,25 @@ fn constants_stack_shuffles_and_frame_stores_carry_no_guard() {
         1,
         1,
     );
-    assert!(ir
-        .nodes()
-        .iter()
-        .filter(|node| matches!(
+    // Stores into interpreter-owned argument/local buffers keep an exact
+    // deoptimization site: a value of unproven representation is checked for
+    // a heap reference before its borrowed alias is spilled into the slot.
+    for node in ir.nodes().iter().filter(|node| {
+        matches!(
             node.kind(),
             rquickjs_jit::ir::OptimizedNodeKind::Bytecode { .. }
-        ))
-        .all(|node| node.deopt_guard().is_none()));
-    assert_eq!(ir.guard_maps().len(), 1, "only the entry guard remains");
+        )
+    }) {
+        let rquickjs_jit::ir::OptimizedNodeKind::Bytecode { opcode } = node.kind() else {
+            unreachable!()
+        };
+        let is_store = opcode.starts_with("put_arg") || opcode.starts_with("set_loc");
+        assert_eq!(node.deopt_guard().is_some(), is_store, "{opcode}");
+    }
+    assert_eq!(
+        ir.guard_maps().len(),
+        3,
+        "the entry guard plus one site per frame store"
+    );
     assert_eq!(ir.max_stack(), 3);
 }

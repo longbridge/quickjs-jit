@@ -29,3 +29,87 @@ fn replay_checked_in_regressions() {
     });
     assert_eq!(observation, case.expected);
 }
+
+#[cfg(all(
+    feature = "compiler",
+    feature = "test-support",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos", target_os = "windows"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
+mod tier2_ownership {
+    use rquickjs::{Context, Function, Object, Runtime};
+    use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
+
+    /// Runs `workload(2000, 7, {x:0,y:1})` until the requested tier settles,
+    /// returns the result and metrics, and tears the runtime down. A
+    /// reference-count error surfaces as a QuickJS assertion abort at
+    /// `JS_FreeRuntime`, which fails the whole test binary.
+    fn run(source: &str) -> (f64, rquickjs_jit::JitMetrics) {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .tier_policy(JitTierPolicy::Optimize)
+                .call_threshold(1)
+                .loop_threshold(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context
+            .with(|ctx| {
+                ctx.eval::<(), _>(format!("globalThis.workloadArgument={{x:0,y:1}}; {source}"))
+            })
+            .unwrap();
+        let mut result = 0.0;
+        for _ in 0..200 {
+            result = context.with(|ctx| {
+                let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+                let argument: Object<'_> = ctx.globals().get("workloadArgument").unwrap();
+                workload.call((2000, 7, argument)).unwrap()
+            });
+            jit.poll();
+            if jit.metrics().tier2_entries > 0 {
+                break;
+            }
+        }
+        let metrics = jit.metrics();
+        drop(context);
+        drop(jit);
+        drop(runtime);
+        (result, metrics)
+    }
+
+    #[test]
+    fn guarded_property_store_below_a_receiver_alias_releases_materialized_owners() {
+        // `p.x = p.x + 1` keeps a second receiver alias below the get_field
+        // operands. Before M2 each guarded access leaked one reference and
+        // JS_FreeRuntime aborted on a non-empty gc_obj_list.
+        let (result, metrics) =
+            run("function workload(n,s,p){ for(let i=0;i<n;i++){ p.x = p.x + 1 } return p.x }");
+        assert!(metrics.tier2_entries > 0, "{metrics:?}");
+        assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
+        assert_eq!(metrics.deopts, 0, "{metrics:?}");
+        assert!(result >= 2000.0, "{result}");
+    }
+
+    #[test]
+    fn heap_argument_aliases_stored_into_locals_stay_on_tier1_with_exact_results() {
+        // A local holding a borrowed heap alias cannot yet be materialized by
+        // the identity-only deoptimization recipes; Tier 2 fails closed and
+        // the interpreter/Tier 1 result is exact with a clean teardown.
+        for source in [
+            "function workload(n,s,p){ let q=p; for(let i=0;i<n;i++){ q.x = q.x + 1 } return q.x }",
+            "function workload(n,s,p){ let q=p; let t=0; for(let i=0;i<n;i++){ t = t + q.x } return t }",
+            "function workload(n,s,p){ let q=p; for(let i=0;i<n;i++){ p.x = p.x + 1 } return q.x }",
+        ] {
+            let (result, metrics) = run(source);
+            assert_eq!(metrics.tier2_entries, 0, "{source}: {metrics:?}");
+            assert_eq!(metrics.native_fallbacks, 0, "{source}: {metrics:?}");
+            assert!(result >= 0.0, "{source}: {result}");
+        }
+    }
+}

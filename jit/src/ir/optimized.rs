@@ -439,9 +439,21 @@ fn is_guarded_arithmetic(name: &str) -> bool {
 /// exit owns an instruction-local guard site. Lowering arms for these opcodes
 /// must resolve `deopt_guard()`; pure loads, stores and stack shuffles never
 /// deoptimize and therefore carry none.
+/// Stores into interpreter-owned argument/local buffers. They need an exact
+/// deoptimization site because a value of unproven representation must be
+/// checked for a heap reference before the borrowed alias is spilled.
+fn is_frame_slot_store(name: &str) -> bool {
+    name != "set_loc_uninitialized"
+        && (name.starts_with("put_loc")
+            || name.starts_with("set_loc")
+            || name.starts_with("put_arg")
+            || name.starts_with("set_arg"))
+}
+
 fn needs_deopt_guard(name: &str) -> bool {
     is_guarded_arithmetic(name)
         || name.starts_with("call")
+        || is_frame_slot_store(name)
         || matches!(
             name,
             "get_array_el"
