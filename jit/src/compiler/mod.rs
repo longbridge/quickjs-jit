@@ -57,6 +57,59 @@ mod helpers;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod optimized;
 
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct DirectCalleeIdentity {
+    object: u64,
+    bytecode: u64,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn emit_guarded_direct_callee_identity(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    tag: cranelift_codegen::ir::Value,
+    payload: cranelift_codegen::ir::Value,
+    callee_identity: DirectCalleeIdentity,
+    pointer_type: cranelift_codegen::ir::Type,
+    matched: cranelift_codegen::ir::Block,
+    miss: cranelift_codegen::ir::Block,
+) {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder, MemFlags};
+
+    let identity = builder.create_block();
+    let bytecode = builder.create_block();
+    let object_tag = builder.ins().icmp_imm(
+        IntCC::Equal,
+        tag,
+        i64::from(rquickjs_core::qjs::JS_TAG_OBJECT),
+    );
+    builder.ins().brif(object_tag, identity, &[], miss, &[]);
+
+    builder.switch_to_block(identity);
+    let identity_matches =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, payload, callee_identity.object as i64);
+    builder
+        .ins()
+        .brif(identity_matches, bytecode, &[], miss, &[]);
+
+    // JSObject::u.func.function_bytecode is at byte offset 48 on the
+    // fingerprinted 64-bit QuickJS layout. The payload is dereferenced only
+    // after the tag and rooted object identity have both matched.
+    builder.switch_to_block(bytecode);
+    let function_bytecode = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), payload, 48);
+    let bytecode_matches = builder.ins().icmp_imm(
+        IntCC::Equal,
+        function_bytecode,
+        callee_identity.bytecode as i64,
+    );
+    builder
+        .ins()
+        .brif(bytecode_matches, matched, &[], miss, &[]);
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 

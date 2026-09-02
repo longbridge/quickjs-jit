@@ -230,7 +230,7 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
     use rquickjs_core::qjs;
 
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 7);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 8);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitExecFrame, runtime_api),
         std::mem::offset_of!(qjs::JSJitExecFrame, entry)
@@ -254,7 +254,8 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
         160
     );
     assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, regexp), 168);
-    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 176);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, atom_value), 176);
+    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 184);
     assert_eq!(qjs::JS_JIT_HELPER_GUARD_MISS, 1);
 }
 
@@ -350,6 +351,11 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
             3,
             qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
         ),
+        (
+            "ATOM_VALUE",
+            1,
+            qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
+        ),
     ];
 
     let mut count = 0_u32;
@@ -394,9 +400,9 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 16);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 18);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 7);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 8);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitEntryHandle, stack_map_count),

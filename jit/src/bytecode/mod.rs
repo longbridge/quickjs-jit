@@ -70,6 +70,7 @@ pub struct ConstantDescriptor {
     index: u32,
     tag: i32,
     kind: u32,
+    payload: u64,
 }
 
 /// Scalar execution flags copied from the QuickJS bytecode function.
@@ -112,6 +113,10 @@ impl ConstantDescriptor {
 
     pub const fn tag(self) -> i32 {
         self.tag
+    }
+
+    pub const fn payload(self) -> u64 {
+        self.payload
     }
 
     pub const fn kind(self) -> u32 {
@@ -437,6 +442,7 @@ impl CompileSnapshot {
                 index: descriptor.index,
                 tag: descriptor.tag,
                 kind: descriptor.kind,
+                payload: descriptor.payload,
             })
             .collect();
         Ok(Self {

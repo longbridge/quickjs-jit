@@ -46,6 +46,7 @@ enum ManifestHelper {
     Dup,
     Free,
     ResolveConst,
+    AtomValue,
     ToNumeric,
     ToBool,
     AddSlow,
@@ -69,6 +70,7 @@ impl ManifestHelper {
             Self::Dup => HelperId::Dup,
             Self::Free => HelperId::Free,
             Self::ResolveConst => HelperId::ResolveConst,
+            Self::AtomValue => HelperId::AtomValue,
             Self::ToNumeric => HelperId::ToNumeric,
             Self::ToBool => HelperId::ToBool,
             Self::AddSlow => HelperId::AddSlow,
@@ -240,6 +242,65 @@ fn ordinary_synchronous_programs_enter_tier1_and_match_the_interpreter() {
             })
             .assert_same();
     }
+}
+
+#[test]
+fn atom_string_literals_enter_tier1_with_owned_values() {
+    differential(
+        "function f(flag){return flag?'quickjs-jit-atom':'fallback-atom'}",
+        "f(true)+'|'+f(false)",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("push_atom_value")
+    .assert_same();
+}
+
+#[test]
+fn string_valued_object_literals_enter_tier1_with_owned_fields() {
+    differential(
+        "function f(value){return {kind:'panel',value:value}}",
+        "JSON.stringify(f(42))",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("define_field")
+    .assert_same();
+}
+
+#[test]
+fn computed_object_fields_enter_tier1_with_owned_container_and_key() {
+    differential(
+        "function f(key,value){return {[key]:value}}",
+        "JSON.stringify(f('panel',42))",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("define_array_el")
+    .assert_same();
+}
+
+#[test]
+fn packed_array_slack_never_behaves_like_live_elements() {
+    differential(
+        "function f(o,k){let v=o[k];return v+0}\n\
+         globalThis.a=[];for(let i=1;i<=32;i++)a.push(i);\n\
+         while(a.length>2)a.pop();",
+        "[f(a,2),f(a,3),f(a,8)].map(String).join(',')",
+    )
+    .force_baseline()
+    .expect_executed_opcode("get_array_el")
+    .assert_same();
+
+    differential(
+        "function f(o,k,v){o[k]=v;return o.length+0}\n\
+         globalThis.a=[];for(let i=1;i<=32;i++)a.push(i);\n\
+         while(a.length>2)a.pop();",
+        "f(a,5,999)+'|'+a.length+'|'+String(a[5])",
+    )
+    .force_baseline()
+    .expect_executed_opcode("put_array_el")
+    .assert_same();
 }
 
 #[test]

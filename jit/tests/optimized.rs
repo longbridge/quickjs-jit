@@ -682,6 +682,122 @@ fn stable_int32_loop_carries_unboxed_i32_ssa_through_the_header() {
 }
 
 #[test]
+fn stable_packed_element_loop_lowers_to_native_tier2_loads() {
+    let fixture = SnapshotFixture::compile(
+        "(function sum(values){let s=0;for(let i=0;i<values.length;i++)s=(s+values[i])|0;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    assert!(verified
+        .instructions()
+        .iter()
+        .any(|instruction| instruction.opcode().name() == "get_array_el"));
+    OptimizedIr::translate(&verified, 163)
+        .unwrap_or_else(|error| panic!("element loop IR translation failed: {error:?}"));
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Object]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+
+    let clif = Tier2Compiler::host(163)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(163))
+        .unwrap_or_else(|error| panic!("element loop did not lower: {error:?}"));
+    assert!(clif.contains("load.i16"), "class guard missing: {clif}");
+    assert!(
+        clif.contains("load.i32"),
+        "bounds/element load missing: {clif}"
+    );
+    assert!(
+        clif.contains("sadd_overflow"),
+        "Int32 SSA add missing: {clif}"
+    );
+}
+
+#[test]
+fn stable_typed_element_loop_lowers_native_loads_and_stores() {
+    let fixture = SnapshotFixture::compile(
+        "(function convert(ints,floats){let sum=0.0;for(let i=0;i<ints.length;i++){floats[i]=ints[i]*0.25+0.5;sum=sum+floats[i];}return sum})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    assert!(verified
+        .instructions()
+        .iter()
+        .any(|instruction| instruction.opcode().name() == "put_array_el"));
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Object, ObservedType::Object]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Float64,
+                ObservedType::Float64,
+                ObservedType::Float64,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Float64);
+    }
+    let clif = Tier2Compiler::host(164)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(164))
+        .unwrap_or_else(|error| {
+            panic!(
+                "typed element loop did not lower: {error:?}; opcodes={:?}",
+                verified
+                    .instructions()
+                    .iter()
+                    .map(|instruction| instruction.opcode().name())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        clif.contains("fcvt_from_sint.f64") && clif.contains("imul_imm.i32"),
+        "typed address/conversion path missing: {clif}"
+    );
+    assert!(clif.contains("load.f64"), "typed load missing: {clif}");
+    assert!(clif.contains("load.i8"), "detached guard missing: {clif}");
+    assert_eq!(
+        clif.matches("icmp ult").count(),
+        1,
+        "the load immediately following a stable in-bounds typed store did not reuse its guarded count and data pointer: {clif}"
+    );
+}
+
+#[test]
 fn stable_int32_sub_mul_div_use_checked_native_operations() {
     let fixture =
         SnapshotFixture::compile("(function arithmetic(a,b){return ((a-b)*(a+b))/(b+1)})");
@@ -817,6 +933,14 @@ fn monomorphic_call_emits_pointer_guard_and_unboxed_native_abi() {
         "direct entry address absent: {clif}"
     );
     assert!(clif.contains("call_indirect"), "{clif}");
+    let bytecode_guard = clif
+        .split("\nblock")
+        .find(|block| block.contains("0x2234_5678"))
+        .expect("bytecode identity guard block");
+    assert!(
+        !bytecode_guard.contains("0x1234_5678") && !bytecode_guard.contains("eq v37, -1"),
+        "payload was dereferenced in the same block as the tag/object guards: {bytecode_guard}"
+    );
     assert!(
         clif.contains("brif") && clif.contains("return"),
         "guard/status mismatch must have exact deopt edge: {clif}"
@@ -966,6 +1090,131 @@ fn production_cse_keys_exact_ssa_operands_and_respects_frame_writes() {
         0,
         "{:#?}",
         mutation_ir.nodes()
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_executes_packed_and_typed_element_loops() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                function elementSum(values) {
+                  let sum = 0;
+                  for (let i = 0; i < values.length; i++) sum = (sum + values[i]) | 0;
+                  return sum;
+                }
+                function reassignedElement(x, y) {
+                  let values = x;
+                  let originalLength = values.length;
+                  values = y;
+                  return (originalLength + values[0]) | 0;
+                }
+                function branchedElement(x, y, select) {
+                  let values = x;
+                  let originalLength = values.length;
+                  if (select) values = y;
+                  return (originalLength + values[0]) | 0;
+                }
+                globalThis.packed = [1,2,3,4,5,6,7,8];
+                globalThis.otherPacked = [99,98];
+                globalThis.typed = new Int32Array(packed);
+                globalThis.floatTyped = new Float64Array([1.5, 2.5]);
+                globalThis.proxied = new Proxy([1, 2], {});
+                "#,
+            )
+        })
+        .unwrap();
+    for _ in 0..10_000 {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("elementSum(packed)"))
+                .unwrap(),
+            36
+        );
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    let before = jit.metrics();
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("elementSum(packed)"))
+            .unwrap(),
+        36
+    );
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("elementSum(typed)"))
+            .unwrap(),
+        36
+    );
+    jit.poll();
+    let after = jit.metrics();
+    assert!(after.tier2_entries >= before.tier2_entries + 2, "{after:?}");
+    assert_eq!(after.deopts, before.deopts, "{after:?}");
+    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    for select in 0..2 {
+        for _ in 0..64 {
+            assert_eq!(
+                context
+                    .with(|ctx| { ctx.eval::<i32, _>("reassignedElement(packed, otherPacked)") })
+                    .unwrap(),
+                107
+            );
+            assert_eq!(
+                context
+                    .with(|ctx| {
+                        ctx.eval::<i32, _>(format!(
+                            "branchedElement(packed, otherPacked, {select})"
+                        ))
+                    })
+                    .unwrap(),
+                if select == 0 { 9 } else { 107 }
+            );
+            jit.poll();
+        }
+    }
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("elementSum(floatTyped)"))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("elementSum(proxied)"))
+            .unwrap(),
+        3
+    );
+    jit.poll();
+    assert!(
+        jit.metrics().deopts >= after.deopts + 2,
+        "{:?}",
+        jit.metrics()
     );
 }
 
@@ -1233,6 +1482,139 @@ fn production_tier2_caller_executes_a_monomorphic_compiled_callee() {
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
     assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
     assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_waits_for_and_calls_a_direct_callee() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(16)
+            .workers(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function increment(value,delta){return value+delta}\n\
+                 function workload(iterations,seed,target){\n\
+                   let value=seed;let delta=0;\n\
+                   for(let i=0;i<iterations;i++){\n\
+                     value=target(value,delta);\n\
+                     delta++;if(delta<8){}else{delta=0;}\n\
+                   }\n\
+                   return value;\n\
+                 }",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(
+            context.with(|ctx| {
+                let increment: Function<'_> = ctx.globals().get("increment").unwrap();
+                let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+                workload.call::<_, i32>((128, 0, increment)).unwrap()
+            }),
+            448
+        );
+        jit.poll();
+        if jit.metrics().installed >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+
+    let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
+    for _ in 0..8 {
+        assert_eq!(
+            context.with(|ctx| {
+                let increment: Function<'_> = ctx.globals().get("increment").unwrap();
+                let workload: Function<'_> = ctx.globals().get("workload").unwrap();
+                workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+            }),
+            7_000
+        );
+    }
+    let after = jit.metrics();
+    assert!(
+        after.tier2_entries.saturating_sub(before.tier2_entries) <= 16,
+        "stable direct calls re-entered through QuickJS: before={before:?} after={after:?}"
+    );
+    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn production_tier2_direct_call_checks_object_before_payload() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(64)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function directAdd(a){return a+1}\n\
+                 function invoke(c,a){let fn=c?directAdd:5;return fn(a)}",
+            )
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("invoke(true,41)"))
+                .unwrap(),
+            42
+        );
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+
+    assert_eq!(
+        context
+            .with(|ctx| {
+                ctx.eval::<String, _>("try{invoke(false,1);'no error'}catch(e){String(e.name)}")
+            })
+            .unwrap(),
+        "TypeError"
+    );
 }
 
 #[cfg(all(
@@ -1646,6 +2028,89 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
     panic!(
         "harmful Tier1 never reached bounded Tier2 trial: {:?}",
         jit.metrics()
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn automatic_call_heavy_promotes_the_direct_edge_caller() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function increment(value,delta){return value+delta;}\
+                 function workload(iterations,seed,target){\
+                   let value=seed;let delta=0;\
+                   for(let i=0;i<iterations;i+=1){\
+                     value=target(value,delta);delta+=1;\
+                     if(delta<8){}else{delta=0;}\
+                   }\
+                   return value;\
+                 }",
+            )
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        jit.poll();
+        let metrics = jit.metrics();
+        if metrics.blacklisted > 0
+            && metrics.tier2_entries > 0
+            && metrics.pending_worker_jobs == 0
+            && metrics.pending_snapshot_bytes == 0
+        {
+            break;
+        }
+        if metrics.pending_worker_jobs == 0 && metrics.pending_snapshot_bytes == 0 {
+            let result = context.with(|ctx| {
+                let workload: Function = ctx.globals().get("workload").unwrap();
+                let increment: Function = ctx.globals().get("increment").unwrap();
+                workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+            });
+            assert_eq!(result, 7_000);
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let warmed = jit.metrics();
+    assert!(warmed.blacklisted > 0, "{warmed:?}");
+    assert_eq!(
+        warmed.profitability_rejected, 5,
+        "the stable direct-edge caller repeated the leaf's misleading baseline profitability retries: {warmed:?}"
+    );
+    assert_eq!(warmed.profitability_approved, 0, "{warmed:?}");
+
+    for _ in 0..11 {
+        let result = context.with(|ctx| {
+            let workload: Function = ctx.globals().get("workload").unwrap();
+            let increment: Function = ctx.globals().get("increment").unwrap();
+            workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+        });
+        assert_eq!(result, 7_000);
+        jit.poll();
+    }
+    let after = jit.metrics();
+    let entries = after.native_entries.saturating_sub(warmed.native_entries);
+    assert!(
+        entries <= 32,
+        "automatic left the direct-edge caller in the interpreter and crossed into the leaf {entries} times: before={warmed:?}, after={after:?}"
     );
 }
 

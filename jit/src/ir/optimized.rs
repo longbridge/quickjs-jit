@@ -1,5 +1,8 @@
 use super::TaggedValue;
-use crate::{bytecode::VerifiedFunction, compiler::CompileFailure};
+use crate::{
+    bytecode::{Instruction, OperandFormat, VerifiedFunction},
+    compiler::CompileFailure,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueRepresentation {
@@ -35,7 +38,7 @@ pub struct OptimizedNode {
     eliminated: bool,
     bytes: Box<[u8]>,
     branch_target: Option<u32>,
-    pops: u8,
+    pops: u16,
     pushes: u8,
     deopt_guard: Option<u32>,
 }
@@ -65,7 +68,7 @@ impl OptimizedNode {
     pub const fn branch_target(&self) -> Option<u32> {
         self.branch_target
     }
-    pub const fn pops(&self) -> u8 {
+    pub const fn pops(&self) -> u16 {
         self.pops
     }
     pub const fn pushes(&self) -> u8 {
@@ -244,7 +247,15 @@ impl OptimizedIr {
             for instruction in &function.instructions()[block.instruction_range()] {
                 let name = instruction.opcode().name();
                 let (representation, effect) = classify_optimized_opcode(name)?;
-                let deopt_guard = if is_guarded_arithmetic(name) || name.starts_with("call") {
+                let pops = u16::try_from(effective_pop(instruction))
+                    .map_err(|_| CompileFailure::ResourceLimit)?;
+                let deopt_guard = if is_guarded_arithmetic(name)
+                    || name.starts_with("call")
+                    || matches!(name, "get_array_el" | "put_array_el")
+                    || name == "get_length"
+                    || name == "to_propkey"
+                    || matches!(name, "or" | "and" | "xor" | "shl" | "sar")
+                {
                     let guard = next_guard;
                     next_guard = next_guard
                         .checked_add(1)
@@ -286,13 +297,13 @@ impl OptimizedIr {
                     branch_target: instruction
                         .branch_target()
                         .and_then(|target| u32::try_from(target).ok()),
-                    pops: instruction.opcode().n_pop(),
+                    pops,
                     pushes: instruction.opcode().n_push(),
                     deopt_guard,
                 });
                 block_nodes.push(id);
                 stack_depth = stack_depth
-                    .checked_sub(u16::from(instruction.opcode().n_pop()))
+                    .checked_sub(pops)
                     .and_then(|depth| depth.checked_add(u16::from(instruction.opcode().n_push())))
                     .ok_or(CompileFailure::InvalidArtifact)?;
                 if effect != OptimizedEffect::Pure {
@@ -351,6 +362,23 @@ impl OptimizedIr {
     }
     pub const fn max_stack(&self) -> u16 {
         self.max_stack
+    }
+}
+
+fn effective_pop(instruction: &Instruction) -> usize {
+    let base = instruction.opcode().n_pop() as usize;
+    match instruction.opcode().format() {
+        OperandFormat::NPop | OperandFormat::NPopU16 => {
+            base.saturating_add(instruction.operand_u16(1) as usize)
+        }
+        OperandFormat::NPopFixed => instruction
+            .opcode()
+            .name()
+            .as_bytes()
+            .last()
+            .and_then(|value| value.is_ascii_digit().then_some((value - b'0') as usize))
+            .map_or(base, |arguments| base.saturating_add(arguments)),
+        _ => base,
     }
 }
 
@@ -584,8 +612,10 @@ fn optimized_block_depths(
             .ok_or(CompileFailure::InvalidArtifact)?;
         let mut depth = *depths.get(&pc).ok_or(CompileFailure::InvalidArtifact)?;
         for instruction in &function.instructions()[block.instruction_range()] {
+            let pops = u16::try_from(effective_pop(instruction))
+                .map_err(|_| CompileFailure::ResourceLimit)?;
             depth = depth
-                .checked_sub(u16::from(instruction.opcode().n_pop()))
+                .checked_sub(pops)
                 .ok_or(CompileFailure::InvalidArtifact)?;
             depth = depth
                 .checked_add(u16::from(instruction.opcode().n_push()))
@@ -620,9 +650,11 @@ fn classify_optimized_opcode(
         }
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" | "get_loc" | "get_loc8"
         | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3" | "get_loc_check" | "get_loc0_loc1"
-        | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3" => {
-            (ValueRepresentation::Tagged, OptimizedEffect::Pure)
-        }
+        | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3"
+        | "swap" => (ValueRepresentation::Tagged, OptimizedEffect::Pure),
+        "push_const" | "push_const8" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "is_undefined_or_null" => (ValueRepresentation::Int32, OptimizedEffect::Pure),
+        "to_propkey" => (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite),
         "put_arg"
         | "put_loc"
         | "put_loc8"
@@ -638,7 +670,10 @@ fn classify_optimized_opcode(
             (ValueRepresentation::Tagged, OptimizedEffect::Reentrant)
         }
         "get_field" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
+        "get_length" => (ValueRepresentation::Int32, OptimizedEffect::FrameWrite),
+        "get_array_el" => (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite),
         "put_field" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
+        "put_array_el" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
         "if_false" | "if_true" | "if_false8" | "if_true8" | "goto" | "goto8" | "goto16"
         | "return" | "return_undef" | "lt" | "lte" | "gt" | "gte" | "eq" | "neq" | "strict_eq"
         | "strict_neq" | "lnot" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),

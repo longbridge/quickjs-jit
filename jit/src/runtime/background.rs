@@ -101,53 +101,49 @@ impl BackgroundCompiler {
             workers.push(
                 thread::Builder::new()
                     .name(format!("rquickjs-jit-{index}"))
-                    .spawn(move || {
-                        while let Ok(request) =
-                            receiver.lock().unwrap_or_else(|p| p.into_inner()).recv()
-                        {
-                            let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
-                            let ir_bytes = snapshot_bytes.saturating_mul(32);
-                            let _usage = UsageGuard {
-                                usage: Arc::clone(&usage),
-                                snapshot_bytes,
-                                ir_bytes,
+                    .spawn(move || loop {
+                        let request = { receiver.lock().unwrap_or_else(|p| p.into_inner()).recv() };
+                        let Ok(request) = request else { break };
+                        let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
+                        let ir_bytes = snapshot_bytes.saturating_mul(32);
+                        let _usage = UsageGuard {
+                            usage: Arc::clone(&usage),
+                            snapshot_bytes,
+                            ir_bytes,
+                        };
+                        let sender = completion_slot
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .clone();
+                        if let Some(sender) = sender {
+                            let key = request.key();
+                            let tier = request.tier();
+                            let artifact_key = request.artifact_key();
+                            let attempt_id = request.attempt_id();
+                            let control = crate::compiler::CompileControl::with_ir_limit(
+                                Arc::clone(&cancelled),
+                                worker_budget,
+                                max_ir_bytes,
+                            );
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    compiler.compile_controlled(request, &control)
+                                }))
+                                .unwrap_or(Err(crate::compiler::CompileFailure::CompilerPanicked));
+                            let completion = super::CompileCompletion {
+                                key,
+                                requested_tier: tier,
+                                artifact_key,
+                                attempt_id,
+                                result,
                             };
-                            let sender = completion_slot
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .clone();
-                            if let Some(sender) = sender {
-                                let key = request.key();
-                                let tier = request.tier();
-                                let artifact_key = request.artifact_key();
-                                let attempt_id = request.attempt_id();
-                                let control = crate::compiler::CompileControl::with_ir_limit(
-                                    Arc::clone(&cancelled),
-                                    worker_budget,
-                                    max_ir_bytes,
-                                );
-                                let result =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        compiler.compile_controlled(request, &control)
-                                    }))
-                                    .unwrap_or(Err(
-                                        crate::compiler::CompileFailure::CompilerPanicked,
-                                    ));
-                                let completion = super::CompileCompletion {
-                                    key,
-                                    requested_tier: tier,
-                                    artifact_key,
-                                    attempt_id,
-                                    result,
-                                };
-                                if let Err(super::CompletionSendError::Full(completion)) =
-                                    sender.try_send(completion)
-                                {
-                                    overflow
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .push_back(*completion);
-                                }
+                            if let Err(super::CompletionSendError::Full(completion)) =
+                                sender.try_send(completion)
+                            {
+                                overflow
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .push_back(*completion);
                             }
                         }
                     })

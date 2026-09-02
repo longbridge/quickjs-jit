@@ -123,6 +123,10 @@ name = "tier1_arrays_typed"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_calls_properties"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "tier1_globals"
 required-features = ["compiler", "test-support"]
 

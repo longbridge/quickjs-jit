@@ -14,10 +14,25 @@ fn native_semantics_targets_require_their_execution_features() {
         .as_array()
         .expect("packages array")
         .iter()
-        .find(|package| package["name"] == "rquickjs-jit")
-        .expect("rquickjs-jit package");
+        .find(|package| package["name"] == "quickjs-jit-runtime")
+        .expect("quickjs-jit-runtime package");
 
-    for test_name in ["helpers", "semantics", "gpui_shell_surface"] {
+    for test_name in [
+        "deopt",
+        "differential",
+        "gpui_shell_surface",
+        "helpers",
+        "opcodes",
+        "optimized",
+        "osr",
+        "semantics",
+        "test262",
+        "tier1_arrays_typed",
+        "tier1_calls_properties",
+        "tier1_constructors",
+        "tier1_globals",
+        "tier1_regexp",
+    ] {
         let target = package["targets"]
             .as_array()
             .expect("targets array")

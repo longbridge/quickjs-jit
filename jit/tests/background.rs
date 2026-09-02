@@ -51,6 +51,32 @@ fn foreground_submission_never_waits_for_blocked_compiler() {
 }
 
 #[test]
+fn configured_workers_receive_compilations_concurrently() {
+    let (compiler, control) = FakeCompiler::new(2);
+    let mut workers = BackgroundCompiler::new(Arc::new(compiler), 2, 2).unwrap();
+    let mut coordinator = Coordinator::with_limits(2, 2, 4, 1024);
+    for id in 1..=2 {
+        coordinator
+            .queue(FunctionKey::new(id, 1), Tier::Baseline, snapshot(id, 1))
+            .unwrap();
+        assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    }
+
+    assert!(control
+        .request_within(std::time::Duration::from_secs(1))
+        .is_some());
+    assert!(
+        control
+            .request_within(std::time::Duration::from_millis(100))
+            .is_some(),
+        "the receiver mutex serialized all configured workers"
+    );
+    control.complete(CompiledArtifact::fake(Tier::Baseline));
+    control.complete(CompiledArtifact::fake(Tier::Baseline));
+    workers.shutdown(&mut coordinator);
+}
+
+#[test]
 fn stale_completion_after_reload_is_discarded() {
     let (compiler, control) = FakeCompiler::new(1);
     let mut workers = BackgroundCompiler::new(Arc::new(compiler), 1, 1).unwrap();

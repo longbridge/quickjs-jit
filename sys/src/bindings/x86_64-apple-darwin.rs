@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 16;
+pub const QJSJIT_ABI_MINOR: u32 = 18;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -102,7 +102,7 @@ pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;
 pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
 pub const QJSJIT_RUNTIME_API_MAJOR: u32 = 1;
-pub const QJSJIT_RUNTIME_API_MINOR: u32 = 7;
+pub const QJSJIT_RUNTIME_API_MINOR: u32 = 8;
 pub type size_t = ::core::ffi::c_ulong;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2570,13 +2570,14 @@ pub struct JSJitConstantDescriptor {
     pub tag: i32,
     pub kind: u32,
     pub reserved: u32,
+    pub payload: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of JSJitConstantDescriptor"]
-        [::core::mem::size_of::<JSJitConstantDescriptor>() - 16usize];
+        [::core::mem::size_of::<JSJitConstantDescriptor>() - 24usize];
     ["Alignment of JSJitConstantDescriptor"]
-        [::core::mem::align_of::<JSJitConstantDescriptor>() - 4usize];
+        [::core::mem::align_of::<JSJitConstantDescriptor>() - 8usize];
     ["Offset of field: JSJitConstantDescriptor::index"]
         [::core::mem::offset_of!(JSJitConstantDescriptor, index) - 0usize];
     ["Offset of field: JSJitConstantDescriptor::tag"]
@@ -2585,6 +2586,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitConstantDescriptor, kind) - 8usize];
     ["Offset of field: JSJitConstantDescriptor::reserved"]
         [::core::mem::offset_of!(JSJitConstantDescriptor, reserved) - 12usize];
+    ["Offset of field: JSJitConstantDescriptor::payload"]
+        [::core::mem::offset_of!(JSJitConstantDescriptor, payload) - 16usize];
 };
 pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_OK: JSJitSnapshotStatus = 0;
 pub const JSJitSnapshotStatus_JS_JIT_SNAPSHOT_INVALID_ARGUMENT: JSJitSnapshotStatus = -1;
@@ -2722,7 +2725,8 @@ pub const JSJitHelperId_JS_JIT_HELPER_TO_PROPKEY: JSJitHelperId = 17;
 pub const JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL: JSJitHelperId = 18;
 pub const JSJitHelperId_JS_JIT_HELPER_CALL_CONSTRUCTOR: JSJitHelperId = 19;
 pub const JSJitHelperId_JS_JIT_HELPER_REGEXP: JSJitHelperId = 20;
-pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 21;
+pub const JSJitHelperId_JS_JIT_HELPER_ATOM_VALUE: JSJitHelperId = 21;
+pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 22;
 pub type JSJitHelperId = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2938,6 +2942,14 @@ unsafe extern "C" {
     ) -> JSJitHelperStatus;
 }
 unsafe extern "C" {
+    pub fn JS_JitHelperAtomValue(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        input: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
     pub fn JS_JitGetHelperTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitHelperInfo;
 }
 #[repr(C)]
@@ -3124,10 +3136,18 @@ pub struct JSJitRuntimeAPI {
             right: u32,
         ) -> JSJitHelperStatus,
     >,
+    pub atom_value: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            input: u32,
+        ) -> JSJitHelperStatus,
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 176usize];
+    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 184usize];
     ["Alignment of JSJitRuntimeAPI"][::core::mem::align_of::<JSJitRuntimeAPI>() - 8usize];
     ["Offset of field: JSJitRuntimeAPI::struct_size"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, struct_size) - 0usize];
@@ -3177,6 +3197,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitRuntimeAPI, call_constructor) - 160usize];
     ["Offset of field: JSJitRuntimeAPI::regexp"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, regexp) - 168usize];
+    ["Offset of field: JSJitRuntimeAPI::atom_value"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, atom_value) - 176usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

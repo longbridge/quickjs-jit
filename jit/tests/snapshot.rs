@@ -117,6 +117,27 @@ fn snapshot_copies_constant_descriptors_without_heap_addresses() {
 }
 
 #[test]
+fn snapshot_copies_numeric_constant_payloads_without_heap_pointers() {
+    let fixture = SnapshotFixture::compile("function f() { return 1.5 } f");
+    let descriptor = fixture
+        .snapshot()
+        .constants()
+        .iter()
+        .copied()
+        .find(|descriptor| descriptor.tag() == rquickjs_core::qjs::JS_TAG_FLOAT64)
+        .expect("Float64 descriptor");
+    assert_eq!(descriptor.payload(), 1.5f64.to_bits());
+
+    let heap_fixture = SnapshotFixture::compile("function f() { return 'owned' } f");
+    assert!(heap_fixture
+        .snapshot()
+        .constants()
+        .iter()
+        .filter(|descriptor| descriptor.tag() < 0)
+        .all(|descriptor| descriptor.payload() == 0));
+}
+
+#[test]
 fn dropping_runtime_constants_releases_the_retained_source_function() {
     let runtime = Runtime::new().expect("snapshot runtime");
     let context = Context::full(&runtime).expect("snapshot context");

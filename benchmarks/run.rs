@@ -209,6 +209,7 @@ struct WorkerResult {
     code_bytes: u64,
     metadata_bytes: u64,
     active_ir_bytes: u64,
+    automatic_ready: bool,
     phases: PhaseTiming,
 }
 
@@ -384,7 +385,9 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
                 install_poll = install_poll.saturating_add(poll_ns);
             }
             before = now;
-            if native_ready(mode, &before, tier1_ready_installs) || before.blacklisted > 0 {
+            if native_ready(mode, &before, tier1_ready_installs)
+                || (mode != "automatic" && before.blacklisted > 0)
+            {
                 break;
             }
             if Instant::now() >= threshold_deadline {
@@ -446,6 +449,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         code_bytes: metrics.code_bytes as u64,
         metadata_bytes: metrics.metadata_bytes as u64,
         active_ir_bytes: metrics.peak_compiler_bytes as u64,
+        automatic_ready: mode != "automatic" || native_ready(mode, &metrics, tier1_ready_installs),
         phases,
     };
     println!("{}", serde_json::to_string(&result).map_err(err)?);
@@ -561,7 +565,9 @@ fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics, tier1_ready_installs: 
         "interpreter" => true,
         "tier1" => m.native_entries > 0 && m.installed >= tier1_ready_installs,
         "tier2" => m.tier2_entries > 0,
-        "automatic" => m.profitability_approved > 0 && m.tier2_entries > 0,
+        "automatic" => {
+            m.tier2_entries > 0 && m.pending_worker_jobs == 0 && m.pending_snapshot_bytes == 0
+        }
         _ => false,
     }
 }
@@ -587,6 +593,12 @@ fn validate_sample(mode: &str, r: &WorkerResult, requires_native: bool) -> Resul
         "tier1" if r.tier2_entries != 0 => Err("Tier1 policy entered Tier2".into()),
         "tier2" if requires_native && r.tier2_entries == 0 => {
             Err("Tier2 sample never entered Tier2 code".into())
+        }
+        "automatic" if requires_native && r.tier2_entries == 0 => {
+            Err("automatic sample never entered Tier2 code".into())
+        }
+        "automatic" if r.tier2_entries > 0 && !r.automatic_ready => {
+            Err("automatic sample retained pending compilation after warmup".into())
         }
         _ => Ok(()),
     }
@@ -732,6 +744,7 @@ console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
         code_bytes: 0,
         metadata_bytes: 0,
         active_ir_bytes: 0,
+        automatic_ready: true,
         phases,
     })
 }
@@ -942,6 +955,7 @@ mod tests {
             code_bytes: 0,
             metadata_bytes: 0,
             active_ir_bytes: 0,
+            automatic_ready: false,
             phases: PhaseTiming::default(),
         };
         assert!(validate_sample("tier1", &r, true).is_err());
@@ -951,6 +965,11 @@ mod tests {
         r.tier2_entries = 1;
         assert!(validate_sample("tier1", &r, true).is_err());
         assert!(validate_sample("tier2", &r, true).is_ok());
+        assert!(validate_sample("automatic", &r, true).is_err());
+        r.automatic_ready = true;
+        assert!(validate_sample("automatic", &r, true).is_ok());
+        r.automatic_ready = false;
+        assert!(validate_sample("automatic", &r, false).is_err());
         r.native_exits = 2;
         assert!(validate_sample("tier2", &r, true).is_err());
     }
@@ -965,14 +984,16 @@ mod tests {
         assert_eq!(threshold_timeout("automatic"), Duration::from_secs(2));
     }
     #[test]
-    fn automatic_warmup_waits_for_an_installed_profitable_tier2() {
+    fn automatic_warmup_waits_for_tier2_and_pending_compilation() {
         let mut metrics = rquickjs_jit::JitMetrics::default();
         metrics.native_entries = 8;
-        metrics.profitability_evaluations = 1;
-        assert!(!native_ready("automatic", &metrics, 1));
-        metrics.profitability_approved = 1;
-        assert!(!native_ready("automatic", &metrics, 1));
         metrics.tier2_entries = 1;
+        metrics.pending_worker_jobs = 1;
+        assert!(!native_ready("automatic", &metrics, 1));
+        metrics.pending_worker_jobs = 0;
+        metrics.pending_snapshot_bytes = 1;
+        assert!(!native_ready("automatic", &metrics, 1));
+        metrics.pending_snapshot_bytes = 0;
         assert!(native_ready("automatic", &metrics, 1));
     }
     #[test]

@@ -46,3 +46,45 @@ fn tier1_enters_for_map_and_set_constructors() {
     assert_eq!(result, (1, 2));
     assert!(jit.metrics().native_entries >= 2, "{:?}", jit.metrics());
 }
+
+#[test]
+fn tier1_constructor_keeps_borrowed_argument_slots_owned_by_the_caller() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(1)
+            .loop_threshold(1)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function Pair(a,b){return {}}\n\
+                 globalThis.construct=function construct(a,b){new Pair(a,b);return a+b};\n\
+                 globalThis.a='20';globalThis.b='22';\n\
+                 globalThis.runConstruct=function(){return construct(a,b)}",
+            )
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut result = String::new();
+    while Instant::now() < deadline {
+        result = context.with(|ctx| {
+            let run: rquickjs::Function<'_> = ctx.globals().get("runConstruct").unwrap();
+            run.call(()).unwrap()
+        });
+        jit.poll();
+        if jit.metrics().native_entries > 0 {
+            break;
+        }
+    }
+    assert_eq!(result, "2022");
+    assert!(jit.metrics().native_entries > 0, "{:?}", jit.metrics());
+}

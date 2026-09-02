@@ -14,6 +14,7 @@ pub enum HelperId {
     Dup,
     Free,
     ResolveConst,
+    AtomValue,
     ToNumeric,
     ToBool,
     AddSlow,

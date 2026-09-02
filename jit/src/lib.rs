@@ -1278,6 +1278,38 @@ impl ProductionBackend {
                 .feedback
                 .snapshot(self.clock.max(1))
                 .with_properties(self.shape_feedback.snapshot(key));
+            let mut direct_call_candidate = false;
+            let direct_call_pending = snapshot.instructions().iter().any(|instruction| {
+                let Some(call) = observed.call_specialization_at(key, instruction.pc()) else {
+                    return false;
+                };
+                if call.callee() == key {
+                    return false;
+                }
+                let repeated_in_loop = snapshot.instructions().iter().any(|branch| {
+                    branch.pc() > instruction.pc()
+                        && branch.branch_target().is_some_and(|target| {
+                            u32::try_from(target).ok().is_some_and(|target| {
+                                target <= instruction.pc()
+                                    && snapshot.control_flow_graph().is_loop_header(target)
+                            })
+                        })
+                });
+                if !repeated_in_loop {
+                    return false;
+                }
+                direct_call_candidate = true;
+                !self.coordinator.direct_call_ready(&call)
+            });
+            /* A caller queued while its monomorphic callee is still compiling
+             * permanently lowers the site through the generic CALL bridge.
+             * Keep the caller at its installed baseline until the callee's
+             * scalar entry is publishable, then capture that pinned target in
+             * the first Tier2 artifact. Self-recursive and non-specializable
+             * calls keep their existing generic lowering. */
+            if direct_call_pending {
+                continue;
+            }
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
                 matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
             }) && !snapshot.instructions().iter().any(|instruction| {
@@ -1310,7 +1342,13 @@ impl ProductionBackend {
              * unboxed loop wins by orders of magnitude.  Give such a function
              * one bounded optimizing trial; coordinator attempt/version caps
              * still prevent compile or deopt loops. */
-            if !forced && !self.profitability_blacklisted.contains(&key) {
+            /* Baseline measurements cannot price the compiled-to-compiled
+             * transition: before the callee is publishable they include the
+             * generic CALL bridge that Tier2 removes. Once every stable
+             * direct target is ready, admit the caller's existing bounded
+             * optimizing trial without spending five misleading baseline
+             * profitability retries. */
+            if !forced && !direct_call_candidate && !self.profitability_blacklisted.contains(&key) {
                 let measured = self
                     .execution_profiles
                     .get(&key)

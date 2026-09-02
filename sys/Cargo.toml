@@ -30,6 +30,7 @@ include = [
     "quickjs/libunicode-table.h",
     "quickjs/libunicode.c",
     "quickjs/libunicode.h",
+    "quickjs/LICENSE",
     "quickjs/list.h",
     "quickjs/quickjs-atom.h",
     "quickjs/quickjs-c-atomics.h",

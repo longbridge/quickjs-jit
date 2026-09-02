@@ -679,6 +679,7 @@ impl DifferentialRun {
                 HelperId::ResolveConst => {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_RESOLVE_CONST
                 }
+                HelperId::AtomValue => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ATOM_VALUE,
                 HelperId::ToNumeric => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_NUMERIC,
                 HelperId::ToBool => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
                 HelperId::AddSlow => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW,
@@ -1249,6 +1250,7 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         dup: Some(synthetic_dup),
         free: Some(synthetic_free),
         resolve_const: Some(synthetic_map_out_in_unavailable),
+        atom_value: Some(synthetic_map_out_in_unavailable),
         to_numeric: Some(synthetic_to_numeric),
         to_bool: Some(synthetic_to_bool),
         add_slow: Some(synthetic_add),
