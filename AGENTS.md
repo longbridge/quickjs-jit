@@ -22,3 +22,15 @@ x86_64 container use emulation and may differ from native x86_64 CI, especially
 under memory, address, or thread sanitizers. Report those differences and do not
 treat an emulation-only sanitizer failure as proof of a regression without
 confirming it on native CI or a native target host.
+
+## Performance Reporting
+
+Express performance comparisons in the direction of speed, relative to the
+named baseline. Prefer `1.25x the baseline speed` or `25% faster`; `1.00x` means
+equal speed, values above `1.00x` are faster, and values below `1.00x` are
+slower. Do not present improvements as negative latency regressions because the
+sign is easy to misread. When a confidence interval crosses parity, say that
+the result is statistically tied and give the plain-language range, for example
+`between 3% slower and 5% faster`. Preserve whether a number measures latency,
+throughput, or speedup, and mathematically convert latency changes before
+describing them as speed changes.

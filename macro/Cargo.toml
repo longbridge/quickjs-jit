@@ -1,6 +1,6 @@
 [package]
 name = "quickjs-jit-macro"
-version = "0.12.4"
+version = "0.12.5"
 authors = ["K. <kayo@illumium.org>", "Mees Delzenne <mees.delzenne@gmail.com>"]
 edition = "2021"
 license = "MIT"

@@ -24,6 +24,18 @@ fn wrapper_derefs_to_runtime() {
 }
 
 #[test]
+fn owning_interpreter_runtime_has_no_jit_backend() {
+    let runtime = JitRuntime::builder()
+        .build_interpreter()
+        .expect("interpreter runtime");
+    assert!(!runtime.metrics().native_enabled());
+    assert_eq!(runtime.metrics().queued, 0);
+
+    let context = Context::full(&runtime).expect("context");
+    context.with(|ctx| assert_eq!(ctx.eval::<i32, _>("40 + 2").unwrap(), 42));
+}
+
+#[test]
 fn invalid_limits_are_rejected() {
     let error = JitConfig::builder().max_queue_len(0).build().unwrap_err();
     assert!(matches!(error, JitError::InvalidConfig("max_queue_len")));

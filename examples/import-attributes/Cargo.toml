@@ -1,6 +1,6 @@
 [package]
 name = "import-attributes"
-version = "0.12.4"
+version = "0.12.5"
 authors = ["K. <kayo@illumium.org>"]
 edition = "2021"
 publish = false

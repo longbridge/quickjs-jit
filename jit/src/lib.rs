@@ -120,7 +120,7 @@ pub struct Jit {
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
     #[cfg(feature = "test-support")]
-    test_environment: Option<runtime::ArtifactEnvironment>,
+    test_environment: Arc<Mutex<Option<runtime::ArtifactEnvironment>>>,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
@@ -192,7 +192,7 @@ impl Jit {
                 )
             )
         ))]
-        let test_environment = Some(backend.environment);
+        let test_environment = Arc::clone(&backend.environment);
         #[cfg(all(
             feature = "test-support",
             feature = "compiler",
@@ -295,7 +295,7 @@ impl Jit {
                     )
                 )))]
                 {
-                    None
+                    Arc::new(Mutex::new(None))
                 }
             },
             #[cfg(feature = "test-support")]
@@ -394,7 +394,19 @@ impl Jit {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_artifact_environment(&self) -> runtime::ArtifactEnvironment {
-        self.test_environment.expect("production compiler backend")
+        self.test_environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("production compiler backend has not received eligible work")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_artifact_environment_initialized(&self) -> bool {
+        self.test_environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 
     #[cfg(feature = "test-support")]
@@ -475,7 +487,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
     )
 ))]
 struct ProductionBackend {
-    environment: runtime::ArtifactEnvironment,
+    runtime_id: u64,
+    abi_info: abi::AbiInfo,
+    environment: Arc<Mutex<Option<runtime::ArtifactEnvironment>>>,
     config: JitConfig,
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
@@ -546,6 +560,24 @@ struct CompilerMeasurements {
 struct MeasuredCompiler<C> {
     inner: C,
     measurements: Arc<CompilerMeasurements>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Default)]
+struct DeferredTieredCompiler {
+    compiler: std::sync::OnceLock<compiler::optimized::TieredCompiler>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl compiler::Compiler for DeferredTieredCompiler {
+    fn compile(
+        &self,
+        request: runtime::CompileRequest,
+    ) -> Result<code_cache::CompiledArtifact, compiler::CompileFailure> {
+        self.compiler
+            .get_or_init(compiler::optimized::TieredCompiler::host)
+            .compile(request)
+    }
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -1109,11 +1141,10 @@ impl ProductionBackend {
         config: JitConfig,
         metrics: Arc<Mutex<JitMetrics>>,
     ) -> Result<Self, JitError> {
-        let identity_compiler = compiler::baseline::BaselineCompiler::host();
-        let environment = artifact_environment(runtime_id, info, &config, &identity_compiler);
+        let environment = Arc::new(Mutex::new(None));
         let compiler_measurements = Arc::new(CompilerMeasurements::default());
         let compiler = Arc::new(MeasuredCompiler {
-            inner: compiler::optimized::TieredCompiler::host(),
+            inner: DeferredTieredCompiler::default(),
             measurements: Arc::clone(&compiler_measurements),
         });
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
@@ -1131,11 +1162,16 @@ impl ProductionBackend {
             config.max_compile_attempts(),
             config.max_code_bytes(),
             config.max_metadata_bytes(),
-            environment,
+            runtime::ArtifactEnvironment {
+                runtime_id,
+                ..runtime::ArtifactEnvironment::default()
+            },
         );
         coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
         let feedback_capacity = config.max_queue_len().max(32);
         Ok(Self {
+            runtime_id,
+            abi_info: *info,
             environment,
             coordinator,
             config,
@@ -1187,6 +1223,29 @@ impl ProductionBackend {
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
+    }
+
+    fn ensure_artifact_environment(&mut self) {
+        if self
+            .environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let identity_compiler = compiler::baseline::BaselineCompiler::host();
+        let environment = artifact_environment(
+            self.runtime_id,
+            &self.abi_info,
+            &self.config,
+            &identity_compiler,
+        );
+        self.coordinator.initialize_environment(environment);
+        *self
+            .environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
     }
 
     fn maintenance(&mut self) {
@@ -1869,6 +1928,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.fail_before_queue(key);
             return;
         };
+        if let Err(rejection) = verified.tier1_eligibility() {
+            self.coordinator
+                .reject_tier1(key, runtime::Tier::Baseline, rejection.reason());
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
+        self.ensure_artifact_environment();
         let adaptive = runtime::AdaptiveInputs {
             bytecode_bytes: verified
                 .snapshot()
@@ -2212,12 +2280,24 @@ impl JitRuntimeBuilder {
         self
     }
 
-    /// Constructs an interpreter runtime with a disabled JIT guard.
+    /// Constructs a QuickJS runtime with an attached JIT backend.
     pub fn build(self) -> Result<JitRuntime, JitError> {
         let runtime = Runtime::new()?;
         let jit = Jit::attach(&runtime, self.config)?;
         Ok(JitRuntime {
             jit: Some(jit),
+            runtime: Some(runtime),
+        })
+    }
+
+    /// Constructs a plain QuickJS interpreter without attaching a JIT backend.
+    ///
+    /// This is useful for differential tests and benchmarks that need an
+    /// interpreter baseline without profiling, snapshot, or compiler overhead.
+    pub fn build_interpreter(self) -> Result<JitRuntime, JitError> {
+        let runtime = Runtime::new()?;
+        Ok(JitRuntime {
+            jit: None,
             runtime: Some(runtime),
         })
     }
@@ -2235,17 +2315,28 @@ impl JitRuntime {
         JitRuntimeBuilder::default()
     }
 
-    /// Returns the disabled JIT guard.
+    /// Returns whether this runtime owns an attached JIT backend.
+    pub const fn has_jit(&self) -> bool {
+        self.jit.is_some()
+    }
+
+    /// Returns the attached JIT guard.
+    ///
+    /// Panics when this runtime was created with
+    /// [`JitRuntimeBuilder::build_interpreter`].
     pub const fn jit(&self) -> &Jit {
         match &self.jit {
             Some(jit) => jit,
-            None => panic!("JIT guard is present until drop"),
+            None => panic!("interpreter runtime has no JIT guard"),
         }
     }
 
-    /// Returns runtime metrics.
+    /// Returns runtime metrics, or disabled zero metrics for an interpreter.
     pub fn metrics(&self) -> JitMetrics {
-        self.jit().metrics()
+        match &self.jit {
+            Some(jit) => jit.metrics(),
+            None => JitMetrics::disabled(),
+        }
     }
 }
 
@@ -2272,8 +2363,17 @@ impl Drop for JitRuntime {
 
 #[cfg(test)]
 mod jit_runtime_drop_tests {
-    use super::drop_jit_before_runtime;
+    use super::{drop_jit_before_runtime, JitRuntime};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn reports_whether_a_jit_backend_is_attached() {
+        let automatic = JitRuntime::builder().build().unwrap();
+        let interpreter = JitRuntime::builder().build_interpreter().unwrap();
+
+        assert!(automatic.has_jit());
+        assert!(!interpreter.has_jit());
+    }
 
     struct DropProbe {
         label: &'static str,

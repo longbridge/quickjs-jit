@@ -666,6 +666,16 @@ impl Coordinator {
         }
     }
 
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn initialize_environment(&mut self, environment: ArtifactEnvironment) {
+        debug_assert_eq!(self.metrics.queued, 0);
+        debug_assert_eq!(self.metrics.compiling, 0);
+        debug_assert_eq!(self.metrics.installed, 0);
+        debug_assert!(self.queue.is_empty());
+        debug_assert!(self.in_flight.is_empty());
+        self.environment = environment;
+    }
+
     /// Registers bounded version identity without claiming a direct-call path.
     pub fn register_call_specialization(
         &mut self,
@@ -1063,7 +1073,7 @@ impl Coordinator {
                 {
                     self.in_flight.remove(&completion.key);
                     self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
-                    self.record_failure(completion.key, completion.requested_tier);
+                    self.record_invalid_artifact(completion.key, completion.requested_tier);
                     return;
                 }
                 self.in_flight.remove(&completion.key);
@@ -1105,7 +1115,7 @@ impl Coordinator {
                         DependencyKey::Shape(_) | DependencyKey::Prototype(_) => false,
                     })
                 {
-                    self.record_failure(completion.key, completion.requested_tier);
+                    self.record_invalid_artifact(completion.key, completion.requested_tier);
                     return;
                 }
                 let mut staged_dependencies = self.dependencies.clone();
@@ -1119,7 +1129,7 @@ impl Coordinator {
                     )
                     .is_err()
                 {
-                    self.record_failure(completion.key, completion.requested_tier);
+                    self.record_install_failure(completion.key, completion.requested_tier);
                     return;
                 }
                 match install::publish(&mut self.cache, artifact) {
@@ -1151,20 +1161,72 @@ impl Coordinator {
                                 self.metrics.dead_nodes_eliminated.saturating_add(dead);
                         }
                     }
-                    Err(_) => self.record_failure(completion.key, completion.requested_tier),
+                    Err(_) => {
+                        self.record_install_failure(completion.key, completion.requested_tier)
+                    }
                 }
             }
             Ok(_) => {
+                self.metrics.invalid_artifacts = self.metrics.invalid_artifacts.saturating_add(1);
                 self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             }
             Err(failure) => {
                 self.in_flight.remove(&completion.key);
-                if failure == CompileFailure::TimedOut {
-                    self.metrics.compile_timeouts = self.metrics.compile_timeouts.saturating_add(1);
-                }
-                self.record_failure(completion.key, completion.requested_tier);
+                self.record_compile_failure(completion.key, completion.requested_tier, failure);
             }
         }
+    }
+
+    fn record_compile_failure(&mut self, key: FunctionKey, tier: Tier, failure: CompileFailure) {
+        let category = match failure {
+            CompileFailure::UnsupportedOpcode => &mut self.metrics.unsupported_opcode_failures,
+            CompileFailure::Tier1Rejected(_) => &mut self.metrics.tier1_rejections,
+            CompileFailure::ResourceLimit => &mut self.metrics.resource_limit_failures,
+            CompileFailure::TimedOut => &mut self.metrics.compile_timeouts,
+            CompileFailure::Cancelled => &mut self.metrics.cancelled_compilations,
+            CompileFailure::CompilerPanicked => &mut self.metrics.compiler_panics,
+            CompileFailure::InvalidArtifact => &mut self.metrics.invalid_artifacts,
+        };
+        *category = category.saturating_add(1);
+        self.record_failure(key, tier);
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn reject_tier1(
+        &mut self,
+        key: FunctionKey,
+        tier: Tier,
+        reason: crate::bytecode::FallbackReason,
+    ) {
+        if self
+            .current_generations
+            .get(&key.id)
+            .is_none_or(|generation| key.generation > *generation)
+        {
+            self.retire_older_generations(key);
+            self.current_generations.insert(key.id, key.generation);
+        }
+        self.functions.entry(key).or_default();
+        self.record_compile_failure(key, tier, CompileFailure::Tier1Rejected(reason));
+        let tier_record = self
+            .functions
+            .get_mut(&key)
+            .expect("Tier 1 rejection registered the function")
+            .tier_mut(tier);
+        if tier_record.state != CompileState::Blacklisted {
+            tier_record.state = CompileState::Blacklisted;
+            self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+        }
+    }
+
+    fn record_invalid_artifact(&mut self, key: FunctionKey, tier: Tier) {
+        self.metrics.invalid_artifacts = self.metrics.invalid_artifacts.saturating_add(1);
+        self.record_failure(key, tier);
+    }
+
+    fn record_install_failure(&mut self, key: FunctionKey, tier: Tier) {
+        self.metrics.install_failures = self.metrics.install_failures.saturating_add(1);
+        self.record_failure(key, tier);
     }
 
     fn record_failure(&mut self, key: FunctionKey, tier: Tier) {

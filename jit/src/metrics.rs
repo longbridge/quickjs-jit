@@ -7,7 +7,21 @@ pub struct JitMetrics {
     pub queued: u64,
     pub compiling: u64,
     pub compile_failures: u64,
+    /// Worker compilations rejected because the bytecode is not supported.
+    pub unsupported_opcode_failures: u64,
+    /// Tier 1 compilations rejected by the closed semantic policy.
+    pub tier1_rejections: u64,
+    /// Worker compilations rejected by a compiler resource bound.
+    pub resource_limit_failures: u64,
     pub compile_timeouts: u64,
+    /// Worker compilations cancelled during shutdown or invalidation.
+    pub cancelled_compilations: u64,
+    /// Compiler panics contained by the background worker boundary.
+    pub compiler_panics: u64,
+    /// Worker results or artifacts rejected as structurally invalid.
+    pub invalid_artifacts: u64,
+    /// Valid compiler results that failed publication or cache installation.
+    pub install_failures: u64,
     pub stale_results: u64,
     pub installed: u64,
     pub blacklisted: u64,
@@ -70,7 +84,14 @@ impl JitMetrics {
             queued: 0,
             compiling: 0,
             compile_failures: 0,
+            unsupported_opcode_failures: 0,
+            tier1_rejections: 0,
+            resource_limit_failures: 0,
             compile_timeouts: 0,
+            cancelled_compilations: 0,
+            compiler_panics: 0,
+            invalid_artifacts: 0,
+            install_failures: 0,
             stale_results: 0,
             installed: 0,
             blacklisted: 0,
