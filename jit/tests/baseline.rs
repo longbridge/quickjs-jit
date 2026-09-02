@@ -759,18 +759,13 @@ fn malformed_stack_ranges_retry_before_poll_or_dereference() {
 }
 
 #[test]
-fn modulo_edge_cases_retry_until_an_exact_runtime_helper_exists() {
-    let runtime = Runtime::new().unwrap();
-    let context = Context::full(&runtime).unwrap();
-    context.with(|ctx| {
-        let finite_over_infinity: f64 = ctx.eval("5 % Infinity").unwrap();
-        let signed_zero: f64 = ctx.eval("-4 % 2").unwrap();
-        let extreme_scale: f64 = ctx.eval("1e308 % 1e-308").unwrap();
-        assert_eq!(finite_over_infinity.to_bits(), 5_f64.to_bits());
-        assert_eq!(signed_zero.to_bits(), (-0_f64).to_bits());
-        assert_eq!(extreme_scale.to_bits(), 0x0002_8401_cf53_d610);
-    });
-
+fn modulo_int32_fast_path_is_exact_and_only_non_negative_operands_stay_native() {
+    // QuickJS's own `%` fast path: both Int32, dividend >= 0, divisor > 0.
+    // Those results are exact `srem` values and can never be `-0`, trap on
+    // `INT32_MIN % -1`, or divide by zero. Every other shape is routed to the
+    // BINARY_ARITH_SLOW helper, so with the synthetic runtime's rejecting
+    // helper table the body exits with an exception instead of computing a
+    // wrong value natively.
     let executable = compile(
         vec![
             named_opcode("get_arg0"),
@@ -783,21 +778,32 @@ fn modulo_edge_cases_retry_until_an_exact_runtime_helper_exists() {
     )
     .publish()
     .unwrap();
+    for (operands, expected) in [
+        ([JSValueRepr::int32(7), JSValueRepr::int32(3)], 1),
+        ([JSValueRepr::int32(0), JSValueRepr::int32(5)], 0),
+        ([JSValueRepr::int32(2147483647), JSValueRepr::int32(2)], 1),
+        ([JSValueRepr::int32(6), JSValueRepr::int32(2147483647)], 6),
+    ] {
+        let mut frame = SyntheticFrame::new(&operands, 0, 2);
+        let outcome = unsafe { frame.call(&executable) };
+        assert_eq!(outcome.exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        assert_eq!(outcome.result, JSValueRepr::int32(expected));
+    }
     for operands in [
         [JSValueRepr::int32(5), JSValueRepr::float64(f64::INFINITY)],
         [JSValueRepr::int32(-4), JSValueRepr::int32(2)],
+        [JSValueRepr::int32(4), JSValueRepr::int32(-2)],
+        [JSValueRepr::int32(5), JSValueRepr::int32(0)],
+        [JSValueRepr::int32(i32::MIN), JSValueRepr::int32(-1)],
         [JSValueRepr::float64(1e308), JSValueRepr::float64(1e-308)],
     ] {
         let mut frame = SyntheticFrame::new(&operands, 0, 2);
-        let before = frame.snapshot();
-
         let outcome = unsafe { frame.call(&executable) };
-
-        assert_eq!(
+        assert_ne!(
             outcome.exit.kind,
-            qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+            qjs::JSJitExitKind_JS_JIT_EXIT_DONE,
+            "{operands:?} must not complete natively"
         );
-        assert_eq!(frame.snapshot(), before);
     }
 }
 

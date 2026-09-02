@@ -130,6 +130,7 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
             | "inc_loc"
             | "dec_loc"
             | "add_loc"
+            | "mod"
     ) {
         required.insert(Dimension::NumericTagEdge);
     }
@@ -146,6 +147,8 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::ToPropertyKey
                 | ManifestHelper::Call
                 | ManifestHelper::CallConstructor
+                | ManifestHelper::BinaryArithSlow
+                | ManifestHelper::UnaryArithSlow
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -473,6 +476,18 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f({valueOf(){return 20}},22)",
             "lt",
             HelperId::CompareSlow,
+        ),
+        (
+            "function f(a,b){ return a % b }",
+            "f({valueOf(){return 20}},6)",
+            "mod",
+            HelperId::BinaryArithSlow,
+        ),
+        (
+            "function f(a){ return -a }",
+            "f({valueOf(){return 20}})",
+            "neg",
+            HelperId::UnaryArithSlow,
         ),
         (
             "function f(o,a){ o.answer=a; return o.answer }",

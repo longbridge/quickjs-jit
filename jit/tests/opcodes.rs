@@ -174,11 +174,7 @@ fn m2_core_opcodes_are_advertised_with_their_lowering_family() {
         "null",
         "goto",
         "perm3",
-        "neg",
-        "inc",
-        "dec",
         "post_dec",
-        "not",
         "inc_loc",
         "dec_loc",
         "add_loc",
@@ -216,6 +212,17 @@ fn m2_core_opcodes_are_advertised_with_their_lowering_family() {
         assert_eq!(by_name(free), Tier1Policy::Helper(HelperId::Free), "{free}");
     }
     assert_eq!(by_name("lnot"), Tier1Policy::Helper(HelperId::ToBool));
+    assert_eq!(
+        by_name("mod"),
+        Tier1Policy::Helper(HelperId::BinaryArithSlow)
+    );
+    for unary in ["neg", "inc", "dec", "not"] {
+        assert_eq!(
+            by_name(unary),
+            Tier1Policy::Helper(HelperId::UnaryArithSlow),
+            "{unary}"
+        );
+    }
     for compare in ["lte", "gt", "gte", "eq", "neq", "strict_eq", "strict_neq"] {
         assert_eq!(
             by_name(compare),

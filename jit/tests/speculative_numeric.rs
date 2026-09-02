@@ -198,13 +198,12 @@ fn eval<T: for<'js> rquickjs::FromJs<'js>>(context: &Context, source: &str) -> T
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn checked_int32_modulo_deopts_to_exact_negative_zero_nan_and_min_remainder() {
     with_optimized_source("function f(a,b){return a%b}", "f(7,3)", |context, jit| {
         let before = jit.metrics();
         assert!(eval::<bool>(context, "Object.is(f(-4,2), -0)"));
         assert!(eval::<bool>(context, "Number.isNaN(f(5,0))"));
-        assert!(eval::<bool>(context, "Object.is(f(-2147483648,-1), 0)"));
+        assert!(eval::<bool>(context, "Object.is(f(-2147483648,-1), -0)"));
         assert!(
             jit.metrics().deopts >= before.deopts + 3,
             "{:?}",
@@ -215,7 +214,6 @@ fn checked_int32_modulo_deopts_to_exact_negative_zero_nan_and_min_remainder() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn shift_counts_are_masked_like_quickjs() {
     with_optimized_source("function f(a,b){return a<<b}", "f(1,2)", |context, jit| {
         let before = jit.metrics();
@@ -226,7 +224,6 @@ fn shift_counts_are_masked_like_quickjs() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn unsigned_shift_renormalizes_large_results_to_float64() {
     with_optimized_source("function f(a,b){return a>>>b}", "f(8,1)", |context, jit| {
         let before = jit.metrics();
@@ -237,7 +234,6 @@ fn unsigned_shift_renormalizes_large_results_to_float64() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn bitwise_not_uses_to_int32_for_float64_operands() {
     with_optimized_source("function f(a){return ~a}", "f(1)", |context, _jit| {
         assert!(eval::<bool>(context, "f(1.5) === -2"));
@@ -247,7 +243,6 @@ fn bitwise_not_uses_to_int32_for_float64_operands() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn strict_equality_of_strings_deopts_after_numeric_feedback() {
     with_optimized_source("function f(a,b){return a===b}", "f(1,1)", |context, jit| {
         let before = jit.metrics();
@@ -259,7 +254,6 @@ fn strict_equality_of_strings_deopts_after_numeric_feedback() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn loose_equality_of_null_and_undefined_is_exact() {
     with_optimized_source("function f(a,b){return a==b}", "f(1,1)", |context, _jit| {
         assert!(eval::<bool>(context, "f(null,undefined) === true"));
@@ -270,7 +264,6 @@ fn loose_equality_of_null_and_undefined_is_exact() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn nan_is_strictly_unequal_to_itself_without_deopt() {
     with_optimized_source(
         "function f(a,b){return a!==b}",
@@ -285,7 +278,6 @@ fn nan_is_strictly_unequal_to_itself_without_deopt() {
 }
 
 #[test]
-#[ignore = "enabled with the M2 Tier 1 policy flip"]
 fn negating_zero_and_int32_min_produces_exact_float64_results() {
     with_optimized_source("function f(a){return -a}", "f(5)", |context, jit| {
         let before = jit.metrics();

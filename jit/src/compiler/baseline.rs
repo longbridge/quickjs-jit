@@ -2216,7 +2216,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 }
                 IrOp::Unary(operation) => {
                     let value = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
-                    let result = analyze_unary(&mut analysis, value, *operation)?;
+                    let result = analyze_unary(&mut analysis, value, *operation, true)?;
                     if analysis.retry_before_entry {
                         return Ok(analysis);
                     }
@@ -2228,7 +2228,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                         .last()
                         .cloned()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    let result = analyze_unary(&mut analysis, value, *operation)?;
+                    let result = analyze_unary(&mut analysis, value, *operation, false)?;
                     if analysis.retry_before_entry {
                         return Ok(analysis);
                     }
@@ -2240,7 +2240,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                         .get(usize::from(*index))
                         .cloned()
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    let result = analyze_unary(&mut analysis, value, *op)?;
+                    let result = analyze_unary(&mut analysis, value, *op, false)?;
                     if analysis.retry_before_entry {
                         return Ok(analysis);
                     }
@@ -2261,15 +2261,12 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.locals[usize::from(*index)] = AbstractValue::known(KnownKind::Number);
                 }
                 IrOp::Binary(operation) => {
-                    if *operation == BinaryOp::Mod {
-                        analysis.retry_before_entry = true;
-                        return Ok(analysis);
-                    }
                     let right = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     let left = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
                     let helper = matches!(
                         operation,
                         BinaryOp::Add
+                            | BinaryOp::Mod
                             | BinaryOp::LessThan
                             | BinaryOp::LessThanOrEqual
                             | BinaryOp::GreaterThan
@@ -2352,10 +2349,15 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
     Ok(analysis)
 }
 
+/// `helper_backed` is true for the plain `Unary` form, whose non-numeric
+/// operands take the exact `UNARY_ARITH_SLOW` helper path instead of
+/// requiring a numeric entry proof. The post-increment and local forms
+/// keep the entry requirement because they are lowered natively only.
 fn analyze_unary(
     analysis: &mut EntryAnalysis,
     value: AbstractValue,
     operation: UnaryOp,
+    helper_backed: bool,
 ) -> Result<AbstractValue, CompileFailure> {
     let (required, result) = match operation {
         UnaryOp::LogicalNot
@@ -2366,11 +2368,22 @@ fn analyze_unary(
         }
         UnaryOp::Plus => return Ok(AbstractValue::known(KnownKind::Other)),
         UnaryOp::Neg | UnaryOp::Increment | UnaryOp::Decrement | UnaryOp::BitNot => {
+            if helper_backed {
+                return Ok(AbstractValue::known(KnownKind::Number));
+            }
             (RequiredDomain::Numeric, KnownKind::Number)
         }
     };
     let _ = analysis.require(&value, required);
     Ok(AbstractValue::known(result))
+}
+
+/// Authoritative QuickJS opcode id passed to the arithmetic slow-path helpers.
+fn quickjs_opcode_id(name: &str) -> Result<u32, CompileFailure> {
+    crate::bytecode::linked_opcode_table()
+        .find(|opcode| opcode.name() == name)
+        .map(|opcode| u32::from(opcode.id()))
+        .ok_or(CompileFailure::InvalidArtifact)
 }
 
 fn binary_returns_boolean(operation: BinaryOp) -> bool {
@@ -3271,15 +3284,49 @@ fn lower_function(
                             define_pair(builder, stack[index], result);
                         }
                     } else {
+                        // Numeric operands are lowered natively; anything
+                        // else takes the exact interpreter slow path
+                        // (`js_unary_arith_slow` / `js_not_slow`) through the
+                        // UNARY_ARITH_SLOW helper, which owns the coercion,
+                        // BigInt, and exception semantics.
+                        let state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let slot = flat_stack_slot(ir, index)?;
+                        let opcode_name = match operation {
+                            UnaryOp::Neg => "neg",
+                            UnaryOp::Increment => "inc",
+                            UnaryOp::Decrement => "dec",
+                            UnaryOp::BitNot => "not",
+                            _ => return Err(CompileFailure::InvalidArtifact),
+                        };
+                        let opcode = quickjs_opcode_id(opcode_name)?;
                         let value = use_pair(builder, stack[index]);
-                        helper_lowering.deopt_unless_numeric(
-                            builder,
-                            &[value],
-                            depth,
-                            instruction.pc,
-                        )?;
+                        let numeric_tag = emit_numeric_tag(builder, value.tag);
+                        let numeric = builder.create_block();
+                        let generic = builder.create_block();
+                        let continuation = builder.create_block();
+                        builder.ins().brif(numeric_tag, numeric, &[], generic, &[]);
+
+                        builder.seal_block(numeric);
+                        builder.switch_to_block(numeric);
                         let result = emit_unary(builder, value, operation);
                         define_pair(builder, stack[index], result);
+                        builder.ins().jump(continuation, &[]);
+
+                        builder.seal_block(generic);
+                        builder.switch_to_block(generic);
+                        invoke_helper!(
+                            qjs::JSJitHelperId_JS_JIT_HELPER_UNARY_ARITH_SLOW,
+                            state,
+                            depth,
+                            &[slot, slot, opcode]
+                        );
+                        reload_pair(builder, stack[index], stack_base, index, layout);
+                        builder.ins().jump(continuation, &[]);
+
+                        builder.seal_block(continuation);
+                        builder.switch_to_block(continuation);
                     }
                 }
                 IrOp::PostUnary(operation) => {
@@ -3319,15 +3366,16 @@ fn lower_function(
                     depth -= 1;
                 }
                 IrOp::Binary(operation) => {
-                    if operation == BinaryOp::Mod {
-                        return Err(CompileFailure::InvalidArtifact);
-                    }
                     let left_index = depth
                         .checked_sub(2)
                         .ok_or(CompileFailure::InvalidArtifact)?;
                     let right_index = depth - 1;
                     let helper = match operation {
                         BinaryOp::Add => Some((qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW, None)),
+                        BinaryOp::Mod => Some((
+                            qjs::JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW,
+                            Some(quickjs_opcode_id("mod")?),
+                        )),
                         BinaryOp::LessThan => Some((
                             qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW,
                             Some(qjs::JSJitCompareOp_JS_JIT_COMPARE_LT),
@@ -3370,17 +3418,25 @@ fn lower_function(
                         let right = flat_stack_slot(ir, right_index)?;
                         let left_value = use_pair(builder, stack[left_index]);
                         let right_value = use_pair(builder, stack[right_index]);
-                        let left_numeric = emit_numeric_tag(builder, left_value.tag);
-                        let right_numeric = emit_numeric_tag(builder, right_value.tag);
-                        let both_numeric = builder.ins().band(left_numeric, right_numeric);
+                        let fast = if operation == BinaryOp::Mod {
+                            emit_int_mod_fast_condition(builder, left_value, right_value)
+                        } else {
+                            let left_numeric = emit_numeric_tag(builder, left_value.tag);
+                            let right_numeric = emit_numeric_tag(builder, right_value.tag);
+                            builder.ins().band(left_numeric, right_numeric)
+                        };
                         let numeric = builder.create_block();
                         let generic = builder.create_block();
                         let continuation = builder.create_block();
-                        builder.ins().brif(both_numeric, numeric, &[], generic, &[]);
+                        builder.ins().brif(fast, numeric, &[], generic, &[]);
 
                         builder.seal_block(numeric);
                         builder.switch_to_block(numeric);
-                        let result = emit_binary(builder, left_value, right_value, operation);
+                        let result = if operation == BinaryOp::Mod {
+                            emit_int_mod(builder, left_value, right_value)
+                        } else {
+                            emit_binary(builder, left_value, right_value, operation)
+                        };
                         define_pair(builder, stack[left_index], result);
                         builder.ins().jump(continuation, &[]);
 
@@ -6164,6 +6220,40 @@ fn emit_integer_binary(
     }
 }
 
+/// QuickJS's own interpreter fast path for `%`: both operands Int32, a
+/// non-negative dividend, and a positive divisor. That excludes division by
+/// zero, `INT32_MIN % -1`, and every result that must be `-0`, so `srem` is
+/// exact and cannot trap. Everything else takes the runtime slow path.
+fn emit_int_mod_fast_condition(
+    builder: &mut FunctionBuilder<'_>,
+    left: Pair,
+    right: Pair,
+) -> Value {
+    let left_int = tag_is(builder, left.tag, qjs::JS_TAG_INT);
+    let right_int = tag_is(builder, right.tag, qjs::JS_TAG_INT);
+    let both_int = builder.ins().band(left_int, right_int);
+    let left_i32 = builder.ins().ireduce(types::I32, left.payload);
+    let right_i32 = builder.ins().ireduce(types::I32, right.payload);
+    let left_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, left_i32, 0);
+    let right_positive = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThan, right_i32, 0);
+    let operands_ok = builder.ins().band(left_non_negative, right_positive);
+    builder.ins().band(both_int, operands_ok)
+}
+
+fn emit_int_mod(builder: &mut FunctionBuilder<'_>, left: Pair, right: Pair) -> Pair {
+    let left_i32 = builder.ins().ireduce(types::I32, left.payload);
+    let right_i32 = builder.ins().ireduce(types::I32, right.payload);
+    let remainder = builder.ins().srem(left_i32, right_i32);
+    Pair {
+        payload: builder.ins().sextend(types::I64, remainder),
+        tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+    }
+}
+
 fn emit_arithmetic(
     builder: &mut FunctionBuilder<'_>,
     left: Pair,
@@ -6611,13 +6701,10 @@ mod tests {
                 seen.insert(ir_op_variant(operation));
             }
             let analysis = analyze_entry_domains(&ir).expect("synthetic IR is structurally valid");
-            let contains_mod = ir.blocks.iter().any(|block| {
-                block
-                    .instructions
-                    .iter()
-                    .any(|instruction| matches!(instruction.op, IrOp::Binary(BinaryOp::Mod)))
-            });
-            assert_eq!(analysis.retry_before_entry, contains_mod, "{ir:?}");
+            // Every operation with an unknown operand domain is either
+            // helper-backed or guarded at its use site, so no synthetic case
+            // forces the whole function to retry before entry.
+            assert!(!analysis.retry_before_entry, "{ir:?}");
         }
         assert_eq!(
             seen.len(),

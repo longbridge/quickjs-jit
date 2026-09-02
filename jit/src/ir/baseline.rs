@@ -473,10 +473,15 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
             | UnaryOp::LogicalNot
             | UnaryOp::IsUndefinedOrNull
             | UnaryOp::IsUndefined
-            | UnaryOp::IsNull,
+            | UnaryOp::IsNull
+            | UnaryOp::Neg
+            | UnaryOp::Increment
+            | UnaryOp::Decrement
+            | UnaryOp::BitNot,
         ) => 1,
         IrOp::Binary(
             BinaryOp::Add
+            | BinaryOp::Mod
             | BinaryOp::LessThan
             | BinaryOp::LessThanOrEqual
             | BinaryOp::GreaterThan

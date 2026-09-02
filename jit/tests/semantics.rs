@@ -452,3 +452,70 @@ fn float64_fast_add_preserves_nan_negative_zero_and_infinity() {
     .expect_ownership_helper_counts(0, 0)
     .assert_same();
 }
+
+#[test]
+fn modulo_uses_the_exact_slow_path_outside_the_int32_fast_path() {
+    differential(
+        "function f(a,b){ return a % b }",
+        "[f(7,3),f(-7,3),f(7,-3),Object.is(f(-4,2),-0),Object.is(f(4,-2),0),Number.isNaN(f(5,0)),Number.isNaN(f(-5,0)),f(5,Infinity),f(-2147483648,-1),f(2147483648,7),f(5.5,2),f(-5.5,2),f(1e308,1e-308),Number.isNaN(f(Infinity,2)),Number.isNaN(f(NaN,2)),f(0,5),Object.is(f(-0,5),-0)]",
+    )
+    .force_baseline()
+    .expect_executed_opcode("mod")
+    .expect_helper(HelperId::BinaryArithSlow)
+    .stress_gc()
+    .assert_same();
+
+    differential(
+        "function f(a,b){ return a % b }",
+        "(()=>{const events=[];const r=f({[Symbol.toPrimitive](){events.push('left');return 20}},{[Symbol.toPrimitive](){events.push('right');return 6}});return [r,events,f('10',3),String(f(7n,3n)),f(true,2),f(null,2)]})()",
+    )
+    .force_baseline()
+    .expect_helper(HelperId::BinaryArithSlow)
+    .stress_gc()
+    .assert_same();
+
+    differential(
+        "function f(a,b){ return a % b }",
+        "(()=>{try{return f(7n,3)}catch(e){return e.name}})()+'|'+(()=>{try{return f({valueOf(){throw new RangeError('x')}},3)}catch(e){return e.name}})()+'|'+(()=>{try{return f(7n,0n)}catch(e){return e.name}})()",
+    )
+    .force_baseline()
+    .expect_helper(HelperId::BinaryArithSlow)
+    .assert_same();
+
+    differential(
+        "function f(n){ let s=0; for(let i=0;i<n;i++){ s = s + (i % 7); } return s }",
+        "f(100)",
+    )
+    .force_baseline()
+    .expect_ownership_helper_counts(0, 0)
+    .assert_same();
+}
+
+#[test]
+fn unary_arithmetic_uses_the_exact_slow_path_for_non_numeric_operands() {
+    differential(
+        "function f(a){ var x=a; return [-a, ~a, ++x, --x] }",
+        "(()=>{const events=[];const r=f({[Symbol.toPrimitive](){events.push('p');return 6}});return [r,events,f('7'),f(null),f(true),f(undefined).map(Number.isNaN),String(f(5n))]})()",
+    )
+    .force_baseline()
+    .expect_executed_opcode("neg")
+    .expect_helper(HelperId::UnaryArithSlow)
+    .stress_gc()
+    .assert_same();
+
+    differential(
+        "function f(a){ return -a }",
+        "(()=>{try{return f(Symbol())}catch(e){return e.name}})()+'|'+(()=>{try{return f({valueOf(){throw new RangeError('x')}})}catch(e){return e.name}})()",
+    )
+    .force_baseline()
+    .expect_helper(HelperId::UnaryArithSlow)
+    .assert_same();
+
+    differential(
+        "function f(a){ return [-a, ~a] }",
+        "[f(42),f(0).map(v=>Object.is(v,-0)),f(-2147483648),f(1.5),f(NaN).map(Number.isNaN)]",
+    )
+    .force_baseline()
+    .expect_ownership_helper_counts(0, 0)
+    .assert_same();
+}
