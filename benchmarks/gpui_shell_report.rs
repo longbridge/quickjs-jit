@@ -150,7 +150,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     }
 
     let mut markdown = format!(
-        "# gpui-shell JIT acceptance\n\nShell `{}`, rquickjs `{}`, target `{}`, CPU affinity `{}`. {} paired fresh processes after {} discarded warmups.\n\n| workload | steady-state speedup CI | P99 regression CI | native entries | fallback | status |\n|---|---:|---:|---:|---:|---|\n",
+        "# gpui-shell JIT acceptance\n\nShell `{}`, rquickjs `{}`, target `{}`, CPU affinity `{}`. {} paired fresh processes after {} discarded warmups.\n\n| workload | steady-state speedup CI | P99 speed CI | native entries | fallback | status |\n|---|---:|---:|---:|---:|---|\n",
         report.provenance.shell_revision,
         report.provenance.rquickjs_revision,
         report.provenance.target_triple,
@@ -170,6 +170,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
         let tail = paired_bootstrap(&workload.interpreter, &workload.automatic, |i, a| {
             a.p99_script_render_ns as f64 / i.p99_script_render_ns as f64
         });
+        let tail_speed = speed_ci_from_latency_ratio(tail);
         let native = workload
             .automatic
             .iter()
@@ -192,12 +193,12 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
             suitable_pass += usize::from(pass);
         }
         markdown.push_str(&format!(
-            "| {} | {:.2}x..{:.2}x | {:+.2}%..{:+.2}% | {} | {} | {} |\n",
+            "| {} | {:.2}x..{:.2}x | {:.2}x..{:.2}x | {} | {} | {} |\n",
             workload.name,
             speedup[0],
             speedup[1],
-            (tail[0] - 1.0) * 100.0,
-            (tail[1] - 1.0) * 100.0,
+            tail_speed[0],
+            tail_speed[1],
             native,
             fallback,
             if pass { "PASS" } else { "FAIL" },
@@ -223,14 +224,16 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     let first = lifecycle_ci(&report.lifecycle, |x| x.first_window_ns);
     let reload = lifecycle_ci(&report.lifecycle, |x| x.hot_reload_ns);
     let lifecycle_pass = first[1] <= 1.05 && reload[1] <= 1.05;
+    let first_speed = speed_ci_from_latency_ratio(first);
+    let reload_speed = speed_ci_from_latency_ratio(reload);
     let all_pass = suitable > 0 && suitable == suitable_pass && workloads_pass && lifecycle_pass;
     markdown.push_str(&format!(
-        "\nDiagnostics across automatic samples:\n\n{}\nLifecycle regression CIs: first window {:+.2}%..{:+.2}%; hot reload {:+.2}%..{:+.2}%. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
+        "\nDiagnostics across automatic samples:\n\n{}\nLifecycle speed CIs: first window {:.2}x..{:.2}x; hot reload {:.2}x..{:.2}x. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
         diagnostics,
-        (first[0] - 1.0) * 100.0,
-        (first[1] - 1.0) * 100.0,
-        (reload[0] - 1.0) * 100.0,
-        (reload[1] - 1.0) * 100.0,
+        first_speed[0],
+        first_speed[1],
+        reload_speed[0],
+        reload_speed[1],
         if all_pass { "PASS" } else { "FAIL" },
     ));
     Ok((markdown, all_pass))
@@ -320,6 +323,10 @@ fn lifecycle_ci(lifecycle: &Lifecycle, field: impl Fn(&LifecycleSample) -> u64 +
     paired_bootstrap(&lifecycle.interpreter, &lifecycle.automatic, |i, a| {
         field(a) as f64 / field(i) as f64
     })
+}
+
+fn speed_ci_from_latency_ratio(latency_ratio: [f64; 2]) -> [f64; 2] {
+    [1.0 / latency_ratio[1], 1.0 / latency_ratio[0]]
 }
 
 fn paired_bootstrap<T>(left: &[T], right: &[T], ratio: impl Fn(&T, &T) -> f64) -> [f64; 2] {
@@ -434,6 +441,30 @@ mod tests {
         let (markdown, pass) = validate_and_render(&report(2, 1)).unwrap();
         assert!(pass);
         assert!(markdown.contains("Overall: **PASS**"));
+    }
+
+    #[test]
+    fn renders_tail_and_lifecycle_results_as_speed_relative_to_interpreter() {
+        let mut report = report(2, 1);
+        report.workloads[0]
+            .automatic
+            .iter_mut()
+            .for_each(|sample| sample.p99_script_render_ns = 200);
+        report.lifecycle.automatic.iter_mut().for_each(|sample| {
+            sample.first_window_ns = 200;
+            sample.hot_reload_ns = 50;
+        });
+
+        let (markdown, _) = validate_and_render(&report).unwrap();
+        assert!(markdown.contains("| P99 speed CI |"), "{markdown}");
+        assert!(markdown.contains("| 0.50x..0.50x |"), "{markdown}");
+        assert!(
+            markdown.contains(
+                "Lifecycle speed CIs: first window 0.50x..0.50x; hot reload 2.00x..2.00x."
+            ),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("regression"), "{markdown}");
     }
 
     #[test]
