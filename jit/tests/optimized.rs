@@ -3906,3 +3906,50 @@ fn increments_without_a_strict_upper_bound_keep_their_overflow_exit() {
         );
     }
 }
+
+#[test]
+fn signature_completes_when_the_first_invocation_returns_natively() {
+    // With loop and call thresholds of one, a long first invocation enters
+    // baseline code through OSR and returns natively, so the interpreter's
+    // OP_return feedback never fires for it. Native DONE exits now record
+    // the return type, and the numeric signature still completes; before,
+    // Tier 2 admission waited forever for the missing return observation.
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function kernel(batches,seed){let checksum=seed;for(let batch=0;batch<batches;batch+=1){let a=0;let b=1;for(let i=0;i<40;i+=1){const next=a+b;a=b;b=next;}checksum=b;}return checksum;}",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut saw_tier2 = false;
+    while std::time::Instant::now() < deadline {
+        let result = context.with(|ctx| {
+            let kernel: Function = ctx.globals().get("kernel").unwrap();
+            kernel.call::<_, i32>((20_000, 0)).unwrap()
+        });
+        assert_eq!(result, 165_580_141);
+        jit.poll();
+        let metrics = jit.metrics();
+        assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
+        if metrics.tier2_entries > 0 {
+            saw_tier2 = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(saw_tier2, "{:?}", jit.metrics());
+}

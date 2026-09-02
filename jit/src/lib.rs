@@ -473,6 +473,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const HOT_MAINTENANCE_INTERVAL: u32 = 64;
 
+/// Feedback pc used for return types observed at native `DONE` exits.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
+
 #[cfg(all(
     feature = "compiler",
     any(
@@ -643,6 +647,9 @@ type PendingDeoptGuards = std::collections::HashMap<
     (u64, u64),
     std::collections::VecDeque<(u32, Option<runtime::ObservedType>)>,
 >;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+type PendingNativeReturns =
+    std::collections::HashMap<(u64, u64), std::collections::VecDeque<runtime::ObservedType>>;
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 #[derive(Default)]
@@ -653,6 +660,12 @@ struct OsrValidationMetrics {
     deopt_guards: Mutex<PendingDeoptGuards>,
     deopt_materializations: AtomicU64,
     side_path_entries: AtomicU64,
+    /// Return-value types observed at native `DONE` exits, keyed by function
+    /// identity. The interpreter records return feedback at `OP_return`, but
+    /// a function that returns natively (including a first invocation that
+    /// entered baseline code through OSR) never executes that opcode, and a
+    /// call signature that never completes would block Tier 2 forever.
+    native_returns: Mutex<PendingNativeReturns>,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -717,6 +730,46 @@ impl OsrValidationMetrics {
     fn take_side_path_entries(&self) -> u64 {
         self.side_path_entries.swap(0, Ordering::AcqRel)
     }
+
+    fn mark_native_return(&self, id: u64, generation: u64, observed: runtime::ObservedType) {
+        self.native_returns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry((id, generation))
+            .or_default()
+            .push_back(observed);
+    }
+
+    fn take_native_return(&self, id: u64, generation: u64) -> Option<runtime::ObservedType> {
+        let mut returns = self
+            .native_returns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let queue = returns.get_mut(&(id, generation))?;
+        let observed = queue.pop_front();
+        if queue.is_empty() {
+            returns.remove(&(id, generation));
+        }
+        observed
+    }
+}
+
+/// Feedback classification of one tagged value, shared by deoptimization
+/// and native-return observations.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn observed_value_type(value: rquickjs_core::qjs::JSValue) -> Option<runtime::ObservedType> {
+    use rquickjs_core::qjs;
+    let tag = unsafe { qjs::JS_VALUE_GET_TAG(value) };
+    Some(match tag {
+        qjs::JS_TAG_INT => runtime::ObservedType::Int32,
+        qjs::JS_TAG_FLOAT64 => runtime::ObservedType::Float64,
+        qjs::JS_TAG_BOOL => runtime::ObservedType::Bool,
+        qjs::JS_TAG_NULL => runtime::ObservedType::Null,
+        qjs::JS_TAG_UNDEFINED => runtime::ObservedType::Undefined,
+        qjs::JS_TAG_STRING => runtime::ObservedType::String,
+        qjs::JS_TAG_OBJECT => runtime::ObservedType::Object,
+        _ => return None,
+    })
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -904,6 +957,12 @@ unsafe extern "C" fn production_entry_trampoline(
         pin.validation
             .side_path_entries
             .fetch_add(1, Ordering::Release);
+    }
+    if exit.kind == qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
+        if let Some(observed) = observed_value_type(frame.result) {
+            pin.validation
+                .mark_native_return(pin.key.id, pin.key.generation, observed);
+        }
     }
     if exit.kind != qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
         return exit;
@@ -2257,6 +2316,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
         self.native_exits = self.native_exits.saturating_add(1);
         let key = runtime::FunctionKey::new(id, generation);
+        if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
+            if let Some(observed) = self.osr_validation.take_native_return(id, generation) {
+                // Native returns complete the call signature exactly like the
+                // interpreter's OP_return feedback; the sentinel pc keeps them
+                // apart from bytecode return sites and deopt guard pcs.
+                self.feedback
+                    .observe_return(key, NATIVE_RETURN_FEEDBACK_PC, observed);
+            }
+        }
         if let Some((start, tier)) = self.execution_starts.get_mut(&key).and_then(Vec::pop) {
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
             let optimized = tier == runtime::Tier::Optimizing;
