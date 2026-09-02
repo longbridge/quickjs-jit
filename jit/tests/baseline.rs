@@ -8,7 +8,6 @@
 ))]
 
 use cranelift_codegen::{isa, settings};
-use rquickjs::{Context, Runtime};
 use rquickjs_core::qjs;
 use rquickjs_jit::{
     bytecode::{linked_opcode_table, opcode, FallbackReason, VerifyLimits},

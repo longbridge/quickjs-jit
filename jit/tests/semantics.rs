@@ -470,6 +470,7 @@ fn modulo_uses_the_exact_slow_path_outside_the_int32_fast_path() {
         "(()=>{const events=[];const r=f({[Symbol.toPrimitive](){events.push('left');return 20}},{[Symbol.toPrimitive](){events.push('right');return 6}});return [r,events,f('10',3),String(f(7n,3n)),f(true,2),f(null,2)]})()",
     )
     .force_baseline()
+    .expect_executed_opcode("mod")
     .expect_helper(HelperId::BinaryArithSlow)
     .stress_gc()
     .assert_same();
@@ -479,6 +480,7 @@ fn modulo_uses_the_exact_slow_path_outside_the_int32_fast_path() {
         "(()=>{try{return f(7n,3)}catch(e){return e.name}})()+'|'+(()=>{try{return f({valueOf(){throw new RangeError('x')}},3)}catch(e){return e.name}})()+'|'+(()=>{try{return f(7n,0n)}catch(e){return e.name}})()",
     )
     .force_baseline()
+    .expect_executed_opcode("mod")
     .expect_helper(HelperId::BinaryArithSlow)
     .assert_same();
 
@@ -508,6 +510,7 @@ fn unary_arithmetic_uses_the_exact_slow_path_for_non_numeric_operands() {
         "(()=>{try{return f(Symbol())}catch(e){return e.name}})()+'|'+(()=>{try{return f({valueOf(){throw new RangeError('x')}})}catch(e){return e.name}})()",
     )
     .force_baseline()
+    .expect_executed_opcode("neg")
     .expect_helper(HelperId::UnaryArithSlow)
     .assert_same();
 
