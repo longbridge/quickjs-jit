@@ -549,6 +549,24 @@ struct MeasuredCompiler<C> {
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Default)]
+struct DeferredTieredCompiler {
+    compiler: std::sync::OnceLock<compiler::optimized::TieredCompiler>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl compiler::Compiler for DeferredTieredCompiler {
+    fn compile(
+        &self,
+        request: runtime::CompileRequest,
+    ) -> Result<code_cache::CompiledArtifact, compiler::CompileFailure> {
+        self.compiler
+            .get_or_init(compiler::optimized::TieredCompiler::host)
+            .compile(request)
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 impl<C: compiler::Compiler> compiler::Compiler for MeasuredCompiler<C> {
     fn compile(
         &self,
@@ -1113,7 +1131,7 @@ impl ProductionBackend {
         let environment = artifact_environment(runtime_id, info, &config, &identity_compiler);
         let compiler_measurements = Arc::new(CompilerMeasurements::default());
         let compiler = Arc::new(MeasuredCompiler {
-            inner: compiler::optimized::TieredCompiler::host(),
+            inner: DeferredTieredCompiler::default(),
             measurements: Arc::clone(&compiler_measurements),
         });
         let workers = runtime::BackgroundCompiler::new_with_resource_limits(
