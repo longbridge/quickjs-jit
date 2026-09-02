@@ -2418,3 +2418,1125 @@ fn guard_specific_float_side_path_changes_machine_guard_and_preserves_profile() 
     );
     assert!(specialized.matches("brif").count() > generic.matches("brif").count());
 }
+
+// ---------------------------------------------------------------------------
+// M2 core opcodes: CLIF evidence for the native lowering.
+// ---------------------------------------------------------------------------
+
+fn tier2_clif(source: &str) -> String {
+    let fixture = SnapshotFixture::compile(source);
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    Tier2Compiler::host(71)
+        .lower_for_test(&verified, 71)
+        .unwrap_or_else(|error| panic!("{source} did not lower: {error:?}"))
+}
+
+fn raw_clif(bytecode: Vec<u8>, arg_count: u16, local_count: u16) -> String {
+    let verified = rquickjs_jit::test_support::verified_bytecode(bytecode, arg_count, local_count);
+    Tier2Compiler::host(72)
+        .lower_for_test(&verified, 72)
+        .unwrap_or_else(|error| panic!("raw bytecode did not lower: {error:?}"))
+}
+
+#[test]
+fn bitops_loop_lowers_to_native_shift_and_xor_instructions() {
+    let clif = tier2_clif("(function(n,v){for(let i=0;i<n;i++)v=((v<<5)^(v>>>3)^i)|0;return v})");
+    for operation in ["ishl", "ushr", "bxor", "bor"] {
+        assert!(clif.contains(operation), "missing {operation}: {clif}");
+    }
+    assert!(
+        clif.lines()
+            .any(|line| line.contains("band_imm") && line.trim_end().ends_with(", 31")),
+        "shift counts must be masked to five bits: {clif}"
+    );
+    // Immediate-only operands prove the fast path and its exits call no
+    // helper at all: without a loop there is no poll, and every exit spills
+    // primitives directly.
+    let straight = raw_clif(
+        vec![
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            1,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            33,
+            rquickjs_core::qjs::QJS_JIT_OP_SHL,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            3,
+            rquickjs_core::qjs::QJS_JIT_OP_SHR,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            5,
+            rquickjs_core::qjs::QJS_JIT_OP_XOR,
+            rquickjs_core::qjs::QJS_JIT_OP_RETURN,
+        ],
+        0,
+        0,
+    );
+    for operation in ["ishl", "ushr", "bxor", "fcvt_from_uint"] {
+        assert!(
+            straight.contains(operation),
+            "missing {operation}: {straight}"
+        );
+    }
+    assert!(
+        !straight.contains("call_indirect"),
+        "bit operations must not call a helper: {straight}"
+    );
+}
+
+#[test]
+fn modulo_loop_lowers_to_a_guarded_srem() {
+    let clif = tier2_clif("(function(n){let s=0;for(let i=0;i<n;i++)s=s+(i%7);return s})");
+    assert!(clif.contains("srem"), "{clif}");
+    let straight = raw_clif(
+        vec![
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            7,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            3,
+            rquickjs_core::qjs::QJS_JIT_OP_MOD,
+            rquickjs_core::qjs::QJS_JIT_OP_RETURN,
+        ],
+        0,
+        0,
+    );
+    assert!(straight.contains("srem"), "{straight}");
+    assert!(
+        !straight.contains("call_indirect"),
+        "modulo must not call a helper: {straight}"
+    );
+}
+
+#[test]
+fn comparisons_lower_to_native_compares_without_helper_calls() {
+    let lte = tier2_clif("(function(n){return n<=0})");
+    assert!(lte.contains("fcmp"), "{lte}");
+    assert!(
+        !lte.contains("call_indirect"),
+        "`n <= 0` must not call CompareSlow: {lte}"
+    );
+    let strict = tier2_clif("(function(x){return x===0})");
+    assert!(strict.contains("fcmp"), "{strict}");
+    let straight = raw_clif(
+        vec![
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            1,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            1,
+            rquickjs_core::qjs::QJS_JIT_OP_STRICT_EQ,
+            rquickjs_core::qjs::QJS_JIT_OP_RETURN,
+        ],
+        0,
+        0,
+    );
+    assert!(straight.contains("fcmp"), "{straight}");
+    assert!(
+        !straight.contains("call_indirect"),
+        "`===` must not call CompareSlow: {straight}"
+    );
+}
+
+#[test]
+fn tail_call_lowers_as_a_guarded_call_followed_by_the_done_exit() {
+    let fixture = SnapshotFixture::compile("(function(f,x){return f(x)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let tail = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "tail_call")
+        .expect("`return f(x)` compiles to tail_call");
+    let ir = OptimizedIr::translate(&verified, 73).unwrap();
+    let expanded = ir
+        .nodes()
+        .iter()
+        .filter(|node| node.pc() == tail.pc())
+        .map(|node| match node.kind() {
+            OptimizedNodeKind::Bytecode { opcode } => (
+                opcode.to_string(),
+                node.pops(),
+                node.pushes(),
+                node.deopt_guard(),
+            ),
+            other => panic!("unexpected node at the tail call: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expanded.len(), 2, "{expanded:?}");
+    assert_eq!(expanded[0].0, "call");
+    assert_eq!((expanded[0].1, expanded[0].2), (2, 1));
+    let guard = expanded[0]
+        .3
+        .expect("the synthesized call keeps a deopt guard");
+    assert_eq!(expanded[1], ("return".to_string(), 1, 0, None));
+    let site = ir
+        .guard_maps()
+        .iter()
+        .find(|site| site.guard() == guard)
+        .unwrap();
+    assert_eq!(site.map().resume_pc(), tail.pc());
+    assert_eq!(site.shape().stack(), 2);
+
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let mut feedback = FeedbackTable::new(16, 2);
+    for _ in 0..8 {
+        feedback.observe_call_signature(
+            key,
+            tail.pc(),
+            FunctionKey::new(99, 1),
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+    }
+    let clif = Tier2Compiler::host(73)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(73))
+        .expect("tail call lowers through the audited call helper");
+    assert!(clif.contains("call_indirect"), "{clif}");
+    assert!(
+        Tier2Compiler::host(73)
+            .lower_for_test(&verified, 73)
+            .is_err(),
+        "a tail call without call-site feedback cannot be specialized"
+    );
+}
+
+/// Exact semantics of the M2 core opcodes, observed by executing the
+/// published Tier 2 machine code on a synthetic frame. This bypasses the
+/// Tier 1 policy entirely and checks results, exit kinds and resume pcs.
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod m2_core_opcodes {
+    use rquickjs_core::qjs;
+    use rquickjs_jit::bytecode::opcode;
+    use rquickjs_jit::compiler::optimized::Tier2Compiler;
+    use rquickjs_jit::test_support::{verified_bytecode, JSValueRepr, SyntheticFrame};
+
+    struct Run {
+        kind: u32,
+        map: u32,
+        resume: Option<usize>,
+        result: JSValueRepr,
+    }
+
+    fn run(bytecode: &[u8], arguments: &[JSValueRepr], locals: &[JSValueRepr]) -> Run {
+        let verified = verified_bytecode(
+            bytecode.to_vec(),
+            u16::try_from(arguments.len()).unwrap(),
+            u16::try_from(locals.len()).unwrap(),
+        );
+        let code = Tier2Compiler::host(1)
+            .publish_for_test(&verified, 1)
+            .unwrap_or_else(|error| panic!("{bytecode:?} did not lower: {error:?}"));
+        let mut frame = SyntheticFrame::new(arguments, locals.len(), 8);
+        for (index, value) in locals.iter().enumerate() {
+            frame.set_local(index, *value);
+        }
+        frame.set_bytecode(bytecode);
+        let outcome = unsafe { frame.call(&code) };
+        let start = frame.bytecode_start() as usize;
+        Run {
+            kind: outcome.exit.kind,
+            map: outcome.exit.reserved,
+            resume: (!outcome.exit.resume_pc.is_null())
+                .then(|| outcome.exit.resume_pc as usize - start),
+            result: outcome.result,
+        }
+    }
+
+    fn done(bytecode: &[u8], arguments: &[JSValueRepr], locals: &[JSValueRepr]) -> JSValueRepr {
+        let run = run(bytecode, arguments, locals);
+        assert_eq!(
+            run.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_DONE,
+            "{bytecode:?} exited early at {:?}",
+            run.resume
+        );
+        run.result
+    }
+
+    fn value(bytecode: &[u8]) -> JSValueRepr {
+        done(bytecode, &[], &[])
+    }
+
+    /// The instruction at `pc` must leave through an exact deoptimization
+    /// exit that names its guard site and resumes at that very instruction.
+    fn deopts_at(bytecode: &[u8], arguments: &[JSValueRepr], locals: &[JSValueRepr], pc: usize) {
+        let run = run(bytecode, arguments, locals);
+        assert_eq!(
+            run.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+            "{bytecode:?} result={:?}",
+            run.result
+        );
+        assert_eq!(run.resume, Some(pc), "{bytecode:?}");
+        assert_ne!(
+            run.map, 0,
+            "deopt exits name their guard site: {bytecode:?}"
+        );
+    }
+
+    /// A deopt exit whose operand aliases a borrowed argument asks the
+    /// runtime to materialize an owner. The synthetic runtime API reports
+    /// that helper as unavailable, so the observable outcome is the
+    /// exception exit rather than the fast path's DONE.
+    fn leaves_fast_path(bytecode: &[u8], arguments: &[JSValueRepr]) {
+        let run = run(bytecode, arguments, &[]);
+        assert_eq!(
+            run.kind,
+            qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+            "{bytecode:?} result={:?}",
+            run.result
+        );
+    }
+
+    const fn int(value: i32) -> JSValueRepr {
+        JSValueRepr::int32(value)
+    }
+    const fn float(value: f64) -> JSValueRepr {
+        JSValueRepr::float64(value)
+    }
+    const fn boolean(value: bool) -> JSValueRepr {
+        JSValueRepr::new(value as u64, qjs::JS_TAG_BOOL as i64)
+    }
+    const fn null() -> JSValueRepr {
+        JSValueRepr::new(0, qjs::JS_TAG_NULL as i64)
+    }
+    const fn string_like() -> JSValueRepr {
+        JSValueRepr::new(0x1000, qjs::JS_TAG_STRING as i64)
+    }
+    fn push_i32(value: i32) -> Vec<u8> {
+        let mut bytes = vec![qjs::QJS_JIT_OP_PUSH_I32];
+        bytes.extend(value.to_le_bytes());
+        bytes
+    }
+    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+    /// `3 / 2` as a Float64 operand.
+    const ONE_AND_A_HALF: [u8; 5] = [
+        qjs::QJS_JIT_OP_PUSH_I8,
+        3,
+        qjs::QJS_JIT_OP_PUSH_I8,
+        2,
+        qjs::QJS_JIT_OP_DIV,
+    ];
+    /// `0 / 0` as a NaN operand.
+    const NAN: [u8; 3] = [
+        qjs::QJS_JIT_OP_PUSH_0,
+        qjs::QJS_JIT_OP_PUSH_0,
+        qjs::QJS_JIT_OP_DIV,
+    ];
+
+    #[test]
+    fn constants_push_exact_tagged_values() {
+        assert_eq!(
+            value(&[qjs::QJS_JIT_OP_PUSH_MINUS1, opcode::RETURN]),
+            int(-1)
+        );
+        assert_eq!(value(&[qjs::QJS_JIT_OP_NULL, opcode::RETURN]), null());
+        assert_eq!(
+            value(&[qjs::QJS_JIT_OP_PUSH_TRUE, opcode::RETURN]),
+            boolean(true)
+        );
+        assert_eq!(
+            value(&[qjs::QJS_JIT_OP_PUSH_FALSE, opcode::RETURN]),
+            boolean(false)
+        );
+        assert_eq!(
+            value(&[qjs::QJS_JIT_OP_NOP, opcode::PUSH_I8, 9, opcode::RETURN]),
+            int(9)
+        );
+    }
+
+    #[test]
+    fn stack_shuffles_permute_values_exactly_like_the_interpreter() {
+        // (opcode, values consumed, sources of the values pushed back) as in
+        // QuickJS's interpreter and the verifier's `copied_stack_values`.
+        let shuffles: &[(u8, usize, &[usize])] = &[
+            (qjs::QJS_JIT_OP_NIP, 2, &[1]),
+            (qjs::QJS_JIT_OP_NIP1, 3, &[1, 2]),
+            (qjs::QJS_JIT_OP_DUP, 1, &[0, 0]),
+            (qjs::QJS_JIT_OP_DUP1, 2, &[0, 0, 1]),
+            (qjs::QJS_JIT_OP_DUP2, 2, &[0, 1, 0, 1]),
+            (qjs::QJS_JIT_OP_DUP3, 3, &[0, 1, 2, 0, 1, 2]),
+            (qjs::QJS_JIT_OP_INSERT2, 2, &[1, 0, 1]),
+            (qjs::QJS_JIT_OP_INSERT3, 3, &[2, 0, 1, 2]),
+            (qjs::QJS_JIT_OP_INSERT4, 4, &[3, 0, 1, 2, 3]),
+            (qjs::QJS_JIT_OP_PERM3, 3, &[1, 0, 2]),
+            (qjs::QJS_JIT_OP_PERM4, 4, &[2, 0, 1, 3]),
+            (qjs::QJS_JIT_OP_PERM5, 5, &[3, 0, 1, 2, 4]),
+            (qjs::QJS_JIT_OP_SWAP, 2, &[1, 0]),
+            (qjs::QJS_JIT_OP_SWAP2, 4, &[2, 3, 0, 1]),
+            (qjs::QJS_JIT_OP_ROT3L, 3, &[1, 2, 0]),
+            (qjs::QJS_JIT_OP_ROT3R, 3, &[2, 0, 1]),
+            (qjs::QJS_JIT_OP_ROT4L, 4, &[1, 2, 3, 0]),
+            (qjs::QJS_JIT_OP_ROT5L, 5, &[1, 2, 3, 4, 0]),
+        ];
+        let arguments = [int(10), int(20), int(30), int(40), int(50)];
+        for (shuffle, take, order) in shuffles {
+            for (position, source) in order.iter().enumerate() {
+                let mut bytecode = Vec::new();
+                for index in 0..*take {
+                    bytecode.extend([opcode::GET_ARG, index as u8, 0]);
+                }
+                bytecode.push(*shuffle);
+                // Drop everything above the slot under test, then return it.
+                bytecode.extend(std::iter::repeat_n(
+                    opcode::DROP,
+                    order.len() - 1 - position,
+                ));
+                bytecode.push(opcode::RETURN);
+                assert_eq!(
+                    done(&bytecode, &arguments[..*take], &[]),
+                    arguments[*source],
+                    "opcode {shuffle} slot {position}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn get_loc0_loc1_pushes_both_locals_in_order() {
+        let locals = [int(7), int(9)];
+        assert_eq!(
+            done(
+                &[qjs::QJS_JIT_OP_GET_LOC0_LOC1, opcode::RETURN],
+                &[],
+                &locals
+            ),
+            int(9)
+        );
+        assert_eq!(
+            done(
+                &[qjs::QJS_JIT_OP_GET_LOC0_LOC1, opcode::DROP, opcode::RETURN],
+                &[],
+                &locals
+            ),
+            int(7)
+        );
+    }
+
+    #[test]
+    fn argument_and_local_stores_redefine_the_frame_slot() {
+        let arguments = [int(1), int(2)];
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    5,
+                    qjs::QJS_JIT_OP_PUT_ARG,
+                    0,
+                    0,
+                    qjs::QJS_JIT_OP_GET_ARG0,
+                    opcode::RETURN
+                ],
+                &arguments,
+                &[]
+            ),
+            int(5)
+        );
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    6,
+                    qjs::QJS_JIT_OP_PUT_ARG1,
+                    qjs::QJS_JIT_OP_GET_ARG1,
+                    opcode::RETURN
+                ],
+                &arguments,
+                &[]
+            ),
+            int(6)
+        );
+        // set_* keeps the stored value on the stack.
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    7,
+                    qjs::QJS_JIT_OP_SET_ARG,
+                    0,
+                    0,
+                    opcode::DROP,
+                    qjs::QJS_JIT_OP_GET_ARG0,
+                    opcode::RETURN
+                ],
+                &arguments,
+                &[]
+            ),
+            int(7)
+        );
+        assert_eq!(
+            done(
+                &[opcode::PUSH_I8, 7, qjs::QJS_JIT_OP_SET_ARG0, opcode::RETURN],
+                &arguments,
+                &[]
+            ),
+            int(7)
+        );
+        let locals = [JSValueRepr::undefined(); 3];
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    8,
+                    qjs::QJS_JIT_OP_SET_LOC,
+                    0,
+                    0,
+                    opcode::DROP,
+                    qjs::QJS_JIT_OP_GET_LOC0,
+                    opcode::RETURN
+                ],
+                &[],
+                &locals
+            ),
+            int(8)
+        );
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    9,
+                    qjs::QJS_JIT_OP_SET_LOC8,
+                    1,
+                    opcode::DROP,
+                    qjs::QJS_JIT_OP_GET_LOC1,
+                    opcode::RETURN
+                ],
+                &[],
+                &locals
+            ),
+            int(9)
+        );
+        assert_eq!(
+            done(
+                &[
+                    opcode::PUSH_I8,
+                    3,
+                    qjs::QJS_JIT_OP_SET_LOC2,
+                    opcode::DROP,
+                    qjs::QJS_JIT_OP_GET_LOC2,
+                    opcode::RETURN
+                ],
+                &[],
+                &locals
+            ),
+            int(3)
+        );
+        // A stale alias of the redefined slot still yields the old value.
+        assert_eq!(
+            done(
+                &[
+                    qjs::QJS_JIT_OP_GET_ARG0,
+                    opcode::PUSH_I8,
+                    4,
+                    qjs::QJS_JIT_OP_PUT_ARG0,
+                    opcode::RETURN
+                ],
+                &arguments,
+                &[]
+            ),
+            int(1)
+        );
+    }
+
+    #[test]
+    fn goto_with_a_32_bit_label_branches_exactly() {
+        // 0: get_arg0  1: if_false8 -> 10  3: push_i8 1  5: goto -> 12
+        // 10: push_i8 2  12: return
+        let bytecode = [
+            qjs::QJS_JIT_OP_GET_ARG0,
+            opcode::IF_FALSE8,
+            8,
+            opcode::PUSH_I8,
+            1,
+            qjs::QJS_JIT_OP_GOTO,
+            6,
+            0,
+            0,
+            0,
+            opcode::PUSH_I8,
+            2,
+            opcode::RETURN,
+        ];
+        assert_eq!(done(&bytecode, &[int(1)], &[]), int(1));
+        assert_eq!(done(&bytecode, &[int(0)], &[]), int(2));
+    }
+
+    #[test]
+    fn negation_and_plus_compute_exact_numeric_results() {
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 5, qjs::QJS_JIT_OP_NEG, opcode::RETURN]),
+            int(-5)
+        );
+        assert_eq!(
+            value(&[qjs::QJS_JIT_OP_PUSH_0, qjs::QJS_JIT_OP_NEG, opcode::RETURN]),
+            float(-0.0)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &push_i32(i32::MIN),
+                &[qjs::QJS_JIT_OP_NEG, opcode::RETURN]
+            ])),
+            float(2_147_483_648.0)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &ONE_AND_A_HALF,
+                &[qjs::QJS_JIT_OP_NEG, opcode::RETURN]
+            ])),
+            float(-1.5)
+        );
+        deopts_at(
+            &[
+                qjs::QJS_JIT_OP_PUSH_TRUE,
+                qjs::QJS_JIT_OP_NEG,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            1,
+        );
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 5, opcode::PLUS, opcode::RETURN]),
+            int(5)
+        );
+        assert_eq!(
+            value(&cat(&[&ONE_AND_A_HALF, &[opcode::PLUS, opcode::RETURN]])),
+            float(1.5)
+        );
+        deopts_at(
+            &[qjs::QJS_JIT_OP_NULL, opcode::PLUS, opcode::RETURN],
+            &[],
+            &[],
+            1,
+        );
+    }
+
+    #[test]
+    fn bitwise_not_applies_to_int32_and_converts_floats_exactly() {
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 1, qjs::QJS_JIT_OP_NOT, opcode::RETURN]),
+            int(-2)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &ONE_AND_A_HALF,
+                &[qjs::QJS_JIT_OP_NOT, opcode::RETURN]
+            ])),
+            int(-2)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &ONE_AND_A_HALF,
+                &[qjs::QJS_JIT_OP_NEG, qjs::QJS_JIT_OP_NOT, opcode::RETURN]
+            ])),
+            int(0)
+        );
+        assert_eq!(
+            value(&cat(&[&NAN, &[qjs::QJS_JIT_OP_NOT, opcode::RETURN]])),
+            int(-1)
+        );
+        // 2^31 - 1 + 2^31 - 1 = 4294967294 wraps to -2 under ToInt32.
+        assert_eq!(
+            value(&cat(&[
+                &push_i32(i32::MAX),
+                &push_i32(i32::MAX),
+                &[opcode::ADD, qjs::QJS_JIT_OP_NOT, opcode::RETURN]
+            ])),
+            int(1)
+        );
+        deopts_at(
+            &[
+                qjs::QJS_JIT_OP_PUSH_TRUE,
+                qjs::QJS_JIT_OP_NOT,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            1,
+        );
+    }
+
+    #[test]
+    fn logical_not_computes_truthiness_natively_for_primitives() {
+        let cases: &[(&[u8], bool)] = &[
+            (&[qjs::QJS_JIT_OP_PUSH_0], true),
+            (&[opcode::PUSH_I8, 3], false),
+            (&[opcode::PUSH_I8, 0x80], false),
+            (&ONE_AND_A_HALF, false),
+            (&NAN, true),
+            (&[qjs::QJS_JIT_OP_PUSH_0, qjs::QJS_JIT_OP_NEG], true),
+            (&[qjs::QJS_JIT_OP_NULL], true),
+            (&[opcode::PUSH_UNDEFINED], true),
+            (&[qjs::QJS_JIT_OP_PUSH_TRUE], false),
+            (&[qjs::QJS_JIT_OP_PUSH_FALSE], true),
+        ];
+        for (operand, expected) in cases {
+            let bytecode = cat(&[operand, &[qjs::QJS_JIT_OP_LNOT, opcode::RETURN]]);
+            assert_eq!(value(&bytecode), boolean(*expected), "{operand:?}");
+        }
+        leaves_fast_path(
+            &[
+                qjs::QJS_JIT_OP_GET_ARG0,
+                qjs::QJS_JIT_OP_LNOT,
+                opcode::RETURN,
+            ],
+            &[string_like()],
+        );
+    }
+
+    #[test]
+    fn is_undefined_and_is_null_test_the_tag() {
+        assert_eq!(
+            value(&[
+                opcode::PUSH_UNDEFINED,
+                qjs::QJS_JIT_OP_IS_UNDEFINED,
+                opcode::RETURN
+            ]),
+            boolean(true)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_NULL,
+                qjs::QJS_JIT_OP_IS_UNDEFINED,
+                opcode::RETURN
+            ]),
+            boolean(false)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_NULL,
+                qjs::QJS_JIT_OP_IS_NULL,
+                opcode::RETURN
+            ]),
+            boolean(true)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_PUSH_0,
+                qjs::QJS_JIT_OP_IS_NULL,
+                opcode::RETURN
+            ]),
+            boolean(false)
+        );
+    }
+
+    #[test]
+    fn decrement_family_mirrors_increment_with_exact_overflow() {
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 5, qjs::QJS_JIT_OP_DEC, opcode::RETURN]),
+            int(4)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &push_i32(i32::MIN),
+                &[qjs::QJS_JIT_OP_DEC, opcode::RETURN]
+            ])),
+            float(-2_147_483_649.0)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &push_i32(i32::MAX),
+                &[qjs::QJS_JIT_OP_INC, opcode::RETURN]
+            ])),
+            float(2_147_483_648.0)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &ONE_AND_A_HALF,
+                &[qjs::QJS_JIT_OP_DEC, opcode::RETURN]
+            ])),
+            float(0.5)
+        );
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 5, qjs::QJS_JIT_OP_POST_DEC, opcode::RETURN]),
+            int(4)
+        );
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                5,
+                qjs::QJS_JIT_OP_POST_DEC,
+                opcode::DROP,
+                opcode::RETURN
+            ]),
+            int(5)
+        );
+        assert_eq!(
+            value(&[opcode::PUSH_I8, 5, qjs::QJS_JIT_OP_POST_INC, opcode::RETURN]),
+            int(6)
+        );
+        deopts_at(
+            &[
+                qjs::QJS_JIT_OP_PUSH_TRUE,
+                qjs::QJS_JIT_OP_DEC,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            1,
+        );
+        deopts_at(
+            &[
+                qjs::QJS_JIT_OP_NULL,
+                qjs::QJS_JIT_OP_POST_INC,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            1,
+        );
+    }
+
+    #[test]
+    fn local_arithmetic_updates_the_slot_in_place() {
+        let read_local0 = [qjs::QJS_JIT_OP_GET_LOC0, opcode::RETURN];
+        assert_eq!(
+            done(&cat(&[&[opcode::INC_LOC, 0], &read_local0]), &[], &[int(5)]),
+            int(6)
+        );
+        assert_eq!(
+            done(&cat(&[&[opcode::DEC_LOC, 0], &read_local0]), &[], &[int(5)]),
+            int(4)
+        );
+        assert_eq!(
+            done(
+                &cat(&[&[opcode::PUSH_I8, 10, opcode::ADD_LOC, 0], &read_local0]),
+                &[],
+                &[int(5)]
+            ),
+            int(15)
+        );
+        assert_eq!(
+            done(
+                &cat(&[&[opcode::INC_LOC, 0], &read_local0]),
+                &[],
+                &[int(i32::MAX)]
+            ),
+            float(2_147_483_648.0)
+        );
+        assert_eq!(
+            done(
+                &cat(&[&[opcode::DEC_LOC, 0], &read_local0]),
+                &[],
+                &[int(i32::MIN)]
+            ),
+            float(-2_147_483_649.0)
+        );
+        assert_eq!(
+            done(
+                &cat(&[&[opcode::PUSH_I8, 1, opcode::ADD_LOC, 0], &read_local0]),
+                &[],
+                &[float(0.5)]
+            ),
+            float(1.5)
+        );
+        // Redefining local 1 leaves local 0 and the stack alias untouched.
+        assert_eq!(
+            done(
+                &[qjs::QJS_JIT_OP_GET_LOC0, opcode::INC_LOC, 1, opcode::RETURN],
+                &[],
+                &[int(3), int(4)]
+            ),
+            int(3)
+        );
+        deopts_at(
+            &cat(&[
+                &[qjs::QJS_JIT_OP_PUSH_TRUE, opcode::ADD_LOC, 0],
+                &read_local0,
+            ]),
+            &[],
+            &[int(1)],
+            1,
+        );
+        deopts_at(
+            &cat(&[&[opcode::INC_LOC, 0], &read_local0]),
+            &[],
+            &[null()],
+            0,
+        );
+        deopts_at(
+            &cat(&[&[opcode::DEC_LOC, 0], &read_local0]),
+            &[],
+            &[boolean(true)],
+            0,
+        );
+    }
+
+    #[test]
+    fn shifts_mask_the_count_and_unsigned_shift_renormalizes() {
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                1,
+                opcode::PUSH_I8,
+                33,
+                qjs::QJS_JIT_OP_SHL,
+                opcode::RETURN
+            ]),
+            int(2)
+        );
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                1,
+                opcode::PUSH_I8,
+                32,
+                qjs::QJS_JIT_OP_SHL,
+                opcode::RETURN
+            ]),
+            int(1)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &push_i32(-8),
+                &[opcode::PUSH_I8, 33, qjs::QJS_JIT_OP_SAR, opcode::RETURN]
+            ])),
+            int(-4)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_PUSH_MINUS1,
+                qjs::QJS_JIT_OP_PUSH_0,
+                qjs::QJS_JIT_OP_SHR,
+                opcode::RETURN
+            ]),
+            float(4_294_967_295.0)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_PUSH_MINUS1,
+                opcode::PUSH_I8,
+                1,
+                qjs::QJS_JIT_OP_SHR,
+                opcode::RETURN
+            ]),
+            int(i32::MAX)
+        );
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                8,
+                opcode::PUSH_I8,
+                33,
+                qjs::QJS_JIT_OP_SHR,
+                opcode::RETURN
+            ]),
+            int(4)
+        );
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                6,
+                opcode::PUSH_I8,
+                3,
+                qjs::QJS_JIT_OP_XOR,
+                opcode::RETURN
+            ]),
+            int(5)
+        );
+        deopts_at(
+            &[
+                opcode::PUSH_I8,
+                1,
+                qjs::QJS_JIT_OP_PUSH_TRUE,
+                qjs::QJS_JIT_OP_SHL,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            3,
+        );
+        deopts_at(
+            &cat(&[
+                &ONE_AND_A_HALF,
+                &[opcode::PUSH_I8, 1, qjs::QJS_JIT_OP_SHR, opcode::RETURN],
+            ]),
+            &[],
+            &[],
+            7,
+        );
+    }
+
+    #[test]
+    fn modulo_computes_only_exact_int32_remainders() {
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                7,
+                opcode::PUSH_I8,
+                3,
+                qjs::QJS_JIT_OP_MOD,
+                opcode::RETURN
+            ]),
+            int(1)
+        );
+        assert_eq!(
+            value(&[
+                opcode::PUSH_I8,
+                7,
+                qjs::QJS_JIT_OP_PUSH_MINUS1,
+                qjs::QJS_JIT_OP_MOD,
+                opcode::RETURN
+            ]),
+            int(0)
+        );
+        assert_eq!(
+            value(&cat(&[
+                &[opcode::PUSH_I8, 7],
+                &push_i32(-3),
+                &[qjs::QJS_JIT_OP_MOD, opcode::RETURN]
+            ])),
+            int(1)
+        );
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_PUSH_0,
+                opcode::PUSH_I8,
+                5,
+                qjs::QJS_JIT_OP_MOD,
+                opcode::RETURN
+            ]),
+            int(0)
+        );
+        // -4 % 2 is -0, x % 0 is NaN and INT32_MIN % -1 must not trap: all
+        // of them resume in the interpreter at the `mod` instruction.
+        deopts_at(
+            &cat(&[
+                &push_i32(-4),
+                &[opcode::PUSH_I8, 2, qjs::QJS_JIT_OP_MOD, opcode::RETURN],
+            ]),
+            &[],
+            &[],
+            7,
+        );
+        deopts_at(
+            &[
+                opcode::PUSH_I8,
+                5,
+                qjs::QJS_JIT_OP_PUSH_0,
+                qjs::QJS_JIT_OP_MOD,
+                opcode::RETURN,
+            ],
+            &[],
+            &[],
+            3,
+        );
+        deopts_at(
+            &cat(&[
+                &push_i32(i32::MIN),
+                &[
+                    qjs::QJS_JIT_OP_PUSH_MINUS1,
+                    qjs::QJS_JIT_OP_MOD,
+                    opcode::RETURN,
+                ],
+            ]),
+            &[],
+            &[],
+            6,
+        );
+        deopts_at(
+            &cat(&[
+                &ONE_AND_A_HALF,
+                &[opcode::PUSH_I8, 1, qjs::QJS_JIT_OP_MOD, opcode::RETURN],
+            ]),
+            &[],
+            &[],
+            7,
+        );
+    }
+
+    #[test]
+    fn equality_opcodes_compute_exact_results_and_deopt_on_coercions() {
+        let one = [opcode::PUSH_I8, 1];
+        let two = [opcode::PUSH_I8, 2];
+        let two_float = [opcode::PUSH_I8, 4, opcode::PUSH_I8, 2, qjs::QJS_JIT_OP_DIV];
+        let negative_zero = [qjs::QJS_JIT_OP_PUSH_0, qjs::QJS_JIT_OP_NEG];
+        let zero = [qjs::QJS_JIT_OP_PUSH_0];
+        let null_value = [qjs::QJS_JIT_OP_NULL];
+        let undefined_value = [opcode::PUSH_UNDEFINED];
+        let yes = [qjs::QJS_JIT_OP_PUSH_TRUE];
+        let no = [qjs::QJS_JIT_OP_PUSH_FALSE];
+        let cases: &[(&[u8], &[u8], u8, bool)] = &[
+            (&one, &one, qjs::QJS_JIT_OP_STRICT_EQ, true),
+            (&one, &one, qjs::QJS_JIT_OP_STRICT_NEQ, false),
+            (&one, &two, qjs::QJS_JIT_OP_EQ, false),
+            (&one, &two, qjs::QJS_JIT_OP_NEQ, true),
+            (&two, &two_float, qjs::QJS_JIT_OP_STRICT_EQ, true),
+            (&one, &ONE_AND_A_HALF, qjs::QJS_JIT_OP_EQ, false),
+            (&negative_zero, &zero, qjs::QJS_JIT_OP_STRICT_EQ, true),
+            (&null_value, &undefined_value, qjs::QJS_JIT_OP_EQ, true),
+            (&undefined_value, &null_value, qjs::QJS_JIT_OP_NEQ, false),
+            (
+                &null_value,
+                &undefined_value,
+                qjs::QJS_JIT_OP_STRICT_EQ,
+                false,
+            ),
+            (
+                &null_value,
+                &undefined_value,
+                qjs::QJS_JIT_OP_STRICT_NEQ,
+                true,
+            ),
+            (&null_value, &null_value, qjs::QJS_JIT_OP_STRICT_EQ, true),
+            (&undefined_value, &undefined_value, qjs::QJS_JIT_OP_EQ, true),
+            (&yes, &yes, qjs::QJS_JIT_OP_STRICT_EQ, true),
+            (&yes, &no, qjs::QJS_JIT_OP_EQ, false),
+            (&yes, &no, qjs::QJS_JIT_OP_STRICT_NEQ, true),
+            // Differing primitive tags never coerce under `===`, and
+            // `null`/`undefined` only ever equal each other under `==`.
+            (&yes, &one, qjs::QJS_JIT_OP_STRICT_EQ, false),
+            (&yes, &one, qjs::QJS_JIT_OP_STRICT_NEQ, true),
+            (&null_value, &zero, qjs::QJS_JIT_OP_EQ, false),
+            (&null_value, &zero, qjs::QJS_JIT_OP_NEQ, true),
+            (&undefined_value, &ONE_AND_A_HALF, qjs::QJS_JIT_OP_EQ, false),
+            (&undefined_value, &zero, qjs::QJS_JIT_OP_STRICT_NEQ, true),
+            (&no, &zero, qjs::QJS_JIT_OP_STRICT_EQ, false),
+        ];
+        for (lhs, rhs, operation, expected) in cases {
+            let bytecode = cat(&[lhs, rhs, &[*operation, opcode::RETURN]]);
+            assert_eq!(value(&bytecode), boolean(*expected), "{bytecode:?}");
+        }
+        for operation in [
+            qjs::QJS_JIT_OP_EQ,
+            qjs::QJS_JIT_OP_NEQ,
+            qjs::QJS_JIT_OP_STRICT_EQ,
+            qjs::QJS_JIT_OP_STRICT_NEQ,
+        ] {
+            // NaN is unequal to itself under every operator.
+            let bytecode = cat(&[&NAN, &[opcode::DUP, operation, opcode::RETURN]]);
+            let expected = matches!(operation, qjs::QJS_JIT_OP_NEQ | qjs::QJS_JIT_OP_STRICT_NEQ);
+            assert_eq!(value(&bytecode), boolean(expected), "{bytecode:?}");
+            // Loose equality coerces a boolean to a number; strings (and
+            // every other heap tag) always belong to the interpreter.
+            if matches!(operation, qjs::QJS_JIT_OP_EQ | qjs::QJS_JIT_OP_NEQ) {
+                deopts_at(
+                    &cat(&[&yes, &one, &[operation, opcode::RETURN]]),
+                    &[],
+                    &[],
+                    3,
+                );
+                deopts_at(
+                    &cat(&[&zero, &no, &[operation, opcode::RETURN]]),
+                    &[],
+                    &[],
+                    2,
+                );
+            }
+            leaves_fast_path(
+                &[
+                    qjs::QJS_JIT_OP_GET_ARG0,
+                    qjs::QJS_JIT_OP_GET_ARG1,
+                    operation,
+                    opcode::RETURN,
+                ],
+                &[string_like(), string_like()],
+            );
+        }
+    }
+}
