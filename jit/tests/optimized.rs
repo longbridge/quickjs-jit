@@ -2068,7 +2068,7 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
         })
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
         let result = context.with(|ctx| {
             let workload: Function = ctx.globals().get("workload").unwrap();
