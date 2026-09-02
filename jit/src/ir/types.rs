@@ -40,6 +40,8 @@ pub enum StackOp {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOp {
     IsUndefinedOrNull,
+    IsUndefined,
+    IsNull,
     Plus,
     Neg,
     Increment,
