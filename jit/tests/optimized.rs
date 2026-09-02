@@ -2093,10 +2093,7 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
         warmed.profitability_rejected, 5,
         "the stable direct-edge caller repeated the leaf's misleading baseline profitability retries: {warmed:?}"
     );
-    assert!(
-        warmed.profitability_approved > 0,
-        "the structural direct-call admission was not reported as a production policy decision: {warmed:?}"
-    );
+    assert_eq!(warmed.profitability_approved, 0, "{warmed:?}");
 
     for _ in 0..11 {
         let result = context.with(|ctx| {

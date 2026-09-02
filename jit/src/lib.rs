@@ -1286,6 +1286,18 @@ impl ProductionBackend {
                 if call.callee() == key {
                     return false;
                 }
+                let repeated_in_loop = snapshot.instructions().iter().any(|branch| {
+                    branch.pc() > instruction.pc()
+                        && branch.branch_target().is_some_and(|target| {
+                            u32::try_from(target).ok().is_some_and(|target| {
+                                target <= instruction.pc()
+                                    && snapshot.control_flow_graph().is_loop_header(target)
+                            })
+                        })
+                });
+                if !repeated_in_loop {
+                    return false;
+                }
                 direct_call_candidate = true;
                 !self.coordinator.direct_call_ready(&call)
             });
@@ -1336,10 +1348,6 @@ impl ProductionBackend {
              * direct target is ready, admit the caller's existing bounded
              * optimizing trial without spending five misleading baseline
              * profitability retries. */
-            if !forced && direct_call_candidate {
-                self.profitability_evaluations = self.profitability_evaluations.saturating_add(1);
-                self.profitability_approved = self.profitability_approved.saturating_add(1);
-            }
             if !forced && !direct_call_candidate && !self.profitability_blacklisted.contains(&key) {
                 let measured = self
                     .execution_profiles

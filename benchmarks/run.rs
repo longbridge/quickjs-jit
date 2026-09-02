@@ -209,6 +209,7 @@ struct WorkerResult {
     code_bytes: u64,
     metadata_bytes: u64,
     active_ir_bytes: u64,
+    automatic_ready: bool,
     phases: PhaseTiming,
 }
 
@@ -448,6 +449,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         code_bytes: metrics.code_bytes as u64,
         metadata_bytes: metrics.metadata_bytes as u64,
         active_ir_bytes: metrics.peak_compiler_bytes as u64,
+        automatic_ready: mode != "automatic" || native_ready(mode, &metrics, tier1_ready_installs),
         phases,
     };
     println!("{}", serde_json::to_string(&result).map_err(err)?);
@@ -591,6 +593,12 @@ fn validate_sample(mode: &str, r: &WorkerResult, requires_native: bool) -> Resul
         "tier1" if r.tier2_entries != 0 => Err("Tier1 policy entered Tier2".into()),
         "tier2" if requires_native && r.tier2_entries == 0 => {
             Err("Tier2 sample never entered Tier2 code".into())
+        }
+        "automatic" if requires_native && r.tier2_entries == 0 => {
+            Err("automatic sample never entered Tier2 code".into())
+        }
+        "automatic" if r.tier2_entries > 0 && !r.automatic_ready => {
+            Err("automatic sample retained pending compilation after warmup".into())
         }
         _ => Ok(()),
     }
@@ -736,6 +744,7 @@ console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
         code_bytes: 0,
         metadata_bytes: 0,
         active_ir_bytes: 0,
+        automatic_ready: true,
         phases,
     })
 }
@@ -946,6 +955,7 @@ mod tests {
             code_bytes: 0,
             metadata_bytes: 0,
             active_ir_bytes: 0,
+            automatic_ready: false,
             phases: PhaseTiming::default(),
         };
         assert!(validate_sample("tier1", &r, true).is_err());
@@ -955,6 +965,11 @@ mod tests {
         r.tier2_entries = 1;
         assert!(validate_sample("tier1", &r, true).is_err());
         assert!(validate_sample("tier2", &r, true).is_ok());
+        assert!(validate_sample("automatic", &r, true).is_err());
+        r.automatic_ready = true;
+        assert!(validate_sample("automatic", &r, true).is_ok());
+        r.automatic_ready = false;
+        assert!(validate_sample("automatic", &r, false).is_err());
         r.native_exits = 2;
         assert!(validate_sample("tier2", &r, true).is_err());
     }
