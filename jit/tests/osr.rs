@@ -506,10 +506,8 @@ fn production_ineligible_loop_is_rejected_once_before_queueing() {
     let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
     let context = Context::full(&runtime).unwrap();
     let value = context.with(|ctx| {
-        ctx.eval::<String, _>(
-            "function f(n,z){let i=z;while(i<n)i++;return typeof i} f(1000000,0)",
-        )
-        .unwrap()
+        ctx.eval::<String, _>("function f(n,z){let i=z;while(i<n)i++;return typeof i} f(1000000,0)")
+            .unwrap()
     });
     assert_eq!(value, "number");
     let metrics = jit.metrics();

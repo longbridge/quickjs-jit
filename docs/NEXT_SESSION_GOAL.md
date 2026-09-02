@@ -269,3 +269,9 @@ Known current limitations must remain visible in reports: focused numeric and
 Fibonacci kernels are profitable, while broad strings/JSON/collections/
 closures/async workers may still be interpreter-only, and the guarded Tier 1
 array traversal is not yet a demonstrated speedup.
+
+After M2 (`docs/M2.md`), the core comparison/bitwise/`%`/unary/tail-call
+opcode set is native in both tiers. The next backlog items in priority order
+are: caching native entry handles on the C side so generic native-to-native
+calls stop paying per-call Rust callbacks; closures (`fclosure`, var-refs);
+`typeof`; `for-of`/iterator opcodes; exception regions and async.

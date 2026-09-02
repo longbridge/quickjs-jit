@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
+- JIT M2: Tier 1 and Tier 2 now support the remaining comparison, bitwise, shift, `%`, unary
+  numeric, constant, stack-shuffle, tail-call, `null`, and empty-string opcodes; the JIT ABI
+  gains the `BINARY_ARITH_SLOW` and `UNARY_ARITH_SLOW` helpers (ABI minor 19); native entries
+  no longer run the full maintenance pass on every call. See `docs/M2.md`.
 
 ### Changed
 

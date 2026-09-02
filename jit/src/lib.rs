@@ -486,6 +486,12 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
         )
     )
 ))]
+/// Upper bound on consecutive per-call ticks that may skip the full
+/// maintenance pass when no completion, feedback change, or installation
+/// happened. Backoff windows are measured in clock ticks, which still advance
+/// on every call, so this only bounds the latency of candidate scans.
+const HOT_MAINTENANCE_INTERVAL: u32 = 64;
+
 struct ProductionBackend {
     runtime_id: u64,
     abi_info: abi::AbiInfo,
@@ -516,6 +522,15 @@ struct ProductionBackend {
     osr_generated_retries: u64,
     osr_validation: Arc<OsrValidationMetrics>,
     clock: u64,
+    /// Per-call runtime callbacks (entry acquisition, hot probes, exits) run
+    /// the full maintenance pass only when it can change anything: pending
+    /// worker completions, new feedback, or a bounded number of skipped
+    /// ticks. The clock still advances on every tick.
+    hot_ticks_since_maintenance: u32,
+    last_scan_feedback_version: u64,
+    last_scan_installed: u64,
+    last_refresh_scan: Option<(u64, u64)>,
+    direct_refresh_probes: std::collections::HashMap<runtime::FunctionKey, (u64, u64)>,
     queue_reasons: std::collections::HashMap<runtime::FunctionKey, runtime::HotReason>,
     prequeue_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
     hot_call_queues: u64,
@@ -616,7 +631,6 @@ struct ProductionEntryPin {
     pc: u32,
     stack_map_count: u32,
     osr: Option<runtime::OsrMap>,
-    deopt_sites: Box<[(ir::OptimizedFrameShape, ir::DeoptMap)]>,
     validation: Arc<OsrValidationMetrics>,
     #[cfg(feature = "test-support")]
     stress_gc: bool,
@@ -901,7 +915,14 @@ unsafe extern "C" fn production_entry_trampoline(
     else {
         return retry_exit();
     };
-    let Some((shape, map)) = pin.deopt_sites.iter().find(|(shape, map)| {
+    // The pinned artifact outlives this entry, so its deopt table is read in
+    // place instead of being copied on every native entry.
+    let deopt_sites = pin
+        .execution
+        .artifact()
+        .optimized_metadata()
+        .map_or(&[][..], |metadata| metadata.deopt_sites());
+    let Some((shape, map)) = deopt_sites.iter().find(|(shape, map)| {
         map.guard() == guard && map.resume_pc() == resume_pc && map.validate(*shape).is_ok()
     }) else {
         return retry_exit();
@@ -1198,6 +1219,11 @@ impl ProductionBackend {
             osr_generated_retries: 0,
             osr_validation: Arc::new(OsrValidationMetrics::default()),
             clock: 0,
+            hot_ticks_since_maintenance: 0,
+            last_scan_feedback_version: u64::MAX,
+            last_scan_installed: u64::MAX,
+            last_refresh_scan: None,
+            direct_refresh_probes: std::collections::HashMap::new(),
             queue_reasons: std::collections::HashMap::new(),
             prequeue_backoff: std::collections::HashMap::new(),
             hot_call_queues: 0,
@@ -1248,7 +1274,30 @@ impl ProductionBackend {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
     }
 
+    /// Runs on the per-call native path. Skips the full maintenance pass
+    /// while nothing that feeds it has changed, so a steady-state native call
+    /// pays only a clock tick instead of completion draining, candidate scans
+    /// and feedback snapshots on every entry.
+    fn maintenance_if_due(&mut self, publish_metrics: bool) {
+        self.hot_ticks_since_maintenance = self.hot_ticks_since_maintenance.saturating_add(1);
+        let due = self.hot_ticks_since_maintenance >= HOT_MAINTENANCE_INTERVAL
+            || self.coordinator.has_pending_work()
+            || self.feedback.version() != self.last_scan_feedback_version
+            || self.coordinator.installed_count() != self.last_scan_installed;
+        if due {
+            self.maintenance();
+        } else {
+            self.clock = self.clock.saturating_add(1);
+            self.coordinator.advance_clock(self.clock);
+            if publish_metrics {
+                self.publish_metrics();
+            }
+        }
+    }
+
     fn maintenance(&mut self) {
+        self.hot_ticks_since_maintenance = 0;
+        self.last_scan_feedback_version = self.feedback.version();
         self.clock = self.clock.saturating_add(1);
         self.coordinator.advance_clock(self.clock);
         let installed_before = self.coordinator.metrics().installed;
@@ -1263,7 +1312,11 @@ impl ProductionBackend {
                     .unwrap_or(u64::MAX),
             );
         }
-        if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
+        let refresh_inputs = (self.feedback.version(), self.coordinator.installed_count());
+        let refresh_scan_due = self.config.tier_policy() == JitTierPolicy::BaselineOnly
+            && self.last_refresh_scan != Some(refresh_inputs);
+        if refresh_scan_due {
+            self.last_refresh_scan = Some(refresh_inputs);
             let refreshes = self
                 .optimizing_snapshots
                 .iter()
@@ -1325,6 +1378,7 @@ impl ProductionBackend {
                     }
             })
             .collect::<Vec<_>>();
+        self.last_scan_installed = self.coordinator.installed_count();
         for key in if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
             Vec::new()
         } else {
@@ -1509,6 +1563,24 @@ impl ProductionBackend {
             .peak_compiler_bytes
             .max(self.workers.peak_compiler_bytes());
         self.coordinator.set_worker_usage(jobs, snapshots, ir);
+        let requested = self.requested.iter().copied().collect::<Vec<_>>();
+        for key in requested {
+            let retryable = match self.coordinator.tier_state(key, runtime::Tier::Baseline) {
+                runtime::CompileState::Cold | runtime::CompileState::Retired => true,
+                runtime::CompileState::Backoff { retry_after, .. } => self.clock >= retry_after,
+                _ => false,
+            };
+            if retryable {
+                self.clear_failed_request(key);
+            }
+        }
+        self.publish_metrics();
+    }
+
+    /// Copies the backend's counters into the externally visible metrics
+    /// snapshot. Cheap enough to run on every native exit so `Jit::metrics`
+    /// stays exact even when the full maintenance pass is skipped.
+    fn publish_metrics(&mut self) {
         let mut snapshot = self.coordinator.metrics();
         snapshot.native_entries = self.native_entries;
         snapshot.native_exits = self.native_exits;
@@ -1545,18 +1617,7 @@ impl ProductionBackend {
             .osr_validation
             .deopt_materializations
             .load(Ordering::Relaxed);
-        let requested = self.requested.iter().copied().collect::<Vec<_>>();
-        for key in requested {
-            let retryable = match self.coordinator.tier_state(key, runtime::Tier::Baseline) {
-                runtime::CompileState::Cold | runtime::CompileState::Retired => true,
-                runtime::CompileState::Backoff { retry_after, .. } => self.clock >= retry_after,
-                _ => false,
-            };
-            if retryable {
-                self.clear_failed_request(key);
-            }
-        }
-        *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot.clone();
+        *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
     }
 
     fn clear_failed_request(&mut self, key: runtime::FunctionKey) {
@@ -1617,7 +1678,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.feedback_disabled.insert(key);
             return 2;
         }
-        self.maintenance();
+        self.maintenance_if_due(false);
         let observed = match event.feedback_type {
             rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_INT32 => {
                 Some(runtime::ObservedType::Int32)
@@ -1659,12 +1720,17 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 )),
             );
         }
+        let probe_inputs = (self.feedback.version(), self.coordinator.installed_count());
         if self.config.tier_policy() == JitTierPolicy::BaselineOnly
             && matches!(
                 self.coordinator.tier_state(key, runtime::Tier::Baseline),
                 runtime::CompileState::Installed(_)
             )
+            && self.direct_refresh_probes.get(&key) != Some(&probe_inputs)
         {
+            // The readiness answer depends only on the feedback lattice and
+            // the installed artifact set; re-probe when either changed.
+            self.direct_refresh_probes.insert(key, probe_inputs);
             let feedback = self.feedback.snapshot(self.clock);
             if self
                 .coordinator
@@ -2044,7 +2110,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         {
             return empty;
         }
-        self.maintenance();
+        self.maintenance_if_due(false);
         let acquired_tier = if matches!(
             self.coordinator.tier_state(key, runtime::Tier::Optimizing),
             runtime::CompileState::Installed(_)
@@ -2088,11 +2154,6 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let entry = published.as_ptr();
         let stack_map_count = published.required_stack_map_count();
         let artifact_key = pin.artifact().key();
-        let deopt_sites: Box<[(ir::OptimizedFrameShape, ir::DeoptMap)]> =
-            pin.artifact().optimized_metadata().map_or_else(
-                || Vec::new().into_boxed_slice(),
-                |metadata| metadata.deopt_sites().to_vec().into_boxed_slice(),
-            );
         let pin = Box::into_raw(Box::new(ProductionEntryPin {
             execution: pin,
             native: entry,
@@ -2101,7 +2162,6 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             pc,
             stack_map_count,
             osr: osr_map,
-            deopt_sites,
             validation: Arc::clone(&self.osr_validation),
             #[cfg(feature = "test-support")]
             stress_gc: self.config.stress_gc(),
@@ -2239,7 +2299,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 self.coordinator.record_deopt(true);
             }
         }
-        self.maintenance();
+        self.maintenance_if_due(true);
     }
 
     fn function_retire(&mut self, id: u64, generation: u64) {
