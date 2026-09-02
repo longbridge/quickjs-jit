@@ -7,10 +7,15 @@ use std::collections::BTreeSet;
 
 #[test]
 fn synthetic_function_identity_cannot_bypass_the_closed_policy() {
-    let mut bytecode = vec![linked_opcode_table()
-        .find(|opcode| opcode.name() == "push_minus1")
-        .expect("linked push_minus1 opcode")
-        .id()];
+    // `typeof` has no Tier 1 lowering and stays a policy reject; the synthetic
+    // ID-zero function must not bypass that row.
+    let mut bytecode = vec![
+        rquickjs_jit::bytecode::opcode::PUSH_UNDEFINED,
+        linked_opcode_table()
+            .find(|opcode| opcode.name() == "typeof")
+            .expect("linked typeof opcode")
+            .id(),
+    ];
     bytecode.push(rquickjs_jit::bytecode::opcode::RETURN);
     let verified = rquickjs_jit::test_support::verified_bytecode(bytecode, 0, 0);
     let rejection = verified
@@ -145,7 +150,102 @@ fn unsupported_frame_and_exception_families_are_stable_rejects() {
         Tier1Policy::Reject(FallbackReason::ExceptionRegion)
     );
     assert_eq!(
-        by_name("tail_call"),
+        by_name("typeof"),
         Tier1Policy::Reject(FallbackReason::UnsupportedOpcode)
     );
+}
+
+#[test]
+fn m2_core_opcodes_are_advertised_with_their_lowering_family() {
+    let by_name = |name| {
+        let opcode = linked_opcode_table()
+            .find(|opcode| opcode.name() == name)
+            .unwrap();
+        tier1_policy(opcode.id()).unwrap()
+    };
+
+    for native in [
+        "push_minus1",
+        "push_4",
+        "push_5",
+        "push_6",
+        "push_7",
+        "push_i16",
+        "null",
+        "goto",
+        "perm3",
+        "neg",
+        "inc",
+        "dec",
+        "post_dec",
+        "not",
+        "inc_loc",
+        "dec_loc",
+        "add_loc",
+        "xor",
+        "shl",
+        "sar",
+        "shr",
+    ] {
+        assert_eq!(by_name(native), Tier1Policy::Native, "{native}");
+    }
+    assert_eq!(
+        by_name("push_const"),
+        Tier1Policy::Helper(HelperId::ResolveConst)
+    );
+    for dup in ["get_loc", "get_loc0_loc1", "insert2", "insert3"] {
+        assert_eq!(by_name(dup), Tier1Policy::Helper(HelperId::Dup), "{dup}");
+    }
+    for free in [
+        "put_loc",
+        "set_loc",
+        "put_arg",
+        "put_arg0",
+        "put_arg1",
+        "put_arg2",
+        "put_arg3",
+        "set_arg",
+        "set_arg0",
+        "set_arg1",
+        "set_arg2",
+        "set_arg3",
+        "nip",
+        "is_undefined",
+        "is_null",
+    ] {
+        assert_eq!(by_name(free), Tier1Policy::Helper(HelperId::Free), "{free}");
+    }
+    assert_eq!(by_name("lnot"), Tier1Policy::Helper(HelperId::ToBool));
+    for compare in ["lte", "gt", "gte", "eq", "neq", "strict_eq", "strict_neq"] {
+        assert_eq!(
+            by_name(compare),
+            Tier1Policy::Helper(HelperId::CompareSlow),
+            "{compare}"
+        );
+    }
+    assert_eq!(
+        by_name("push_empty_string"),
+        Tier1Policy::Helper(HelperId::AtomValue)
+    );
+    assert_eq!(by_name("tail_call"), Tier1Policy::Helper(HelperId::Call));
+    assert_eq!(
+        by_name("tail_call_method"),
+        Tier1Policy::Helper(HelperId::Call)
+    );
+
+    // Stack shuffles that ordinary Tier 1 eligible source cannot reach stay
+    // rejected: `nop`/`nip1` are never emitted by the QuickJS compiler,
+    // `dup1`/`swap2`/`rot3r`/`rot3l` need destructuring or for-in lvalues
+    // (`to_object`, `for_in_start`), `dup2`/`perm4` need `to_propkey2`, and
+    // `dup3`/`insert4`/`perm5`/`rot4l`/`rot5l` need `super` lvalues.
+    for rejected in [
+        "nop", "nip1", "dup1", "dup2", "dup3", "insert4", "perm4", "perm5", "swap2", "rot3l",
+        "rot3r", "rot4l", "rot5l",
+    ] {
+        assert_eq!(
+            by_name(rejected),
+            Tier1Policy::Reject(FallbackReason::UnsupportedOpcode),
+            "{rejected}"
+        );
+    }
 }

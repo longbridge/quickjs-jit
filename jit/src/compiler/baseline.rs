@@ -134,6 +134,72 @@ impl HelperLowering<'_> {
         set_visible_stack_depth(builder, self.frame, self.stack_base, depth, self.layout)
     }
 
+    /// Natively lowered arithmetic reinterprets the payload word as Int32 or
+    /// Float64 bits, so every operand must carry a numeric tag.  The entry
+    /// analysis proves that for argument/local roots and literal pushes, but
+    /// values with an unknown domain (globals, elements, constants, property
+    /// keys, call results) are only known at run time.  Guard them here and
+    /// hand the untouched frame back to the interpreter at this instruction
+    /// when the proof fails; the interpreter then applies the exact coercion
+    /// (`ToNumeric`, `Symbol.toPrimitive`, BigInt arithmetic, TypeErrors).
+    fn deopt_unless_numeric(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        operands: &[Pair],
+        depth: usize,
+        bytecode_pc: u32,
+    ) -> Result<(), CompileFailure> {
+        let mut condition = None;
+        for operand in operands {
+            let numeric = emit_numeric_tag(builder, operand.tag);
+            condition = Some(match condition {
+                Some(previous) => builder.ins().band(previous, numeric),
+                None => numeric,
+            });
+        }
+        let Some(condition) = condition else {
+            return Ok(());
+        };
+        let deopt = builder.create_block();
+        let continuation = builder.create_block();
+        builder.ins().brif(condition, continuation, &[], deopt, &[]);
+        builder.seal_block(deopt);
+        builder.switch_to_block(deopt);
+        builder.set_cold_block(deopt);
+        materialize_frame(
+            builder,
+            self.frame,
+            self.arg_buf,
+            self.var_buf,
+            self.stack_base,
+            self.arguments,
+            self.locals,
+            self.stack,
+            depth,
+            depth,
+            bytecode_pc,
+            self.pointer_type,
+            self.layout,
+        )?;
+        let bytecode = builder.ins().load(
+            self.pointer_type,
+            MemFlags::new(),
+            self.frame,
+            self.layout.bytecode_start,
+        );
+        let resume = builder.ins().iadd_imm(bytecode, i64::from(bytecode_pc));
+        emit_exit(
+            builder,
+            self.sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+            Some(resume),
+            self.pointer_type,
+        );
+        builder.seal_block(continuation);
+        builder.switch_to_block(continuation);
+        Ok(())
+    }
+
     fn shape_guard(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -1980,13 +2046,17 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
+                // Property loads and call results carry any value. Their
+                // domain stays unknown so numeric uses are guarded at the use
+                // site (`deopt_unless_numeric`) instead of forcing the whole
+                // function to retry before entry.
                 IrOp::GetProperty(_) => {
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
-                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                    frame.stack.push(AbstractValue::unknown());
                 }
                 IrOp::GetPropertyKeep(_) => {
                     frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
-                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                    frame.stack.push(AbstractValue::unknown());
                 }
                 IrOp::SetProperty(_) => {
                     frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
@@ -2024,7 +2094,7 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                         .checked_sub(pop)
                         .ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.truncate(new_len);
-                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                    frame.stack.push(AbstractValue::unknown());
                 }
                 IrOp::CallConstructor(argc) => {
                     let pop = usize::from(*argc) + 2;
@@ -2288,7 +2358,10 @@ fn analyze_unary(
     operation: UnaryOp,
 ) -> Result<AbstractValue, CompileFailure> {
     let (required, result) = match operation {
-        UnaryOp::LogicalNot | UnaryOp::IsUndefinedOrNull => {
+        UnaryOp::LogicalNot
+        | UnaryOp::IsUndefinedOrNull
+        | UnaryOp::IsUndefined
+        | UnaryOp::IsNull => {
             return Ok(AbstractValue::known(KnownKind::Boolean));
         }
         UnaryOp::Plus => return Ok(AbstractValue::known(KnownKind::Other)),
@@ -2880,19 +2953,27 @@ fn lower_function(
                         let dup_state = helper_states
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        // The DUP helper requires an unoccupied destination.
+                        // A primitive previous value is released without a
+                        // helper, so clear it explicitly before duplicating.
+                        let undefined = constant_pair(
+                            builder,
+                            TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64),
+                        );
+                        define_pair(builder, arguments[index as usize], undefined);
+                        let source = use_pair(builder, stack[source_index]);
+                        lower_dup_local_if_refcounted(
+                            builder,
+                            &helper_lowering,
                             dup_state,
                             depth,
-                            &[destination, flat_stack_slot(ir, source_index)?]
-                        );
-                        reload_pair(
-                            builder,
+                            source,
+                            flat_stack_slot(ir, source_index)?,
+                            destination,
                             arguments[index as usize],
                             arg_buf,
                             index as usize,
-                            layout,
-                        );
+                        )?;
                     } else {
                         let value = use_pair(builder, stack[source_index]);
                         define_pair(builder, arguments[index as usize], value);
@@ -2931,6 +3012,14 @@ fn lower_function(
                         let dup_state = helper_states
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
+                        // See PutArgument: the DUP helper rejects an occupied
+                        // destination, and a primitive previous value leaves
+                        // the slot occupied because it needs no FREE helper.
+                        let undefined = constant_pair(
+                            builder,
+                            TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64),
+                        );
+                        define_pair(builder, locals[index as usize], undefined);
                         let source = use_pair(builder, stack[source_index]);
                         lower_dup_local_if_refcounted(
                             builder,
@@ -3129,15 +3218,28 @@ fn lower_function(
                     let index = depth
                         .checked_sub(1)
                         .ok_or(CompileFailure::InvalidArtifact)?;
-                    if operation == UnaryOp::IsUndefinedOrNull {
+                    if matches!(
+                        operation,
+                        UnaryOp::IsUndefinedOrNull | UnaryOp::IsUndefined | UnaryOp::IsNull
+                    ) {
                         let state = helper_states
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
                         let slot = flat_stack_slot(ir, index)?;
                         let value = use_pair(builder, stack[index]);
-                        let is_undefined = tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
-                        let is_null = tag_is(builder, value.tag, qjs::JS_TAG_NULL);
-                        let result = builder.ins().bor(is_undefined, is_null);
+                        let result = match operation {
+                            UnaryOp::IsUndefinedOrNull => {
+                                let is_undefined =
+                                    tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
+                                let is_null = tag_is(builder, value.tag, qjs::JS_TAG_NULL);
+                                builder.ins().bor(is_undefined, is_null)
+                            }
+                            UnaryOp::IsUndefined => {
+                                tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED)
+                            }
+                            UnaryOp::IsNull => tag_is(builder, value.tag, qjs::JS_TAG_NULL),
+                            _ => unreachable!(),
+                        };
                         invoke_helper!(
                             qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
                             state,
@@ -3170,24 +3272,48 @@ fn lower_function(
                         }
                     } else {
                         let value = use_pair(builder, stack[index]);
+                        helper_lowering.deopt_unless_numeric(
+                            builder,
+                            &[value],
+                            depth,
+                            instruction.pc,
+                        )?;
                         let result = emit_unary(builder, value, operation);
                         define_pair(builder, stack[index], result);
                     }
                 }
                 IrOp::PostUnary(operation) => {
                     let value = use_pair(builder, stack[depth - 1]);
+                    helper_lowering.deopt_unless_numeric(
+                        builder,
+                        &[value],
+                        depth,
+                        instruction.pc,
+                    )?;
                     let result = emit_unary(builder, value, operation);
                     define_pair(builder, stack[depth], result);
                     depth += 1;
                 }
                 IrOp::LocalUnary { index, op } => {
                     let value = use_pair(builder, locals[index as usize]);
+                    helper_lowering.deopt_unless_numeric(
+                        builder,
+                        &[value],
+                        depth,
+                        instruction.pc,
+                    )?;
                     let result = emit_unary(builder, value, op);
                     define_pair(builder, locals[index as usize], result);
                 }
                 IrOp::AddLocal(index) => {
                     let left = use_pair(builder, locals[index as usize]);
                     let right = use_pair(builder, stack[depth - 1]);
+                    helper_lowering.deopt_unless_numeric(
+                        builder,
+                        &[left, right],
+                        depth,
+                        instruction.pc,
+                    )?;
                     let result = emit_binary(builder, left, right, BinaryOp::Add);
                     define_pair(builder, locals[index as usize], result);
                     depth -= 1;
@@ -3276,6 +3402,12 @@ fn lower_function(
                     } else {
                         let left = use_pair(builder, stack[left_index]);
                         let right = use_pair(builder, stack[right_index]);
+                        helper_lowering.deopt_unless_numeric(
+                            builder,
+                            &[left, right],
+                            depth,
+                            instruction.pc,
+                        )?;
                         let result = emit_binary(builder, left, right, operation);
                         depth -= 1;
                         define_pair(builder, stack[depth - 1], result);
@@ -5903,7 +6035,9 @@ fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair) -> Value {
 
 fn emit_unary(builder: &mut FunctionBuilder<'_>, value: Pair, operation: UnaryOp) -> Pair {
     match operation {
-        UnaryOp::IsUndefinedOrNull => unreachable!("lowered with exact ownership handling"),
+        UnaryOp::IsUndefinedOrNull | UnaryOp::IsUndefined | UnaryOp::IsNull => {
+            unreachable!("lowered with exact ownership handling")
+        }
         UnaryOp::LogicalNot => {
             let truthy = emit_truthy(builder, value);
             let inverse = builder.ins().bxor_imm(truthy, 1);
@@ -6377,6 +6511,9 @@ mod tests {
             ));
         }
         for operation in [
+            UnaryOp::IsUndefinedOrNull,
+            UnaryOp::IsUndefined,
+            UnaryOp::IsNull,
             UnaryOp::Plus,
             UnaryOp::Neg,
             UnaryOp::Increment,
