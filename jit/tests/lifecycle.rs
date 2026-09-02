@@ -165,6 +165,68 @@ fn repeated_failures_blacklist_only_the_generation() {
 }
 
 #[test]
+fn compiler_failures_are_categorized_without_losing_the_total() {
+    let mut coordinator = coordinator(4);
+    let failures = [
+        CompileFailure::UnsupportedOpcode,
+        CompileFailure::Tier1Rejected(rquickjs_jit::bytecode::FallbackReason::UnsupportedOpcode),
+        CompileFailure::ResourceLimit,
+        CompileFailure::TimedOut,
+        CompileFailure::Cancelled,
+        CompileFailure::CompilerPanicked,
+        CompileFailure::InvalidArtifact,
+    ];
+
+    for (index, failure) in failures.into_iter().enumerate() {
+        let key = FunctionKey::new(100 + index as u64, 1);
+        coordinator
+            .queue(key, Tier::Baseline, coordinator_snapshot())
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        coordinator.complete(CompileCompletion {
+            key,
+            requested_tier: Tier::Baseline,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
+            result: Err(failure),
+        });
+    }
+
+    let metrics = coordinator.metrics();
+    assert_eq!(metrics.compile_failures, 7);
+    assert_eq!(metrics.unsupported_opcode_failures, 1);
+    assert_eq!(metrics.tier1_rejections, 1);
+    assert_eq!(metrics.resource_limit_failures, 1);
+    assert_eq!(metrics.compile_timeouts, 1);
+    assert_eq!(metrics.cancelled_compilations, 1);
+    assert_eq!(metrics.compiler_panics, 1);
+    assert_eq!(metrics.invalid_artifacts, 1);
+    assert_eq!(metrics.install_failures, 0);
+}
+
+#[test]
+fn artifact_publication_failures_are_categorized_as_install_failures() {
+    let mut coordinator = Coordinator::with_limits(3, 3, 4, 2);
+    let key = FunctionKey::new(200, 1);
+    coordinator
+        .queue(key, Tier::Baseline, coordinator_snapshot())
+        .unwrap();
+    let request = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Ok(artifact_with_code(request.artifact_key(), 4)),
+    });
+
+    let metrics = coordinator.metrics();
+    assert_eq!(metrics.compile_failures, 1);
+    assert_eq!(metrics.install_failures, 1);
+    assert_eq!(metrics.installed, 0);
+}
+
+#[test]
 fn profitability_demoted_baseline_is_not_terminal_for_tier2_feedback() {
     let mut coordinator = coordinator(4);
     let key = FunctionKey::new(91, 1);
@@ -937,6 +999,7 @@ fn mismatched_artifact_identity_leaves_legitimate_attempt_in_flight() {
         CompileState::Installed(Tier::Baseline)
     );
     assert_eq!(coordinator.metrics().stale_results, 1);
+    assert_eq!(coordinator.metrics().invalid_artifacts, 1);
     assert_eq!(coordinator.metrics().compile_failures, 0);
     assert_eq!(coordinator.metrics().installed, 1);
 }
