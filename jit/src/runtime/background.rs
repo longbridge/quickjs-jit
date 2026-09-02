@@ -22,6 +22,7 @@ pub enum BackgroundCompilerError {
 /// only; the owning runtime thread remains solely responsible for installation.
 pub struct BackgroundCompiler {
     sender: Option<mpsc::SyncSender<CompileRequest>>,
+    startup: Option<WorkerStartup>,
     workers: Vec<JoinHandle<()>>,
     completion_slot: Arc<Mutex<Option<super::CompletionSender>>>,
     cancelled: Arc<AtomicBool>,
@@ -29,6 +30,13 @@ pub struct BackgroundCompiler {
     max_snapshot_bytes: usize,
     max_ir_bytes: usize,
     overflow: Arc<Mutex<VecDeque<super::CompileCompletion>>>,
+}
+
+struct WorkerStartup {
+    receiver: Arc<Mutex<mpsc::Receiver<CompileRequest>>>,
+    compiler: Arc<dyn Compiler>,
+    worker_count: usize,
+    compile_budget: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -88,71 +96,15 @@ impl BackgroundCompiler {
         let cancelled = Arc::new(AtomicBool::new(false));
         let usage = Arc::new(WorkerUsage::default());
         let overflow = Arc::new(Mutex::new(VecDeque::with_capacity(max_pending_jobs)));
-        let mut workers = Vec::with_capacity(worker_count);
-        for index in 0..worker_count {
-            let receiver = Arc::clone(&receiver);
-            let compiler = Arc::clone(&compiler);
-            let completion_slot: Arc<Mutex<Option<super::CompletionSender>>> =
-                Arc::clone(&completion_slot);
-            let cancelled = Arc::clone(&cancelled);
-            let worker_budget = compile_budget;
-            let usage = Arc::clone(&usage);
-            let overflow = Arc::clone(&overflow);
-            workers.push(
-                thread::Builder::new()
-                    .name(format!("rquickjs-jit-{index}"))
-                    .spawn(move || loop {
-                        let request = { receiver.lock().unwrap_or_else(|p| p.into_inner()).recv() };
-                        let Ok(request) = request else { break };
-                        let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
-                        let ir_bytes = snapshot_bytes.saturating_mul(32);
-                        let _usage = UsageGuard {
-                            usage: Arc::clone(&usage),
-                            snapshot_bytes,
-                            ir_bytes,
-                        };
-                        let sender = completion_slot
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .clone();
-                        if let Some(sender) = sender {
-                            let key = request.key();
-                            let tier = request.tier();
-                            let artifact_key = request.artifact_key();
-                            let attempt_id = request.attempt_id();
-                            let control = crate::compiler::CompileControl::with_ir_limit(
-                                Arc::clone(&cancelled),
-                                worker_budget,
-                                max_ir_bytes,
-                            );
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    compiler.compile_controlled(request, &control)
-                                }))
-                                .unwrap_or(Err(crate::compiler::CompileFailure::CompilerPanicked));
-                            let completion = super::CompileCompletion {
-                                key,
-                                requested_tier: tier,
-                                artifact_key,
-                                attempt_id,
-                                result,
-                            };
-                            if let Err(super::CompletionSendError::Full(completion)) =
-                                sender.try_send(completion)
-                            {
-                                overflow
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner())
-                                    .push_back(*completion);
-                            }
-                        }
-                    })
-                    .map_err(|_| BackgroundCompilerError::Shutdown)?,
-            );
-        }
         Ok(Self {
             sender: Some(sender),
-            workers,
+            startup: Some(WorkerStartup {
+                receiver,
+                compiler,
+                worker_count,
+                compile_budget,
+            }),
+            workers: Vec::with_capacity(worker_count),
             completion_slot,
             cancelled,
             usage,
@@ -162,15 +114,89 @@ impl BackgroundCompiler {
         })
     }
 
+    fn start_workers(&mut self) -> Result<(), BackgroundCompilerError> {
+        let Some(startup) = self.startup.take() else {
+            return Ok(());
+        };
+        for index in 0..startup.worker_count {
+            let receiver = Arc::clone(&startup.receiver);
+            let compiler = Arc::clone(&startup.compiler);
+            let completion_slot: Arc<Mutex<Option<super::CompletionSender>>> =
+                Arc::clone(&self.completion_slot);
+            let cancelled = Arc::clone(&self.cancelled);
+            let worker_budget = startup.compile_budget;
+            let max_ir_bytes = self.max_ir_bytes;
+            let usage = Arc::clone(&self.usage);
+            let overflow = Arc::clone(&self.overflow);
+            let worker = thread::Builder::new()
+                .name(format!("rquickjs-jit-{index}"))
+                .spawn(move || loop {
+                    let request = { receiver.lock().unwrap_or_else(|p| p.into_inner()).recv() };
+                    let Ok(request) = request else { break };
+                    let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
+                    let ir_bytes = snapshot_bytes.saturating_mul(32);
+                    let _usage = UsageGuard {
+                        usage: Arc::clone(&usage),
+                        snapshot_bytes,
+                        ir_bytes,
+                    };
+                    let sender = completion_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if let Some(sender) = sender {
+                        let key = request.key();
+                        let tier = request.tier();
+                        let artifact_key = request.artifact_key();
+                        let attempt_id = request.attempt_id();
+                        let control = crate::compiler::CompileControl::with_ir_limit(
+                            Arc::clone(&cancelled),
+                            worker_budget,
+                            max_ir_bytes,
+                        );
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            compiler.compile_controlled(request, &control)
+                        }))
+                        .unwrap_or(Err(crate::compiler::CompileFailure::CompilerPanicked));
+                        let completion = super::CompileCompletion {
+                            key,
+                            requested_tier: tier,
+                            artifact_key,
+                            attempt_id,
+                            result,
+                        };
+                        if let Err(super::CompletionSendError::Full(completion)) =
+                            sender.try_send(completion)
+                        {
+                            overflow
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .push_back(*completion);
+                        }
+                    }
+                });
+            match worker {
+                Ok(worker) => self.workers.push(worker),
+                Err(_) => {
+                    self.sender.take();
+                    for worker in self.workers.drain(..) {
+                        let _ = worker.join();
+                    }
+                    return Err(BackgroundCompilerError::Shutdown);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn dispatch_next(
         &mut self,
         coordinator: &mut Coordinator,
     ) -> Result<bool, BackgroundCompilerError> {
         self.drain_overflow(coordinator, super::DEFAULT_COMPLETION_DRAIN_BUDGET);
-        let sender = self
-            .sender
-            .as_ref()
-            .ok_or(BackgroundCompilerError::Shutdown)?;
+        if self.sender.is_none() {
+            return Err(BackgroundCompilerError::Shutdown);
+        }
         *self
             .completion_slot
             .lock()
@@ -179,6 +205,14 @@ impl BackgroundCompiler {
         let Some(request) = coordinator.begin_next() else {
             return Ok(false);
         };
+        if let Err(error) = self.start_workers() {
+            coordinator.rollback_dispatch(request);
+            return Err(error);
+        }
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or(BackgroundCompilerError::Shutdown)?;
         let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
         let ir_bytes = snapshot_bytes.saturating_mul(32);
         if self
@@ -256,9 +290,15 @@ impl BackgroundCompiler {
         self.usage.peak_compiler.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    fn started_worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
     pub fn shutdown(&mut self, coordinator: &mut Coordinator) {
         self.cancelled.store(true, Ordering::Release);
         self.sender.take();
+        self.startup.take();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -269,5 +309,53 @@ impl BackgroundCompiler {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bytecode::{opcode, CompileSnapshot, VerifyLimits},
+        code_cache::CompiledArtifact,
+        compiler::CompileFailure,
+        runtime::{FunctionKey, Tier},
+    };
+
+    struct ImmediateCompiler;
+
+    impl Compiler for ImmediateCompiler {
+        fn compile(&self, request: CompileRequest) -> Result<CompiledArtifact, CompileFailure> {
+            Ok(CompiledArtifact::fake(request.tier()))
+        }
+    }
+
+    fn snapshot() -> crate::bytecode::VerifiedFunction {
+        CompileSnapshot::from_untrusted_bytecode(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
+            .verify(VerifyLimits::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn construction_does_not_start_workers_before_eligible_work_exists() {
+        let mut background = BackgroundCompiler::new(Arc::new(ImmediateCompiler), 2, 1).unwrap();
+        assert_eq!(background.started_worker_count(), 0);
+
+        let mut coordinator = Coordinator::with_limits(1, 1, 1, 1);
+        background.shutdown(&mut coordinator);
+        assert_eq!(coordinator.metrics().queued, 0);
+    }
+
+    #[test]
+    fn first_queued_request_starts_the_configured_workers() {
+        let mut background = BackgroundCompiler::new(Arc::new(ImmediateCompiler), 2, 1).unwrap();
+        let mut coordinator = Coordinator::with_limits(1, 1, 1, 1);
+        coordinator
+            .queue(FunctionKey::new(1, 1), Tier::Baseline, snapshot())
+            .unwrap();
+
+        assert!(background.dispatch_next(&mut coordinator).unwrap());
+        assert_eq!(background.started_worker_count(), 2);
+        background.shutdown(&mut coordinator);
     }
 }
