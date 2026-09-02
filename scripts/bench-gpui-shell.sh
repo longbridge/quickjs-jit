@@ -36,6 +36,15 @@ fi
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 shell_root=$(cd "$shell_root" && pwd)
 output_json=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$output_json")
+rquickjs_revision=$(git -C "$repo_root" rev-parse HEAD)
+dependency_revisions=$(sed -n '/quickjs-jit.*git =/s/.*rev = "\([^"]*\)".*/\1/p' \
+  "$shell_root/Cargo.toml" | sort -u)
+if [[ "$dependency_revisions" != "$rquickjs_revision" ]]; then
+  echo "gpui-shell quickjs-jit dependency revision does not match the benchmark source:" >&2
+  echo "  dependency: ${dependency_revisions:-missing}" >&2
+  echo "  source:     $rquickjs_revision" >&2
+  exit 5
+fi
 
 # Pin every fresh process to one explicitly selected CPU. This removes process
 # migration from paired P99 and lifecycle observations without changing either
