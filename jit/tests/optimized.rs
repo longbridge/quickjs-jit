@@ -2070,12 +2070,6 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
-        let result = context.with(|ctx| {
-            let workload: Function = ctx.globals().get("workload").unwrap();
-            let increment: Function = ctx.globals().get("increment").unwrap();
-            workload.call::<_, i32>((2_000, 0, increment)).unwrap()
-        });
-        assert_eq!(result, 7_000);
         jit.poll();
         let metrics = jit.metrics();
         if metrics.blacklisted > 0
@@ -2084,6 +2078,14 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
             && metrics.pending_snapshot_bytes == 0
         {
             break;
+        }
+        if metrics.pending_worker_jobs == 0 && metrics.pending_snapshot_bytes == 0 {
+            let result = context.with(|ctx| {
+                let workload: Function = ctx.globals().get("workload").unwrap();
+                let increment: Function = ctx.globals().get("increment").unwrap();
+                workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+            });
+            assert_eq!(result, 7_000);
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
