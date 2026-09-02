@@ -384,7 +384,9 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
                 install_poll = install_poll.saturating_add(poll_ns);
             }
             before = now;
-            if native_ready(mode, &before, tier1_ready_installs) || before.blacklisted > 0 {
+            if native_ready(mode, &before, tier1_ready_installs)
+                || (mode != "automatic" && before.blacklisted > 0)
+            {
                 break;
             }
             if Instant::now() >= threshold_deadline {
@@ -561,7 +563,9 @@ fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics, tier1_ready_installs: 
         "interpreter" => true,
         "tier1" => m.native_entries > 0 && m.installed >= tier1_ready_installs,
         "tier2" => m.tier2_entries > 0,
-        "automatic" => m.profitability_approved > 0 && m.tier2_entries > 0,
+        "automatic" => {
+            m.tier2_entries > 0 && m.pending_worker_jobs == 0 && m.pending_snapshot_bytes == 0
+        }
         _ => false,
     }
 }
@@ -965,14 +969,16 @@ mod tests {
         assert_eq!(threshold_timeout("automatic"), Duration::from_secs(2));
     }
     #[test]
-    fn automatic_warmup_waits_for_an_installed_profitable_tier2() {
+    fn automatic_warmup_waits_for_tier2_and_pending_compilation() {
         let mut metrics = rquickjs_jit::JitMetrics::default();
         metrics.native_entries = 8;
-        metrics.profitability_evaluations = 1;
-        assert!(!native_ready("automatic", &metrics, 1));
-        metrics.profitability_approved = 1;
-        assert!(!native_ready("automatic", &metrics, 1));
         metrics.tier2_entries = 1;
+        metrics.pending_worker_jobs = 1;
+        assert!(!native_ready("automatic", &metrics, 1));
+        metrics.pending_worker_jobs = 0;
+        metrics.pending_snapshot_bytes = 1;
+        assert!(!native_ready("automatic", &metrics, 1));
+        metrics.pending_snapshot_bytes = 0;
         assert!(native_ready("automatic", &metrics, 1));
     }
     #[test]

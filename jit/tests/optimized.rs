@@ -2037,6 +2037,86 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
+fn automatic_call_heavy_promotes_the_direct_edge_caller() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function increment(value,delta){return value+delta;}\
+                 function workload(iterations,seed,target){\
+                   let value=seed;let delta=0;\
+                   for(let i=0;i<iterations;i+=1){\
+                     value=target(value,delta);delta+=1;\
+                     if(delta<8){}else{delta=0;}\
+                   }\
+                   return value;\
+                 }",
+            )
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let result = context.with(|ctx| {
+            let workload: Function = ctx.globals().get("workload").unwrap();
+            let increment: Function = ctx.globals().get("increment").unwrap();
+            workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+        });
+        assert_eq!(result, 7_000);
+        jit.poll();
+        let metrics = jit.metrics();
+        if metrics.blacklisted > 0
+            && metrics.tier2_entries > 0
+            && metrics.pending_worker_jobs == 0
+            && metrics.pending_snapshot_bytes == 0
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let warmed = jit.metrics();
+    assert!(warmed.blacklisted > 0, "{warmed:?}");
+    assert_eq!(
+        warmed.profitability_rejected, 5,
+        "the stable direct-edge caller repeated the leaf's misleading baseline profitability retries: {warmed:?}"
+    );
+
+    for _ in 0..11 {
+        let result = context.with(|ctx| {
+            let workload: Function = ctx.globals().get("workload").unwrap();
+            let increment: Function = ctx.globals().get("increment").unwrap();
+            workload.call::<_, i32>((2_000, 0, increment)).unwrap()
+        });
+        assert_eq!(result, 7_000);
+        jit.poll();
+    }
+    let after = jit.metrics();
+    let entries = after.native_entries.saturating_sub(warmed.native_entries);
+    assert!(
+        entries <= 32,
+        "automatic left the direct-edge caller in the interpreter and crossed into the leaf {entries} times: before={warmed:?}, after={after:?}"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
 fn stable_float64_loop_stays_native_without_a_side_path() {
     use rquickjs::{Context, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
