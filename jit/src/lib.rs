@@ -466,6 +466,13 @@ struct NoopBackend {
 )))]
 unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 
+/// Upper bound on consecutive per-call ticks that may skip the full
+/// maintenance pass when no completion, feedback change, or installation
+/// happened. Backoff windows are measured in clock ticks, which still advance
+/// on every call, so this only bounds the latency of candidate scans.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const HOT_MAINTENANCE_INTERVAL: u32 = 64;
+
 #[cfg(all(
     feature = "compiler",
     any(
@@ -486,12 +493,6 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
         )
     )
 ))]
-/// Upper bound on consecutive per-call ticks that may skip the full
-/// maintenance pass when no completion, feedback change, or installation
-/// happened. Backoff windows are measured in clock ticks, which still advance
-/// on every call, so this only bounds the latency of candidate scans.
-const HOT_MAINTENANCE_INTERVAL: u32 = 64;
-
 struct ProductionBackend {
     runtime_id: u64,
     abi_info: abi::AbiInfo,
