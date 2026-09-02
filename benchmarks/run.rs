@@ -258,7 +258,9 @@ fn measure_interleaved(modes: &[String]) -> Result<Vec<ModeResult>, String> {
         for pair in 0..sampling.samples {
             for mode in rotated(modes, pair) {
                 let result = child(&executable, mode, &path)?;
-                validate_sample(mode, &result, workload.designated)?;
+                validate_sample(mode, &result, workload.designated).map_err(|error| {
+                    format!("{} {mode} latency pair {pair}: {error}", workload.name)
+                })?;
                 samples
                     .get_mut(mode)
                     .unwrap()
@@ -272,7 +274,13 @@ fn measure_interleaved(modes: &[String]) -> Result<Vec<ModeResult>, String> {
                 let start = Instant::now();
                 let mut ops = 0u64;
                 while start.elapsed() < sampling.window {
-                    validate_sample(mode, &child(&executable, mode, &path)?, workload.designated)?;
+                    validate_sample(mode, &child(&executable, mode, &path)?, workload.designated)
+                        .map_err(|error| {
+                        format!(
+                            "{} {mode} throughput window {window}: {error}",
+                            workload.name
+                        )
+                    })?;
                     ops = ops.saturating_add(1);
                 }
                 throughput.get_mut(mode).unwrap().push(ops);
@@ -404,6 +412,27 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             break;
         }
     }
+    // Automatic tiering may queue one more version right after its first
+    // Tier 2 entry (a side path or a refreshed caller). Let that bounded tail
+    // of compilation settle before the steady state is timed; a sample whose
+    // compilation never settles is still rejected below.
+    if let Some(jit) = &jit {
+        if mode == "automatic" {
+            let settle_deadline = Instant::now() + Duration::from_secs(1);
+            let mut quiet_polls = 0;
+            while quiet_polls < 3 && Instant::now() < settle_deadline {
+                let _settle_checksum = invoke_workload(&context)?;
+                jit.poll();
+                before = jit.metrics();
+                if before.pending_worker_jobs == 0 && before.pending_snapshot_bytes == 0 {
+                    quiet_polls += 1;
+                } else {
+                    quiet_polls = 0;
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+        }
+    }
     phases.threshold_crossing_ns = ns(threshold_start.elapsed());
     phases.compile_ns = before.compile_ns;
     phases.install_ns = before.install_ns.max(install_poll);
@@ -430,6 +459,22 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         }
     }
     phases.steady_state_ns = ns(start.elapsed());
+    // A completion that landed during the last steady-state invocation is
+    // drained by polling without further JavaScript execution; the timing
+    // above is untouched.
+    if let Some(jit) = &jit {
+        let drain_deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            jit.poll();
+            let metrics = jit.metrics();
+            if (metrics.pending_worker_jobs == 0 && metrics.pending_snapshot_bytes == 0)
+                || Instant::now() >= drain_deadline
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
     let metrics = jit.as_ref().map(Jit::metrics).unwrap_or_default();
     let abi = AbiInfo::linked().map_err(err)?;
     phases.total_ns = ns(total.elapsed());
@@ -594,18 +639,18 @@ fn validate_sample(mode: &str, r: &WorkerResult, requires_native: bool) -> Resul
     match mode {
         "interpreter" if r.native_entries != 0 => Err("interpreter entered native code".into()),
         "tier1" if requires_native && r.native_entries == 0 => {
-            Err("Tier1 sample never entered native code".into())
+            Err(format!("Tier1 sample never entered native code: {r:?}"))
         }
         "tier1" if r.tier2_entries != 0 => Err("Tier1 policy entered Tier2".into()),
         "tier2" if requires_native && r.tier2_entries == 0 => {
-            Err("Tier2 sample never entered Tier2 code".into())
+            Err(format!("Tier2 sample never entered Tier2 code: {r:?}"))
         }
         "automatic" if requires_native && r.tier2_entries == 0 => {
-            Err("automatic sample never entered Tier2 code".into())
+            Err(format!("automatic sample never entered Tier2 code: {r:?}"))
         }
-        "automatic" if r.tier2_entries > 0 && !r.automatic_ready => {
-            Err("automatic sample retained pending compilation after warmup".into())
-        }
+        "automatic" if r.tier2_entries > 0 && !r.automatic_ready => Err(format!(
+            "automatic sample retained pending compilation after warmup: {r:?}"
+        )),
         _ => Ok(()),
     }
 }
