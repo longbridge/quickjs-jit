@@ -488,17 +488,15 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn production_compile_failure_retries_through_backoff_without_duplicates() {
+fn production_ineligible_loop_is_rejected_once_before_queueing() {
     let failure_fixture =
         SnapshotFixture::compile("(function f(n,z){let i=z;while(i<n)i++;return i%2})");
     let verified = failure_fixture
         .snapshot()
         .verify(Default::default())
         .unwrap();
-    assert!(
-        BaselineCompiler::host().compile(&verified).is_err(),
-        "fixture must reach the worker then fail Tier1 compilation"
-    );
+    assert!(verified.tier1_eligibility().is_err());
+    assert!(BaselineCompiler::host().compile(&verified).is_err());
     let runtime = Runtime::new().unwrap();
     let config = rquickjs_jit::JitConfig::builder()
         .loop_threshold(1)
@@ -513,16 +511,14 @@ fn production_compile_failure_retries_through_backoff_without_duplicates() {
     });
     assert_eq!(value, 0);
     let metrics = jit.metrics();
-    assert_eq!(
-        metrics.queued, 4,
-        "one request per coordinator attempt: {metrics:?}"
-    );
-    assert_eq!(metrics.compile_failures, 4, "{metrics:?}");
+    assert_eq!(metrics.queued, 0, "ineligible work was queued: {metrics:?}");
+    assert_eq!(metrics.compile_failures, 1, "{metrics:?}");
+    assert_eq!(metrics.tier1_rejections, 1, "{metrics:?}");
     assert_eq!(metrics.blacklisted, 1, "{metrics:?}");
-    assert_eq!(metrics.hot_loop_queues, 4, "{metrics:?}");
+    assert_eq!(metrics.hot_loop_queues, 0, "{metrics:?}");
     assert_eq!(
-        metrics.snapshot_requests, 4,
-        "backoff must suppress duplicate snapshots between attempts: {metrics:?}"
+        metrics.snapshot_requests, 1,
+        "terminal eligibility must suppress duplicate snapshots: {metrics:?}"
     );
 }
 
