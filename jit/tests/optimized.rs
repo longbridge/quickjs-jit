@@ -1684,7 +1684,30 @@ fn production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch()
         });
         jit.poll();
     }
+    // Background compilation is much slower under coverage or sanitizer
+    // instrumentation; let every queued caller version land before the
+    // deoptimization probes run.
+    let settled = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < settled {
+        let metrics = jit.metrics();
+        if metrics.pending_worker_jobs == 0
+            && metrics.pending_snapshot_bytes == 0
+            && metrics.tier2_entries > 0
+        {
+            break;
+        }
+        context.with(|ctx| {
+            let add1: rquickjs::Function<'_> = ctx.globals().get("add1").unwrap();
+            for name in ["invokeTarget", "invokeType", "invokeOverflow"] {
+                let invoke: rquickjs::Function<'_> = ctx.globals().get(name).unwrap();
+                assert_eq!(invoke.call::<_, i32>((add1.clone(), 40)).unwrap(), 41);
+            }
+        });
+        jit.poll();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
     context.with(|ctx| {
         let invoke: rquickjs::Function<'_> = ctx.globals().get("invokeTarget").unwrap();
         let sub1: rquickjs::Function<'_> = ctx.globals().get("sub1").unwrap();
