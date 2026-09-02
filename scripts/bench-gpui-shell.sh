@@ -55,10 +55,11 @@ target_root=${CARGO_TARGET_DIR:-$shell_root/target}
 test_binary=
 while IFS= read -r candidate; do
   if "$candidate" --list 2>/dev/null | grep '^tests::benchmark::emit_one_jit_acceptance_sample:' >/dev/null; then
-    test_binary=$candidate
-    break
+    if [[ -z "$test_binary" || "$candidate" -nt "$test_binary" ]]; then
+      test_binary=$candidate
+    fi
   fi
-done < <(find "$target_root/release/deps" -maxdepth 1 -type f -perm +111 -name 'gpui_shell-*' | sort)
+done < <(find "$target_root/release/deps" -maxdepth 1 -type f -perm +111 -name 'gpui_shell-*')
 if [[ -z "$test_binary" ]]; then
   echo "unable to locate gpui-shell library test binary" >&2
   exit 4

@@ -44,7 +44,12 @@ def main() -> None:
     directory, shell_root, rquickjs_root, output = map(Path, sys.argv[1:])
     workload_keys = (
         "pair_index", "steady_state_ns", "p99_script_render_ns", "checksum",
-        "snapshot_sha256", "script_renders", "native_entries", "fallback_count",
+        "snapshot_sha256", "script_renders", "native_enabled", "native_entries",
+        "fallback_count", "installed", "compile_failures",
+        "unsupported_opcode_failures", "tier1_rejections",
+        "resource_limit_failures", "cancelled_compilations", "compiler_panics",
+        "invalid_artifacts", "install_failures", "native_exits", "osr_entries",
+        "deopts",
     )
     lifecycle_keys = (
         "pair_index", "first_window_ns", "hot_reload_ns", "snapshot_sha256",

@@ -55,8 +55,21 @@ struct Sample {
     checksum: String,
     snapshot_sha256: String,
     script_renders: u64,
+    native_enabled: bool,
     native_entries: u64,
     fallback_count: u64,
+    installed: u64,
+    compile_failures: u64,
+    unsupported_opcode_failures: u64,
+    tier1_rejections: u64,
+    resource_limit_failures: u64,
+    cancelled_compilations: u64,
+    compiler_panics: u64,
+    invalid_artifacts: u64,
+    install_failures: u64,
+    native_exits: u64,
+    osr_entries: u64,
+    deopts: u64,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +161,7 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
     let mut suitable = 0;
     let mut suitable_pass = 0;
     let mut workloads_pass = true;
+    let mut diagnostics = String::new();
     for workload in &report.workloads {
         validate_pairs(&workload.name, &workload.interpreter, &workload.automatic)?;
         let speedup = paired_bootstrap(&workload.interpreter, &workload.automatic, |i, a| {
@@ -188,13 +202,31 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
             fallback,
             if pass { "PASS" } else { "FAIL" },
         ));
+        let sum = |field: fn(&Sample) -> u64| workload.automatic.iter().map(field).sum::<u64>();
+        diagnostics.push_str(&format!(
+            "- {}: installed={}, failures={} (unsupported={}, tier1={}, resource={}, cancelled={}, panics={}, invalid={}, install={}), native exits={}, OSR entries={}, deopts={}\n",
+            workload.name,
+            sum(|sample| sample.installed),
+            sum(|sample| sample.compile_failures),
+            sum(|sample| sample.unsupported_opcode_failures),
+            sum(|sample| sample.tier1_rejections),
+            sum(|sample| sample.resource_limit_failures),
+            sum(|sample| sample.cancelled_compilations),
+            sum(|sample| sample.compiler_panics),
+            sum(|sample| sample.invalid_artifacts),
+            sum(|sample| sample.install_failures),
+            sum(|sample| sample.native_exits),
+            sum(|sample| sample.osr_entries),
+            sum(|sample| sample.deopts),
+        ));
     }
     let first = lifecycle_ci(&report.lifecycle, |x| x.first_window_ns);
     let reload = lifecycle_ci(&report.lifecycle, |x| x.hot_reload_ns);
     let lifecycle_pass = first[1] <= 1.05 && reload[1] <= 1.05;
     let all_pass = suitable > 0 && suitable == suitable_pass && workloads_pass && lifecycle_pass;
     markdown.push_str(&format!(
-        "\nLifecycle regression CIs: first window {:+.2}%..{:+.2}%; hot reload {:+.2}%..{:+.2}%. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
+        "\nDiagnostics across automatic samples:\n\n{}\nLifecycle regression CIs: first window {:+.2}%..{:+.2}%; hot reload {:+.2}%..{:+.2}%. Snapshots and script-render counts match pairwise.\n\nOverall: **{}**.\n",
+        diagnostics,
         (first[0] - 1.0) * 100.0,
         (first[1] - 1.0) * 100.0,
         (reload[0] - 1.0) * 100.0,
@@ -228,6 +260,27 @@ fn validate_pairs(name: &str, interpreter: &[Sample], automatic: &[Sample]) -> R
             || i.script_renders != a.script_renders
         {
             return Err(format!("{name}: semantic mismatch at pair {index}"));
+        }
+        if i.native_enabled || !a.native_enabled {
+            return Err(format!("{name}: invalid runtime mode at pair {index}"));
+        }
+        if i.native_entries != 0 || i.installed != 0 || i.compile_failures != 0 {
+            return Err(format!(
+                "{name}: interpreter recorded JIT activity at pair {index}"
+            ));
+        }
+        let categorized_failures = a
+            .unsupported_opcode_failures
+            .saturating_add(a.tier1_rejections)
+            .saturating_add(a.resource_limit_failures)
+            .saturating_add(a.cancelled_compilations)
+            .saturating_add(a.compiler_panics)
+            .saturating_add(a.invalid_artifacts)
+            .saturating_add(a.install_failures);
+        if a.compile_failures > 0 && categorized_failures == 0 {
+            return Err(format!(
+                "{name}: uncategorized compilation failures at pair {index}"
+            ));
         }
     }
     Ok(())
@@ -296,7 +349,7 @@ mod tests {
     use super::*;
 
     fn report(speedup: u64, automatic_native_entries: u64) -> Report {
-        let samples = |time, native_entries| {
+        let samples = |time, native_enabled, native_entries| {
             (0..REQUIRED_SAMPLES)
                 .map(|pair_index| Sample {
                     pair_index,
@@ -305,8 +358,21 @@ mod tests {
                     checksum: "same".into(),
                     snapshot_sha256: "snapshot".into(),
                     script_renders: 1,
+                    native_enabled,
                     native_entries,
                     fallback_count: 0,
+                    installed: native_entries,
+                    compile_failures: 0,
+                    unsupported_opcode_failures: 0,
+                    tier1_rejections: 0,
+                    resource_limit_failures: 0,
+                    cancelled_compilations: 0,
+                    compiler_panics: 0,
+                    invalid_artifacts: 0,
+                    install_failures: 0,
+                    native_exits: native_entries,
+                    osr_entries: 0,
+                    deopts: 0,
                 })
                 .collect()
         };
@@ -344,8 +410,8 @@ mod tests {
                 name: "real panel".into(),
                 suitable_for_jit: true,
                 regression_guard: true,
-                interpreter: samples(100 * speedup, 0),
-                automatic: samples(100, automatic_native_entries),
+                interpreter: samples(100 * speedup, false, 0),
+                automatic: samples(100, true, automatic_native_entries),
             }],
             lifecycle: Lifecycle {
                 interpreter: lifecycle(100),
@@ -375,6 +441,27 @@ mod tests {
         let (markdown, pass) = validate_and_render(&report(3, 0)).unwrap();
         assert!(!pass);
         assert!(markdown.contains("Overall: **FAIL**"));
+    }
+
+    #[test]
+    fn threshold_only_runtime_is_rejected_as_an_interpreter_baseline() {
+        let mut report = report(2, 1);
+        report.workloads[0].interpreter[0].native_enabled = true;
+
+        let error = validate_and_render(&report).unwrap_err();
+        assert!(error.contains("invalid runtime mode at pair 0"), "{error}");
+    }
+
+    #[test]
+    fn aggregate_failure_without_a_category_is_rejected() {
+        let mut report = report(2, 1);
+        report.workloads[0].automatic[0].compile_failures = 1;
+
+        let error = validate_and_render(&report).unwrap_err();
+        assert!(
+            error.contains("uncategorized compilation failures at pair 0"),
+            "{error}"
+        );
     }
 
     #[test]
