@@ -227,6 +227,10 @@ impl OptimizedIr {
         let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
         let mut boxes_elided = 0u64;
         let mut next_effect = 1u64;
+        // The verifier proves every reachable depth, so the operand stack the
+        // machine lowering has to model is the deepest point actually reached
+        // rather than the declared (possibly unbounded) capacity.
+        let mut max_stack = 0u16;
         for block in function.control_flow_graph().blocks() {
             let mut block_nodes = Vec::new();
             let mut stack_depth = *block_depths
@@ -245,69 +249,82 @@ impl OptimizedIr {
                 )?);
             }
             for instruction in &function.instructions()[block.instruction_range()] {
-                let name = instruction.opcode().name();
-                let (representation, effect) = classify_optimized_opcode(name)?;
-                let pops = u16::try_from(effective_pop(instruction))
+                let instruction_pops = u16::try_from(effective_pop(instruction))
                     .map_err(|_| CompileFailure::ResourceLimit)?;
-                let deopt_guard = if is_guarded_arithmetic(name)
-                    || name.starts_with("call")
-                    || matches!(name, "get_array_el" | "put_array_el")
-                    || name == "get_length"
-                    || name == "to_propkey"
-                    || matches!(name, "or" | "and" | "xor" | "shl" | "sar")
-                {
-                    let guard = next_guard;
-                    next_guard = next_guard
-                        .checked_add(1)
-                        .ok_or(CompileFailure::ResourceLimit)?;
-                    let shape = OptimizedFrameShape::new(
-                        snapshot.arg_count(),
-                        snapshot.local_count(),
-                        stack_depth,
-                    );
-                    let map = identity_deopt_map(
-                        guard,
-                        instruction.pc(),
-                        DeoptPhase::BeforeEffect(next_effect),
-                        shape,
-                    )?;
-                    guards.push(GuardSite { guard, shape, map });
-                    Some(guard)
-                } else {
-                    None
+                // A tail call is exactly a call whose result is returned from
+                // the same pc. Expanding it here lets the audited call
+                // lowering and the runtime's call-site feedback (recorded at
+                // this pc) apply unchanged; `tail_call` itself pushes nothing,
+                // so the synthesized return consumes the call result.
+                let expansions: [Option<(&str, u16, u8)>; 2] = match instruction.opcode().name() {
+                    "tail_call" => [Some(("call", instruction_pops, 1)), Some(("return", 1, 0))],
+                    "tail_call_method" => [
+                        Some(("call_method", instruction_pops, 1)),
+                        Some(("return", 1, 0)),
+                    ],
+                    name => [
+                        Some((name, instruction_pops, instruction.opcode().n_push())),
+                        None,
+                    ],
                 };
-                boxes_elided = boxes_elided.saturating_add(u64::from(matches!(
-                    representation,
-                    ValueRepresentation::Int32 | ValueRepresentation::Float64
-                )));
-                let id = u32::try_from(nodes.len()).map_err(|_| CompileFailure::ResourceLimit)?;
-                // Stack drops and bytecode nops have no machine operation once
-                // their SSA uses are dead; producers are removed by the
-                // backwards liveness pass in the lowering stage.
-                nodes.push(OptimizedNode {
-                    id,
-                    pc: instruction.pc(),
-                    kind: OptimizedNodeKind::Bytecode {
-                        opcode: name.into(),
-                    },
-                    representation,
-                    effect,
-                    eliminated: matches!(name, "nop" | "drop"),
-                    bytes: instruction.bytes().into(),
-                    branch_target: instruction
-                        .branch_target()
-                        .and_then(|target| u32::try_from(target).ok()),
-                    pops,
-                    pushes: instruction.opcode().n_push(),
-                    deopt_guard,
-                });
-                block_nodes.push(id);
-                stack_depth = stack_depth
-                    .checked_sub(pops)
-                    .and_then(|depth| depth.checked_add(u16::from(instruction.opcode().n_push())))
-                    .ok_or(CompileFailure::InvalidArtifact)?;
-                if effect != OptimizedEffect::Pure {
-                    next_effect = next_effect.saturating_add(1);
+                for (name, pops, pushes) in expansions.into_iter().flatten() {
+                    let (representation, effect) = classify_optimized_opcode(name)?;
+                    let deopt_guard = if needs_deopt_guard(name) {
+                        let guard = next_guard;
+                        next_guard = next_guard
+                            .checked_add(1)
+                            .ok_or(CompileFailure::ResourceLimit)?;
+                        let shape = OptimizedFrameShape::new(
+                            snapshot.arg_count(),
+                            snapshot.local_count(),
+                            stack_depth,
+                        );
+                        let map = identity_deopt_map(
+                            guard,
+                            instruction.pc(),
+                            DeoptPhase::BeforeEffect(next_effect),
+                            shape,
+                        )?;
+                        guards.push(GuardSite { guard, shape, map });
+                        Some(guard)
+                    } else {
+                        None
+                    };
+                    boxes_elided = boxes_elided.saturating_add(u64::from(matches!(
+                        representation,
+                        ValueRepresentation::Int32 | ValueRepresentation::Float64
+                    )));
+                    let id =
+                        u32::try_from(nodes.len()).map_err(|_| CompileFailure::ResourceLimit)?;
+                    // Stack drops and bytecode nops have no machine operation once
+                    // their SSA uses are dead; producers are removed by the
+                    // backwards liveness pass in the lowering stage.
+                    nodes.push(OptimizedNode {
+                        id,
+                        pc: instruction.pc(),
+                        kind: OptimizedNodeKind::Bytecode {
+                            opcode: name.into(),
+                        },
+                        representation,
+                        effect,
+                        eliminated: matches!(name, "nop" | "drop"),
+                        bytes: instruction.bytes().into(),
+                        branch_target: instruction
+                            .branch_target()
+                            .and_then(|target| u32::try_from(target).ok()),
+                        pops,
+                        pushes,
+                        deopt_guard,
+                    });
+                    block_nodes.push(id);
+                    stack_depth = stack_depth
+                        .checked_sub(pops)
+                        .and_then(|depth| depth.checked_add(u16::from(pushes)))
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    max_stack = max_stack.max(stack_depth);
+                    if effect != OptimizedEffect::Pure {
+                        next_effect = next_effect.saturating_add(1);
+                    }
                 }
             }
             blocks.push(OptimizedBlock {
@@ -339,7 +356,7 @@ impl OptimizedIr {
                 dead_nodes_eliminated,
             },
             feedback_epoch,
-            max_stack: snapshot.stack_size(),
+            max_stack: max_stack.min(snapshot.stack_size()),
         })
     }
     pub fn blocks(&self) -> &[OptimizedBlock] {
@@ -392,6 +409,19 @@ fn is_guarded_arithmetic(name: &str) -> bool {
             | "mod"
             | "plus"
             | "neg"
+            | "not"
+            | "lnot"
+            | "inc"
+            | "dec"
+            | "post_inc"
+            | "post_dec"
+            | "add_loc"
+            | "inc_loc"
+            | "dec_loc"
+            | "eq"
+            | "neq"
+            | "strict_eq"
+            | "strict_neq"
             | "if_false"
             | "if_true"
             | "if_false8"
@@ -399,6 +429,28 @@ fn is_guarded_arithmetic(name: &str) -> bool {
             | "get_field"
             | "put_field"
     )
+}
+
+/// Every node that can leave optimized code through an exact deoptimization
+/// exit owns an instruction-local guard site. Lowering arms for these opcodes
+/// must resolve `deopt_guard()`; pure loads, stores and stack shuffles never
+/// deoptimize and therefore carry none.
+fn needs_deopt_guard(name: &str) -> bool {
+    is_guarded_arithmetic(name)
+        || name.starts_with("call")
+        || matches!(
+            name,
+            "get_array_el"
+                | "put_array_el"
+                | "get_length"
+                | "to_propkey"
+                | "or"
+                | "and"
+                | "xor"
+                | "shl"
+                | "sar"
+                | "shr"
+        )
 }
 
 fn identity_deopt_map(
@@ -451,7 +503,7 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
     for block in blocks {
         let ids = block.nodes();
         let mut expressions = BTreeMap::<ExpressionKey, u32>::new();
-        let mut local_versions = BTreeMap::<u16, u64>::new();
+        let mut slot_versions = BTreeMap::<(u8, u16), u64>::new();
         let mut effect_epoch = 0u64;
         let mut index = 0usize;
         while index < ids.len() {
@@ -481,8 +533,8 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
                     && names[1].is_some_and(is_pure_load)
                     && names[2].is_some_and(is_pure_binary)
                 {
-                    let lhs = ssa_load_operand(&nodes[triple[0] as usize], &local_versions);
-                    let rhs = ssa_load_operand(&nodes[triple[1] as usize], &local_versions);
+                    let lhs = ssa_load_operand(&nodes[triple[0] as usize], &slot_versions);
+                    let rhs = ssa_load_operand(&nodes[triple[1] as usize], &slot_versions);
                     let representation = match nodes[triple[2] as usize].representation {
                         ValueRepresentation::Tagged => 0,
                         ValueRepresentation::Int32 => 1,
@@ -524,10 +576,10 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
                 effect_epoch = effect_epoch.saturating_add(1);
                 expressions.clear();
                 if node.effect == OptimizedEffect::FrameWrite {
-                    if let Some(local) = local_write_index(node) {
-                        *local_versions.entry(local).or_default() += 1;
+                    if let Some(slot) = frame_write_slot(node) {
+                        *slot_versions.entry(slot).or_default() += 1;
                     } else {
-                        local_versions.clear();
+                        slot_versions.clear();
                     }
                 }
             }
@@ -539,23 +591,42 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
 
 fn ssa_load_operand(
     node: &OptimizedNode,
-    local_versions: &std::collections::BTreeMap<u16, u64>,
+    slot_versions: &std::collections::BTreeMap<(u8, u16), u64>,
 ) -> Option<(u8, u16, u64)> {
     let name = opcode_name(node)?;
     let index = indexed_node_operand(name, node.bytes())?;
-    if name.starts_with("get_arg") {
-        Some((0, index, 0))
+    let kind = if name.starts_with("get_arg") {
+        FRAME_SLOT_ARGUMENT
     } else if name.starts_with("get_loc") {
-        Some((1, index, local_versions.get(&index).copied().unwrap_or(0)))
+        FRAME_SLOT_LOCAL
     } else {
-        None
-    }
+        return None;
+    };
+    Some((
+        kind,
+        index,
+        slot_versions.get(&(kind, index)).copied().unwrap_or(0),
+    ))
 }
 
-fn local_write_index(node: &OptimizedNode) -> Option<u16> {
+const FRAME_SLOT_ARGUMENT: u8 = 0;
+const FRAME_SLOT_LOCAL: u8 = 1;
+
+/// The single argument or local slot a frame-writing node redefines, so the
+/// value-numbering pass retires only the loads that alias it.
+fn frame_write_slot(node: &OptimizedNode) -> Option<(u8, u16)> {
     let name = opcode_name(node)?;
-    (name.starts_with("put_loc") || name.starts_with("set_loc"))
-        .then(|| indexed_node_operand(name, node.bytes()))?
+    let kind = if name.starts_with("put_loc")
+        || name.starts_with("set_loc")
+        || matches!(name, "add_loc" | "inc_loc" | "dec_loc")
+    {
+        FRAME_SLOT_LOCAL
+    } else if name.starts_with("put_arg") || name.starts_with("set_arg") {
+        FRAME_SLOT_ARGUMENT
+    } else {
+        return None;
+    };
+    Some((kind, indexed_node_operand(name, node.bytes())?))
 }
 
 fn indexed_node_operand(name: &str, bytes: &[u8]) -> Option<u16> {
@@ -641,21 +712,33 @@ fn classify_optimized_opcode(
     name: &str,
 ) -> Result<(ValueRepresentation, OptimizedEffect), CompileFailure> {
     let result = match name {
-        "push_i8" | "push_i16" | "push_i32" | "push_0" | "push_1" | "push_2" | "push_3"
-        | "push_4" | "push_5" | "push_6" | "push_7" | "add_loc" | "inc_loc" | "dec_loc"
-        | "post_inc" | "post_dec" | "inc" | "dec" | "shl" | "sar" | "shr" | "and" | "or"
-        | "xor" => (ValueRepresentation::Int32, OptimizedEffect::Pure),
+        "push_i8" | "push_i16" | "push_i32" | "push_minus1" | "push_0" | "push_1" | "push_2"
+        | "push_3" | "push_4" | "push_5" | "push_6" | "push_7" | "post_inc" | "post_dec"
+        | "inc" | "dec" | "not" | "shl" | "sar" | "shr" | "and" | "or" | "xor" => {
+            (ValueRepresentation::Int32, OptimizedEffect::Pure)
+        }
         "add" | "sub" | "mul" | "div" | "mod" | "plus" | "neg" => {
             (ValueRepresentation::Float64, OptimizedEffect::Pure)
         }
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" | "get_loc" | "get_loc8"
         | "get_loc0" | "get_loc1" | "get_loc2" | "get_loc3" | "get_loc_check" | "get_loc0_loc1"
         | "undefined" | "null" | "push_true" | "push_false" | "dup" | "dup1" | "dup2" | "dup3"
-        | "swap" => (ValueRepresentation::Tagged, OptimizedEffect::Pure),
+        | "swap" | "nip" | "nip1" | "insert2" | "insert3" | "insert4" | "perm3" | "perm4"
+        | "perm5" | "swap2" | "rot3l" | "rot3r" | "rot4l" | "rot5l" => {
+            (ValueRepresentation::Tagged, OptimizedEffect::Pure)
+        }
         "push_const" | "push_const8" => (ValueRepresentation::Tagged, OptimizedEffect::Reentrant),
-        "is_undefined_or_null" => (ValueRepresentation::Int32, OptimizedEffect::Pure),
+        "is_undefined_or_null" | "is_undefined" | "is_null" | "lnot" => {
+            (ValueRepresentation::Int32, OptimizedEffect::Pure)
+        }
         "to_propkey" => (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite),
+        // Local arithmetic redefines a frame slot in place; it is a frame
+        // write for value numbering even though it pushes nothing.
         "put_arg"
+        | "put_arg0"
+        | "put_arg1"
+        | "put_arg2"
+        | "put_arg3"
         | "put_loc"
         | "put_loc8"
         | "put_loc0"
@@ -665,7 +748,14 @@ fn classify_optimized_opcode(
         | "put_loc_check"
         | "put_loc_check_init"
         | "set_loc_uninitialized"
+        | "add_loc"
+        | "inc_loc"
+        | "dec_loc"
         | "drop" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
+        "set_arg" | "set_arg0" | "set_arg1" | "set_arg2" | "set_arg3" | "set_loc" | "set_loc8"
+        | "set_loc0" | "set_loc1" | "set_loc2" | "set_loc3" => {
+            (ValueRepresentation::Tagged, OptimizedEffect::FrameWrite)
+        }
         "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
             (ValueRepresentation::Tagged, OptimizedEffect::Reentrant)
         }
@@ -676,7 +766,7 @@ fn classify_optimized_opcode(
         "put_array_el" => (ValueRepresentation::Effect, OptimizedEffect::FrameWrite),
         "if_false" | "if_true" | "if_false8" | "if_true8" | "goto" | "goto8" | "goto16"
         | "return" | "return_undef" | "lt" | "lte" | "gt" | "gte" | "eq" | "neq" | "strict_eq"
-        | "strict_neq" | "lnot" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),
+        | "strict_neq" | "nop" => (ValueRepresentation::Effect, OptimizedEffect::Control),
         _ => return Err(CompileFailure::UnsupportedOpcode),
     };
     Ok(result)

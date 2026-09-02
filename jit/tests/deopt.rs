@@ -221,3 +221,216 @@ fn checked_integer_arithmetic_sites_have_exact_pre_effect_deopt_maps() {
             .is_ok());
     }
 }
+
+// ---------------------------------------------------------------------------
+// M2 core opcodes: exact guard sites in the optimized IR.
+// ---------------------------------------------------------------------------
+
+fn translate(bytecode: Vec<u8>, arg_count: u16, local_count: u16) -> OptimizedIr {
+    let verified = CompileSnapshot::from_untrusted_bytecode(bytecode, arg_count, local_count, 0, 0)
+        .verify(VerifyLimits::default())
+        .expect("synthetic bytecode verifies");
+    OptimizedIr::translate(&verified, 3).expect("M2 opcodes translate")
+}
+
+fn bytecode_name(node: &rquickjs_jit::ir::OptimizedNode) -> &str {
+    match node.kind() {
+        rquickjs_jit::ir::OptimizedNodeKind::Bytecode { opcode } => opcode,
+        other => panic!("expected a bytecode node, found {other:?}"),
+    }
+}
+
+/// The node at `pc` owns an instruction-local, pre-effect identity guard
+/// site whose frame shape is exactly the operand stack before the pops.
+fn assert_exact_guard(ir: &OptimizedIr, pc: u32, shape: OptimizedFrameShape) {
+    let node = ir
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.pc() == pc
+                && node.deopt_guard().is_some()
+                && matches!(
+                    node.kind(),
+                    rquickjs_jit::ir::OptimizedNodeKind::Bytecode { .. }
+                )
+        })
+        .unwrap_or_else(|| panic!("{} at pc {pc} carries no guard", ir.nodes().len()));
+    let guard = node.deopt_guard().unwrap();
+    assert_ne!(guard, ir.guard_maps()[0].guard(), "{}", bytecode_name(node));
+    let site = ir
+        .guard_maps()
+        .iter()
+        .find(|site| site.guard() == guard)
+        .unwrap();
+    assert_eq!(site.map().resume_pc(), pc, "{}", bytecode_name(node));
+    assert_eq!(
+        site.map().phase(),
+        DeoptPhase::BeforeEffect(1),
+        "{}",
+        bytecode_name(node)
+    );
+    assert_eq!(site.shape(), shape, "{}", bytecode_name(node));
+    assert!(
+        site.map()
+            .validate_identity_materialization(site.shape())
+            .is_ok(),
+        "{}",
+        bytecode_name(node)
+    );
+}
+
+#[test]
+fn tail_call_expands_into_a_guarded_call_and_a_return_at_the_same_pc() {
+    use rquickjs_core::qjs;
+    let ir = translate(
+        vec![
+            opcode::GET_ARG,
+            0,
+            0,
+            opcode::GET_ARG,
+            1,
+            0,
+            qjs::QJS_JIT_OP_TAIL_CALL,
+            1,
+            0,
+        ],
+        2,
+        0,
+    );
+    let expanded = ir
+        .nodes()
+        .iter()
+        .filter(|node| node.pc() == 6)
+        .collect::<Vec<_>>();
+    assert_eq!(expanded.len(), 2);
+    assert_eq!(bytecode_name(expanded[0]), "call");
+    assert_eq!((expanded[0].pops(), expanded[0].pushes()), (2, 1));
+    assert_eq!(bytecode_name(expanded[1]), "return");
+    assert_eq!((expanded[1].pops(), expanded[1].pushes()), (1, 0));
+    assert_eq!(expanded[1].deopt_guard(), None);
+    assert_exact_guard(&ir, 6, OptimizedFrameShape::new(2, 0, 2));
+
+    let ir = translate(
+        vec![
+            opcode::GET_ARG,
+            0,
+            0,
+            opcode::GET_ARG,
+            1,
+            0,
+            opcode::GET_ARG,
+            2,
+            0,
+            qjs::QJS_JIT_OP_TAIL_CALL_METHOD,
+            1,
+            0,
+        ],
+        3,
+        0,
+    );
+    let expanded = ir
+        .nodes()
+        .iter()
+        .filter(|node| node.pc() == 9)
+        .collect::<Vec<_>>();
+    assert_eq!(bytecode_name(expanded[0]), "call_method");
+    assert_eq!((expanded[0].pops(), expanded[0].pushes()), (3, 1));
+    assert_eq!(bytecode_name(expanded[1]), "return");
+    assert_exact_guard(&ir, 9, OptimizedFrameShape::new(3, 0, 3));
+}
+
+#[test]
+fn m2_numeric_opcodes_own_instruction_local_deopt_sites() {
+    use rquickjs_core::qjs;
+    for unary in [
+        qjs::QJS_JIT_OP_NEG,
+        qjs::QJS_JIT_OP_PLUS,
+        qjs::QJS_JIT_OP_NOT,
+        qjs::QJS_JIT_OP_LNOT,
+        qjs::QJS_JIT_OP_INC,
+        qjs::QJS_JIT_OP_DEC,
+        qjs::QJS_JIT_OP_POST_INC,
+        qjs::QJS_JIT_OP_POST_DEC,
+    ] {
+        let ir = translate(vec![opcode::GET_ARG, 0, 0, unary, opcode::RETURN], 1, 0);
+        assert_exact_guard(&ir, 3, OptimizedFrameShape::new(1, 0, 1));
+    }
+    for binary in [
+        qjs::QJS_JIT_OP_MOD,
+        qjs::QJS_JIT_OP_SHL,
+        qjs::QJS_JIT_OP_SAR,
+        qjs::QJS_JIT_OP_SHR,
+        qjs::QJS_JIT_OP_EQ,
+        qjs::QJS_JIT_OP_NEQ,
+        qjs::QJS_JIT_OP_STRICT_EQ,
+        qjs::QJS_JIT_OP_STRICT_NEQ,
+    ] {
+        let ir = translate(
+            vec![
+                opcode::GET_ARG,
+                0,
+                0,
+                opcode::GET_ARG,
+                1,
+                0,
+                binary,
+                opcode::RETURN,
+            ],
+            2,
+            0,
+        );
+        assert_exact_guard(&ir, 6, OptimizedFrameShape::new(2, 0, 2));
+    }
+    for local in [opcode::INC_LOC, opcode::DEC_LOC] {
+        let ir = translate(vec![local, 0, opcode::GET_LOC, 0, 0, opcode::RETURN], 0, 1);
+        assert_exact_guard(&ir, 0, OptimizedFrameShape::new(0, 1, 0));
+    }
+    let ir = translate(
+        vec![
+            opcode::GET_ARG,
+            0,
+            0,
+            opcode::ADD_LOC,
+            0,
+            opcode::GET_LOC,
+            0,
+            0,
+            opcode::RETURN,
+        ],
+        1,
+        1,
+    );
+    assert_exact_guard(&ir, 3, OptimizedFrameShape::new(1, 1, 1));
+}
+
+#[test]
+fn constants_stack_shuffles_and_frame_stores_carry_no_guard() {
+    use rquickjs_core::qjs;
+    let ir = translate(
+        vec![
+            qjs::QJS_JIT_OP_PUSH_MINUS1,
+            qjs::QJS_JIT_OP_NULL,
+            qjs::QJS_JIT_OP_PUSH_TRUE,
+            qjs::QJS_JIT_OP_ROT3L,
+            qjs::QJS_JIT_OP_NIP1,
+            qjs::QJS_JIT_OP_PUT_ARG0,
+            qjs::QJS_JIT_OP_SET_LOC,
+            0,
+            0,
+            qjs::QJS_JIT_OP_IS_NULL,
+            opcode::RETURN,
+        ],
+        1,
+        1,
+    );
+    assert!(ir
+        .nodes()
+        .iter()
+        .filter(|node| matches!(
+            node.kind(),
+            rquickjs_jit::ir::OptimizedNodeKind::Bytecode { .. }
+        ))
+        .all(|node| node.deopt_guard().is_none()));
+    assert_eq!(ir.guard_maps().len(), 1, "only the entry guard remains");
+    assert_eq!(ir.max_stack(), 3);
+}

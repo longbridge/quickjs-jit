@@ -151,3 +151,147 @@ fn stable_float64_add_executes_natively_and_preserves_nan_and_infinity() {
         assert_eq!(after.deopts, before.deopts, "{after:?}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// M2 core opcodes: exact runtime fallback through the production pipeline.
+// Tier 2 is only reached after Tier 1 accepts the function, so these run
+// once the M2 Tier 1 policy flip admits the opcodes below.
+// ---------------------------------------------------------------------------
+
+/// Installs `source` (which must define `f`) and evaluates `warm` until the
+/// optimized entry has run at least once.
+fn with_optimized_source(source: &str, warm: &str, check: impl FnOnce(&Context, &Jit)) {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(64)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        context.with(|ctx| {
+            let _: rquickjs::Value<'_> = ctx.eval(warm).unwrap();
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    check(&context, &jit);
+}
+
+fn eval<T: for<'js> rquickjs::FromJs<'js>>(context: &Context, source: &str) -> T {
+    context.with(|ctx| {
+        ctx.eval(source)
+            .unwrap_or_else(|error| panic!("{source}: {error} {:?}", ctx.catch()))
+    })
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn checked_int32_modulo_deopts_to_exact_negative_zero_nan_and_min_remainder() {
+    with_optimized_source("function f(a,b){return a%b}", "f(7,3)", |context, jit| {
+        let before = jit.metrics();
+        assert!(eval::<bool>(context, "Object.is(f(-4,2), -0)"));
+        assert!(eval::<bool>(context, "Number.isNaN(f(5,0))"));
+        assert!(eval::<bool>(context, "Object.is(f(-2147483648,-1), 0)"));
+        assert!(
+            jit.metrics().deopts >= before.deopts + 3,
+            "{:?}",
+            jit.metrics()
+        );
+        assert_eq!(eval::<i32>(context, "f(7,-3)"), 1);
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn shift_counts_are_masked_like_quickjs() {
+    with_optimized_source("function f(a,b){return a<<b}", "f(1,2)", |context, jit| {
+        let before = jit.metrics();
+        assert!(eval::<bool>(context, "f(1,33) === 2"));
+        assert!(eval::<bool>(context, "f(1,32) === 1"));
+        assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn unsigned_shift_renormalizes_large_results_to_float64() {
+    with_optimized_source("function f(a,b){return a>>>b}", "f(8,1)", |context, jit| {
+        let before = jit.metrics();
+        assert!(eval::<bool>(context, "f(-1,0) === 4294967295"));
+        assert!(eval::<bool>(context, "f(8,33) === 4"));
+        assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn bitwise_not_uses_to_int32_for_float64_operands() {
+    with_optimized_source("function f(a){return ~a}", "f(1)", |context, _jit| {
+        assert!(eval::<bool>(context, "f(1.5) === -2"));
+        assert!(eval::<bool>(context, "f(4294967294) === 1"));
+        assert!(eval::<bool>(context, "f(1) === -2"));
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn strict_equality_of_strings_deopts_after_numeric_feedback() {
+    with_optimized_source("function f(a,b){return a===b}", "f(1,1)", |context, jit| {
+        let before = jit.metrics();
+        assert!(eval::<bool>(context, "f('a','a') === true"));
+        assert!(eval::<bool>(context, "f('a','b') === false"));
+        assert!(jit.metrics().deopts > before.deopts, "{:?}", jit.metrics());
+        assert!(eval::<bool>(context, "f(2,2) === true"));
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn loose_equality_of_null_and_undefined_is_exact() {
+    with_optimized_source("function f(a,b){return a==b}", "f(1,1)", |context, _jit| {
+        assert!(eval::<bool>(context, "f(null,undefined) === true"));
+        assert!(eval::<bool>(context, "f(undefined,null) === true"));
+        assert!(eval::<bool>(context, "f(null,0) === false"));
+        assert!(eval::<bool>(context, "f(true,1) === true"));
+    });
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn nan_is_strictly_unequal_to_itself_without_deopt() {
+    with_optimized_source(
+        "function f(a,b){return a!==b}",
+        "f(1.5,2.5)",
+        |context, jit| {
+            let before = jit.metrics();
+            assert!(eval::<bool>(context, "f(NaN,NaN) === true"));
+            assert!(eval::<bool>(context, "f(-0,0) === false"));
+            assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
+        },
+    );
+}
+
+#[test]
+#[ignore = "enabled with the M2 Tier 1 policy flip"]
+fn negating_zero_and_int32_min_produces_exact_float64_results() {
+    with_optimized_source("function f(a){return -a}", "f(5)", |context, jit| {
+        let before = jit.metrics();
+        assert!(eval::<bool>(context, "Object.is(f(0), -0)"));
+        assert!(eval::<bool>(context, "f(-2147483648) === 2147483648"));
+        assert!(eval::<bool>(context, "f(7) === -7"));
+        assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
+    });
+}
