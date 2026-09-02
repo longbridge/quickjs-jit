@@ -2315,6 +2315,11 @@ impl JitRuntime {
         JitRuntimeBuilder::default()
     }
 
+    /// Returns whether this runtime owns an attached JIT backend.
+    pub const fn has_jit(&self) -> bool {
+        self.jit.is_some()
+    }
+
     /// Returns the attached JIT guard.
     ///
     /// Panics when this runtime was created with
@@ -2358,8 +2363,17 @@ impl Drop for JitRuntime {
 
 #[cfg(test)]
 mod jit_runtime_drop_tests {
-    use super::drop_jit_before_runtime;
+    use super::{drop_jit_before_runtime, JitRuntime};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn reports_whether_a_jit_backend_is_attached() {
+        let automatic = JitRuntime::builder().build().unwrap();
+        let interpreter = JitRuntime::builder().build_interpreter().unwrap();
+
+        assert!(automatic.has_jit());
+        assert!(!interpreter.has_jit());
+    }
 
     struct DropProbe {
         label: &'static str,
