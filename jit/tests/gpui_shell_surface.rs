@@ -191,6 +191,7 @@ fn rendering_events_and_async_continuations_share_live_script_state() {
 #[test]
 fn deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing() {
     let runtime = JitRuntime::builder().build().expect("JIT runtime");
+    assert!(!runtime.jit().test_artifact_environment_initialized());
     let context = JsContext::full(&runtime).expect("full shell context");
     context
         .with(|ctx| {
@@ -217,6 +218,7 @@ fn deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing() {
     assert_eq!(metrics.compile_failures, 1, "{metrics:?}");
     assert_eq!(metrics.tier1_rejections, 1, "{metrics:?}");
     assert_eq!(metrics.pending_worker_jobs, 0, "{metrics:?}");
+    assert!(!runtime.jit().test_artifact_environment_initialized());
 }
 
 #[test]

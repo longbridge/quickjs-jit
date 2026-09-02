@@ -666,6 +666,16 @@ impl Coordinator {
         }
     }
 
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn initialize_environment(&mut self, environment: ArtifactEnvironment) {
+        debug_assert_eq!(self.metrics.queued, 0);
+        debug_assert_eq!(self.metrics.compiling, 0);
+        debug_assert_eq!(self.metrics.installed, 0);
+        debug_assert!(self.queue.is_empty());
+        debug_assert!(self.in_flight.is_empty());
+        self.environment = environment;
+    }
+
     /// Registers bounded version identity without claiming a direct-call path.
     pub fn register_call_specialization(
         &mut self,

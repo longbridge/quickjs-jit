@@ -303,9 +303,8 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
     let jit_b = rquickjs_jit::Jit::attach(&runtime_b, config).unwrap();
     let context_b = Context::full(&runtime_b).unwrap();
 
-    let environment_a = jit_a.test_artifact_environment();
-    let environment_b = jit_b.test_artifact_environment();
-    assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
+    assert!(!jit_a.test_artifact_environment_initialized());
+    assert!(!jit_b.test_artifact_environment_initialized());
 
     context_a.with(|ctx| {
         ctx.eval::<(), _>(
@@ -319,6 +318,9 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
         )
         .unwrap()
     });
+    let environment_a = jit_a.test_artifact_environment();
+    let environment_b = jit_b.test_artifact_environment();
+    assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
     let deadline = Instant::now() + std::time::Duration::from_secs(10);
     while Instant::now() < deadline
         && (jit_a.metrics().installed == 0 || jit_b.metrics().installed == 0)

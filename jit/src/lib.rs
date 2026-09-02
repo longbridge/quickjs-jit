@@ -120,7 +120,7 @@ pub struct Jit {
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
     #[cfg(feature = "test-support")]
-    test_environment: Option<runtime::ArtifactEnvironment>,
+    test_environment: Arc<Mutex<Option<runtime::ArtifactEnvironment>>>,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
 }
@@ -192,7 +192,7 @@ impl Jit {
                 )
             )
         ))]
-        let test_environment = Some(backend.environment);
+        let test_environment = Arc::clone(&backend.environment);
         #[cfg(all(
             feature = "test-support",
             feature = "compiler",
@@ -295,7 +295,7 @@ impl Jit {
                     )
                 )))]
                 {
-                    None
+                    Arc::new(Mutex::new(None))
                 }
             },
             #[cfg(feature = "test-support")]
@@ -394,7 +394,19 @@ impl Jit {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_artifact_environment(&self) -> runtime::ArtifactEnvironment {
-        self.test_environment.expect("production compiler backend")
+        self.test_environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("production compiler backend has not received eligible work")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_artifact_environment_initialized(&self) -> bool {
+        self.test_environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 
     #[cfg(feature = "test-support")]
@@ -475,7 +487,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
     )
 ))]
 struct ProductionBackend {
-    environment: runtime::ArtifactEnvironment,
+    runtime_id: u64,
+    abi_info: abi::AbiInfo,
+    environment: Arc<Mutex<Option<runtime::ArtifactEnvironment>>>,
     config: JitConfig,
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
@@ -1127,8 +1141,7 @@ impl ProductionBackend {
         config: JitConfig,
         metrics: Arc<Mutex<JitMetrics>>,
     ) -> Result<Self, JitError> {
-        let identity_compiler = compiler::baseline::BaselineCompiler::host();
-        let environment = artifact_environment(runtime_id, info, &config, &identity_compiler);
+        let environment = Arc::new(Mutex::new(None));
         let compiler_measurements = Arc::new(CompilerMeasurements::default());
         let compiler = Arc::new(MeasuredCompiler {
             inner: DeferredTieredCompiler::default(),
@@ -1149,11 +1162,16 @@ impl ProductionBackend {
             config.max_compile_attempts(),
             config.max_code_bytes(),
             config.max_metadata_bytes(),
-            environment,
+            runtime::ArtifactEnvironment {
+                runtime_id,
+                ..runtime::ArtifactEnvironment::default()
+            },
         );
         coordinator.set_native_enabled(NATIVE_EXECUTION_SUPPORTED);
         let feedback_capacity = config.max_queue_len().max(32);
         Ok(Self {
+            runtime_id,
+            abi_info: *info,
             environment,
             coordinator,
             config,
@@ -1205,6 +1223,29 @@ impl ProductionBackend {
             #[cfg(feature = "test-support")]
             test_last_acquired_key: Arc::new(Mutex::new(None)),
         })
+    }
+
+    fn ensure_artifact_environment(&mut self) {
+        if self
+            .environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let identity_compiler = compiler::baseline::BaselineCompiler::host();
+        let environment = artifact_environment(
+            self.runtime_id,
+            &self.abi_info,
+            &self.config,
+            &identity_compiler,
+        );
+        self.coordinator.initialize_environment(environment);
+        *self
+            .environment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
     }
 
     fn maintenance(&mut self) {
@@ -1895,6 +1936,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.maintenance();
             return;
         }
+        self.ensure_artifact_environment();
         let adaptive = runtime::AdaptiveInputs {
             bytecode_bytes: verified
                 .snapshot()
