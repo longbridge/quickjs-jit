@@ -2013,9 +2013,12 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         if saw_demotion && metrics.tier2_entries > 0 {
             assert!(metrics.profitability_rejected >= 5, "{metrics:?}");
             assert_eq!(metrics.deopts, 0, "{metrics:?}");
+            // The profitable kernel queues its Baseline and Tier2 trials. The
+            // terminal host function is rejected synchronously before it can
+            // consume a worker queue slot.
             assert!(
-                metrics.queued >= 3,
-                "Tier2 trial was not queued: {metrics:?}"
+                metrics.queued >= 2,
+                "kernel Baseline and Tier2 trials were not queued: {metrics:?}"
             );
             assert!(
                 metrics.compile_failures > 0,

@@ -1181,6 +1181,7 @@ impl Coordinator {
         self.record_failure(key, tier);
     }
 
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub(crate) fn reject_tier1(
         &mut self,
         key: FunctionKey,
