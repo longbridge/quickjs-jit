@@ -562,6 +562,7 @@ fn lower_optimized_machine(
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
         let mut guarded_element_source: Option<GuardedElementSource> = None;
         let owned_locals = owned_local_targets(ir, specialization)?;
+        let bounded_increments = provably_bounded_increments(ir);
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         let env = OptEnv {
             frame,
@@ -1701,30 +1702,32 @@ fn lower_optimized_machine(
                                 // Only numbers compare natively; strings,
                                 // objects and nullish operands coerce in the
                                 // interpreter.
-                                let lhs_int =
-                                    opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_INT);
-                                let rhs_int =
-                                    opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_INT);
-                                let numeric = if int32_loop {
-                                    builder.ins().band(lhs_int, rhs_int)
-                                } else {
+                                // The raw-i32 loop shape admits only unboxed
+                                // Int32 values (entry and header guards), so
+                                // its operands need no per-iteration tag check.
+                                if !int32_loop {
+                                    let lhs_int =
+                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_INT);
+                                    let rhs_int =
+                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_INT);
                                     let lhs_float =
                                         opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_FLOAT64);
                                     let rhs_float =
                                         opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_FLOAT64);
                                     let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
                                     let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
-                                    builder.ins().band(lhs_numeric, rhs_numeric)
-                                };
-                                emit_opt_guard_branch(
-                                    &mut builder,
-                                    &env,
-                                    &stack_provenance,
-                                    depth + 2,
-                                    node.pc(),
-                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
-                                    numeric,
-                                )?;
+                                    let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+                                    emit_opt_guard_branch(
+                                        &mut builder,
+                                        &env,
+                                        &stack_provenance,
+                                        depth + 2,
+                                        node.pc(),
+                                        node.deopt_guard()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                        numeric,
+                                    )?;
+                                }
                                 let value = if int32_loop {
                                     let cc = match name {
                                         "lt" => IntCC::SignedLessThan,
@@ -1764,16 +1767,27 @@ fn lower_optimized_machine(
                                         .ins()
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
-                                let pair = emit_opt_checked_add(
-                                    &mut builder,
-                                    &env,
-                                    &stack_provenance,
-                                    depth,
-                                    old,
-                                    delta,
-                                    node.pc(),
-                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
-                                )?;
+                                let pair = if int32_loop
+                                    && name.ends_with("inc")
+                                    && bounded_increments.contains(&node.pc())
+                                {
+                                    // Proven `k < X` at the loop header with no
+                                    // other write to `k`: the increment fits.
+                                    let sum = builder.ins().iadd(old.payload, delta.payload);
+                                    opt_int_pair(&mut builder, &env, sum)
+                                } else {
+                                    emit_opt_checked_add(
+                                        &mut builder,
+                                        &env,
+                                        &stack_provenance,
+                                        depth,
+                                        old,
+                                        delta,
+                                        node.pc(),
+                                        node.deopt_guard()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                    )?
+                                };
                                 if name.starts_with("post_") {
                                     // ToNumeric of a proven number is the
                                     // number itself, so the old value stays.
@@ -2419,6 +2433,9 @@ fn emit_opt_guard_branch(
     use cranelift_codegen::ir::InstBuilder;
     let pass = builder.create_block();
     let deopt = builder.create_block();
+    // Deoptimization exits are cold: keep them out of the hot fallthrough
+    // path so a guarded loop body stays straight-line machine code.
+    builder.set_cold_block(deopt);
     builder.ins().brif(condition, pass, &[], deopt, &[]);
     builder.switch_to_block(deopt);
     emit_opt_deopt(builder, env, provenance, depth, pc, guard)?;
@@ -2567,19 +2584,24 @@ fn emit_opt_checked_add(
 ) -> Result<OptPair, CompileFailure> {
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     use rquickjs_core::qjs;
-    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
-    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
-    let both_int = builder.ins().band(lhs_int, rhs_int);
     if env.int32_loop {
-        let deopt = emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, both_int)?;
+        // Every value in the raw-i32 loop shape is a proven Int32 (entry and
+        // header guards), so only the overflow exit remains.
         let (sum, overflow) = builder.ins().sadd_overflow(lhs.payload, rhs.payload);
         let pass = builder.create_block();
+        let deopt = builder.create_block();
+        builder.set_cold_block(deopt);
         builder.append_block_param(pass, types::I32);
         builder.ins().brif(overflow, deopt, &[], pass, &[sum]);
+        builder.switch_to_block(deopt);
+        emit_opt_deopt(builder, env, provenance, depth, pc, guard)?;
         builder.switch_to_block(pass);
         let sum = builder.block_params(pass)[0];
         return Ok(opt_int_pair(builder, env, sum));
     }
+    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
+    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
+    let both_int = builder.ins().band(lhs_int, rhs_int);
     let lhs_float = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_FLOAT64);
     let rhs_float = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_FLOAT64);
     let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
@@ -4875,6 +4897,159 @@ fn opt_flat_local_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFai
         .checked_add(index)
         .and_then(|slot| u32::try_from(slot).ok())
         .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// Local index written or read by a `get_loc*`/`put_loc*`/`set_loc*`
+/// family opcode name, or `None` for other opcodes.
+fn opt_local_slot(name: &str, bytes: &[u8]) -> Option<usize> {
+    for prefix in [
+        "get_loc", "put_loc", "set_loc", "inc_loc", "dec_loc", "add_loc",
+    ] {
+        if name == "get_loc0_loc1" || name == "set_loc_uninitialized" {
+            return None;
+        }
+        if name.starts_with(prefix) {
+            if let Ok(Some(index)) = opt_index(name, bytes, prefix) {
+                return Some(index);
+            }
+            return opt_u16(bytes).ok();
+        }
+    }
+    None
+}
+
+/// Increments whose Int32 result provably cannot overflow, so the raw-i32
+/// loop shape may add without an overflow exit.
+///
+/// The proof is the canonical counted loop: inside a natural loop whose
+/// header block ends with `get_loc k; <Int32 operand>; lt; if_false -> exit`,
+/// the sequence `get_loc k; inc|post_inc; put_loc k` is the only write to
+/// local `k` anywhere in the loop. Then `k < X <= INT32_MAX` holds at the
+/// increment on every iteration, so `k + 1` fits. Every value in the raw-i32
+/// shape is Int32 by its entry and header guards, which is what makes the
+/// header comparison a numeric bound.
+fn provably_bounded_increments(ir: &OptimizedIr) -> std::collections::BTreeSet<u32> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut bounded = BTreeSet::new();
+    let blocks = ir.blocks();
+    let index_of: BTreeMap<u32, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.start_pc(), index))
+        .collect();
+    let mut predecessors: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for block in blocks {
+        for successor in block.successors() {
+            predecessors
+                .entry(*successor)
+                .or_default()
+                .push(block.start_pc());
+        }
+    }
+    fn name_of(node: &crate::ir::OptimizedNode) -> Option<&str> {
+        match node.kind() {
+            crate::ir::OptimizedNodeKind::Bytecode { opcode } => Some(opcode.as_ref()),
+            _ => None,
+        }
+    }
+    for header in blocks.iter().filter(|block| block.is_loop_header()) {
+        // Natural loop: the header plus everything that reaches a latch
+        // without passing through the header.
+        let latches: Vec<u32> = blocks
+            .iter()
+            .filter(|block| {
+                block.start_pc() >= header.start_pc()
+                    && block.successors().contains(&header.start_pc())
+            })
+            .map(|block| block.start_pc())
+            .collect();
+        let mut members = BTreeSet::from([header.start_pc()]);
+        let mut pending = latches;
+        while let Some(pc) = pending.pop() {
+            if members.insert(pc) {
+                if let Some(preds) = predecessors.get(&pc) {
+                    pending.extend(preds.iter().copied());
+                }
+            }
+        }
+        // Header pattern: `get_loc k; operand; lt; if_false -> outside`.
+        let header_nodes: Vec<&crate::ir::OptimizedNode> = header
+            .nodes()
+            .iter()
+            .filter_map(|id| ir.nodes().get(*id as usize))
+            .filter(|node| name_of(node).is_some() && !node.eliminated())
+            .collect();
+        let count = header_nodes.len();
+        if count < 4 {
+            continue;
+        }
+        let [load, operand, compare, branch] = [
+            header_nodes[count - 4],
+            header_nodes[count - 3],
+            header_nodes[count - 2],
+            header_nodes[count - 1],
+        ];
+        let Some(counter) = name_of(load).and_then(|name| {
+            name.starts_with("get_loc")
+                .then(|| opt_local_slot(name, load.bytes()))
+                .flatten()
+        }) else {
+            continue;
+        };
+        let operand_ok = name_of(operand).is_some_and(|name| {
+            name.starts_with("get_loc") || name.starts_with("get_arg") || name.starts_with("push_")
+        });
+        let exits_loop = name_of(branch).is_some_and(|name| name.starts_with("if_false"))
+            && branch
+                .branch_target()
+                .is_some_and(|target| !members.contains(&target));
+        if !operand_ok || name_of(compare) != Some("lt") || !exits_loop {
+            continue;
+        }
+        // Every write to `counter` inside the loop must be the increment's
+        // own `get_loc k; inc|post_inc; put_loc k` store.
+        let mut increments = Vec::new();
+        let mut foreign_write = false;
+        for pc in &members {
+            let Some(block) = index_of.get(pc).and_then(|index| blocks.get(*index)) else {
+                continue;
+            };
+            let nodes: Vec<&crate::ir::OptimizedNode> = block
+                .nodes()
+                .iter()
+                .filter_map(|id| ir.nodes().get(*id as usize))
+                .filter(|node| name_of(node).is_some())
+                .collect();
+            for (position, node) in nodes.iter().enumerate() {
+                let name = name_of(node).unwrap_or_default();
+                let writes_counter = (name.starts_with("put_loc")
+                    || name.starts_with("set_loc")
+                    || name.starts_with("inc_loc")
+                    || name.starts_with("dec_loc")
+                    || name.starts_with("add_loc"))
+                    && opt_local_slot(name, node.bytes()) == Some(counter);
+                if !writes_counter {
+                    continue;
+                }
+                let from_increment = name.starts_with("put_loc")
+                    && position >= 2
+                    && matches!(name_of(nodes[position - 1]), Some("inc" | "post_inc"))
+                    && name_of(nodes[position - 2]).is_some_and(|name| {
+                        name.starts_with("get_loc")
+                            && opt_local_slot(name, nodes[position - 2].bytes()) == Some(counter)
+                    });
+                if from_increment {
+                    increments.push(nodes[position - 1].pc());
+                } else {
+                    foreign_write = true;
+                }
+            }
+        }
+        if !foreign_write && increments.len() == 1 {
+            bounded.extend(increments);
+        }
+    }
+    bounded
 }
 
 /// How a value may be stored into an interpreter-owned argument or local

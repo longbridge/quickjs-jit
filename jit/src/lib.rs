@@ -528,6 +528,7 @@ struct ProductionBackend {
     /// worker completions, new feedback, or a bounded number of skipped
     /// ticks. The clock still advances on every tick.
     hot_ticks_since_maintenance: u32,
+    generic_call_rejections: u64,
     last_scan_feedback_version: u64,
     last_scan_installed: u64,
     last_refresh_scan: Option<(u64, u64)>,
@@ -1221,6 +1222,7 @@ impl ProductionBackend {
             osr_validation: Arc::new(OsrValidationMetrics::default()),
             clock: 0,
             hot_ticks_since_maintenance: 0,
+            generic_call_rejections: 0,
             last_scan_feedback_version: u64::MAX,
             last_scan_installed: u64::MAX,
             last_refresh_scan: None,
@@ -1424,6 +1426,52 @@ impl ProductionBackend {
             if direct_call_pending {
                 continue;
             }
+            /* A native-to-native call through the generic CALL bridge still
+             * costs about ten interpreter calls (entry acquisition, hot
+             * probing, timing and exit accounting run as callbacks per call).
+             * A loop amortizes that against unboxed work; a function that
+             * only calls (recursion, forwarding wrappers, tail calls) cannot,
+             * and the cost model has no interpreter timing to notice that
+             * both native tiers lose. Keep such functions in the interpreter
+             * until the bridge is cached on the C side. */
+            let has_loop = snapshot.control_flow_graph().blocks().iter().any(|block| {
+                snapshot
+                    .control_flow_graph()
+                    .is_loop_header(block.start_pc())
+            });
+            let generic_call_without_loop = !has_loop
+                && snapshot.instructions().iter().any(|instruction| {
+                    matches!(
+                        instruction.opcode().name(),
+                        "call"
+                            | "call0"
+                            | "call1"
+                            | "call2"
+                            | "call3"
+                            | "call_method"
+                            | "tail_call"
+                            | "tail_call_method"
+                            | "call_constructor"
+                    ) && !observed
+                        .call_specialization_at(key, instruction.pc())
+                        .is_some_and(|call| {
+                            call.callee() != key && self.coordinator.direct_call_ready(&call)
+                        })
+                });
+            #[cfg(feature = "test-support")]
+            let forced_call_only = self.config.force_optimized();
+            #[cfg(not(feature = "test-support"))]
+            let forced_call_only = false;
+            if generic_call_without_loop && !forced_call_only {
+                self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
+                self.optimizing_snapshots.remove(&key);
+                self.feedback_disabled.insert(key);
+                if !self.profitability_blacklisted.contains(&key) {
+                    self.profitability_blacklisted.insert(key);
+                    self.coordinator.demote_baseline_to_interpreter(key);
+                }
+                continue;
+            }
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
                 matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
             }) && !snapshot.instructions().iter().any(|instruction| {
@@ -1600,6 +1648,7 @@ impl ProductionBackend {
         snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
         snapshot.snapshot_requests = self.snapshot_requests;
         snapshot.stable_path_compile_requests = self.stable_path_compile_requests;
+        snapshot.generic_call_rejections = self.generic_call_rejections;
         snapshot.profitability_evaluations = self.profitability_evaluations;
         snapshot.profitability_approved = self.profitability_approved;
         snapshot.profitability_rejected = self.profitability_rejected;

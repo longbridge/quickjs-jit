@@ -3814,3 +3814,69 @@ fn storing_an_unproven_alias_into_a_local_guards_the_tag_before_the_spill() {
         "non-refcounted tag guard missing: {clif}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Counted-loop increments whose overflow exit is provably unnecessary.
+
+fn int32_loop_clif(source: &str) -> String {
+    let fixture = SnapshotFixture::compile(source);
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        for instruction in verified.instructions().iter().filter(|instruction| {
+            matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+        }) {
+            feedback.observe_binary(
+                key,
+                instruction.pc(),
+                ObservedType::Int32,
+                ObservedType::Int32,
+                ObservedType::Int32,
+                Default::default(),
+            );
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    Tier2Compiler::host(181)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(181))
+        .unwrap()
+}
+
+#[test]
+fn counted_loop_increment_bounded_by_its_header_compare_needs_no_overflow_exit() {
+    // `i < n` at the header and no other write to `i` prove `i + 1` fits, so
+    // only `sum + i` keeps its overflow exit.
+    let clif = int32_loop_clif("(function(n,z){let s=z;for(let i=z;i<n;i++){s=s+i}return s})");
+    assert_eq!(
+        clif.matches("sadd_overflow").count(),
+        1,
+        "only the accumulator add is checked: {clif}"
+    );
+}
+
+#[test]
+fn increments_without_a_strict_upper_bound_keep_their_overflow_exit() {
+    // `<=` admits `i == INT32_MAX` before the increment; a second write to
+    // the counter breaks the single-writer proof. Both keep the exact exit.
+    for source in [
+        "(function(n,z){let s=z;for(let i=z;i<=n;i++){s=s+i}return s})",
+        "(function(n,z){let s=z;for(let i=z;i<n;i++){s=s+i;i=i+z}return s})",
+    ] {
+        let clif = int32_loop_clif(source);
+        assert!(
+            clif.matches("sadd_overflow").count() >= 2,
+            "{source}: increment must stay checked: {clif}"
+        );
+    }
+}

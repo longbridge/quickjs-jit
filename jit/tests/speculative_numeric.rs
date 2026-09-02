@@ -287,3 +287,74 @@ fn negating_zero_and_int32_min_produces_exact_float64_results() {
         assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
     });
 }
+
+/// Like `with_optimized_source`, but warms through one predefined caller so
+/// a loop-shaped `f` is not starved by per-iteration script compilations.
+fn with_optimized_loop(source: &str, warm: &str, check: impl FnOnce(&Context, &Jit)) {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(format!(
+                "{source}; globalThis.__warm=function(){{return {warm}}}"
+            ))
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        context.with(|ctx| {
+            let warm: Function<'_> = ctx.globals().get("__warm").unwrap();
+            let _: rquickjs::Value<'_> = warm.call(()).unwrap();
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    check(&context, &jit);
+}
+
+#[test]
+fn counted_loop_increments_stay_exact_at_the_int32_boundary() {
+    // The bounded increment proof applies to `<`; the `<=` loop reaches
+    // INT32_MAX and its increment must produce the exact Float64 result via
+    // the retained overflow exit.
+    with_optimized_loop(
+        "function f(a,b){let c=0;for(let i=a;i<b;i++){c=c+1}return c}",
+        "f(0,64)",
+        |context, jit| {
+            let before = jit.metrics();
+            assert_eq!(
+                eval::<i32>(context, "f(2147483640, 2147483647)"),
+                7,
+                "{:?}",
+                jit.metrics()
+            );
+            assert_eq!(jit.metrics().deopts, before.deopts, "{:?}", jit.metrics());
+        },
+    );
+    with_optimized_loop(
+        "function f(a,b){let c=0;let last=0;for(let i=a;i<=b;i++){c=c+1;last=i}return c*1e10+last}",
+        "f(0,64)",
+        |context, jit| {
+            let before = jit.metrics();
+            let result = eval::<f64>(context, "f(2147483640, 2147483647)");
+            assert_eq!(result, 8.0 * 1e10 + 2147483647.0, "{:?}", jit.metrics());
+            let after = jit.metrics();
+            assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+            assert_eq!(after.native_retries, before.native_retries, "{after:?}");
+        },
+    );
+}

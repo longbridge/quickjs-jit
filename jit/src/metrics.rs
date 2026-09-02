@@ -68,6 +68,9 @@ pub struct JitMetrics {
     pub cse_eliminated: u64,
     pub dead_nodes_eliminated: u64,
     pub dependency_invalidations: u64,
+    /// Functions kept in the interpreter because every native tier would
+    /// pay the generic call bridge on each call without a loop to amortize it.
+    pub generic_call_rejections: u64,
     pub profitability_evaluations: u64,
     pub profitability_approved: u64,
     pub profitability_rejected: u64,
@@ -137,6 +140,7 @@ impl JitMetrics {
             cse_eliminated: 0,
             dead_nodes_eliminated: 0,
             dependency_invalidations: 0,
+            generic_call_rejections: 0,
             profitability_evaluations: 0,
             profitability_approved: 0,
             profitability_rejected: 0,
