@@ -2212,12 +2212,24 @@ impl JitRuntimeBuilder {
         self
     }
 
-    /// Constructs an interpreter runtime with a disabled JIT guard.
+    /// Constructs a QuickJS runtime with an attached JIT backend.
     pub fn build(self) -> Result<JitRuntime, JitError> {
         let runtime = Runtime::new()?;
         let jit = Jit::attach(&runtime, self.config)?;
         Ok(JitRuntime {
             jit: Some(jit),
+            runtime: Some(runtime),
+        })
+    }
+
+    /// Constructs a plain QuickJS interpreter without attaching a JIT backend.
+    ///
+    /// This is useful for differential tests and benchmarks that need an
+    /// interpreter baseline without profiling, snapshot, or compiler overhead.
+    pub fn build_interpreter(self) -> Result<JitRuntime, JitError> {
+        let runtime = Runtime::new()?;
+        Ok(JitRuntime {
+            jit: None,
             runtime: Some(runtime),
         })
     }
@@ -2235,17 +2247,23 @@ impl JitRuntime {
         JitRuntimeBuilder::default()
     }
 
-    /// Returns the disabled JIT guard.
+    /// Returns the attached JIT guard.
+    ///
+    /// Panics when this runtime was created with
+    /// [`JitRuntimeBuilder::build_interpreter`].
     pub const fn jit(&self) -> &Jit {
         match &self.jit {
             Some(jit) => jit,
-            None => panic!("JIT guard is present until drop"),
+            None => panic!("interpreter runtime has no JIT guard"),
         }
     }
 
-    /// Returns runtime metrics.
+    /// Returns runtime metrics, or disabled zero metrics for an interpreter.
     pub fn metrics(&self) -> JitMetrics {
-        self.jit().metrics()
+        match &self.jit {
+            Some(jit) => jit.metrics(),
+            None => JitMetrics::disabled(),
+        }
     }
 }
 
