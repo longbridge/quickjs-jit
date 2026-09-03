@@ -649,6 +649,11 @@ pub struct FeedbackTable {
     capacity: usize,
     diversity_limit: usize,
     dropped: u64,
+    /// Incremented only when an observation changes a lattice entry. Stable,
+    /// warmed-up feedback keeps this constant, which lets per-call runtime
+    /// callbacks skip the snapshot/scan work that could not produce a
+    /// different answer.
+    version: u64,
     entries: BTreeMap<FeedbackKey, Entry>,
     calls: BTreeMap<FunctionKey, CallFeedbackEntry>,
     binaries: BTreeMap<(FunctionKey, u32), BinaryFeedbackEntry>,
@@ -744,6 +749,23 @@ fn call_signature_state(entry: &CallSignatureFeedbackEntry) -> FeedbackState {
     }
 }
 
+/// Cheap structural fingerprint of one lattice cell: it changes exactly when
+/// a new observation is admitted or the cell widens to megamorphic.
+fn entry_shape(entry: &Entry) -> (usize, bool) {
+    (entry.observations.len(), entry.megamorphic)
+}
+
+fn slots_shape(slots: &[Entry]) -> (usize, usize) {
+    slots
+        .iter()
+        .fold((0, 0), |(observations, megamorphic), slot| {
+            (
+                observations + slot.observations.len(),
+                megamorphic + usize::from(slot.megamorphic),
+            )
+        })
+}
+
 fn empty_entry(capacity: usize) -> Entry {
     Entry {
         observations: Vec::with_capacity(capacity),
@@ -757,6 +779,7 @@ impl FeedbackTable {
             capacity,
             diversity_limit: diversity_limit.max(1),
             dropped: 0,
+            version: 0,
             entries: BTreeMap::new(),
             calls: BTreeMap::new(),
             binaries: BTreeMap::new(),
@@ -766,8 +789,20 @@ impl FeedbackTable {
         }
     }
 
+    /// Monotonic change counter; see the field documentation.
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn observe_call(&mut self, function: FunctionKey, arguments: &[ObservedType]) {
+        let is_new = !self.calls.contains_key(&function);
         let call = self.calls.entry(function).or_default();
+        let before = (
+            call.arities.len(),
+            call.arity_megamorphic,
+            call.slots.len(),
+            slots_shape(&call.slots),
+        );
         if !call.arity_megamorphic && !call.arities.contains(&arguments.len()) {
             if call.arities.len() >= self.diversity_limit {
                 call.arity_megamorphic = true;
@@ -782,6 +817,15 @@ impl FeedbackTable {
         }
         for (slot, observation) in call.slots.iter_mut().zip(arguments.iter().copied()) {
             slot.observe(observation, self.diversity_limit);
+        }
+        let after = (
+            call.arities.len(),
+            call.arity_megamorphic,
+            call.slots.len(),
+            slots_shape(&call.slots),
+        );
+        if is_new || before != after {
+            self.version = self.version.wrapping_add(1);
         }
     }
 
@@ -807,12 +851,27 @@ impl FeedbackTable {
                 result: empty_entry(self.diversity_limit),
                 flags: BinaryFeedbackFlags::NONE,
             });
+        let before = (
+            entry_shape(&entry.lhs),
+            entry_shape(&entry.rhs),
+            entry_shape(&entry.result),
+            entry.flags,
+        );
         let states = [
             entry.lhs.observe(lhs, self.diversity_limit),
             entry.rhs.observe(rhs, self.diversity_limit),
             entry.result.observe(result, self.diversity_limit),
         ];
         entry.flags |= flags;
+        let after = (
+            entry_shape(&entry.lhs),
+            entry_shape(&entry.rhs),
+            entry_shape(&entry.result),
+            entry.flags,
+        );
+        if before != after {
+            self.version = self.version.wrapping_add(1);
+        }
         if states.contains(&FeedbackState::Megamorphic) {
             FeedbackState::Megamorphic
         } else if states.contains(&FeedbackState::Polymorphic) {
@@ -836,8 +895,12 @@ impl FeedbackTable {
                     operand: empty_entry(self.diversity_limit),
                     result: empty_entry(self.diversity_limit),
                 });
+        let before = (entry_shape(&entry.operand), entry_shape(&entry.result));
         entry.operand.observe(operand, self.diversity_limit);
         entry.result.observe(result, self.diversity_limit);
+        if before != (entry_shape(&entry.operand), entry_shape(&entry.result)) {
+            self.version = self.version.wrapping_add(1);
+        }
         combined_state(&[&entry.operand, &entry.result], false)
     }
 
@@ -855,10 +918,14 @@ impl FeedbackTable {
                 condition_types: empty_entry(self.diversity_limit),
                 outcomes: 0,
             });
+        let before = (entry_shape(&entry.condition_types), entry.outcomes);
         entry
             .condition_types
             .observe(condition_type, self.diversity_limit);
         entry.outcomes |= if taken { 1 } else { 2 };
+        if before != (entry_shape(&entry.condition_types), entry.outcomes) {
+            self.version = self.version.wrapping_add(1);
+        }
         combined_state(&[&entry.condition_types], entry.outcomes == 3)
     }
 
@@ -896,6 +963,17 @@ impl FeedbackTable {
                 callee_bytecode_identity,
             }
         });
+        let before = (
+            entry.targets.len(),
+            entry.targets_megamorphic,
+            entry.arities.len(),
+            entry.arities_megamorphic,
+            entry.arguments.len(),
+            slots_shape(&entry.arguments),
+            entry_shape(&entry.results),
+            entry.callee_identity,
+            entry.callee_bytecode_identity,
+        );
         if entry.callee_identity != callee_identity {
             entry.targets_megamorphic = true;
             entry.callee_identity = 0;
@@ -925,6 +1003,20 @@ impl FeedbackTable {
             slot.observe(observed, self.diversity_limit);
         }
         entry.results.observe(result, self.diversity_limit);
+        let after = (
+            entry.targets.len(),
+            entry.targets_megamorphic,
+            entry.arities.len(),
+            entry.arities_megamorphic,
+            entry.arguments.len(),
+            slots_shape(&entry.arguments),
+            entry_shape(&entry.results),
+            entry.callee_identity,
+            entry.callee_bytecode_identity,
+        );
+        if before != after {
+            self.version = self.version.wrapping_add(1);
+        }
         call_signature_state(entry)
     }
 
@@ -940,13 +1032,16 @@ impl FeedbackTable {
             self.dropped = self.dropped.saturating_add(1);
             return FeedbackState::Megamorphic;
         }
-        self.entries
-            .entry(key)
-            .or_insert_with(|| Entry {
-                observations: Vec::with_capacity(self.diversity_limit),
-                megamorphic: false,
-            })
-            .observe(observation, self.diversity_limit)
+        let before = self.entries.get(&key).map(entry_shape);
+        let entry = self.entries.entry(key).or_insert_with(|| Entry {
+            observations: Vec::with_capacity(self.diversity_limit),
+            megamorphic: false,
+        });
+        let state = entry.observe(observation, self.diversity_limit);
+        if before != Some(entry_shape(entry)) {
+            self.version = self.version.wrapping_add(1);
+        }
+        state
     }
 
     pub fn len(&self) -> usize {

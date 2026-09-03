@@ -621,16 +621,25 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                                 rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr())
                             });
                             let mut trace = vec![JitTraceEvent::default(); 65_536];
-                            if unsafe {
-                                JS_JitSetExecutionTrace(rt, trace.as_mut_ptr(), trace.len() as u32)
-                            } != 0
-                            {
-                                return Err("failed to arm native execution trace".into());
-                            }
                             let warm = format!(
                                 "for(let __jit_i=0;__jit_i<256;__jit_i++){{{invocation};}}"
                             );
                             for _ in 0..128 {
+                                // Re-arm the trace for every replay round. The
+                                // evidence only needs one round in which native
+                                // code executed; accumulating every warm-up
+                                // round overflows the bounded buffer once the
+                                // harness's own assertion helpers run natively.
+                                if unsafe {
+                                    JS_JitSetExecutionTrace(
+                                        rt,
+                                        trace.as_mut_ptr(),
+                                        trace.len() as u32,
+                                    )
+                                } != 0
+                                {
+                                    return Err("failed to arm native execution trace".into());
+                                }
                                 context
                                     .with(|ctx| ctx.eval::<(), _>(warm.as_str()))
                                     .map_err(|error| {

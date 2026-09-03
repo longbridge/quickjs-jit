@@ -289,6 +289,49 @@ impl BaselineIr {
                     op,
                 });
                 emitted_since_poll = emitted_since_poll.saturating_add(1);
+                if is_tail_call(instruction) {
+                    // The interpreter returns the call result directly
+                    // (`goto done`). The call lowering leaves that result as
+                    // the single value above the popped callee/arguments, so
+                    // the return sequence observes depth `next_depth + 1`
+                    // even though the opcode's own `n_push` is zero.
+                    let return_depth = next_depth
+                        .checked_add(1)
+                        .ok_or(CompileFailure::ResourceLimit)?;
+                    max_stack_depth = max_stack_depth.max(return_depth);
+                    let poll_state = record_state(
+                        &mut states,
+                        snapshot.arg_count(),
+                        snapshot.local_count(),
+                        return_depth,
+                        FrameStateKind::Poll,
+                        pc,
+                    )?;
+                    instructions.push(IrInstruction {
+                        pc,
+                        frame_state: Some(poll_state),
+                        helper_states: Box::new([]),
+                        op: IrOp::Poll {
+                            state: poll_state,
+                            kind: PollKind::Return,
+                        },
+                    });
+                    let return_state = record_state(
+                        &mut states,
+                        snapshot.arg_count(),
+                        snapshot.local_count(),
+                        return_depth,
+                        FrameStateKind::Marker,
+                        pc,
+                    )?;
+                    instructions.push(IrInstruction {
+                        pc,
+                        frame_state: Some(return_state),
+                        helper_states: Box::new([]),
+                        op: IrOp::Return,
+                    });
+                    emitted_since_poll = 0;
+                }
                 depth = next_depth;
 
                 if let Some(target) = instruction.branch_target() {
@@ -425,9 +468,20 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
             | StackOp::Insert4 => 1,
             _ => 0,
         },
-        IrOp::Unary(UnaryOp::Plus | UnaryOp::LogicalNot | UnaryOp::IsUndefinedOrNull) => 1,
+        IrOp::Unary(
+            UnaryOp::Plus
+            | UnaryOp::LogicalNot
+            | UnaryOp::IsUndefinedOrNull
+            | UnaryOp::IsUndefined
+            | UnaryOp::IsNull
+            | UnaryOp::Neg
+            | UnaryOp::Increment
+            | UnaryOp::Decrement
+            | UnaryOp::BitNot,
+        ) => 1,
         IrOp::Binary(
             BinaryOp::Add
+            | BinaryOp::Mod
             | BinaryOp::LessThan
             | BinaryOp::LessThanOrEqual
             | BinaryOp::GreaterThan
@@ -491,6 +545,13 @@ fn record_state(
         slots: slots.into_boxed_slice(),
         kind,
     }))
+}
+
+fn is_tail_call(instruction: &Instruction) -> bool {
+    matches!(
+        instruction.opcode().name(),
+        "tail_call" | "tail_call_method"
+    )
 }
 
 fn effective_pop(instruction: &Instruction) -> usize {
@@ -596,6 +657,10 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "push_atom_value" => {
             IrOp::ResolveAtom(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
+        // QuickJS `js_empty_string(rt)` is
+        // `js_dup(JS_MKPTR(JS_TAG_STRING, rt->atom_array[JS_ATOM_empty_string]))`,
+        // which is exactly `JS_AtomToValue(JS_ATOM_empty_string)`.
+        "push_empty_string" => IrOp::ResolveAtom(qjs::JS_ATOM_empty_string),
         "get_var" => {
             IrOp::GetGlobal(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
@@ -610,7 +675,10 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "put_array_el" => IrOp::SetElement,
         "define_array_el" => IrOp::DefineElement,
         "to_propkey" => IrOp::ToPropertyKey,
-        "call" => IrOp::Call {
+        // `tail_call` / `tail_call_method` are `call` / `call_method` whose
+        // result is returned immediately (`goto done` in the interpreter).
+        // `translate_with_policy` appends the return sequence after the call.
+        "call" | "tail_call" => IrOp::Call {
             argc: instruction.operand_u16(1),
             has_this: false,
         },
@@ -624,7 +692,7 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
             ),
             has_this: false,
         },
-        "call_method" => IrOp::Call {
+        "call_method" | "tail_call_method" => IrOp::Call {
             argc: instruction.operand_u16(1),
             has_this: true,
         },
@@ -705,6 +773,8 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         }
         "lnot" => IrOp::Unary(UnaryOp::LogicalNot),
         "is_undefined_or_null" => IrOp::Unary(UnaryOp::IsUndefinedOrNull),
+        "is_undefined" => IrOp::Unary(UnaryOp::IsUndefined),
+        "is_null" => IrOp::Unary(UnaryOp::IsNull),
         "not" => IrOp::Unary(UnaryOp::BitNot),
         "add" => IrOp::Binary(BinaryOp::Add),
         "sub" => IrOp::Binary(BinaryOp::Sub),

@@ -251,6 +251,11 @@ enum OptProvenance {
     Argument(usize),
     Local(usize),
     ImmediatePrimitive,
+    /// The interpreter stack slot at this index owns the value (a helper
+    /// wrote it there). Exits and the call bridge leave it in place; it may
+    /// be consumed by a call, returned, freed by `drop`, or moved into a
+    /// local, but never copied.
+    OwnedSlot,
     Unknown,
 }
 
@@ -301,7 +306,7 @@ impl NumericSpecialization {
         let calls = function
             .instructions()
             .iter()
-            .filter(|instruction| instruction.opcode().name().starts_with("call"))
+            .filter(|instruction| is_call_site(instruction.opcode().name()))
             .filter_map(|instruction| {
                 feedback
                     .call_specialization_at(key, instruction.pc())
@@ -376,12 +381,31 @@ impl NumericSpecialization {
                     .into_boxed_slice()
             })
             .unwrap_or_default();
+        // The checked Int32 arithmetic path guards both operand tags at
+        // run time, so stable per-site Int32 feedback selects it whatever the
+        // function's own signature is (a kernel may well return a string).
+        let int_pcs = function
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
+            })
+            .filter_map(|instruction| {
+                let site = feedback.binary_at(key, instruction.pc())?;
+                (site.state() == FeedbackState::Monomorphic
+                    && site.lhs() == [ObservedType::Int32]
+                    && site.rhs() == [ObservedType::Int32]
+                    && site.result() == [ObservedType::Int32])
+                .then_some(instruction.pc())
+            })
+            .collect();
         let Some(signature) = feedback
             .bounded_specialization(key)
             .filter(|signature| signature.arity() == argument_count)
         else {
             return Self {
                 arguments: entry_arguments,
+                int_pcs,
                 calls,
                 properties,
                 numeric_constants,
@@ -394,28 +418,14 @@ impl NumericSpecialization {
             FeedbackRepresentation::Float64 => ObservedType::Float64,
             FeedbackRepresentation::HeapRef => {
                 return Self {
+                    int_pcs,
                     calls,
                     properties,
+                    numeric_constants,
                     ..Self::default()
                 }
             }
         };
-        let int_pcs = function
-            .instructions()
-            .iter()
-            .filter(|instruction| {
-                matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
-            })
-            .filter_map(|instruction| {
-                let site = feedback.binary_at(key, instruction.pc())?;
-                (representation == FeedbackRepresentation::Int32
-                    && site.state() == FeedbackState::Monomorphic
-                    && site.lhs() == [observed]
-                    && site.rhs() == [observed]
-                    && site.result() == [observed])
-                .then_some(instruction.pc())
-            })
-            .collect();
         let float_pcs = function
             .instructions()
             .iter()
@@ -551,7 +561,24 @@ fn lower_optimized_machine(
         let stack = (0..stack_slots).map(|_| alloc()).collect::<Vec<_>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
         let mut guarded_element_source: Option<GuardedElementSource> = None;
+        let owned_locals = owned_local_targets(ir, specialization)?;
+        let bounded_increments = provably_bounded_increments(ir);
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
+        let env = OptEnv {
+            frame,
+            sret,
+            arg_buf,
+            var_buf,
+            stack_base,
+            pointer_type,
+            payload_type,
+            layout,
+            int32_loop,
+            arguments: &arguments,
+            locals: &locals,
+            stack: &stack,
+            helper_signatures: &helper_signatures,
+        };
         for vars in arguments.iter().chain(&locals).chain(&stack) {
             builder.declare_var(vars.payload, payload_type);
             builder.declare_var(vars.tag, types::I64);
@@ -638,6 +665,14 @@ fn lower_optimized_machine(
                     .get(*node_id as usize)
                     .ok_or(CompileFailure::InvalidArtifact)?;
                 if node.eliminated() {
+                    if node.pops() == 1
+                        && node.pushes() == 0
+                        && depth
+                            .checked_sub(1)
+                            .is_some_and(|top| stack_provenance[top] == OptProvenance::OwnedSlot)
+                    {
+                        emit_opt_free_stack_slot(&mut builder, &env, depth - 1)?;
+                    }
                     depth = depth
                         .checked_sub(usize::from(node.pops()))
                         .and_then(|value| value.checked_add(usize::from(node.pushes())))
@@ -704,6 +739,9 @@ fn lower_optimized_machine(
                             "set_loc_uninitialized" => {
                                 guarded_element_source = None;
                                 let index = opt_u16(node.bytes())?;
+                                if owned_locals[index] {
+                                    emit_opt_free_local_slot(&mut builder, &env, index)?;
+                                }
                                 opt_define(&mut builder, locals[index], undefined);
                                 if !int32_loop {
                                     opt_store(&mut builder, var_buf, index, undefined);
@@ -817,8 +855,9 @@ fn lower_optimized_machine(
                                 stack_provenance[depth] = OptProvenance::Argument(index);
                                 depth += 1;
                             }
-                            n if opt_index(n, node.bytes(), "get_loc")?.is_some()
-                                || n == "get_loc_check" =>
+                            n if n != "get_loc0_loc1"
+                                && (opt_index(n, node.bytes(), "get_loc")?.is_some()
+                                    || n == "get_loc_check") =>
                             {
                                 let index = opt_index(n, node.bytes(), "get_loc")?
                                     .map_or_else(|| opt_u16(node.bytes()), Ok)?;
@@ -836,33 +875,68 @@ fn lower_optimized_machine(
                                 depth = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth + 1,
+                                    depth,
+                                    OptProvenance::Local(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
                                 let pair = opt_use(&mut builder, stack[depth]);
+                                // A value owned by its stack slot moves into
+                                // the local exactly like the interpreter's
+                                // set_value: release what the local owned,
+                                // then let var_buf own the new value.
+                                if owned_locals[index] {
+                                    emit_opt_free_local_slot(&mut builder, &env, index)?;
+                                }
                                 opt_define(&mut builder, locals[index], pair);
                                 if !int32_loop {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    depth,
+                                    OptProvenance::Local(index),
+                                );
                             }
-                            "dup" => {
-                                let source = depth
+                            "get_var" => {
+                                let atom = opt_u32(node.bytes())?;
+                                depth = emit_opt_owned_helper_push(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    qjs::JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL as usize,
+                                    &[atom],
+                                )?;
+                            }
+                            "get_field2" => {
+                                let atom = opt_u32(node.bytes())?;
+                                let receiver = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                let pair = opt_use(&mut builder, stack[source]);
-                                opt_define(&mut builder, stack[depth], pair);
-                                stack_provenance[depth] = stack_provenance[source];
-                                depth += 1;
-                            }
-                            "swap" => {
-                                let lhs = depth
-                                    .checked_sub(2)
-                                    .ok_or(CompileFailure::InvalidArtifact)?;
-                                let rhs = lhs + 1;
-                                let lhs_value = opt_use(&mut builder, stack[lhs]);
-                                let rhs_value = opt_use(&mut builder, stack[rhs]);
-                                opt_define(&mut builder, stack[lhs], rhs_value);
-                                opt_define(&mut builder, stack[rhs], lhs_value);
-                                stack_provenance.swap(lhs, rhs);
+                                let receiver_slot = opt_flat_stack_slot(&env, receiver)?;
+                                depth = emit_opt_owned_helper_push(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY as usize,
+                                    &[receiver_slot, atom],
+                                )?;
                             }
                             "is_undefined_or_null" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let index = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
@@ -878,17 +952,15 @@ fn lower_optimized_machine(
                                     i64::from(qjs::JS_TAG_NULL),
                                 );
                                 let truth = builder.ins().bor(undefined, null);
-                                let payload = builder.ins().uextend(types::I64, truth);
-                                let result = OptPair {
-                                    payload,
-                                    tag: builder
-                                        .ins()
-                                        .iconst(types::I64, i64::from(qjs::JS_TAG_BOOL)),
-                                };
+                                let result = opt_bool_pair(&mut builder, &env, truth);
                                 opt_define(&mut builder, stack[index], result);
                                 stack_provenance[index] = OptProvenance::ImmediatePrimitive;
                             }
                             "to_propkey" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 depth = emit_opt_guarded_propkey(
                                     &mut builder,
                                     frame,
@@ -914,6 +986,10 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                             }
                             "get_field" | "put_field" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(2)..depth,
+                                )?;
                                 let property = specialization
                                     .properties
                                     .get(&node.pc())
@@ -941,6 +1017,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "get_array_el" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(2)..depth,
+                                )?;
                                 depth = emit_opt_element_get(
                                     &mut builder,
                                     frame,
@@ -963,6 +1043,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "get_length" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
                                 let source_provenance = stack_provenance[depth - 1];
                                 depth = emit_opt_array_length(
                                     &mut builder,
@@ -988,6 +1072,10 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "put_array_el" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(3)..depth,
+                                )?;
                                 let source_provenance = stack_provenance[depth
                                     .checked_sub(3)
                                     .ok_or(CompileFailure::InvalidArtifact)?];
@@ -1015,9 +1103,13 @@ fn lower_optimized_machine(
                                 )?;
                             }
                             "call" | "call0" | "call1" | "call2" | "call3" | "call_method" => {
-                                let Some(call) = specialization.calls.get(&node.pc()) else {
+                                // Native callees (Math.max, String, ...) never
+                                // record call-site feedback; they take the
+                                // generic CALL bridge with an owned result.
+                                let call = specialization.calls.get(&node.pc());
+                                if call.is_none() && int32_loop {
                                     return Err(CompileFailure::InvalidArtifact);
-                                };
+                                }
                                 let argc = if name == "call" || name == "call_method" {
                                     opt_u16(node.bytes())?
                                 } else {
@@ -1029,7 +1121,7 @@ fn lower_optimized_machine(
                                             - b'0',
                                     )
                                 };
-                                if argc != call.arguments().len() {
+                                if call.is_some_and(|call| argc != call.arguments().len()) {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
                                 let has_this = name == "call_method";
@@ -1053,6 +1145,7 @@ fn lower_optimized_machine(
                                     layout,
                                     specialization.direct_calls.get(&node.pc()),
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    call.is_some(),
                                 )?;
                             }
                             "add" | "sub" | "mul" | "div" => {
@@ -1089,6 +1182,7 @@ fn lower_optimized_machine(
                                             .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
                                     };
                                     opt_define(&mut builder, stack[depth], pair);
+                                    stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
                                     reusable_values.insert(*node_id, pair);
                                     depth += 1;
                                     continue;
@@ -1235,10 +1329,32 @@ fn lower_optimized_machine(
                                             .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                     };
                                     opt_define(&mut builder, stack[depth], pair);
+                                    stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
                                     reusable_values.insert(*node_id, pair);
                                     depth += 1;
                                     continue;
                                 }
+                                // Without stable feedback the Float64 path
+                                // still requires two numbers; string
+                                // concatenation and object coercion deopt.
+                                let lhs_int = opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_INT);
+                                let rhs_int = opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_INT);
+                                let lhs_float =
+                                    opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_FLOAT64);
+                                let rhs_float =
+                                    opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_FLOAT64);
+                                let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
+                                let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
+                                let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+                                emit_opt_guard_branch(
+                                    &mut builder,
+                                    &env,
+                                    &stack_provenance,
+                                    depth + 2,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                    numeric,
+                                )?;
                                 let lf = opt_f64(&mut builder, lhs);
                                 let rf = opt_f64(&mut builder, rhs);
                                 let result = match name {
@@ -1289,29 +1405,292 @@ fn lower_optimized_machine(
                                     }
                                 };
                                 opt_define(&mut builder, stack[depth], pair);
+                                stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
                                 reusable_values.insert(*node_id, pair);
                                 depth += 1;
                             }
-                            "or" | "and" | "xor" | "shl" | "sar" => {
+                            "or" | "and" | "xor" | "shl" | "sar" | "shr" => {
                                 depth = emit_opt_guarded_int_binary(
                                     &mut builder,
-                                    frame,
-                                    sret,
-                                    arg_buf,
-                                    var_buf,
-                                    stack_base,
-                                    &arguments,
-                                    &locals,
-                                    &stack,
+                                    &env,
                                     &mut stack_provenance,
                                     depth,
                                     name,
                                     node.pc(),
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
-                                    &helper_signatures,
-                                    pointer_type,
-                                    layout,
                                 )?;
+                            }
+                            "mod" => {
+                                depth = emit_opt_mod(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                )?;
+                            }
+                            "eq" | "neq" | "strict_eq" | "strict_neq" => {
+                                depth = emit_opt_equality(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    name,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                )?;
+                            }
+                            "neg" | "plus" | "not" | "lnot" => {
+                                emit_opt_unary(
+                                    &mut builder,
+                                    &env,
+                                    &mut stack_provenance,
+                                    depth,
+                                    name,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                )?;
+                            }
+                            "is_undefined" | "is_null" => {
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
+                                let index = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let value = opt_use(&mut builder, stack[index]);
+                                let expected = if name == "is_undefined" {
+                                    qjs::JS_TAG_UNDEFINED
+                                } else {
+                                    qjs::JS_TAG_NULL
+                                };
+                                let truth = opt_tag_is(&mut builder, value.tag, expected);
+                                let pair = opt_bool_pair(&mut builder, &env, truth);
+                                opt_define(&mut builder, stack[index], pair);
+                                stack_provenance[index] = OptProvenance::ImmediatePrimitive;
+                            }
+                            "inc_loc" | "dec_loc" => {
+                                guarded_element_source = None;
+                                let index = opt_u8(node.bytes())?;
+                                let old = opt_use(&mut builder, locals[index]);
+                                let delta = OptPair {
+                                    payload: builder.ins().iconst(
+                                        payload_type,
+                                        if name == "inc_loc" { 1 } else { -1 },
+                                    ),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                let pair = emit_opt_checked_add(
+                                    &mut builder,
+                                    &env,
+                                    &stack_provenance,
+                                    depth,
+                                    old,
+                                    delta,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                )?;
+                                opt_define(&mut builder, locals[index], pair);
+                                if !int32_loop {
+                                    opt_store(&mut builder, var_buf, index, pair);
+                                }
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    depth,
+                                    OptProvenance::Local(index),
+                                );
+                            }
+                            "add_loc" => {
+                                guarded_element_source = None;
+                                let index = opt_u8(node.bytes())?;
+                                let rhs_index = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let lhs = opt_use(&mut builder, locals[index]);
+                                let rhs = opt_use(&mut builder, stack[rhs_index]);
+                                let pair = emit_opt_checked_add(
+                                    &mut builder,
+                                    &env,
+                                    &stack_provenance,
+                                    depth,
+                                    lhs,
+                                    rhs,
+                                    node.pc(),
+                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+                                )?;
+                                opt_define(&mut builder, locals[index], pair);
+                                if !int32_loop {
+                                    opt_store(&mut builder, var_buf, index, pair);
+                                }
+                                depth = rhs_index;
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    depth,
+                                    OptProvenance::Local(index),
+                                );
+                            }
+                            "push_minus1" => {
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(payload_type, -1),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
+                                reusable_values.insert(*node_id, pair);
+                                depth += 1;
+                            }
+                            "null" | "push_true" | "push_false" => {
+                                let (payload, tag) = match name {
+                                    "null" => (0, qjs::JS_TAG_NULL),
+                                    "push_true" => (1, qjs::JS_TAG_BOOL),
+                                    _ => (0, qjs::JS_TAG_BOOL),
+                                };
+                                let pair = OptPair {
+                                    payload: builder.ins().iconst(payload_type, payload),
+                                    tag: builder.ins().iconst(types::I64, i64::from(tag)),
+                                };
+                                opt_define(&mut builder, stack[depth], pair);
+                                stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
+                                depth += 1;
+                            }
+                            "get_loc0_loc1" => {
+                                if locals.len() < 2 {
+                                    return Err(CompileFailure::InvalidArtifact);
+                                }
+                                for (index, vars) in locals.iter().take(2).enumerate() {
+                                    let pair = opt_use(&mut builder, *vars);
+                                    opt_define(&mut builder, stack[depth], pair);
+                                    stack_provenance[depth] = OptProvenance::Local(index);
+                                    depth += 1;
+                                }
+                            }
+                            n if opt_index(n, node.bytes(), "put_arg")?.is_some() => {
+                                guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
+                                let index = opt_index(n, node.bytes(), "put_arg")?.unwrap();
+                                depth = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth + 1,
+                                    depth,
+                                    OptProvenance::Argument(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
+                                let pair = opt_use(&mut builder, stack[depth]);
+                                opt_define(&mut builder, arguments[index], pair);
+                                opt_store(&mut builder, arg_buf, index, pair);
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    depth,
+                                    OptProvenance::Argument(index),
+                                );
+                            }
+                            n if opt_index(n, node.bytes(), "set_arg")?.is_some() => {
+                                guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
+                                let index = opt_index(n, node.bytes(), "set_arg")?.unwrap();
+                                let top = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth,
+                                    top,
+                                    OptProvenance::Argument(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
+                                let pair = opt_use(&mut builder, stack[top]);
+                                opt_define(&mut builder, arguments[index], pair);
+                                opt_store(&mut builder, arg_buf, index, pair);
+                                // The value stays on the stack; only older
+                                // aliases of the slot go stale.
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    top,
+                                    OptProvenance::Argument(index),
+                                );
+                            }
+                            n if opt_index(n, node.bytes(), "set_loc")?.is_some() => {
+                                guarded_element_source = None;
+                                opt_reject_owned(
+                                    &stack_provenance,
+                                    depth.saturating_sub(1)..depth,
+                                )?;
+                                let index = opt_index(n, node.bytes(), "set_loc")?.unwrap();
+                                let top = depth
+                                    .checked_sub(1)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                emit_opt_alias_store_guard(
+                                    &mut builder,
+                                    &env,
+                                    specialization,
+                                    &stack_provenance,
+                                    depth,
+                                    top,
+                                    OptProvenance::Local(index),
+                                    node.pc(),
+                                    node.deopt_guard(),
+                                )?;
+                                let pair = opt_use(&mut builder, stack[top]);
+                                opt_define(&mut builder, locals[index], pair);
+                                if !int32_loop {
+                                    opt_store(&mut builder, var_buf, index, pair);
+                                }
+                                opt_invalidate_provenance(
+                                    &mut stack_provenance,
+                                    top,
+                                    OptProvenance::Local(index),
+                                );
+                            }
+                            n if opt_stack_permutation(n).is_some() => {
+                                let (take, order) = opt_stack_permutation(n).unwrap();
+                                let start = depth
+                                    .checked_sub(take)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                opt_reject_owned(&stack_provenance, start..depth)?;
+                                if start + order.len() > stack.len() {
+                                    return Err(CompileFailure::ResourceLimit);
+                                }
+                                // Shuffles move SSA values together with the
+                                // frame-slot aliases they carry, so a later
+                                // exit still materializes every copy of a
+                                // borrowed value as its own owner.
+                                let values = (0..take)
+                                    .map(|offset| {
+                                        (
+                                            opt_use(&mut builder, stack[start + offset]),
+                                            stack_provenance[start + offset],
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                for (destination, source) in order.iter().enumerate() {
+                                    let (pair, provenance) = values[*source];
+                                    opt_define(&mut builder, stack[start + destination], pair);
+                                    stack_provenance[start + destination] = provenance;
+                                }
+                                depth = start + order.len();
                             }
                             "lt" | "lte" | "gt" | "gte" => {
                                 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -1320,6 +1699,35 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let lhs_pair = opt_use(&mut builder, stack[depth]);
                                 let rhs_pair = opt_use(&mut builder, stack[depth + 1]);
+                                // Only numbers compare natively; strings,
+                                // objects and nullish operands coerce in the
+                                // interpreter.
+                                // The raw-i32 loop shape admits only unboxed
+                                // Int32 values (entry and header guards), so
+                                // its operands need no per-iteration tag check.
+                                if !int32_loop {
+                                    let lhs_int =
+                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_INT);
+                                    let rhs_int =
+                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_INT);
+                                    let lhs_float =
+                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_FLOAT64);
+                                    let rhs_float =
+                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_FLOAT64);
+                                    let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
+                                    let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
+                                    let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+                                    emit_opt_guard_branch(
+                                        &mut builder,
+                                        &env,
+                                        &stack_provenance,
+                                        depth + 2,
+                                        node.pc(),
+                                        node.deopt_guard()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                        numeric,
+                                    )?;
+                                }
                                 let value = if int32_loop {
                                     let cc = match name {
                                         "lt" => IntCC::SignedLessThan,
@@ -1339,68 +1747,56 @@ fn lower_optimized_machine(
                                     };
                                     builder.ins().fcmp(cc, lhs, rhs)
                                 };
-                                let payload = builder.ins().uextend(payload_type, value);
-                                let pair = OptPair {
-                                    payload,
-                                    tag: builder
-                                        .ins()
-                                        .iconst(types::I64, i64::from(qjs::JS_TAG_BOOL)),
-                                };
+                                let pair = opt_bool_pair(&mut builder, &env, value);
                                 opt_define(&mut builder, stack[depth], pair);
+                                stack_provenance[depth] = OptProvenance::ImmediatePrimitive;
+                                stack_provenance[depth + 1] = OptProvenance::Unknown;
                                 depth += 1;
                             }
-                            "post_inc" | "inc" => {
+                            "post_inc" | "inc" | "post_dec" | "dec" => {
                                 let index = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 let old = opt_use(&mut builder, stack[index]);
-                                let pair = if int32_loop {
-                                    OptPair {
-                                        payload: builder.ins().iadd_imm(old.payload, 1),
-                                        tag: old.tag,
-                                    }
-                                } else {
-                                    use cranelift_codegen::ir::condcodes::IntCC;
-                                    let old_is_int = builder.ins().icmp_imm(
-                                        IntCC::Equal,
-                                        old.tag,
-                                        i64::from(qjs::JS_TAG_INT),
-                                    );
-                                    let old_int = builder.ins().ireduce(types::I32, old.payload);
-                                    let one_int = builder.ins().iconst(types::I32, 1);
-                                    let (int_result, overflow) =
-                                        builder.ins().sadd_overflow(old_int, one_int);
-                                    let no_overflow = builder.ins().bnot(overflow);
-                                    let keep_int = builder.ins().band(old_is_int, no_overflow);
-                                    let one = builder.ins().f64const(1.0);
-                                    let old_float = opt_f64(&mut builder, old);
-                                    let float_result = builder.ins().fadd(old_float, one);
-                                    let int_payload = builder.ins().sextend(types::I64, int_result);
-                                    let float_payload = builder.ins().bitcast(
-                                        types::I64,
-                                        MemFlags::new(),
-                                        float_result,
-                                    );
-                                    let int_tag = builder
+                                let delta = OptPair {
+                                    payload: builder.ins().iconst(
+                                        payload_type,
+                                        if name.ends_with("inc") { 1 } else { -1 },
+                                    ),
+                                    tag: builder
                                         .ins()
-                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT));
-                                    let float_tag = builder
-                                        .ins()
-                                        .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
-                                    OptPair {
-                                        payload: builder.ins().select(
-                                            keep_int,
-                                            int_payload,
-                                            float_payload,
-                                        ),
-                                        tag: builder.ins().select(keep_int, int_tag, float_tag),
-                                    }
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
-                                if name == "post_inc" {
+                                let pair = if int32_loop
+                                    && name.ends_with("inc")
+                                    && bounded_increments.contains(&node.pc())
+                                {
+                                    // Proven `k < X` at the loop header with no
+                                    // other write to `k`: the increment fits.
+                                    let sum = builder.ins().iadd(old.payload, delta.payload);
+                                    opt_int_pair(&mut builder, &env, sum)
+                                } else {
+                                    emit_opt_checked_add(
+                                        &mut builder,
+                                        &env,
+                                        &stack_provenance,
+                                        depth,
+                                        old,
+                                        delta,
+                                        node.pc(),
+                                        node.deopt_guard()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                    )?
+                                };
+                                if name.starts_with("post_") {
+                                    // ToNumeric of a proven number is the
+                                    // number itself, so the old value stays.
                                     opt_define(&mut builder, stack[index + 1], pair);
+                                    stack_provenance[index + 1] = OptProvenance::ImmediatePrimitive;
                                     depth += 1;
                                 } else {
                                     opt_define(&mut builder, stack[index], pair);
+                                    stack_provenance[index] = OptProvenance::ImmediatePrimitive;
                                 }
                             }
                             "if_false8" | "if_true8" | "if_false" | "if_true" => {
@@ -1613,7 +2009,15 @@ fn lower_optimized_machine(
         builder.seal_all_blocks();
         builder.finalize();
     }
-    super::baseline::finalize_optimized_machine(isa, clif, control, false)
+    // Helpers that validate a stack map (CALL, GET_GLOBAL, GET_PROPERTY, ...)
+    // are always invoked with map 0, so an artifact that calls anything must
+    // publish the single helper stack map the runtime checks that id against.
+    let calls_helpers = clif.layout.blocks().any(|block| {
+        clif.layout
+            .block_insts(block)
+            .any(|inst| clif.dfg.insts[inst].opcode().is_call())
+    });
+    super::baseline::finalize_optimized_machine(isa, clif, control, calls_helpers)
 }
 
 /// Builds the secondary, scalar-only entry used by monomorphic native call
@@ -1684,6 +2088,7 @@ pub(crate) fn lower_direct_call_machine(
                 };
             match name {
                 "nop" => {}
+                "push_minus1" => push_int(-1, &mut builder, &mut stack),
                 "push_i8" => push_int(i64::from(bytes[1] as i8), &mut builder, &mut stack),
                 "push_i16" => push_int(
                     i64::from(i16::from_le_bytes([bytes[1], bytes[2]])),
@@ -1750,6 +2155,58 @@ pub(crate) fn lower_direct_call_machine(
                         }
                     };
                     stack.push(value);
+                }
+                "neg" => {
+                    let value = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    let negated = match representation {
+                        FeedbackRepresentation::Float64 => builder.ins().fneg(value),
+                        FeedbackRepresentation::Int32 => {
+                            // `-0` and `-INT32_MIN` are Float64 results the
+                            // scalar Int32 ABI cannot return.
+                            let zero = builder.ins().icmp_imm(IntCC::Equal, value, 0);
+                            let min =
+                                builder
+                                    .ins()
+                                    .icmp_imm(IntCC::Equal, value, i64::from(i32::MIN));
+                            let unrepresentable = builder.ins().bor(zero, min);
+                            let ok = builder.create_block();
+                            let fail = builder.create_block();
+                            builder.ins().brif(unrepresentable, fail, &[], ok, &[]);
+                            builder.switch_to_block(fail);
+                            let status = builder.ins().iconst(types::I32, 1);
+                            builder.ins().return_(&[status]);
+                            builder.switch_to_block(ok);
+                            builder.ins().ineg(value)
+                        }
+                        FeedbackRepresentation::HeapRef => {
+                            unreachable!("direct calls are scalar-only")
+                        }
+                    };
+                    stack.push(negated);
+                }
+                "mod" => {
+                    if representation != FeedbackRepresentation::Int32 {
+                        return Err(CompileFailure::UnsupportedOpcode);
+                    }
+                    let rhs = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    let lhs = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    // A non-negative dividend and non-zero divisor make the
+                    // Int32 remainder exact (no `-0`, no trap).
+                    let non_negative =
+                        builder
+                            .ins()
+                            .icmp_imm(IntCC::SignedGreaterThanOrEqual, lhs, 0);
+                    let non_zero = builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+                    let exact = builder.ins().band(non_negative, non_zero);
+                    let ok = builder.create_block();
+                    let fail = builder.create_block();
+                    builder.ins().brif(exact, ok, &[], fail, &[]);
+                    builder.switch_to_block(fail);
+                    let status = builder.ins().iconst(types::I32, 1);
+                    builder.ins().return_(&[status]);
+                    builder.switch_to_block(ok);
+                    let remainder = builder.ins().srem(lhs, rhs);
+                    stack.push(remainder);
                 }
                 "return" => {
                     let result = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
@@ -1869,6 +2326,566 @@ fn opt_index(name: &str, bytes: &[u8], prefix: &str) -> Result<Option<usize>, Co
     Ok(Some(opt_u16(bytes)?))
 }
 
+/// Frame-level values and variable tables every guarded lowering arm needs to
+/// spill state and leave through an exact deoptimization exit.
+#[derive(Clone, Copy)]
+struct OptEnv<'a> {
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    pointer_type: cranelift_codegen::ir::Type,
+    payload_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    int32_loop: bool,
+    arguments: &'a [OptVars],
+    locals: &'a [OptVars],
+    stack: &'a [OptVars],
+    helper_signatures: &'a [cranelift_codegen::ir::SigRef],
+}
+
+/// Spills the complete frame, records the resume pc and leaves through the
+/// exact deoptimization exit of `guard`. `depth` is the operand-stack depth
+/// before the deoptimizing instruction pops its inputs, so the interpreter
+/// re-executes it with every operand materialized and no effect applied.
+fn emit_opt_deopt(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &[OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+) -> Result<(), CompileFailure> {
+    use cranelift_codegen::ir::{InstBuilder, MemFlags};
+    for (index, vars) in env.arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.arg_buf, index, value);
+    }
+    for (index, vars) in env.locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.var_buf, index, value);
+    }
+    for (index, vars) in env.stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.stack_base, index, value);
+    }
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        depth,
+        env.pointer_type,
+        env.layout,
+    );
+    let start = builder.ins().load(
+        env.pointer_type,
+        MemFlags::new(),
+        env.frame,
+        env.layout.bytecode_start,
+    );
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, env.frame, env.layout.pc);
+    // The raw-i32 loop shape admits only unboxed scalars (Int32 entry guard,
+    // numeric constants, no calls), so the values just stored are already
+    // exact interpreter stack owners. Every other shape may alias borrowed
+    // arguments or locals and must materialize an owner per slot.
+    if !env.int32_loop {
+        opt_own_stack_for_exit(
+            builder,
+            env.frame,
+            env.sret,
+            env.stack_base,
+            depth,
+            env.arguments.len() + env.locals.len(),
+            provenance,
+            env.helper_signatures,
+            env.pointer_type,
+            env.layout,
+        )?;
+    }
+    emit_opt_exit(
+        builder,
+        env.sret,
+        rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        env.pointer_type,
+        guard,
+    );
+    Ok(())
+}
+
+/// Branches to a fresh pass block when `condition` holds and otherwise to an
+/// exact deoptimization exit; the builder is left positioned on the pass
+/// block. The returned deopt block may be reused by later checks of the same
+/// instruction.
+fn emit_opt_guard_branch(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &[OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+    condition: cranelift_codegen::ir::Value,
+) -> Result<cranelift_codegen::ir::Block, CompileFailure> {
+    use cranelift_codegen::ir::InstBuilder;
+    let pass = builder.create_block();
+    let deopt = builder.create_block();
+    // Deoptimization exits are cold: keep them out of the hot fallthrough
+    // path so a guarded loop body stays straight-line machine code.
+    builder.set_cold_block(deopt);
+    builder.ins().brif(condition, pass, &[], deopt, &[]);
+    builder.switch_to_block(deopt);
+    emit_opt_deopt(builder, env, provenance, depth, pc, guard)?;
+    builder.switch_to_block(pass);
+    Ok(deopt)
+}
+
+fn opt_tag_is(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    tag: cranelift_codegen::ir::Value,
+    expected: i32,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    builder
+        .ins()
+        .icmp_imm(IntCC::Equal, tag, i64::from(expected))
+}
+
+/// The Int32 payload of a pair whose tag was (or is about to be) checked.
+fn opt_i32(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    pair: OptPair,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    if env.int32_loop {
+        pair.payload
+    } else {
+        builder.ins().ireduce(types::I32, pair.payload)
+    }
+}
+
+fn opt_int_pair(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    value: cranelift_codegen::ir::Value,
+) -> OptPair {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    OptPair {
+        payload: if env.int32_loop {
+            value
+        } else {
+            builder.ins().sextend(types::I64, value)
+        },
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(rquickjs_core::qjs::JS_TAG_INT)),
+    }
+}
+
+fn opt_bool_pair(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    truth: cranelift_codegen::ir::Value,
+) -> OptPair {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    OptPair {
+        payload: builder.ins().uextend(env.payload_type, truth),
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(rquickjs_core::qjs::JS_TAG_BOOL)),
+    }
+}
+
+/// ECMAScript ToInt32 of a value already proven Int32 or Float64: exact
+/// modulo 2^32 truncation, NaN and infinities map to zero.
+fn opt_to_i32(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    pair: OptPair,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    let is_int = opt_tag_is(builder, pair.tag, rquickjs_core::qjs::JS_TAG_INT);
+    let direct = builder.ins().ireduce(types::I32, pair.payload);
+    let number = builder
+        .ins()
+        .bitcast(types::F64, MemFlags::new(), pair.payload);
+    let modulus = builder.ins().f64const(4_294_967_296.0);
+    let quotient = builder.ins().fdiv(number, modulus);
+    let quotient = builder.ins().trunc(quotient);
+    let multiple = builder.ins().fmul(quotient, modulus);
+    let remainder = builder.ins().fsub(number, multiple);
+    let converted = builder.ins().fcvt_to_sint_sat(types::I64, remainder);
+    let converted = builder.ins().ireduce(types::I32, converted);
+    builder.ins().select(is_int, direct, converted)
+}
+
+/// Stack slots that alias a frame slot stop describing it once the slot is
+/// redefined; their SSA value is the primitive the slot held before.
+fn opt_invalidate_provenance(provenance: &mut [OptProvenance], depth: usize, stale: OptProvenance) {
+    for slot in provenance.iter_mut().take(depth) {
+        if *slot == stale {
+            *slot = OptProvenance::ImmediatePrimitive;
+        }
+    }
+}
+
+fn opt_u8(bytes: &[u8]) -> Result<usize, CompileFailure> {
+    bytes
+        .get(1)
+        .copied()
+        .map(usize::from)
+        .ok_or(CompileFailure::InvalidArtifact)
+}
+
+/// QuickJS stack shuffles as (values consumed, sources of the values pushed
+/// back), identical to the interpreter and the Tier 1 lowering.
+fn opt_stack_permutation(name: &str) -> Option<(usize, &'static [usize])> {
+    Some(match name {
+        "nip" => (2, &[1]),
+        "nip1" => (3, &[1, 2]),
+        "dup" => (1, &[0, 0]),
+        "dup1" => (2, &[0, 0, 1]),
+        "dup2" => (2, &[0, 1, 0, 1]),
+        "dup3" => (3, &[0, 1, 2, 0, 1, 2]),
+        "insert2" => (2, &[1, 0, 1]),
+        "insert3" => (3, &[2, 0, 1, 2]),
+        "insert4" => (4, &[3, 0, 1, 2, 3]),
+        "perm3" => (3, &[1, 0, 2]),
+        "perm4" => (4, &[2, 0, 1, 3]),
+        "perm5" => (5, &[3, 0, 1, 2, 4]),
+        "swap" => (2, &[1, 0]),
+        "swap2" => (4, &[2, 3, 0, 1]),
+        "rot3l" => (3, &[1, 2, 0]),
+        "rot3r" => (3, &[2, 0, 1]),
+        "rot4l" => (4, &[1, 2, 3, 0]),
+        "rot5l" => (5, &[1, 2, 3, 4, 0]),
+        _ => return None,
+    })
+}
+
+/// `lhs + rhs` with exact JavaScript numeric semantics for two operands whose
+/// tags are checked here: Int32 + Int32 stays Int32 unless it overflows into
+/// Float64, any other numeric mix is a Float64 add, and non-numeric operands
+/// deoptimize before any effect. In the raw-i32 loop shape a Float64 result
+/// cannot be represented, so overflow deoptimizes instead.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_checked_add(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &[OptProvenance],
+    depth: usize,
+    lhs: OptPair,
+    rhs: OptPair,
+    pc: u32,
+    guard: u32,
+) -> Result<OptPair, CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    if env.int32_loop {
+        // Every value in the raw-i32 loop shape is a proven Int32 (entry and
+        // header guards), so only the overflow exit remains.
+        let (sum, overflow) = builder.ins().sadd_overflow(lhs.payload, rhs.payload);
+        let pass = builder.create_block();
+        let deopt = builder.create_block();
+        builder.set_cold_block(deopt);
+        builder.append_block_param(pass, types::I32);
+        builder.ins().brif(overflow, deopt, &[], pass, &[sum]);
+        builder.switch_to_block(deopt);
+        emit_opt_deopt(builder, env, provenance, depth, pc, guard)?;
+        builder.switch_to_block(pass);
+        let sum = builder.block_params(pass)[0];
+        return Ok(opt_int_pair(builder, env, sum));
+    }
+    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
+    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
+    let both_int = builder.ins().band(lhs_int, rhs_int);
+    let lhs_float = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_FLOAT64);
+    let rhs_float = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_FLOAT64);
+    let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
+    let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
+    let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, numeric)?;
+    let li = builder.ins().ireduce(types::I32, lhs.payload);
+    let ri = builder.ins().ireduce(types::I32, rhs.payload);
+    let (sum, overflow) = builder.ins().sadd_overflow(li, ri);
+    let no_overflow = builder.ins().bxor_imm(overflow, 1);
+    let keep_int = builder.ins().band(both_int, no_overflow);
+    let lf = opt_f64(builder, lhs);
+    let rf = opt_f64(builder, rhs);
+    let float_sum = builder.ins().fadd(lf, rf);
+    let int_payload = builder.ins().sextend(types::I64, sum);
+    let float_payload = builder
+        .ins()
+        .bitcast(types::I64, MemFlags::new(), float_sum);
+    let int_tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+    let float_tag = builder
+        .ins()
+        .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+    Ok(OptPair {
+        payload: builder.ins().select(keep_int, int_payload, float_payload),
+        tag: builder.ins().select(keep_int, int_tag, float_tag),
+    })
+}
+
+/// Unary numeric opcodes (`neg`, `plus`, `not`, `lnot`) on the stack top.
+/// Numeric (and, for `lnot`, boolean/nullish) inputs are computed natively
+/// with exact JavaScript results; every other tag deoptimizes to the
+/// interpreter before any effect.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_unary(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    operation: &str,
+    pc: u32,
+    guard: u32,
+) -> Result<(), CompileFailure> {
+    use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    let index = depth
+        .checked_sub(1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let value = opt_use(builder, env.stack[index]);
+    let is_int = opt_tag_is(builder, value.tag, qjs::JS_TAG_INT);
+    let is_float = opt_tag_is(builder, value.tag, qjs::JS_TAG_FLOAT64);
+    let numeric = if env.int32_loop {
+        is_int
+    } else {
+        builder.ins().bor(is_int, is_float)
+    };
+    let result = match operation {
+        "plus" => {
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, numeric)?;
+            value
+        }
+        "neg" => {
+            if env.int32_loop {
+                // Zero and INT32_MIN negate to Float64 values that the raw
+                // i32 loop shape cannot hold.
+                let nonzero = builder.ins().icmp_imm(IntCC::NotEqual, value.payload, 0);
+                let not_min =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::NotEqual, value.payload, i64::from(i32::MIN));
+                let representable = builder.ins().band(nonzero, not_min);
+                let ok = builder.ins().band(is_int, representable);
+                emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, ok)?;
+                let negated = builder.ins().ineg(value.payload);
+                opt_int_pair(builder, env, negated)
+            } else {
+                emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, numeric)?;
+                let iv = builder.ins().ireduce(types::I32, value.payload);
+                let int_result = builder.ins().ineg(iv);
+                let fv = opt_f64(builder, value);
+                let float_result = builder.ins().fneg(fv);
+                let nonzero = builder.ins().icmp_imm(IntCC::NotEqual, iv, 0);
+                let not_min = builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, iv, i64::from(i32::MIN));
+                let representable = builder.ins().band(nonzero, not_min);
+                let keep_int = builder.ins().band(is_int, representable);
+                let int_payload = builder.ins().sextend(types::I64, int_result);
+                let float_payload =
+                    builder
+                        .ins()
+                        .bitcast(types::I64, MemFlags::new(), float_result);
+                let int_tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+                let float_tag = builder
+                    .ins()
+                    .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+                OptPair {
+                    payload: builder.ins().select(keep_int, int_payload, float_payload),
+                    tag: builder.ins().select(keep_int, int_tag, float_tag),
+                }
+            }
+        }
+        "not" => {
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, numeric)?;
+            let iv = if env.int32_loop {
+                value.payload
+            } else {
+                opt_to_i32(builder, value)
+            };
+            let inverted = builder.ins().bnot(iv);
+            opt_int_pair(builder, env, inverted)
+        }
+        "lnot" => {
+            let is_bool = opt_tag_is(builder, value.tag, qjs::JS_TAG_BOOL);
+            let is_null = opt_tag_is(builder, value.tag, qjs::JS_TAG_NULL);
+            let is_undefined = opt_tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
+            let scalar = builder.ins().bor(is_int, is_bool);
+            let empty = builder.ins().bor(is_null, is_undefined);
+            let numeric = if env.int32_loop {
+                scalar
+            } else {
+                builder.ins().bor(scalar, is_float)
+            };
+            let allowed = builder.ins().bor(numeric, empty);
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, allowed)?;
+            let iv = opt_i32(builder, env, value);
+            let integer_truth = builder.ins().icmp_imm(IntCC::NotEqual, iv, 0);
+            let numeric_truth = if env.int32_loop {
+                integer_truth
+            } else {
+                let float = builder
+                    .ins()
+                    .bitcast(types::F64, MemFlags::new(), value.payload);
+                let zero = builder.ins().f64const(0.0);
+                let float_truth = builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
+                builder.ins().select(is_float, float_truth, integer_truth)
+            };
+            let false_value = builder.ins().iconst(types::I8, 0);
+            let truth = builder.ins().select(empty, false_value, numeric_truth);
+            let negated = builder.ins().bxor_imm(truth, 1);
+            opt_bool_pair(builder, env, negated)
+        }
+        _ => return Err(CompileFailure::UnsupportedOpcode),
+    };
+    opt_define(builder, env.stack[index], result);
+    provenance[index] = OptProvenance::ImmediatePrimitive;
+    Ok(())
+}
+
+/// `%` on two Int32 operands whose result is provably an Int32: a non-negative
+/// dividend never yields `-0` and rules out `INT32_MIN % -1`, and a non-zero
+/// divisor cannot trap. Everything else (Float64 operands, negative
+/// dividends, zero divisors, non-numeric tags) deoptimizes.
+fn emit_opt_mod(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    guard: u32,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    use rquickjs_core::qjs;
+    let output = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let lhs = opt_use(builder, env.stack[output]);
+    let rhs = opt_use(builder, env.stack[output + 1]);
+    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
+    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
+    let both_int = builder.ins().band(lhs_int, rhs_int);
+    let li = opt_i32(builder, env, lhs);
+    let ri = opt_i32(builder, env, rhs);
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, li, 0);
+    let non_zero = builder.ins().icmp_imm(IntCC::NotEqual, ri, 0);
+    let exact = builder.ins().band(non_negative, non_zero);
+    let ok = builder.ins().band(both_int, exact);
+    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, ok)?;
+    let remainder = builder.ins().srem(li, ri);
+    let pair = opt_int_pair(builder, env, remainder);
+    opt_define(builder, env.stack[output], pair);
+    provenance[output] = OptProvenance::ImmediatePrimitive;
+    provenance[output + 1] = OptProvenance::Unknown;
+    Ok(output + 1)
+}
+
+/// `==`, `!=`, `===` and `!==` with exact results for operands that need no
+/// coercion, i.e. both tagged Int32, Float64, Bool, `undefined` or `null`:
+/// two numbers compare as Float64 (NaN is unequal to itself, `-0` equals
+/// `0`), two booleans compare payloads, `undefined`/`null` pairs are equal
+/// under `==` and equal under `===` only with matching tags, and any other
+/// combination of these tags is unequal. Loose equality of a boolean with a
+/// number coerces and deoptimizes, as does every string, object, symbol or
+/// BigInt operand, so those run in the interpreter.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_equality(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    operation: &str,
+    pc: u32,
+    guard: u32,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+    use cranelift_codegen::ir::{types, InstBuilder};
+    use rquickjs_core::qjs;
+    let output = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let lhs = opt_use(builder, env.stack[output]);
+    let rhs = opt_use(builder, env.stack[output + 1]);
+    let strict = matches!(operation, "strict_eq" | "strict_neq");
+    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
+    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
+    let (lhs_numeric, rhs_numeric) = if env.int32_loop {
+        (lhs_int, rhs_int)
+    } else {
+        let lhs_float = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_FLOAT64);
+        let rhs_float = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_FLOAT64);
+        (
+            builder.ins().bor(lhs_int, lhs_float),
+            builder.ins().bor(rhs_int, rhs_float),
+        )
+    };
+    let both_numeric = builder.ins().band(lhs_numeric, rhs_numeric);
+    let lhs_bool = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_BOOL);
+    let rhs_bool = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_BOOL);
+    let lhs_undefined = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_UNDEFINED);
+    let rhs_undefined = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_UNDEFINED);
+    let lhs_null = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_NULL);
+    let rhs_null = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_NULL);
+    let lhs_nullish = builder.ins().bor(lhs_undefined, lhs_null);
+    let rhs_nullish = builder.ins().bor(rhs_undefined, rhs_null);
+    let lhs_primitive = builder.ins().bor(lhs_numeric, lhs_bool);
+    let lhs_primitive = builder.ins().bor(lhs_primitive, lhs_nullish);
+    let rhs_primitive = builder.ins().bor(rhs_numeric, rhs_bool);
+    let rhs_primitive = builder.ins().bor(rhs_primitive, rhs_nullish);
+    let mut allowed = builder.ins().band(lhs_primitive, rhs_primitive);
+    if !strict {
+        let lhs_coerces = builder.ins().band(lhs_bool, rhs_numeric);
+        let rhs_coerces = builder.ins().band(rhs_bool, lhs_numeric);
+        let coerces = builder.ins().bor(lhs_coerces, rhs_coerces);
+        let pure = builder.ins().bxor_imm(coerces, 1);
+        allowed = builder.ins().band(allowed, pure);
+    }
+    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, allowed)?;
+    let numeric_equal = if env.int32_loop {
+        builder.ins().icmp(IntCC::Equal, lhs.payload, rhs.payload)
+    } else {
+        let lf = opt_f64(builder, lhs);
+        let rf = opt_f64(builder, rhs);
+        builder.ins().fcmp(FloatCC::Equal, lf, rf)
+    };
+    let li = opt_i32(builder, env, lhs);
+    let ri = opt_i32(builder, env, rhs);
+    let payload_equal = builder.ins().icmp(IntCC::Equal, li, ri);
+    let both_bool = builder.ins().band(lhs_bool, rhs_bool);
+    let both_nullish = builder.ins().band(lhs_nullish, rhs_nullish);
+    let nullish_equal = if strict {
+        builder.ins().icmp(IntCC::Equal, lhs.tag, rhs.tag)
+    } else {
+        builder.ins().iconst(types::I8, 1)
+    };
+    let falsehood = builder.ins().iconst(types::I8, 0);
+    let simple_equal = builder.ins().select(both_nullish, nullish_equal, falsehood);
+    let simple_equal = builder.ins().select(both_bool, payload_equal, simple_equal);
+    let equal = builder
+        .ins()
+        .select(both_numeric, numeric_equal, simple_equal);
+    let result = if matches!(operation, "neq" | "strict_neq") {
+        builder.ins().bxor_imm(equal, 1)
+    } else {
+        equal
+    };
+    let pair = opt_bool_pair(builder, env, result);
+    opt_define(builder, env.stack[output], pair);
+    provenance[output] = OptProvenance::ImmediatePrimitive;
+    provenance[output + 1] = OptProvenance::Unknown;
+    Ok(output + 1)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_opt_guarded_propkey(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
@@ -1954,25 +2971,19 @@ fn emit_opt_guarded_propkey(
     Ok(depth)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Bitwise and shift opcodes on two Int32 operands. Shift counts are masked
+/// to five bits exactly like ToUint32(count) & 31 in the specification, and
+/// `>>>` renormalizes results at or above 2^31 to Float64 (or deoptimizes in
+/// the raw-i32 loop shape, which cannot hold a Float64). Non-Int32 operands
+/// deoptimize so the interpreter performs ToInt32/ToNumeric with effects.
 fn emit_opt_guarded_int_binary(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
-    frame: cranelift_codegen::ir::Value,
-    sret: cranelift_codegen::ir::Value,
-    arg_buf: cranelift_codegen::ir::Value,
-    var_buf: cranelift_codegen::ir::Value,
-    stack_base: cranelift_codegen::ir::Value,
-    arguments: &[OptVars],
-    locals: &[OptVars],
-    stack: &[OptVars],
-    stack_provenance: &mut [OptProvenance],
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
     depth: usize,
     operation: &str,
     pc: u32,
     guard: u32,
-    helper_signatures: &[cranelift_codegen::ir::SigRef],
-    pointer_type: cranelift_codegen::ir::Type,
-    layout: super::helpers::FrameLayout,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
@@ -1981,87 +2992,58 @@ fn emit_opt_guarded_int_binary(
     let output = depth
         .checked_sub(2)
         .ok_or(CompileFailure::InvalidArtifact)?;
-    let lhs = opt_use(builder, stack[output]);
-    let rhs = opt_use(builder, stack[output + 1]);
-    let lhs_int = builder
-        .ins()
-        .icmp_imm(IntCC::Equal, lhs.tag, i64::from(qjs::JS_TAG_INT));
-    let rhs_int = builder
-        .ins()
-        .icmp_imm(IntCC::Equal, rhs.tag, i64::from(qjs::JS_TAG_INT));
+    let lhs = opt_use(builder, env.stack[output]);
+    let rhs = opt_use(builder, env.stack[output + 1]);
+    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
+    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
     let both_int = builder.ins().band(lhs_int, rhs_int);
-    let direct = builder.create_block();
-    let deopt = builder.create_block();
-    builder.ins().brif(both_int, direct, &[], deopt, &[]);
-
-    builder.switch_to_block(direct);
-    let lhs = builder.ins().ireduce(types::I32, lhs.payload);
-    let rhs = builder.ins().ireduce(types::I32, rhs.payload);
+    let deopt = emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, both_int)?;
+    let li = opt_i32(builder, env, lhs);
+    let ri = opt_i32(builder, env, rhs);
     let value = match operation {
-        "or" => builder.ins().bor(lhs, rhs),
-        "and" => builder.ins().band(lhs, rhs),
-        "xor" => builder.ins().bxor(lhs, rhs),
-        "shl" => builder.ins().ishl(lhs, rhs),
-        "sar" => builder.ins().sshr(lhs, rhs),
+        "or" => builder.ins().bor(li, ri),
+        "and" => builder.ins().band(li, ri),
+        "xor" => builder.ins().bxor(li, ri),
+        "shl" | "sar" | "shr" => {
+            let count = builder.ins().band_imm(ri, 31);
+            match operation {
+                "shl" => builder.ins().ishl(li, count),
+                "sar" => builder.ins().sshr(li, count),
+                _ => builder.ins().ushr(li, count),
+            }
+        }
         _ => return Err(CompileFailure::UnsupportedOpcode),
     };
-    let payload = if builder.func.dfg.value_type(lhs) == types::I32 {
-        builder.ins().sextend(types::I64, value)
+    let result = if operation == "shr" {
+        let fits_int32 = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, value, 0);
+        if env.int32_loop {
+            let int_block = builder.create_block();
+            builder.ins().brif(fits_int32, int_block, &[], deopt, &[]);
+            builder.switch_to_block(int_block);
+            opt_int_pair(builder, env, value)
+        } else {
+            let int_payload = builder.ins().sextend(types::I64, value);
+            let uint_float = builder.ins().fcvt_from_uint(types::F64, value);
+            let float_payload = builder
+                .ins()
+                .bitcast(types::I64, MemFlags::new(), uint_float);
+            let int_tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+            let float_tag = builder
+                .ins()
+                .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
+            OptPair {
+                payload: builder.ins().select(fits_int32, int_payload, float_payload),
+                tag: builder.ins().select(fits_int32, int_tag, float_tag),
+            }
+        }
     } else {
-        value
+        opt_int_pair(builder, env, value)
     };
-    let result = OptPair {
-        payload,
-        tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
-    };
-    opt_define(builder, stack[output], result);
-    let continuation = builder.create_block();
-    builder.ins().jump(continuation, &[]);
-
-    builder.switch_to_block(deopt);
-    for (index, vars) in arguments.iter().enumerate() {
-        let value = opt_use(builder, *vars);
-        opt_store(builder, arg_buf, index, value);
-    }
-    for (index, vars) in locals.iter().enumerate() {
-        let value = opt_use(builder, *vars);
-        opt_store(builder, var_buf, index, value);
-    }
-    for (index, vars) in stack.iter().take(depth).enumerate() {
-        let value = opt_use(builder, *vars);
-        opt_store(builder, stack_base, index, value);
-    }
-    opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
-    let start = builder
-        .ins()
-        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
-    let resume = builder.ins().iadd_imm(start, i64::from(pc));
-    builder
-        .ins()
-        .store(MemFlags::new(), resume, frame, layout.pc);
-    opt_own_stack_for_exit(
-        builder,
-        frame,
-        sret,
-        stack_base,
-        depth,
-        arguments.len() + locals.len(),
-        stack_provenance,
-        helper_signatures,
-        pointer_type,
-        layout,
-    )?;
-    emit_opt_exit(
-        builder,
-        sret,
-        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
-        Some(resume),
-        pointer_type,
-        guard,
-    );
-    builder.switch_to_block(continuation);
-    stack_provenance[output] = OptProvenance::ImmediatePrimitive;
-    stack_provenance[output + 1] = OptProvenance::Unknown;
+    opt_define(builder, env.stack[output], result);
+    provenance[output] = OptProvenance::ImmediatePrimitive;
+    provenance[output + 1] = OptProvenance::Unknown;
     Ok(output + 1)
 }
 
@@ -3227,6 +4209,22 @@ fn emit_opt_guarded_property(
         guard,
     );
     builder.switch_to_block(continuation);
+    // Every borrowed alias below the operands was materialized as an owner
+    // for the guard's exception path; hand those references back before the
+    // operand slots are released, or each guarded access leaks one.
+    opt_release_materialized_aliases(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        stack_provenance,
+        0..object_index,
+        depth,
+        arguments.len() + locals.len(),
+        helper_signatures,
+        pointer_type,
+        layout,
+    )?;
     opt_release_owned_stack(
         builder,
         frame,
@@ -3256,6 +4254,53 @@ fn emit_opt_guarded_property(
         opt_set_stack_top(builder, frame, stack_base, depth, pointer_type, layout);
         Ok(depth)
     }
+}
+
+/// Releases the owned duplicates that `opt_own_stack_for_exit` created for
+/// borrowed argument/local aliases *below* an operation's operands, once
+/// that operation continues natively. The aliases keep their provenance:
+/// the SSA value still borrows from the argument or local buffer, and the
+/// interpreter slot must not own a reference that nobody consumes.
+#[allow(clippy::too_many_arguments)]
+fn opt_release_materialized_aliases(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    provenance: &[OptProvenance],
+    range: core::ops::Range<usize>,
+    exception_depth: usize,
+    flat_stack_base: usize,
+    signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<(), CompileFailure> {
+    use rquickjs_core::qjs;
+    for index in range {
+        if !matches!(
+            provenance.get(index),
+            Some(OptProvenance::Argument(_) | OptProvenance::Local(_))
+        ) {
+            continue;
+        }
+        let slot = flat_stack_base
+            .checked_add(index)
+            .and_then(|slot| u32::try_from(slot).ok())
+            .ok_or(CompileFailure::ResourceLimit)?;
+        emit_opt_helper(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            exception_depth,
+            signatures,
+            qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+            &[0, slot],
+            pointer_type,
+            layout,
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3322,7 +4367,10 @@ fn opt_own_stack_for_exit(
     };
     opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
     for index in 0..depth {
-        if provenance.get(index) == Some(&OptProvenance::ImmediatePrimitive) {
+        if matches!(
+            provenance.get(index),
+            Some(OptProvenance::ImmediatePrimitive | OptProvenance::OwnedSlot)
+        ) {
             opt_set_stack_top(builder, frame, stack_base, index + 1, pointer_type, layout);
             continue;
         }
@@ -3411,6 +4459,7 @@ fn emit_opt_specialized_call(
     layout: super::helpers::FrameLayout,
     direct: Option<&DirectCallSite>,
     guard: u32,
+    scalar_result: bool,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     use rquickjs_core::qjs;
@@ -3724,12 +4773,537 @@ fn emit_opt_specialized_call(
         opt_define(builder, stack_slot, undefined);
         opt_store(builder, stack_base, index, undefined);
     }
-    stack_provenance[base] = OptProvenance::ImmediatePrimitive;
+    // The CALL bridge materialized every borrowed alias below the callee as
+    // an owner for its exception path; release those duplicates now that
+    // the call continued natively.
+    opt_release_materialized_aliases(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        stack_provenance,
+        0..base,
+        free_depth,
+        flat_base,
+        signatures,
+        pointer_type,
+        layout,
+    )?;
+    // Feedback-specialized results are scalars; anything else stays owned
+    // by the interpreter stack slot the CALL helper wrote it to.
+    stack_provenance[base] = if scalar_result {
+        OptProvenance::ImmediatePrimitive
+    } else {
+        OptProvenance::OwnedSlot
+    };
     for provenance in &mut stack_provenance[(base + 1)..=output_index] {
         *provenance = OptProvenance::Unknown;
     }
     opt_set_stack_top(builder, frame, stack_base, base + 1, pointer_type, layout);
     Ok(base + 1)
+}
+
+/// Locals that ever receive a value owned by its interpreter stack slot
+/// (helper results: global lookups, kept-receiver property loads and
+/// non-specialized call results). Stores into such a local must first
+/// release whatever it currently owns, exactly like the interpreter's
+/// `set_value`. The walk mirrors the lowering's linear stack model, so the
+/// set over-approximates every path; releasing a primitive is a no-op.
+fn owned_local_targets(
+    ir: &OptimizedIr,
+    specialization: &NumericSpecialization,
+) -> Result<Vec<bool>, CompileFailure> {
+    let Some(entry) = ir.guard_maps().first() else {
+        return Err(CompileFailure::InvalidArtifact);
+    };
+    let mut owned_locals = vec![false; usize::from(entry.shape().locals())];
+    let mut owned = vec![false; usize::from(ir.max_stack()) + crate::ir::MAX_HELPER_SCRATCH_SLOTS];
+    for block in ir.blocks() {
+        let mut depth = usize::from(block.stack_depth());
+        for node_id in block.nodes() {
+            let node = ir
+                .nodes()
+                .get(*node_id as usize)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            let name = match node.kind() {
+                crate::ir::OptimizedNodeKind::Bytecode { opcode } => opcode.as_ref(),
+                _ => "",
+            };
+            let pops = usize::from(node.pops());
+            let pushes = usize::from(node.pushes());
+            let base = depth
+                .checked_sub(pops)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            if base + pushes > owned.len() {
+                return Err(CompileFailure::ResourceLimit);
+            }
+            let top_owned = pops > 0 && owned[depth - 1];
+            let produces_owned = match name {
+                "get_var" => true,
+                "get_field2" => true,
+                n if n.starts_with("call") => !specialization.calls.contains_key(&node.pc()),
+                _ => false,
+            };
+            if top_owned {
+                let target = if name.starts_with("put_loc") {
+                    opt_index(name, node.bytes(), "put_loc")?
+                } else if name.starts_with("set_loc") && name != "set_loc_uninitialized" {
+                    opt_index(name, node.bytes(), "set_loc")?
+                } else {
+                    None
+                };
+                if let Some(slot) = target.and_then(|local| owned_locals.get_mut(local)) {
+                    *slot = true;
+                }
+            }
+            match name {
+                "get_field2" => {
+                    // The receiver stays; the loaded property is owned.
+                    owned[base + 1] = true;
+                }
+                _ => {
+                    for slot in &mut owned[base..base + pushes] {
+                        *slot = produces_owned;
+                    }
+                }
+            }
+            depth = base + pushes;
+        }
+    }
+    Ok(owned_locals)
+}
+
+fn opt_u32(bytes: &[u8]) -> Result<u32, CompileFailure> {
+    bytes
+        .get(1..5)
+        .and_then(|raw| raw.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or(CompileFailure::InvalidArtifact)
+}
+
+/// Flat frame slot index (arguments, locals, then stack) of a stack slot.
+fn opt_flat_stack_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFailure> {
+    env.arguments
+        .len()
+        .checked_add(env.locals.len())
+        .and_then(|base| base.checked_add(index))
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+fn opt_flat_local_slot(env: &OptEnv<'_>, index: usize) -> Result<u32, CompileFailure> {
+    env.arguments
+        .len()
+        .checked_add(index)
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// Local index written or read by a `get_loc*`/`put_loc*`/`set_loc*`
+/// family opcode name, or `None` for other opcodes.
+fn opt_local_slot(name: &str, bytes: &[u8]) -> Option<usize> {
+    for prefix in [
+        "get_loc", "put_loc", "set_loc", "inc_loc", "dec_loc", "add_loc",
+    ] {
+        if name == "get_loc0_loc1" || name == "set_loc_uninitialized" {
+            return None;
+        }
+        if name.starts_with(prefix) {
+            if let Ok(Some(index)) = opt_index(name, bytes, prefix) {
+                return Some(index);
+            }
+            return opt_u16(bytes).ok();
+        }
+    }
+    None
+}
+
+/// Increments whose Int32 result provably cannot overflow, so the raw-i32
+/// loop shape may add without an overflow exit.
+///
+/// The proof is the canonical counted loop: inside a natural loop whose
+/// header block ends with `get_loc k; <Int32 operand>; lt; if_false -> exit`,
+/// the sequence `get_loc k; inc|post_inc; put_loc k` is the only write to
+/// local `k` anywhere in the loop. Then `k < X <= INT32_MAX` holds at the
+/// increment on every iteration, so `k + 1` fits. Every value in the raw-i32
+/// shape is Int32 by its entry and header guards, which is what makes the
+/// header comparison a numeric bound.
+fn provably_bounded_increments(ir: &OptimizedIr) -> std::collections::BTreeSet<u32> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut bounded = BTreeSet::new();
+    let blocks = ir.blocks();
+    let index_of: BTreeMap<u32, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.start_pc(), index))
+        .collect();
+    let mut predecessors: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for block in blocks {
+        for successor in block.successors() {
+            predecessors
+                .entry(*successor)
+                .or_default()
+                .push(block.start_pc());
+        }
+    }
+    fn name_of(node: &crate::ir::OptimizedNode) -> Option<&str> {
+        match node.kind() {
+            crate::ir::OptimizedNodeKind::Bytecode { opcode } => Some(opcode.as_ref()),
+            _ => None,
+        }
+    }
+    for header in blocks.iter().filter(|block| block.is_loop_header()) {
+        // Natural loop: the header plus everything that reaches a latch
+        // without passing through the header.
+        let latches: Vec<u32> = blocks
+            .iter()
+            .filter(|block| {
+                block.start_pc() >= header.start_pc()
+                    && block.successors().contains(&header.start_pc())
+            })
+            .map(|block| block.start_pc())
+            .collect();
+        let mut members = BTreeSet::from([header.start_pc()]);
+        let mut pending = latches;
+        while let Some(pc) = pending.pop() {
+            if members.insert(pc) {
+                if let Some(preds) = predecessors.get(&pc) {
+                    pending.extend(preds.iter().copied());
+                }
+            }
+        }
+        // Header pattern: `get_loc k; operand; lt; if_false -> outside`.
+        let header_nodes: Vec<&crate::ir::OptimizedNode> = header
+            .nodes()
+            .iter()
+            .filter_map(|id| ir.nodes().get(*id as usize))
+            .filter(|node| name_of(node).is_some() && !node.eliminated())
+            .collect();
+        let count = header_nodes.len();
+        if count < 4 {
+            continue;
+        }
+        let [load, operand, compare, branch] = [
+            header_nodes[count - 4],
+            header_nodes[count - 3],
+            header_nodes[count - 2],
+            header_nodes[count - 1],
+        ];
+        let Some(counter) = name_of(load).and_then(|name| {
+            name.starts_with("get_loc")
+                .then(|| opt_local_slot(name, load.bytes()))
+                .flatten()
+        }) else {
+            continue;
+        };
+        let operand_ok = name_of(operand).is_some_and(|name| {
+            name.starts_with("get_loc") || name.starts_with("get_arg") || name.starts_with("push_")
+        });
+        let exits_loop = name_of(branch).is_some_and(|name| name.starts_with("if_false"))
+            && branch
+                .branch_target()
+                .is_some_and(|target| !members.contains(&target));
+        if !operand_ok || name_of(compare) != Some("lt") || !exits_loop {
+            continue;
+        }
+        // Every write to `counter` inside the loop must be the increment's
+        // own `get_loc k; inc|post_inc; put_loc k` store.
+        let mut increments = Vec::new();
+        let mut foreign_write = false;
+        for pc in &members {
+            let Some(block) = index_of.get(pc).and_then(|index| blocks.get(*index)) else {
+                continue;
+            };
+            let nodes: Vec<&crate::ir::OptimizedNode> = block
+                .nodes()
+                .iter()
+                .filter_map(|id| ir.nodes().get(*id as usize))
+                .filter(|node| name_of(node).is_some())
+                .collect();
+            for (position, node) in nodes.iter().enumerate() {
+                let name = name_of(node).unwrap_or_default();
+                let writes_counter = (name.starts_with("put_loc")
+                    || name.starts_with("set_loc")
+                    || name.starts_with("inc_loc")
+                    || name.starts_with("dec_loc")
+                    || name.starts_with("add_loc"))
+                    && opt_local_slot(name, node.bytes()) == Some(counter);
+                if !writes_counter {
+                    continue;
+                }
+                let from_increment = name.starts_with("put_loc")
+                    && position >= 2
+                    && matches!(name_of(nodes[position - 1]), Some("inc" | "post_inc"))
+                    && name_of(nodes[position - 2]).is_some_and(|name| {
+                        name.starts_with("get_loc")
+                            && opt_local_slot(name, nodes[position - 2].bytes()) == Some(counter)
+                    });
+                if from_increment {
+                    increments.push(nodes[position - 1].pc());
+                } else {
+                    foreign_write = true;
+                }
+            }
+        }
+        if !foreign_write && increments.len() == 1 {
+            bounded.extend(increments);
+        }
+    }
+    bounded
+}
+
+/// How a value may be stored into an interpreter-owned argument or local
+/// buffer. Tier 2 spills borrowed SSA aliases into those buffers at every
+/// exit without transferring ownership (deoptimization maps carry identity
+/// recipes only), so an alias that is a heap reference must never be copied
+/// into a *different* slot: the interpreter would inherit an unowned pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AliasStore {
+    /// Proven scalar, slot-owned (moved by the caller), or the slot's own value.
+    Safe,
+    /// Unproven representation: check the tag at run time and deoptimize
+    /// before the store when the value is reference counted.
+    GuardHeap,
+    /// Proven or unknowable heap alias: fail closed.
+    Reject,
+}
+
+fn opt_alias_store(
+    specialization: &NumericSpecialization,
+    argument_count: usize,
+    source: OptProvenance,
+    destination: OptProvenance,
+) -> AliasStore {
+    if source == destination {
+        return AliasStore::Safe;
+    }
+    let representation = |slot: usize| {
+        specialization
+            .arguments
+            .get(slot)
+            .copied()
+            .unwrap_or(specialization.entry)
+    };
+    let classify = |representation: EntryRepresentation| match representation {
+        EntryRepresentation::Numeric
+        | EntryRepresentation::Int32
+        | EntryRepresentation::Float64 => AliasStore::Safe,
+        EntryRepresentation::Any => AliasStore::GuardHeap,
+        EntryRepresentation::HeapRef => AliasStore::Reject,
+    };
+    match source {
+        OptProvenance::ImmediatePrimitive | OptProvenance::OwnedSlot => AliasStore::Safe,
+        OptProvenance::Argument(slot) => classify(representation(slot)),
+        OptProvenance::Local(slot) => classify(representation(argument_count + slot)),
+        OptProvenance::Unknown => AliasStore::Reject,
+    }
+}
+
+/// Applies [`opt_alias_store`] for the value at stack index `source_index`
+/// before it is stored into `destination`; `depth` is the operand-stack
+/// depth before the storing instruction pops anything.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_alias_store_guard(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    specialization: &NumericSpecialization,
+    provenance: &[OptProvenance],
+    depth: usize,
+    source_index: usize,
+    destination: OptProvenance,
+    pc: u32,
+    guard: Option<u32>,
+) -> Result<(), CompileFailure> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    if env.int32_loop {
+        return Ok(());
+    }
+    match opt_alias_store(
+        specialization,
+        env.arguments.len(),
+        provenance[source_index],
+        destination,
+    ) {
+        AliasStore::Safe => Ok(()),
+        AliasStore::Reject => Err(CompileFailure::UnsupportedOpcode),
+        AliasStore::GuardHeap => {
+            // QuickJS reference-counted tags are the negative ones.
+            let pair = opt_use(builder, env.stack[source_index]);
+            let not_refcounted =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::SignedGreaterThanOrEqual, pair.tag, 0);
+            let guard = guard.ok_or(CompileFailure::InvalidArtifact)?;
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, not_refcounted)?;
+            Ok(())
+        }
+    }
+}
+
+/// Compilation fails closed when an opcode would copy or silently discard a
+/// value owned by its interpreter stack slot.
+fn opt_reject_owned(
+    provenance: &[OptProvenance],
+    range: core::ops::Range<usize>,
+) -> Result<(), CompileFailure> {
+    if provenance[range].contains(&OptProvenance::OwnedSlot) {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    Ok(())
+}
+
+/// Releases the value an interpreter stack slot owns (the slot must hold
+/// the current SSA value, which every owned slot does by construction).
+fn emit_opt_free_stack_slot(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    let pair = opt_use(builder, env.stack[index]);
+    opt_store(builder, env.stack_base, index, pair);
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        index + 1,
+        env.pointer_type,
+        env.layout,
+    );
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        index + 1,
+        env.helper_signatures,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, opt_flat_stack_slot(env, index)?],
+        env.pointer_type,
+        env.layout,
+    )
+}
+
+/// Releases the value a local owns before it is redefined.
+fn emit_opt_free_local_slot(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    if env.int32_loop {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    let pair = opt_use(builder, env.locals[index]);
+    opt_store(builder, env.var_buf, index, pair);
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        0,
+        env.helper_signatures,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, opt_flat_local_slot(env, index)?],
+        env.pointer_type,
+        env.layout,
+    )
+}
+
+/// Invokes a helper that writes an owned value into the pushed stack slot
+/// (GET_GLOBAL, GET_PROPERTY with the receiver kept). Every live stack slot
+/// is turned into a real interpreter owner first, exactly as the CALL bridge
+/// does, so an exception unwinds the frame correctly and the helper sees a
+/// consistent stack; `helper_arguments` follow the output slot.
+fn emit_opt_owned_helper_push(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    helper_id: usize,
+    helper_arguments: &[u32],
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    if env.int32_loop {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    if depth >= env.stack.len() {
+        return Err(CompileFailure::ResourceLimit);
+    }
+    let undefined = OptPair {
+        payload: builder.ins().iconst(types::I64, 0),
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
+    };
+    opt_define(builder, env.stack[depth], undefined);
+    for (index, vars) in env.arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.arg_buf, index, value);
+    }
+    for (index, vars) in env.locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.var_buf, index, value);
+    }
+    for (index, vars) in env.stack.iter().take(depth + 1).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.stack_base, index, value);
+    }
+    let bytecode = builder.ins().load(
+        env.pointer_type,
+        MemFlags::new(),
+        env.frame,
+        env.layout.bytecode_start,
+    );
+    let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), current_pc, env.frame, env.layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.arguments.len() + env.locals.len(),
+        provenance,
+        env.helper_signatures,
+        env.pointer_type,
+        env.layout,
+    )?;
+    for slot in provenance.iter_mut().take(depth) {
+        if matches!(slot, OptProvenance::Argument(_) | OptProvenance::Local(_)) {
+            *slot = OptProvenance::OwnedSlot;
+        }
+    }
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        depth + 1,
+        env.pointer_type,
+        env.layout,
+    );
+    let mut arguments = Vec::with_capacity(helper_arguments.len() + 2);
+    arguments.push(0);
+    arguments.push(opt_flat_stack_slot(env, depth)?);
+    arguments.extend_from_slice(helper_arguments);
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.helper_signatures,
+        helper_id,
+        &arguments,
+        env.pointer_type,
+        env.layout,
+    )?;
+    let result = opt_load(builder, env.stack_base, depth);
+    opt_define(builder, env.stack[depth], result);
+    provenance[depth] = OptProvenance::OwnedSlot;
+    Ok(depth + 1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3885,6 +5459,25 @@ fn emit_opt_numeric_guard(
             .unwrap_or(representation);
         let valid = match required {
             EntryRepresentation::Any => builder.ins().iconst(types::I8, 1),
+            EntryRepresentation::Numeric if index >= arguments.len() => {
+                // A `let` declared inside the loop body is still
+                // uninitialized or undefined at the header. Every numeric
+                // consumer guards its operand tags itself, so such locals
+                // need no proof here.
+                let numeric = builder.ins().bor(int, float);
+                let undefined = builder.ins().icmp_imm(
+                    IntCC::Equal,
+                    pair.tag,
+                    i64::from(rquickjs_core::qjs::JS_TAG_UNDEFINED),
+                );
+                let uninitialized = builder.ins().icmp_imm(
+                    IntCC::Equal,
+                    pair.tag,
+                    i64::from(rquickjs_core::qjs::JS_TAG_UNINITIALIZED),
+                );
+                let unset = builder.ins().bor(undefined, uninitialized);
+                builder.ins().bor(numeric, unset)
+            }
             EntryRepresentation::Numeric => builder.ins().bor(int, float),
             EntryRepresentation::Int32 => int,
             EntryRepresentation::Float64 => float,
@@ -4029,6 +5622,11 @@ impl Tier2Compiler {
         settings
             .set("opt_level", "speed")
             .expect("Cranelift opt_level setting");
+        // See BaselineCompiler::host: the IR verifier is a development aid
+        // whose superlinear passes dominate large-function compile time.
+        settings
+            .set("enable_verifier", "false")
+            .expect("Cranelift enable_verifier setting");
         let isa = cranelift_native::builder()
             .expect("host architecture is supported by Cranelift")
             .finish(settings::Flags::new(settings))
@@ -4054,6 +5652,27 @@ impl Tier2Compiler {
             &NumericSpecialization::default(),
         )
         .map(|code| code.clif().to_owned())
+    }
+
+    /// Compiles and publishes the feedback-free Tier 2 machine code for a
+    /// verified function so tests can execute it on a synthetic frame and
+    /// observe exact results and exits.
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    pub fn publish_for_test(
+        &self,
+        function: &VerifiedFunction,
+        epoch: u64,
+    ) -> Result<super::baseline::PublishedBaselineCode, CompileFailure> {
+        let ir = OptimizedIr::translate(function, epoch)?;
+        lower_optimized_machine(
+            &self.isa,
+            &ir,
+            None,
+            None,
+            &NumericSpecialization::default(),
+        )?
+        .publish()
+        .map_err(|_| CompileFailure::InvalidArtifact)
     }
 
     #[cfg(feature = "test-support")]
@@ -4224,10 +5843,16 @@ impl Compiler for TieredCompiler {
     }
 }
 
+/// Call opcodes whose call-site feedback the runtime records at the
+/// instruction pc; tail calls are lowered as the equivalent call plus return.
+fn is_call_site(name: &str) -> bool {
+    name.starts_with("call") || name.starts_with("tail_call")
+}
+
 fn has_stable_compiled_call(request: &CompileRequest) -> bool {
     let mut found = false;
     for instruction in request.snapshot().instructions() {
-        if !instruction.opcode().name().starts_with("call") {
+        if !is_call_site(instruction.opcode().name()) {
             continue;
         }
         found = true;

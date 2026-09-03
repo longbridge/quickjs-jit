@@ -37,6 +37,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0006-tier1-regexp.patch",
         "0007-msan-slot-boundary.patch",
         "0008-tier1-atom-values.patch",
+        "0009-tier1-arith-slow.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -95,7 +96,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 18u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 19u"));
     assert!(jit_header.contains("uint64_t payload;"));
     assert!(quickjs.contains("constants[i].payload = 0;"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
@@ -111,7 +112,8 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
             .count(),
         3
     );
-    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 8u"));
+    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 9u"));
+    assert!(jit_header.contains("#define QJSJIT_RUNTIME_FIELD_MAP_OUT_IN_OP(field)"));
     assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_LOCAL = 1"));
@@ -124,6 +126,12 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(helper_header.contains("X(CALL_CONSTRUCTOR, call_constructor"));
     assert!(helper_header.contains("X(REGEXP, regexp"));
     assert!(helper_header.contains("X(ATOM_VALUE, atom_value"));
+    assert!(helper_header.contains("X(BINARY_ARITH_SLOW, binary_arith_slow"));
+    assert!(helper_header.contains("X(UNARY_ARITH_SLOW, unary_arith_slow"));
+    assert!(helper_header.contains("#define QJSJIT_DECLARE_MAP_OUT_IN_OP(name)"));
+    assert!(quickjs.contains("JS_JitHelperBinaryArithSlow"));
+    assert!(quickjs.contains("JS_JitHelperUnaryArithSlow"));
+    assert!(quickjs.contains("#define QJSJIT_ABI_COUNT_MAP_OUT_IN_OP 6"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
@@ -202,7 +210,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 18;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 19;"),
             "{target}"
         );
         assert!(
@@ -228,11 +236,23 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
                 && binding.contains("pub get_global: ::core::option::Option")
                 && binding.contains("pub call_constructor: ::core::option::Option")
                 && binding.contains("pub regexp: ::core::option::Option")
-                && binding.contains("pub atom_value: ::core::option::Option"),
+                && binding.contains("pub atom_value: ::core::option::Option")
+                && binding.contains("pub binary_arith_slow: ::core::option::Option")
+                && binding.contains("pub unary_arith_slow: ::core::option::Option"),
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 184usize"),
+            binding.contains("JS_JIT_HELPER_BINARY_ARITH_SLOW: JSJitHelperId = 22")
+                && binding.contains("JS_JIT_HELPER_UNARY_ARITH_SLOW: JSJitHelperId = 23")
+                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 24"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("pub const QJSJIT_RUNTIME_API_MINOR: u32 = 9;"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 200usize"),
             "{target}"
         );
     }

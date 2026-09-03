@@ -18,6 +18,8 @@ pub enum HelperId {
     ToNumeric,
     ToBool,
     AddSlow,
+    BinaryArithSlow,
+    UnaryArithSlow,
     CompareSlow,
     GetProperty,
     SetProperty,

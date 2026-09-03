@@ -238,6 +238,7 @@ struct ForcedBaselineBackend {
     code: PublishedBaselineCode,
     entries: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
+    deopts: Arc<AtomicUsize>,
     registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
     stress_gc: bool,
 }
@@ -247,6 +248,7 @@ struct ForcedEntryPin {
     code: PublishedBaselineCode,
     entries: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
+    deopts: Arc<AtomicUsize>,
     stress_gc: bool,
 }
 
@@ -323,6 +325,9 @@ unsafe extern "C" fn forced_entry_trampoline(
     if exit.kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER {
         pin.retries.fetch_add(1, Ordering::SeqCst);
     }
+    if exit.kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+        pin.deopts.fetch_add(1, Ordering::SeqCst);
+    }
     exit
 }
 
@@ -352,6 +357,7 @@ unsafe impl JitBackend for ForcedBaselineBackend {
                 code: self.code.clone(),
                 entries: Arc::clone(&self.entries),
                 retries: Arc::clone(&self.retries),
+                deopts: Arc::clone(&self.deopts),
                 stress_gc: self.stress_gc,
             }))
             .cast(),
@@ -416,6 +422,7 @@ struct ForcedInstallation {
     guard: RuntimeJitGuard,
     entries: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
+    deopts: Arc<AtomicUsize>,
     registry: Arc<Mutex<Option<JitFunctionRegistry>>>,
 }
 
@@ -452,6 +459,7 @@ fn compile_named_function(
         .unwrap_or_else(|error| panic!("forced baseline publication failed: {error:?}"));
     let entries = Arc::new(AtomicUsize::new(0));
     let retries = Arc::new(AtomicUsize::new(0));
+    let deopts = Arc::new(AtomicUsize::new(0));
     let registry_slot = Arc::new(Mutex::new(None));
     let guard = runtime
         .attach_jit_backend(ForcedBaselineBackend {
@@ -460,6 +468,7 @@ fn compile_named_function(
             code,
             entries: Arc::clone(&entries),
             retries: Arc::clone(&retries),
+            deopts: Arc::clone(&deopts),
             registry: Arc::clone(&registry_slot),
             stress_gc,
         })
@@ -485,6 +494,7 @@ fn compile_named_function(
         guard,
         entries,
         retries,
+        deopts,
         registry: registry_slot,
     }
 }
@@ -499,6 +509,7 @@ pub struct DifferentialRun {
     expected_helper: Option<HelperId>,
     expected_ownership_helper_counts: Option<(u64, u64)>,
     stress_gc: bool,
+    expect_deopt: bool,
 }
 
 #[cfg(feature = "compiler")]
@@ -511,6 +522,7 @@ pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
         expected_helper: None,
         expected_ownership_helper_counts: None,
         stress_gc: false,
+        expect_deopt: false,
     }
 }
 
@@ -568,6 +580,13 @@ impl DifferentialRun {
 
     pub fn stress_gc(mut self) -> Self {
         self.stress_gc = true;
+        self
+    }
+
+    /// The native body is expected to hand the frame back to the
+    /// interpreter mid-function (a use-site guard failed) at least once.
+    pub fn expect_deopt(mut self) -> Self {
+        self.expect_deopt = true;
         self
     }
 
@@ -658,6 +677,18 @@ impl DifferentialRun {
                 0,
                 "forced baseline silently retried in the interpreter"
             );
+            let deopts = installation.deopts.load(Ordering::SeqCst);
+            if self.expect_deopt {
+                assert!(
+                    deopts > 0,
+                    "forced baseline never deoptimized to the interpreter"
+                );
+            } else {
+                assert_eq!(
+                    deopts, 0,
+                    "forced baseline silently deoptimized to the interpreter"
+                );
+            }
         }
         if let Some(expected) = self.expected_opcode.as_deref() {
             let opcode = linked_opcode_table()
@@ -683,6 +714,12 @@ impl DifferentialRun {
                 HelperId::ToNumeric => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_NUMERIC,
                 HelperId::ToBool => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_BOOL,
                 HelperId::AddSlow => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ADD_SLOW,
+                HelperId::BinaryArithSlow => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW
+                }
+                HelperId::UnaryArithSlow => {
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_UNARY_ARITH_SLOW
+                }
                 HelperId::CompareSlow => {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_COMPARE_SLOW
                 }
@@ -1155,6 +1192,27 @@ unsafe extern "C" fn synthetic_map_out_two_unavailable(
     -1
 }
 
+unsafe extern "C" fn synthetic_map_out_two_op_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _left: u32,
+    _right: u32,
+    _opcode: u32,
+) -> i32 {
+    -1
+}
+
+unsafe extern "C" fn synthetic_map_out_in_op_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _output: u32,
+    _input: u32,
+    _opcode: u32,
+) -> i32 {
+    -1
+}
+
 unsafe extern "C" fn synthetic_get_unavailable(
     _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
     _stack_map_id: u32,
@@ -1268,6 +1326,8 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         get_global: Some(synthetic_map_out_in_unavailable),
         call_constructor: Some(synthetic_map_call_unavailable),
         regexp: Some(synthetic_map_out_two_unavailable),
+        binary_arith_slow: Some(synthetic_map_out_two_op_unavailable),
+        unary_arith_slow: Some(synthetic_map_out_in_op_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

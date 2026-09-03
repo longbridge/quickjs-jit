@@ -1586,6 +1586,19 @@ impl Coordinator {
     }
 
     /// Applies worker completions on the caller's runtime-locked coordinator.
+    /// True when a worker completion or a code-cache reclamation is waiting
+    /// to be applied. This is a pair of relaxed atomic loads, cheap enough
+    /// for the per-entry native path to decide whether maintenance is due.
+    pub fn has_pending_work(&self) -> bool {
+        self.completion_signals.pending.load(Ordering::Acquire) != 0
+            || self.cache.reclamation_requested()
+    }
+
+    /// Number of installed artifacts without cloning the metrics snapshot.
+    pub fn installed_count(&self) -> u64 {
+        self.metrics.installed
+    }
+
     pub fn drain_completions(&mut self) -> CompletionDrain {
         self.drain_completions_with_budget(DEFAULT_COMPLETION_DRAIN_BUDGET)
     }

@@ -5,7 +5,7 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Function, Runtime};
 use rquickjs_jit::bytecode::{
     linked_opcode_table, tier1_policy, FallbackReason, HelperId, Tier1Policy,
 };
@@ -50,6 +50,8 @@ enum ManifestHelper {
     ToNumeric,
     ToBool,
     AddSlow,
+    BinaryArithSlow,
+    UnaryArithSlow,
     CompareSlow,
     GetProperty,
     SetProperty,
@@ -74,6 +76,8 @@ impl ManifestHelper {
             Self::ToNumeric => HelperId::ToNumeric,
             Self::ToBool => HelperId::ToBool,
             Self::AddSlow => HelperId::AddSlow,
+            Self::BinaryArithSlow => HelperId::BinaryArithSlow,
+            Self::UnaryArithSlow => HelperId::UnaryArithSlow,
             Self::CompareSlow => HelperId::CompareSlow,
             Self::GetProperty => HelperId::GetProperty,
             Self::SetProperty => HelperId::SetProperty,
@@ -100,7 +104,33 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
     }
     if matches!(
         case.opcode.as_str(),
-        "plus" | "post_inc" | "add" | "sub" | "mul" | "div" | "lt"
+        "plus"
+            | "post_inc"
+            | "post_dec"
+            | "add"
+            | "sub"
+            | "mul"
+            | "div"
+            | "lt"
+            | "lte"
+            | "gt"
+            | "gte"
+            | "eq"
+            | "neq"
+            | "strict_eq"
+            | "strict_neq"
+            | "neg"
+            | "inc"
+            | "dec"
+            | "not"
+            | "shl"
+            | "sar"
+            | "shr"
+            | "xor"
+            | "inc_loc"
+            | "dec_loc"
+            | "add_loc"
+            | "mod"
     ) {
         required.insert(Dimension::NumericTagEdge);
     }
@@ -117,6 +147,8 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::ToPropertyKey
                 | ManifestHelper::Call
                 | ManifestHelper::CallConstructor
+                | ManifestHelper::BinaryArithSlow
+                | ManifestHelper::UnaryArithSlow
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -162,6 +194,14 @@ fn manifest_executes_every_advertised_opcode_at_its_native_pc() {
         serde_json::from_str(include_str!("fixtures/opcode-cases.json")).unwrap();
     validate_dimensions(&manifest).expect("manifest has semantic dimension evidence");
     for case in manifest.cases {
+        // The 32-bit `goto` case needs a 6,000-statement dead block to push a
+        // jump offset past 16 bits. Under sanitizer instrumentation compiling
+        // that block takes over an hour on CI runners, so only the
+        // uninstrumented jobs execute it; the opcode manifest gate in
+        // `opcodes.rs` still requires the case to exist.
+        if cfg!(rquickjs_sanitizer) && case.opcode == "goto" {
+            continue;
+        }
         let mut run = differential(&case.definition, &case.expression)
             .force_baseline()
             .expect_executed_opcode(&case.opcode);
@@ -210,8 +250,8 @@ fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() 
 #[test]
 fn rejected_programs_have_exact_fallback_and_interpreter_semantics() {
     assert_tier1_rejected(
-        "function f(a,b){ return a%b }",
-        "f(86,44)",
+        "function f(a){ return typeof a }",
+        "f(86)",
         FallbackReason::UnsupportedOpcode,
     );
 }
@@ -446,6 +486,18 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             HelperId::CompareSlow,
         ),
         (
+            "function f(a,b){ return a % b }",
+            "f({valueOf(){return 20}},6)",
+            "mod",
+            HelperId::BinaryArithSlow,
+        ),
+        (
+            "function f(a){ return -a }",
+            "f({valueOf(){return 20}})",
+            "neg",
+            HelperId::UnaryArithSlow,
+        ),
+        (
             "function f(o,a){ o.answer=a; return o.answer }",
             "f({},42)",
             "put_field",
@@ -517,9 +569,9 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
         let automatic_context = Context::full(&automatic).unwrap();
         automatic_context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
-        let warm = format!("for(let i=0;i<256;i++){{{invocation};}}");
+        install_warm_loop(&automatic_context, &invocation);
         for _ in 0..128 {
-            automatic_context.with(|ctx| ctx.eval::<(), _>(warm.as_str()).unwrap());
+            run_warm_loop(&automatic_context);
             automatic.jit().poll();
             if automatic.metrics().native_entries > 0 {
                 break;
@@ -574,9 +626,9 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         let context = Context::full(&optimized).unwrap();
         context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
-        let warm = format!("for(let i=0;i<256;i++){{{invocation};}}");
+        install_warm_loop(&context, &invocation);
         for _ in 0..128 {
-            context.with(|ctx| ctx.eval::<(), _>(warm.as_str()).unwrap());
+            run_warm_loop(&context);
             optimized.jit().poll();
             if optimized.metrics().tier2_entries > 0 {
                 break;
@@ -605,6 +657,22 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         );
         assert_eq!(actual, expected, "optimized seed {seed}");
     }
+}
+
+/// Warm through one function defined once. Evaluating a fresh warm script
+/// per iteration creates a new (now Tier 1 eligible) function every time,
+/// and with `call_threshold(1)` those throwaway scripts fill the compile
+/// queue ahead of the function under test.
+fn install_warm_loop(context: &Context, invocation: &str) {
+    let warm = format!("globalThis.warm=function(){{for(let i=0;i<256;i++){{{invocation};}}}}");
+    context.with(|ctx| ctx.eval::<(), _>(warm.as_str()).unwrap());
+}
+
+fn run_warm_loop(context: &Context) {
+    context.with(|ctx| {
+        let warm: Function<'_> = ctx.globals().get("warm").unwrap();
+        warm.call::<_, ()>(()).unwrap();
+    });
 }
 
 fn seeded_eligible_function(seed: u64) -> (&'static str, String) {
