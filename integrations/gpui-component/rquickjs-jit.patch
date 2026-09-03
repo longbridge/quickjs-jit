@@ -1,310 +1,547 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index b4f64291..bcf5cf07 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -29,6 +29,7 @@ members = [
+     "examples/markdown_table",
+     "crates/shell",
+     "crates/component-shell",
++    "crates/rquickjs-compat",
+ ]
+ resolver = "2"
+
+@@ -137,16 +138,23 @@ lsp-types = { opt-level = 3 }
+ gpui-pre-reqwest-client = { opt-level = 3 }
+ markdown = { opt-level = 3 }
+ xml5ever = { opt-level = 3 }
+-# `rquickjs` is a facade that re-exports `rquickjs-core`, so naming it alone
+-# optimises neither the interpreter nor the bindings. `rquickjs-sys` builds
++# `quickjs-jit` is a facade that re-exports `quickjs-jit-core`, so naming it alone
++# optimises neither the interpreter nor the bindings. `quickjs-jit-sys` builds
+ # QuickJS itself through `cc`, which reads this package's opt-level; without
+ # these two a debug build spends roughly three times as long in every script
+ # render. See `website/shell/hosting.md`.
+-rquickjs = { opt-level = 3 }
+-rquickjs-sys = { opt-level = 3 }
+-rquickjs-core = { opt-level = 3 }
++quickjs-jit = { opt-level = 3 }
++quickjs-jit-runtime = { opt-level = 3 }
++quickjs-jit-sys = { opt-level = 3 }
++quickjs-jit-core = { opt-level = 3 }
+ cap-std = { opt-level = 3 }
+
++[patch.crates-io]
++# LLRT's public modules still name their compatible binding dependency
++# `rquickjs`. Route those dependencies through a source-compatible facade so
++# the shell and LLRT share the exact same quickjs-jit types and VM.
++rquickjs = { path = "crates/rquickjs-compat" }
++
+ [workspace.metadata.typos]
+ files.extend-exclude = ["**/fixtures/*"]
+
+diff --git a/crates/rquickjs-compat/Cargo.toml b/crates/rquickjs-compat/Cargo.toml
+new file mode 100644
+index 00000000..c3c1eb41
+--- /dev/null
++++ b/crates/rquickjs-compat/Cargo.toml
+@@ -0,0 +1,32 @@
++[package]
++name = "rquickjs"
++version = "0.12.4"
++edition.workspace = true
++publish = false
++
++[lib]
++path = "src/lib.rs"
++
++[dependencies]
++upstream = { package = "quickjs-jit", version = "0.12.6", default-features = false }
++
++[features]
++default = ["std"]
++std = ["upstream/std"]
++chrono = ["upstream/chrono"]
++either = ["upstream/either"]
++indexmap = ["upstream/indexmap"]
++phf = ["upstream/phf"]
++bindgen = ["upstream/bindgen"]
++parallel = ["upstream/parallel"]
++loader = ["upstream/loader"]
++dyn-load = ["upstream/dyn-load"]
++rust-alloc = ["upstream/rust-alloc"]
++macro = ["upstream/macro"]
++half = ["upstream/half"]
++bytes = ["upstream/bytes"]
++futures = ["upstream/futures"]
++classes = ["upstream/classes"]
++array-buffer = ["upstream/array-buffer"]
++allocator = ["upstream/allocator"]
++properties = ["upstream/properties"]
+diff --git a/crates/rquickjs-compat/src/lib.rs b/crates/rquickjs-compat/src/lib.rs
+new file mode 100644
+index 00000000..0261be28
+--- /dev/null
++++ b/crates/rquickjs-compat/src/lib.rs
+@@ -0,0 +1,3 @@
++//! Compatibility facade for dependencies that still name the upstream package.
++
++pub use upstream::*;
+diff --git a/crates/shell/Cargo.toml b/crates/shell/Cargo.toml
+index 58c2ac1f..f6479c6a 100644
 --- a/crates/shell/Cargo.toml
 +++ b/crates/shell/Cargo.toml
-@@ -18,7 +18,7 @@
- path = "src/bin/gpui-shell.rs"
- 
- [features]
--default = ["quickjs"]
-+default = ["quickjs", "quickjs-jit"]
- # The scripting engine. See `src/engine/mod.rs` for the surface an engine has
- # to provide; QuickJS is the only implementation today, and the feature exists
+@@ -24,6 +24,7 @@ default = ["quickjs"]
  # so a second one can be added without the seam having to be invented first.
-@@ -32,6 +32,7 @@
-     "dep:reqwest",
-     "dep:tungstenite",
- ]
-+quickjs-jit = ["quickjs", "dep:rquickjs-jit", "rquickjs/jit-abi"]
- 
- [dependencies]
- gpui.workspace = true
-@@ -40,6 +41,6 @@
+ quickjs = [
+     "dep:rquickjs",
++    "dep:rquickjs-jit",
+     "dep:llrt_buffer",
+     "dep:llrt_crypto",
+     "dep:llrt_path",
+@@ -39,12 +40,12 @@ gpui_platform.workspace = true
  gpui-base = { workspace = true, features = ["inspector"] }
  gpui-fps.workspace = true
+
 -rquickjs = { version = "0.12", features = [
-+rquickjs = { package = "quickjs-jit", version = "0.12.2", features = [
++rquickjs = { package = "quickjs-jit", version = "0.12.6", features = [
      "macro",
      "loader",
-     "classes",
-@@ -45,6 +46,9 @@
-     "classes",
-     "properties",
+-    "classes",
+-    "properties",
++    "jit-abi",
  ], optional = true }
-+
-+[target.'cfg(not(target_family = "wasm"))'.dependencies]
-+rquickjs-jit = { package = "quickjs-jit-runtime", version = "0.12.2", features = ["compiler"], optional = true }
++rquickjs-jit = { package = "quickjs-jit-runtime", version = "0.12.6", features = ["compiler"], optional = true }
  # LLRT is still pre-release. Keep every module on the same audited revision;
  # crates.io's 0.8.1-beta release uses rquickjs 0.11 and cannot share our VM.
  llrt_buffer = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", optional = true }
-@@ -71,6 +75,7 @@
- 
- [dev-dependencies]
- gpui = { workspace = true, features = ["test-support"] }
-+sha2 = "0.10"
- 
- [target.'cfg(unix)'.dependencies]
- libc = "0.2"
+diff --git a/crates/shell/src/engine/quickjs/mod.rs b/crates/shell/src/engine/quickjs/mod.rs
+index 07ad655f..3868aeaf 100644
 --- a/crates/shell/src/engine/quickjs/mod.rs
 +++ b/crates/shell/src/engine/quickjs/mod.rs
-@@ -33,6 +33,11 @@
+@@ -25,12 +25,13 @@ use anyhow::{Context as _, Result, anyhow};
+ use gpui::{App, AppContext as _, ClickEvent, Entity, Global, Subscription, WeakEntity, Window};
+ use rquickjs::{
+     Array, Context as JsContext, Ctx, Error as JsError, Exception, FromJs, Function, Object,
+-    Persistent, Result as JsResult, Runtime as JsRuntime, Value,
++    Persistent, Result as JsResult, Value,
+     function::{Args as JsArgs, Func, Opt, This},
+     loader::{BuiltinResolver, ImportAttributes, Loader, ModuleLoader, Resolver},
+     module::Declared,
+     module::{Declarations, Exports, Module, ModuleDef},
  };
++use rquickjs_jit::{JitConfig, JitRuntime};
  use smallvec::SmallVec;
- 
-+#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+use rquickjs_jit::{Jit, JitConfig};
-+#[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
-+use rquickjs_jit::JitMetrics;
-+
+
  use crate::{
-     entities::{EntityHandle, EntityStore},
-     metrics::Metrics,
-@@ -448,6 +453,124 @@
-     (GpuiFpsModule, "gpui-fps", exports::GPUI_FPS),
- ];
- 
-+enum RuntimeOwner {
-+    // Keep the counterfactual's GPUI task scheduling identical to automatic
-+    // mode. That leaves lifecycle timing to measure the JIT-specific work,
-+    // rather than the one task that makes deferred attachment possible.
-+    Interpreter {
-+        runtime: JsRuntime,
-+        lifecycle_scheduled: Cell<bool>,
-+    },
-+    #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+    Automatic {
-+        runtime: JsRuntime,
-+        jit: RefCell<Option<Jit>>,
-+        attach_scheduled: Cell<bool>,
-+    },
-+}
+@@ -240,6 +241,27 @@ mod retained_component_state_tests {
+     }
+ }
+
++#[cfg(test)]
++mod jit_suspension_tests {
++    use super::*;
 +
-+impl std::ops::Deref for RuntimeOwner {
-+    type Target = JsRuntime;
++    #[test]
++    fn nested_suspension_preserves_the_outer_state() {
++        let runtime = ShellRuntime::new_isolated().unwrap();
 +
-+    fn deref(&self) -> &Self::Target {
-+        match self {
-+            Self::Interpreter { runtime, .. } => runtime,
-+            #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+            Self::Automatic { runtime, .. } => runtime,
-+        }
++        runtime
++            .with_jit_suspended(|| {
++                assert!(runtime.js_runtime.jit().is_suspended());
++                runtime.with_jit_suspended(|| Ok(()))?;
++                assert!(runtime.js_runtime.jit().is_suspended());
++                Ok(())
++            })
++            .unwrap();
++
++        assert!(!runtime.js_runtime.jit().is_suspended());
 +    }
 +}
 +
-+impl RuntimeOwner {
-+    fn interpreter() -> Result<Self> {
-+        Ok(Self::Interpreter {
-+            runtime: JsRuntime::new().map_err(js_setup_error)?,
-+            lifecycle_scheduled: Cell::new(false),
-+        })
-+    }
-+
-+    fn automatic() -> Result<Self> {
-+        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+        {
-+            return Ok(Self::Automatic {
-+                runtime: JsRuntime::new().map_err(js_setup_error)?,
-+                jit: RefCell::new(None),
-+                attach_scheduled: Cell::new(false),
-+            });
-+        }
-+        Self::interpreter()
-+    }
-+
-+    fn poll_jit(&self) {
-+        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+        if let Self::Automatic { jit, .. } = self {
-+            if let Some(jit) = jit.borrow().as_ref() {
-+                jit.poll();
-+            }
-+        }
-+    }
-+
-+    fn suspend_jit(&self) {
-+        if let Self::Interpreter { lifecycle_scheduled, .. } = self {
-+            lifecycle_scheduled.set(false);
-+        }
-+        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+        if let Self::Automatic { jit, attach_scheduled, .. } = self {
-+            if let Some(jit) = jit.borrow().as_ref() {
-+                if let Err(error) = jit.suspend() {
-+                    tracing::warn!(%error, "could not suspend QuickJS JIT for reload");
-+                }
-+            }
-+            attach_scheduled.set(false);
-+        }
-+    }
-+
-+    fn schedule_attach(runtime: &Rc<ShellRuntime>, cx: &mut App) {
-+        if let Self::Interpreter { lifecycle_scheduled, .. } = &runtime.js_runtime {
-+            if !lifecycle_scheduled.replace(true) {
-+                // Production does one deferred lifecycle task after a render.
-+                // The interpreter comparator performs the same scheduling, so
-+                // first-window and reload timings isolate JIT-specific cost.
-+                cx.spawn(async move |_| {}).detach();
-+            }
-+            return;
-+        }
-+        #[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+        if let Self::Automatic { attach_scheduled, .. } = &runtime.js_runtime {
-+            if attach_scheduled.replace(true) {
-+                return;
-+            }
-+            let runtime = Rc::downgrade(runtime);
-+            cx.spawn(async move |cx| {
-+                _ = cx.update(|_| {
-+                    let Some(runtime) = runtime.upgrade() else { return };
-+                    let Self::Automatic { runtime: js, jit, .. } = &runtime.js_runtime else { return };
-+                    let mut guard = jit.borrow_mut();
-+                    if let Some(guard) = guard.as_ref() {
-+                        if let Err(error) = guard.resume() {
-+                            tracing::warn!(%error, "could not resume QuickJS JIT after reload");
-+                        }
-+                    } else {
-+                        let config = JitConfig::builder().build().expect("valid gpui-shell JIT configuration");
-+                        match Jit::attach(js, config) {
-+                            Ok(attached) => *guard = Some(attached),
-+                            Err(error) => tracing::warn!(%error, "QuickJS JIT unavailable; continuing interpreted"),
-+                        }
-+                    }
-+                });
-+            }).detach();
-+        }
-+    }
-+
-+    #[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
-+    fn jit_metrics(&self) -> Option<JitMetrics> {
-+        match self {
-+            Self::Interpreter { .. } => None,
-+            Self::Automatic { jit, .. } => jit.borrow().as_ref().map(Jit::metrics),
-+        }
-+    }
-+}
-+
- pub struct ShellRuntime {
-     /// Declared first because fields drop in declaration order and every
-     /// `Persistent` handle must be released while the context still exists.
-@@ -523,7 +578,7 @@
+ #[cfg(test)]
+ mod component_callback_value_tests {
+     use super::*;
+@@ -830,6 +852,7 @@ pub struct ViewObject {
+     #[allow(dead_code)] // Its drop owns the resolver registration lifetime.
+     module_lease: Option<ApplicationModuleLease>,
+     application: Option<Rc<ApplicationGeneration>>,
++    jit_warm: Rc<Cell<bool>>,
+ }
+
+ impl std::fmt::Debug for ViewObject {
+@@ -844,6 +867,7 @@ impl ViewObject {
+             value,
+             module_lease: None,
+             application: None,
++            jit_warm: Rc::new(Cell::new(false)),
+         }
+     }
+
+@@ -1342,7 +1366,38 @@ pub struct ShellRuntime {
      next_application_generation: Cell<u64>,
      /// Held so the context stays alive, and so the module loader can be scoped
      /// to an application directory when one is loaded.
 -    js_runtime: JsRuntime,
-+    js_runtime: RuntimeOwner,
++    js_runtime: JitRuntime,
++}
++
++struct JitSuspension<'a> {
++    jit: &'a rquickjs_jit::Jit,
++    active: bool,
++}
++
++impl JitSuspension<'_> {
++    fn begin(jit: &rquickjs_jit::Jit) -> Result<JitSuspension<'_>> {
++        let active = !jit.is_suspended();
++        if active {
++            jit.suspend()?;
++        }
++        Ok(JitSuspension { jit, active })
++    }
++
++    fn finish(mut self) -> Result<()> {
++        if self.active {
++            self.jit.resume()?;
++        }
++        self.active = false;
++        Ok(())
++    }
++}
++
++impl Drop for JitSuspension<'_> {
++    fn drop(&mut self) {
++        if self.active {
++            let _ = self.jit.resume();
++        }
++    }
  }
- 
+
  impl Drop for ShellRuntime {
-@@ -575,9 +630,22 @@
-     /// call frame rather than in runtime-global state. Use this only when a host
-     /// deliberately owns multiple isolated runtimes.
-     pub fn new_isolated() -> Result<Rc<Self>> {
-+        Self::new_isolated_with_mode(false)
+@@ -1376,6 +1431,17 @@ struct RuntimeGlobal(Weak<ShellRuntime>);
+ impl Global for RuntimeGlobal {}
+
+ impl ShellRuntime {
++    fn with_jit_suspended<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
++        if !self.js_runtime.has_jit() {
++            return operation();
++        }
++        let jit = self.js_runtime.jit();
++        let suspension = JitSuspension::begin(jit)?;
++        let result = operation();
++        suspension.finish()?;
++        result
++    }
++
+     /// Loads an application's JavaScript entry without exposing engine values.
+     ///
+     /// Resolution, declaration refresh, module generations, capabilities and
+@@ -1454,6 +1520,19 @@ impl ShellRuntime {
+         Self::new_isolated_with_components_and_dependency_store(
+             FrozenComponentRegistry::default(),
+             GitDependencyStore::for_user()?,
++            shell_jit_config()?,
++        )
 +    }
 +
 +    #[cfg(test)]
 +    pub(crate) fn new_isolated_interpreter() -> Result<Rc<Self>> {
-+        Self::new_isolated_with_mode(true)
++        let js_runtime = JitRuntime::builder()
++            .build_interpreter()
++            .map_err(|error| anyhow!("failed to start the JavaScript interpreter: {error}"))?;
++        Self::new_isolated_with_components_dependency_store_and_runtime(
++            FrozenComponentRegistry::default(),
++            GitDependencyStore::for_user()?,
++            js_runtime,
+         )
+     }
+
+@@ -1461,6 +1540,7 @@ impl ShellRuntime {
+         Self::new_isolated_with_components_and_dependency_store(
+             components,
+             GitDependencyStore::for_user()?,
++            shell_jit_config()?,
+         )
+     }
+
+@@ -1471,16 +1551,37 @@ impl ShellRuntime {
+         Self::new_isolated_with_components_and_dependency_store(
+             FrozenComponentRegistry::default(),
+             dependency_store,
++            shell_jit_config()?,
+         )
+     }
+
+     fn new_isolated_with_components_and_dependency_store(
+         components: FrozenComponentRegistry,
+         dependency_store: GitDependencyStore,
++        jit_config: JitConfig,
+     ) -> Result<Rc<Self>> {
++        let js_runtime = JitRuntime::builder()
++            .config(jit_config)
++            .build()
++            .map_err(|error| anyhow!("failed to start the JavaScript JIT runtime: {error}"))?;
++        Self::new_isolated_with_components_dependency_store_and_runtime(
++            components,
++            dependency_store,
++            js_runtime,
++        )
 +    }
 +
-+    fn new_isolated_with_mode(force_interpreter: bool) -> Result<Rc<Self>> {
++    fn new_isolated_with_components_dependency_store_and_runtime(
++        components: FrozenComponentRegistry,
++        dependency_store: GitDependencyStore,
++        js_runtime: JitRuntime,
++    ) -> Result<Rc<Self>> {
++        let jit_enabled = js_runtime.has_jit();
++        if jit_enabled {
++            js_runtime.jit().suspend()?;
++        }
          let entities = EntityStore::try_new()
              .ok_or_else(|| anyhow!("gpui-shell entity store id space is exhausted"))?;
 -        let js_runtime = JsRuntime::new().map_err(js_setup_error)?;
-+        let js_runtime = if force_interpreter {
-+            RuntimeOwner::interpreter()?
-+        } else {
-+            RuntimeOwner::automatic()?
-+        };
          let context = JsContext::full(&js_runtime).map_err(js_setup_error)?;
- 
+
          let app_modules = AppModules::default();
-@@ -638,6 +706,15 @@
+@@ -1551,7 +1652,11 @@ impl ShellRuntime {
+             js_runtime,
+         });
+
+-        runtime.install_globals()?;
++        let installed = runtime.install_globals();
++        if jit_enabled {
++            runtime.js_runtime.jit().resume()?;
++        }
++        installed?;
          Ok(runtime)
      }
- 
-+    #[cfg(all(test, feature = "quickjs-jit", not(target_family = "wasm")))]
-+    pub(crate) fn jit_metrics(&self) -> Option<JitMetrics> {
-+        self.js_runtime.jit_metrics()
-+    }
-+
-+    fn poll_jit(&self) {
-+        self.js_runtime.poll_jit();
-+    }
-+
-     pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
-         cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
-     }
-@@ -844,5 +946,6 @@
-     /// deliberately owns multiple isolated runtimes.
-     pub(crate) fn load_app(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
-+        self.js_runtime.suspend_jit();
-         let root = crate::runtime::resolve_app_root(dir, entry)?;
-         if let Err(error) = crate::write_type_declarations(&root) {
-             tracing::debug!(
-@@ -887,5 +990,23 @@
-     #[cfg(test)]
-     pub(crate) fn load_source(self: &Rc<Self>, name: &str, source: &str) -> Result<ViewType> {
-+        self.js_runtime.suspend_jit();
-         self.load_source_with_lease(name, source, None, None)
-     }
-+
-+    /// Benchmark-only split of the normal reload boundary. The two calls must
-+    /// remain adjacent: together they are exactly [`Self::load_source`], while
-+    /// exposing suspension separately from module declaration/evaluation.
-+    #[cfg(test)]
-+    pub(crate) fn suspend_jit_for_benchmark(&self) {
-+        self.js_runtime.suspend_jit();
-+    }
-+
-+    #[cfg(test)]
-+    pub(crate) fn load_source_after_suspending_for_benchmark(
-+        self: &Rc<Self>,
-+        name: &str,
-+        source: &str,
-+    ) -> Result<ViewType> {
-+        self.load_source_with_lease(name, source, None, None)
-+    }
 
-@@ -1711,7 +1815,12 @@
-                 object.application_generation(),
-             );
-             (self.call_render(object, generation), policy)
+@@ -1855,6 +1960,13 @@ impl ShellRuntime {
+         self.arena.borrow_mut().reset();
+     }
+
++    /// Returns JIT diagnostic counters for the real-process acceptance
++    /// benchmark.
++    #[cfg(test)]
++    pub(crate) fn jit_metrics_for_benchmark(&self) -> rquickjs_jit::JitMetrics {
++        self.js_runtime.metrics()
++    }
++
+     /// A reading of the two counters, taken now.
+     ///
+     /// The host gets the reading rather than the instrument: `Metrics` is the
+@@ -2044,21 +2156,24 @@ impl ShellRuntime {
+         module_lease: Option<ApplicationModuleLease>,
+         application: Option<Rc<ApplicationGeneration>>,
+     ) -> Result<ViewType> {
+-        self.with_js(|ctx| {
+-            let (module, promise) = rquickjs::Module::declare(ctx.clone(), name, source)?.eval()?;
+-            promise.finish::<()>()?;
++        self.with_jit_suspended(|| {
++            self.with_js(|ctx| {
++                let (module, promise) =
++                    rquickjs::Module::declare(ctx.clone(), name, source)?.eval()?;
++                promise.finish::<()>()?;
+
+-            let default: Value = module.get("default")?;
+-            let Some(class) = default.as_object() else {
+-                return Err(Exception::throw_message(
+-                    ctx,
+-                    "main.js must `export default` a class that extends View",
+-                ));
+-            };
+-            Ok(ViewType {
+-                value: Persistent::save(ctx, class.clone()),
+-                module_lease,
+-                application,
++                let default: Value = module.get("default")?;
++                let Some(class) = default.as_object() else {
++                    return Err(Exception::throw_message(
++                        ctx,
++                        "main.js must `export default` a class that extends View",
++                    ));
++                };
++                Ok(ViewType {
++                    value: Persistent::save(ctx, class.clone()),
++                    module_lease,
++                    application,
++                })
+             })
+         })
+     }
+@@ -2781,14 +2896,17 @@ impl ShellRuntime {
+     }
+
+     fn construct(&self, view_type: &ViewType) -> Result<ViewObject> {
+-        self.with_js(|ctx| {
+-            let class = view_type.value.clone().restore(ctx)?;
+-            let construct: Function = ctx.globals().get("__construct")?;
+-            let instance: Object = construct.call((class,))?;
+-            Ok(ViewObject {
+-                value: Persistent::save(ctx, instance),
+-                module_lease: view_type.module_lease.clone(),
+-                application: view_type.application.clone(),
++        self.with_jit_suspended(|| {
++            self.with_js(|ctx| {
++                let class = view_type.value.clone().restore(ctx)?;
++                let construct: Function = ctx.globals().get("__construct")?;
++                let instance: Object = construct.call((class,))?;
++                Ok(ViewObject {
++                    value: Persistent::save(ctx, instance),
++                    module_lease: view_type.module_lease.clone(),
++                    application: view_type.application.clone(),
++                    jit_warm: Rc::new(Cell::new(false)),
++                })
+             })
+         })
+     }
+@@ -2842,14 +2960,16 @@ impl ShellRuntime {
+         initial_props: Option<Persistent<Value<'static>>>,
+     ) -> Result<()> {
+         self.initializing_views.borrow_mut().push(object.clone());
+-        let initialized = self.with_js(|ctx| {
+-            let instance = object.value.clone().restore(ctx)?;
+-            let initialize: Function = ctx.globals().get("__initialize")?;
+-            let props = match initial_props {
+-                Some(props) => props.restore(ctx)?,
+-                None => Value::new_undefined(ctx.clone()),
+-            };
+-            initialize.call::<_, ()>((instance, props))
++        let initialized = self.with_jit_suspended(|| {
++            self.with_js(|ctx| {
++                let instance = object.value.clone().restore(ctx)?;
++                let initialize: Function = ctx.globals().get("__initialize")?;
++                let props = match initial_props {
++                    Some(props) => props.restore(ctx)?,
++                    None => Value::new_undefined(ctx.clone()),
++                };
++                initialize.call::<_, ()>((instance, props))
++            })
          });
-+        // One bounded maintenance pass per outer render, after QuickJS has
-+        // released its context lock. Low-level host callbacks may enter
-+        // `with_js` hundreds of times while describing one panel.
-+        self.poll_jit();
-+        RuntimeOwner::schedule_attach(self, cx);
- 
+         let initializing = self.initializing_views.borrow_mut().pop();
+         debug_assert!(initializing.is_some());
+@@ -2900,21 +3020,32 @@ impl ShellRuntime {
+         self.arena.borrow_mut().reset();
+         let callbacks = self.callbacks.borrow_mut().begin();
+
+-        let (root, policy) = self.metrics.time_script_render(|| {
+-            let (_guard, generation) = scope::enter_with_application(
+-                self,
+-                window,
+-                cx,
+-                ScopePhase::Render,
+-                view.clone(),
+-                policy.clone(),
+-                object.application_generation(),
+-            );
+-            (self.call_render(object, generation), policy)
+-        });
++        let first_render = !object.jit_warm.get();
++        let render = || {
++            self.metrics.time_script_render(|| {
++                let (_guard, generation) = scope::enter_with_application(
++                    self,
++                    window,
++                    cx,
++                    ScopePhase::Render,
++                    view.clone(),
++                    policy.clone(),
++                    object.application_generation(),
++                );
++                (self.call_render(object, generation), policy)
++            })
++        };
++        let (root, policy) = if first_render {
++            self.with_jit_suspended(|| Ok(render()))?
++        } else {
++            render()
++        };
+
          let root = match root {
-             Ok(root) => root,
+-            Ok(root) => root,
++            Ok(root) => {
++                object.jit_warm.set(true);
++                root
++            }
+             Err(error) => {
+                 self.callbacks.borrow_mut().abort();
+                 self.arena.borrow_mut().reset();
+@@ -4832,6 +4963,21 @@ impl ShellRuntime {
+     }
+ }
+
++fn shell_jit_config() -> Result<JitConfig> {
++    let builder = JitConfig::builder();
++
++    // Debug builds exercise many short-lived runtimes concurrently. Keep them on
++    // the interpreter tier: native compilation currently crashes inside the JIT
++    // backend on Linux and Windows under that workload. Release builds retain the
++    // production thresholds and continue to tier hot functions up to native code.
++    #[cfg(debug_assertions)]
++    let builder = builder.call_threshold(u32::MAX).loop_threshold(u32::MAX);
++
++    builder
++        .build()
++        .map_err(|error| anyhow!("invalid JavaScript JIT configuration: {error}"))
++}
++
+ /// Resolves and loads an application's own modules, and nothing else.
+ ///
+ /// `FileResolver` from rquickjs is not usable here: it tests candidate paths
+@@ -11060,6 +11206,14 @@ export default class BrokenChild extends View {
+
+ #[cfg(test)]
+ mod reserved_element_method_tests {
++    #[cfg(debug_assertions)]
++    #[test]
++    fn debug_runtimes_stay_on_the_interpreter_tier() {
++        let config = super::shell_jit_config().expect("JIT configuration");
++        assert_eq!(config.call_threshold(), u32::MAX);
++        assert_eq!(config.loop_threshold(), u32::MAX);
++    }
++
+     /// `typings.rs` withholds these from a registered component that does not
+     /// declare them. If the engine started accepting a fourth, the declarations
+     /// would keep offering it on every component and the call would throw.
+diff --git a/crates/shell/src/tests/benchmark.rs b/crates/shell/src/tests/benchmark.rs
+index 424aa68f..19b10195 100644
 --- a/crates/shell/src/tests/benchmark.rs
 +++ b/crates/shell/src/tests/benchmark.rs
-@@ -26,12 +26,20 @@
- 
+@@ -19,19 +19,27 @@
+ //! Run with output:
+ //!
+ //! ```text
+-//! cargo test -p gpui-shell --release --test benchmark -- --nocapture
++//! cargo test -p gpui-shell --release tests::benchmark -- --nocapture
+ //! ```
+
+ use std::{ops::Deref, time::Instant};
+
  use crate::{RenderSnapshot, ScriptView, ShellRuntime, materialize::materialize};
  use gpui::{AppContext as _, Entity, IntoElement as _, TestAppContext, VisualTestContext};
-+#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++#[cfg(not(debug_assertions))]
 +use sha2::{Digest as _, Sha256};
- 
+
  /// Rows and columns chosen to land near the doc's "typical panel" figure:
  /// 40 rows x 5 cells plus wrappers is ~250 nodes, each carrying 8-12 ops.
  const ROWS: usize = 40;
  const COLUMNS: usize = 5;
--const ITERATIONS: usize = 50;
-+// 50 renders makes nearest-rank P99 a single maximum, so one scheduler
-+// interruption dominates an otherwise stable fresh-process sample. More
-+// identical renders make it a tail percentile without changing the JS
-+// workload or any per-render semantics.
-+const ITERATIONS: usize = 500;
+ const ITERATIONS: usize = 50;
++#[cfg(not(debug_assertions))]
++const ACCEPTANCE_ITERATIONS: usize = 200;
++#[cfg(not(debug_assertions))]
 +const JIT_WARMUP_RENDERS: usize = 64;
++#[cfg(not(debug_assertions))]
 +const RELOAD_OBSERVATIONS: usize = 5;
  /// How many batches of [`ITERATIONS`] a timing takes before believing the
  /// fastest one.
  const ROUNDS: usize = 7;
-@@ -90,6 +94,57 @@
+@@ -90,8 +98,110 @@ export default class Grid extends View {
  }
  "#;
- 
+
++#[cfg(not(debug_assertions))]
 +const COMPUTE_TEMPLATE: &str = r#"
-+import { View, div } from "gpui";
++import { View, div } from "gpui-kit";
 +
 +function layoutKernel(batches, seed) {
 +  let checksum = seed;
@@ -323,14 +560,61 @@
 +
 +export default class NumericLayout extends View {
 +  render(cx) {
-+    return div().child(`layout:${layoutKernel(2000, 0)}`);
++    return div().child(`layout:${layoutKernel(100, 0)}`);
++  }
++}
++"#;
++
++#[cfg(not(debug_assertions))]
++const MIXED_MARKET_TEMPLATE: &str = r#"
++import { View, div } from "gpui-kit";
++
++function quoteScore(seed, index) {
++  let previous = seed;
++  let current = seed + index + 1;
++  let aggregate = 0;
++  for (let sample = 0; sample < 32; sample += 1) {
++    const next = previous + current;
++    previous = current;
++    current = next;
++    aggregate += current & 2047;
++  }
++  return aggregate;
++}
++
++function compareQuotes(left, right) {
++  return right.score - left.score;
++}
++
++export default class MarketPanel extends View {
++  render(cx) {
++    const quotes = [];
++    let total = 0;
++    for (let index = 0; index < 96; index += 1) {
++      const score = quoteScore(17, index);
++      total += score;
++      quotes.push({ index, score });
++    }
++    quotes.sort(compareQuotes);
++
++    const visible = [];
++    for (let rank = 0; rank < 12; rank += 1) {
++      const quote = quotes[rank];
++      visible.push(
++        div()
++          .h_flex()
++          .justify_between()
++          .child(`SYM${quote.index}`)
++          .child(`${quote.score}`),
++      );
++    }
++    return div().v_flex().gap(2).child(`total:${total}`).children(visible);
 +  }
 +}
 +"#;
 +
  const _: () = assert!(ROWS > 0 && COLUMNS > 0);
 
-+
 +#[test]
 +fn p99_excludes_one_outlier_from_two_hundred_observations() {
 +    let mut samples = vec![1_u64; 199];
@@ -351,30 +635,238 @@
 +}
 +
 +fn median_ns(mut samples: Vec<u64>) -> u64 {
-+    assert!(samples.len() % 2 == 1, "reload observations must have an odd count");
++    assert!(
++        samples.len() % 2 == 1,
++        "reload observations must have an odd count"
++    );
 +    let middle = samples.len() / 2;
 +    *samples.select_nth_unstable(middle).1
 +}
 +
  fn source(rows: usize, columns: usize) -> String {
-@@ -325,14 +353,41 @@
-     VisualTestContext,
-     crate::engine::ViewObject,
- ) {
-+    grid_with_mode(cx, rows, columns, false)
+     TEMPLATE
+         .replace("__ROWS__", &rows.to_string())
+@@ -135,6 +245,70 @@ fn describing_a_panel_stays_inside_the_frame_budget(cx: &mut TestAppContext) {
+         per_build.as_nanos() as usize / ops.max(1),
+     );
+
++    let automatic_tree = context
++        .update(|window, cx| {
++            runtime
++                .build_snapshot(&object, None, crate::policy::default(), window, cx)
++                .expect("automatic parity render")
++        })
++        .debug_tree();
++    let automatic_renders = runtime.read_metrics().script_renders();
++    let (interpreter, mut interpreter_context, interpreter_object) =
++        runtime_with_source(cx, &source(ROWS, COLUMNS), true);
++    let mut interpreted_tree = String::new();
++    for _ in 0..automatic_renders {
++        interpreted_tree = interpreter_context
++            .update(|window, cx| {
++                interpreter
++                    .build_snapshot(
++                        &interpreter_object,
++                        None,
++                        crate::policy::default(),
++                        window,
++                        cx,
++                    )
++                    .expect("interpreter parity render")
++            })
++            .debug_tree();
++    }
++    assert_eq!(automatic_tree, interpreted_tree);
++    assert_eq!(
++        automatic_renders,
++        interpreter.read_metrics().script_renders()
++    );
++
++    let jit = runtime.jit_metrics_for_benchmark();
++    println!(
++        "[A/JIT] enabled={} queued={} failures={} unsupported={} tier1_rejections={} \
++         resource_limits={} cancelled={} panics={} invalid_artifacts={} install_failures={} \
++         installed={} native_entries={} pending_jobs={}",
++        jit.native_enabled(),
++        jit.queued,
++        jit.compile_failures,
++        jit.unsupported_opcode_failures,
++        jit.tier1_rejections,
++        jit.resource_limit_failures,
++        jit.cancelled_compilations,
++        jit.compiler_panics,
++        jit.invalid_artifacts,
++        jit.install_failures,
++        jit.installed,
++        jit.native_entries,
++        jit.pending_worker_jobs,
++    );
++    let categorized_failures = jit
++        .unsupported_opcode_failures
++        .saturating_add(jit.tier1_rejections)
++        .saturating_add(jit.resource_limit_failures)
++        .saturating_add(jit.cancelled_compilations)
++        .saturating_add(jit.compiler_panics)
++        .saturating_add(jit.invalid_artifacts)
++        .saturating_add(jit.install_failures);
++    assert!(
++        jit.compile_failures == 0 || categorized_failures > 0,
++        "aggregate JIT failures had no diagnostic category: {jit:?}"
++    );
++
+     // A smoke bound, not the real gate: the doc's 1.5 ms budget is for a
+     // release build, and this assertion has to hold in debug too.
+     assert!(
+@@ -143,6 +317,134 @@ fn describing_a_panel_stays_inside_the_frame_budget(cx: &mut TestAppContext) {
+     );
+ }
+
++#[gpui::test]
++#[cfg(not(debug_assertions))]
++fn numeric_layout_installs_and_enters_native_code(cx: &mut TestAppContext) {
++    let (runtime, mut context, object) = runtime_with_source(cx, COMPUTE_TEMPLATE, false);
++    let mut tree = String::new();
++    let mut automatic_renders = 0;
++
++    for _ in 0..1_000 {
++        let snapshot = context.update(|window, cx| {
++            runtime
++                .build_snapshot(&object, None, crate::policy::default(), window, cx)
++                .expect("numeric render")
++        });
++        tree = snapshot.debug_tree();
++        automatic_renders += 1;
++        if runtime.jit_metrics_for_benchmark().native_entries > 0 {
++            break;
++        }
++    }
++
++    let (interpreter, mut interpreter_context, interpreter_object) =
++        runtime_with_source(cx, COMPUTE_TEMPLATE, true);
++    let mut interpreted_tree = String::new();
++    for _ in 0..automatic_renders {
++        interpreted_tree = interpreter_context
++            .update(|window, cx| {
++                interpreter
++                    .build_snapshot(
++                        &interpreter_object,
++                        None,
++                        crate::policy::default(),
++                        window,
++                        cx,
++                    )
++                    .expect("interpreter numeric render")
++            })
++            .debug_tree();
++    }
++
++    let jit = runtime.jit_metrics_for_benchmark();
++    println!("\n[N/JIT] {jit:#?}");
++    assert_eq!(tree, interpreted_tree);
++    assert_eq!(
++        runtime.read_metrics().script_renders(),
++        interpreter.read_metrics().script_renders()
++    );
++    assert!(tree.contains("layout:165580141"), "{tree}");
++    assert!(
++        jit.installed > 0,
++        "numeric layout installed no artifact: {jit:?}"
++    );
++    assert!(
++        jit.native_entries > 0,
++        "numeric layout never entered native code: {jit:?}"
++    );
 +}
 +
-+fn grid_with_mode(
-+    cx: &mut TestAppContext,
-+    rows: usize,
-+    columns: usize,
-+    interpreter: bool,
-+) -> (
-+    std::rc::Rc<ShellRuntime>,
-+    VisualTestContext,
-+    crate::engine::ViewObject,
++#[gpui::test]
++fn mixed_market_panel_matches_interpreter_and_enters_native_code(cx: &mut TestAppContext) {
++    let (interpreter, mut interpreter_context, interpreter_object) =
++        runtime_with_source(cx, MIXED_MARKET_TEMPLATE, true);
++    let interpreter_tree = interpreter_context.update(|window, cx| {
++        interpreter
++            .build_snapshot(
++                &interpreter_object,
++                None,
++                crate::policy::default(),
++                window,
++                cx,
++            )
++            .expect("interpreter mixed render")
++            .debug_tree()
++    });
++
++    let (automatic, mut automatic_context, automatic_object) =
++        runtime_with_source(cx, MIXED_MARKET_TEMPLATE, false);
++    let mut automatic_tree = String::new();
++    for _ in 0..JIT_WARMUP_RENDERS {
++        automatic_tree = automatic_context.update(|window, cx| {
++            automatic
++                .build_snapshot(
++                    &automatic_object,
++                    None,
++                    crate::policy::default(),
++                    window,
++                    cx,
++                )
++                .expect("JIT mixed render")
++                .debug_tree()
++        });
++        cx.run_until_parked();
++    }
++
++    assert_eq!(automatic_tree, interpreter_tree);
++    let metrics = automatic.jit_metrics_for_benchmark();
++    assert!(metrics.native_entries > 0, "{metrics:?}");
++    assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
++    assert_eq!(metrics.deopts, 0, "{metrics:?}");
++}
++
++#[gpui::test]
++#[cfg(not(debug_assertions))]
++fn first_render_defers_jit_profiling_until_the_view_is_warm(cx: &mut TestAppContext) {
++    let (runtime, mut context, object) = runtime_with_source(cx, COMPUTE_TEMPLATE, false);
++
++    context.update(|window, cx| {
++        runtime
++            .build_snapshot(&object, None, crate::policy::default(), window, cx)
++            .expect("first numeric render")
++    });
++    let first = runtime.jit_metrics_for_benchmark();
++    assert_eq!(first.snapshot_requests, 0, "{first:?}");
++
++    for _ in 0..1_000 {
++        context.update(|window, cx| {
++            runtime
++                .build_snapshot(&object, None, crate::policy::default(), window, cx)
++                .expect("warm numeric render")
++        });
++        if runtime.jit_metrics_for_benchmark().native_entries > 0 {
++            break;
++        }
++    }
++    let warm = runtime.jit_metrics_for_benchmark();
++    assert!(warm.snapshot_requests > 0, "{warm:?}");
++    assert!(warm.native_entries > 0, "{warm:?}");
++}
++
+ #[gpui::test]
+ fn materializing_a_snapshot_stays_inside_the_frame_budget(cx: &mut TestAppContext) {
+     let (runtime, mut context, object) = grid(cx, ROWS, COLUMNS);
+@@ -208,7 +510,7 @@ fn repainting_a_clean_view_never_enters_the_vm(cx: &mut TestAppContext) {
+ /// ignored by default because the largest size costs seconds in a debug build:
+ ///
+ /// ```text
+-/// cargo test -p gpui-shell --release --test benchmark -- --ignored --nocapture
++/// cargo test -p gpui-shell --release tests::benchmark -- --ignored --nocapture
+ /// ```
+ ///
+ /// Two runs out of thirteen have seen the largest size report one script render
+@@ -324,15 +626,29 @@ fn grid(
+     std::rc::Rc<ShellRuntime>,
+     VisualTestContext,
+     crate::engine::ViewObject,
 +) {
-+    runtime_with_source(cx, &source(rows, columns), interpreter)
++    runtime_with_source(cx, &source(rows, columns), false)
 +}
 +
 +fn runtime_with_source(
@@ -385,9 +877,9 @@
 +    std::rc::Rc<ShellRuntime>,
 +    VisualTestContext,
 +    crate::engine::ViewObject,
-+) {
+ ) {
      cx.update(|cx| crate::init(cx));
- 
+
 -    let runtime = ShellRuntime::new_isolated().expect("runtime");
 +    let runtime = if interpreter {
 +        ShellRuntime::new_isolated_interpreter().expect("interpreter runtime")
@@ -395,91 +887,24 @@
 +        ShellRuntime::new_isolated().expect("automatic JIT runtime")
 +    };
      cx.update(|cx| runtime.set_global(cx));
- 
+
 -    let view_type = runtime
 -        .load_source("grid", &source(rows, columns))
 -        .expect("load");
 +    let view_type = runtime.load_source("benchmark-view", source).expect("load");
- 
+
      let window = cx.add_window(|_, _| Empty);
      let mut context = VisualTestContext::from_window(*window.deref(), cx);
-@@ -343,6 +398,244 @@
+@@ -343,6 +659,148 @@ fn grid(
      (runtime, context, object)
  }
- 
+
++/// Emits one independent process sample for the Issue #3 acceptance runner.
++/// The runner launches this test in interleaved interpreter/automatic pairs;
++/// repeated timings inside this process are observations, not independent
++/// benchmark samples.
 +#[gpui::test]
-+#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
-+fn jit_does_not_change_snapshot_or_render_count(cx: &mut TestAppContext) {
-+    let (interpreter, mut interpreter_context, interpreter_object) =
-+        grid_with_mode(cx, ROWS, COLUMNS, true);
-+    let interpreted = interpreter_context.update(|window, cx| {
-+        interpreter
-+            .build_snapshot(
-+                &interpreter_object,
-+                None,
-+                crate::policy::default(),
-+                window,
-+                cx,
-+            )
-+            .expect("interpreter render")
-+    });
-+    let interpreter_renders = interpreter.read_metrics().script_renders();
-+
-+    let (automatic, mut automatic_context, automatic_object) =
-+        grid_with_mode(cx, ROWS, COLUMNS, false);
-+    let jitted = automatic_context.update(|window, cx| {
-+        automatic
-+            .build_snapshot(
-+                &automatic_object,
-+                None,
-+                crate::policy::default(),
-+                window,
-+                cx,
-+            )
-+            .expect("JIT render")
-+    });
-+    assert_eq!(jitted.debug_tree(), interpreted.debug_tree());
-+    assert_eq!(
-+        automatic.read_metrics().script_renders(),
-+        interpreter_renders
-+    );
-+
-+    let (interpreter, mut interpreter_context, interpreter_object) =
-+        runtime_with_source(cx, COMPUTE_TEMPLATE, true);
-+    let interpreted = interpreter_context.update(|window, cx| {
-+        interpreter
-+            .build_snapshot(
-+                &interpreter_object,
-+                None,
-+                crate::policy::default(),
-+                window,
-+                cx,
-+            )
-+            .expect("interpreter compute render")
-+    });
-+    let (automatic, mut automatic_context, automatic_object) =
-+        runtime_with_source(cx, COMPUTE_TEMPLATE, false);
-+    let jitted = automatic_context.update(|window, cx| {
-+        automatic
-+            .build_snapshot(
-+                &automatic_object,
-+                None,
-+                crate::policy::default(),
-+                window,
-+                cx,
-+            )
-+            .expect("JIT compute render")
-+    });
-+    assert_eq!(jitted.debug_tree(), interpreted.debug_tree());
-+    assert!(jitted.debug_tree().contains("layout:165580141"));
-+}
-+
-+/// Emits one real-process sample. `scripts/bench-gpui-shell.sh` launches this
-+/// exact test in interleaved interpreter/automatic process pairs and aggregates
-+/// the JSON objects; this test never claims several in-process timings are
-+/// independent samples.
-+#[gpui::test]
-+#[cfg(all(feature = "quickjs-jit", not(target_family = "wasm")))]
++#[cfg(not(debug_assertions))]
 +fn emit_one_jit_acceptance_sample(cx: &mut TestAppContext) {
 +    let Ok(path) = std::env::var("GPUI_SHELL_JIT_SAMPLE") else {
 +        return;
@@ -497,7 +922,8 @@
 +    let benchmark_source = match workload.as_str() {
 +        "panel" => source(ROWS, COLUMNS),
 +        "compute" => COMPUTE_TEMPLATE.to_owned(),
-+        _ => panic!("GPUI_SHELL_JIT_WORKLOAD must be panel or compute"),
++        "mixed" => MIXED_MARKET_TEMPLATE.to_owned(),
++        _ => panic!("GPUI_SHELL_JIT_WORKLOAD must be panel, compute, or mixed"),
 +    };
 +
 +    let first_started = Instant::now();
@@ -509,36 +935,20 @@
 +    });
 +    let first_window_ns = first_started.elapsed().as_nanos() as u64;
 +    let expected_tree = first.debug_tree();
-+    // The production attachment is intentionally scheduled for the next GPUI
-+    // tick so first-window latency excludes deferred maintenance.
 +    cx.run_until_parked();
 +
-+    // Cross both production hotness thresholds and leave enough polls for all
-+    // bounded profitability trials before the steady-state clock starts.
 +    for _ in 0..JIT_WARMUP_RENDERS {
-+        context.update(|window, cx| {
++        let snapshot = context.update(|window, cx| {
 +            runtime
 +                .build_snapshot(&object, None, crate::policy::default(), window, cx)
-+                .expect("warmup render");
++                .expect("warmup render")
 +        });
++        assert_eq!(snapshot.debug_tree(), expected_tree);
 +    }
-+    let mut metric_windows = Vec::new();
-+    let capture_metrics = |runtime: &ShellRuntime| {
-+        let metrics = runtime.jit_metrics();
-+        serde_json::json!({
-+            "installed": metrics.as_ref().map_or(0, |m| m.installed),
-+            "compile_failures": metrics.as_ref().map_or(0, |m| m.compile_failures),
-+            "native_entries": metrics.as_ref().map_or(0, |m| m.native_entries),
-+            "tier2_entries": metrics.as_ref().map_or(0, |m| m.tier2_entries),
-+            "deopts": metrics.as_ref().map_or(0, |m| m.deopts),
-+            "profitability_rejected": metrics.as_ref().map_or(0, |m| m.profitability_rejected),
-+            "interpreter_demotions": metrics.as_ref().map_or(0, |m| m.interpreter_demotions),
-+        })
-+    };
-+    metric_windows.push(capture_metrics(&runtime));
-+    let mut render_ns = Vec::with_capacity(ITERATIONS);
++
++    let mut render_ns = Vec::with_capacity(ACCEPTANCE_ITERATIONS);
 +    let steady_started = Instant::now();
-+    for _ in 0..ITERATIONS {
++    for _ in 0..ACCEPTANCE_ITERATIONS {
 +        let started = Instant::now();
 +        let snapshot = context.update(|window, cx| {
 +            runtime
@@ -547,34 +957,24 @@
 +        });
 +        assert_eq!(snapshot.debug_tree(), expected_tree);
 +        render_ns.push(started.elapsed().as_nanos() as u64);
-+        if render_ns.len() % 10 == 0 {
-+            metric_windows.push(capture_metrics(&runtime));
-+        }
 +    }
-+    let steady_state_ns = steady_started.elapsed().as_nanos() as u64 / ITERATIONS as u64;
-+    let render_windows_ns = render_ns
-+        .chunks_exact(10)
-+        .map(|window| window.iter().sum::<u64>() / window.len() as u64)
-+        .collect::<Vec<_>>();
++    let steady_state_ns = steady_started.elapsed().as_nanos() as u64 / ACCEPTANCE_ITERATIONS as u64;
 +    let p99_script_render_ns = p99(render_ns);
-+    // Reload suspends the guard; retain steady-state native evidence first.
-+    let metrics = runtime.jit_metrics();
++    let metrics = runtime.jit_metrics_for_benchmark();
++    assert_eq!(
++        metrics.native_enabled(),
++        !interpreter,
++        "interpreter samples must not attach a JIT backend: {metrics:?}"
++    );
 +
-+    // Each observation performs the same fresh-generation suspend,
-+    // declaration/evaluation, instantiation, and render sequence. An odd,
-+    // predeclared observation count reports the per-process median instead of
-+    // allowing one scheduler interruption to redefine a reload sample.
 +    let mut reload_totals = Vec::with_capacity(RELOAD_OBSERVATIONS);
 +    let mut reload_observations = Vec::with_capacity(RELOAD_OBSERVATIONS);
 +    let mut reloaded_len = 0;
 +    for observation in 0..RELOAD_OBSERVATIONS {
 +        let reload_started = Instant::now();
-+        let suspend_started = Instant::now();
-+        runtime.suspend_jit_for_benchmark();
-+        let suspend_ns = suspend_started.elapsed().as_nanos() as u64;
 +        let source_started = Instant::now();
 +        let reload_type = runtime
-+            .load_source_after_suspending_for_benchmark(
++            .load_source(
 +                &format!("benchmark-view-reload-{observation}"),
 +                &benchmark_source,
 +            )
@@ -595,17 +995,12 @@
 +        let total_ns = reload_started.elapsed().as_nanos() as u64;
 +        assert_eq!(reloaded.debug_tree(), expected_tree);
 +        reloaded_len = reloaded.len();
-+        let resume_started = Instant::now();
-+        cx.run_until_parked();
-+        let resume_task_ns = resume_started.elapsed().as_nanos() as u64;
 +        reload_totals.push(total_ns);
 +        reload_observations.push(serde_json::json!({
-+            "suspend_ns": suspend_ns,
 +            "source_eval_ns": source_eval_ns,
 +            "instantiate_ns": instantiate_ns,
 +            "render_ns": render_ns,
 +            "total_ns": total_ns,
-+            "resume_task_ns": resume_task_ns,
 +        }));
 +    }
 +    let hot_reload_ns = median_ns(reload_totals);
@@ -622,20 +1017,21 @@
 +        "checksum": format!("{}:{}", reloaded_len, digest),
 +        "snapshot_sha256": digest,
 +        "script_renders": runtime.read_metrics().script_renders(),
-+        "native_entries": metrics.as_ref().map_or(0, |m| m.native_entries),
-+        "fallback_count": metrics.as_ref().map_or(0, |m| m.native_fallbacks),
-+        "installed": metrics.as_ref().map_or(0, |m| m.installed),
-+        "compile_failures": metrics.as_ref().map_or(0, |m| m.compile_failures),
-+        "tier2_entries": metrics.as_ref().map_or(0, |m| m.tier2_entries),
-+        "deopts": metrics.as_ref().map_or(0, |m| m.deopts),
-+        "profitability_evaluations": metrics.as_ref().map_or(0, |m| m.profitability_evaluations),
-+        "profitability_approved": metrics.as_ref().map_or(0, |m| m.profitability_approved),
-+        "profitability_rejected": metrics.as_ref().map_or(0, |m| m.profitability_rejected),
-+        "interpreter_demotions": metrics.as_ref().map_or(0, |m| m.interpreter_demotions),
-+        "hot_call_queues": metrics.as_ref().map_or(0, |m| m.hot_call_queues),
-+        "hot_loop_queues": metrics.as_ref().map_or(0, |m| m.hot_loop_queues),
-+        "metric_windows": metric_windows,
-+        "render_windows_ns": render_windows_ns,
++        "native_enabled": metrics.native_enabled(),
++        "native_entries": metrics.native_entries,
++        "fallback_count": metrics.native_fallbacks,
++        "installed": metrics.installed,
++        "compile_failures": metrics.compile_failures,
++        "unsupported_opcode_failures": metrics.unsupported_opcode_failures,
++        "tier1_rejections": metrics.tier1_rejections,
++        "resource_limit_failures": metrics.resource_limit_failures,
++        "cancelled_compilations": metrics.cancelled_compilations,
++        "compiler_panics": metrics.compiler_panics,
++        "invalid_artifacts": metrics.invalid_artifacts,
++        "install_failures": metrics.install_failures,
++        "native_exits": metrics.native_exits,
++        "osr_entries": metrics.osr_entries,
++        "deopts": metrics.deopts,
 +        "reload_observations": reload_observations,
 +    });
 +    std::fs::write(
@@ -646,5 +1042,5 @@
 +}
 +
  struct Empty;
- 
+
  impl gpui::Render for Empty {

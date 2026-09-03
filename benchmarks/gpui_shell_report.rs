@@ -42,6 +42,8 @@ struct Workload {
     name: String,
     suitable_for_jit: bool,
     regression_guard: bool,
+    #[serde(default)]
+    native_required: bool,
     interpreter: Vec<Sample>,
     automatic: Vec<Sample>,
 }
@@ -182,11 +184,12 @@ fn validate_and_render(report: &Report) -> Result<(String, bool), String> {
             .iter()
             .map(|x| x.fallback_count)
             .sum::<u64>();
+        let native_gate = !workload.native_required || every_sample_native;
         let suitable_gate = !workload.suitable_for_jit
             || (speedup[0] + f64::EPSILON * 8.0 >= 2.0 && every_sample_native);
         let regression_gate = !workload.regression_guard
             || (speedup[0] + f64::EPSILON * 8.0 >= 1.0 / 1.05 && tail[1] <= 1.05);
-        let pass = suitable_gate && regression_gate;
+        let pass = native_gate && suitable_gate && regression_gate;
         workloads_pass &= pass;
         if workload.suitable_for_jit {
             suitable += 1;
@@ -417,6 +420,7 @@ mod tests {
                 name: "real panel".into(),
                 suitable_for_jit: true,
                 regression_guard: true,
+                native_required: false,
                 interpreter: samples(100 * speedup, false, 0),
                 automatic: samples(100, true, automatic_native_entries),
             }],
@@ -510,5 +514,30 @@ mod tests {
         assert!(!pass);
         assert!(markdown.contains("host panel"));
         assert!(markdown.contains("Overall: **FAIL**"));
+    }
+
+    #[test]
+    fn observational_mixed_workload_requires_native_without_a_speed_gate() {
+        let mut report = report(2, 1);
+        let mut mixed = report.workloads[0].clone();
+        mixed.name = "mixed market panel".into();
+        mixed.suitable_for_jit = false;
+        mixed.regression_guard = false;
+        mixed.native_required = true;
+        mixed
+            .interpreter
+            .iter_mut()
+            .for_each(|sample| sample.steady_state_ns = 100);
+        report.workloads.push(mixed);
+
+        let (markdown, pass) = validate_and_render(&report).unwrap();
+        assert!(pass, "{markdown}");
+
+        report.workloads[1]
+            .automatic
+            .iter_mut()
+            .for_each(|sample| sample.native_entries = 0);
+        let (markdown, pass) = validate_and_render(&report).unwrap();
+        assert!(!pass, "{markdown}");
     }
 }

@@ -39,10 +39,19 @@ output_json=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "
 rquickjs_revision=$(git -C "$repo_root" rev-parse HEAD)
 dependency_revisions=$(sed -n '/quickjs-jit.*git =/s/.*rev = "\([^"]*\)".*/\1/p' \
   "$shell_root/Cargo.toml" | sort -u)
-if [[ "$dependency_revisions" != "$rquickjs_revision" ]]; then
+dependency_versions=$(sed -n '/package = "quickjs-jit"/s/.*version = "\([^"]*\)".*/\1/p; /package = "quickjs-jit-runtime"/s/.*version = "\([^"]*\)".*/\1/p' \
+  "$manifest" | sort -u)
+rquickjs_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$repo_root/Cargo.toml" | head -1)
+if [[ -n "$dependency_revisions" && "$dependency_revisions" != "$rquickjs_revision" ]]; then
   echo "gpui-shell quickjs-jit dependency revision does not match the benchmark source:" >&2
   echo "  dependency: ${dependency_revisions:-missing}" >&2
   echo "  source:     $rquickjs_revision" >&2
+  exit 5
+fi
+if [[ -z "$dependency_revisions" && "$dependency_versions" != "$rquickjs_version" ]]; then
+  echo "gpui-shell published quickjs-jit dependency does not match the benchmark source:" >&2
+  echo "  dependency: ${dependency_versions:-missing}" >&2
+  echo "  source:     ${rquickjs_version:-missing}" >&2
   exit 5
 fi
 
@@ -68,19 +77,20 @@ while IFS= read -r candidate; do
       test_binary=$candidate
     fi
   fi
-done < <(find "$target_root/release/deps" -maxdepth 1 -type f -perm +111 -name 'gpui_shell-*')
+done < <(find "$target_root/release/deps" -maxdepth 1 -type f -perm /111 -name 'gpui_shell-*')
 if [[ -z "$test_binary" ]]; then
   echo "unable to locate gpui-shell library test binary" >&2
   exit 4
 fi
 "${runner[@]}" "$test_binary" tests::benchmark::describing_a_panel_stays_inside_the_frame_budget --exact
 "${runner[@]}" "$test_binary" tests::benchmark::numeric_layout_installs_and_enters_native_code --exact
+"${runner[@]}" "$test_binary" tests::benchmark::mixed_market_panel_matches_interpreter_and_enters_native_code --exact
 
 sample_dir=$(mktemp -d "${TMPDIR:-/tmp}/gpui-shell-jit-samples.XXXXXX")
 trap 'rm -rf "$sample_dir"' EXIT
 sample_test=tests::benchmark::emit_one_jit_acceptance_sample
 for warmup in $(seq 0 4); do
-  for workload in panel compute; do
+  for workload in panel compute mixed; do
     for mode in interpreter automatic; do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/warmup-$warmup-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$warmup" \
@@ -91,7 +101,7 @@ for warmup in $(seq 0 4); do
 done
 for pair in $(seq 0 29); do
   if (( pair % 2 == 0 )); then modes=(interpreter automatic); else modes=(automatic interpreter); fi
-  for workload in panel compute; do
+  for workload in panel compute mixed; do
     for mode in "${modes[@]}"; do
       GPUI_SHELL_JIT_SAMPLE="$sample_dir/pair-$pair-$workload-$mode.json" \
       GPUI_SHELL_JIT_MODE="$mode" GPUI_SHELL_JIT_PAIR="$pair" \

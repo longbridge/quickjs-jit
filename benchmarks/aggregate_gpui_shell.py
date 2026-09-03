@@ -84,14 +84,16 @@ def main() -> None:
             "automatic": select(samples(directory, "panel", "automatic"), lifecycle_keys),
         },
     }
-    for workload, name, suitable, regression_guard in (
-        ("panel", "realistic 443-node host-heavy panel", False, True),
-        ("compute", "render-driven numeric layout checksum", True, False),
+    for workload, name, suitable, regression_guard, native_required in (
+        ("panel", "realistic 443-node host-heavy panel", False, True, False),
+        ("compute", "render-driven numeric layout checksum", True, False, True),
+        ("mixed", "market compute, sort, aggregate, and visible list", False, False, True),
     ):
         document["workloads"].append({
             "name": name,
             "suitable_for_jit": suitable,
             "regression_guard": regression_guard,
+            "native_required": native_required,
             "interpreter": select(samples(directory, workload, "interpreter"), workload_keys),
             "automatic": select(samples(directory, workload, "automatic"), workload_keys),
         })
