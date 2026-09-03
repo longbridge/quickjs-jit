@@ -48,20 +48,30 @@ script renders, and the focused parity test passed. Both diagnostic thresholds
 pass. Do not publish fixture, forced-tier, or single-pair results in place of
 the required confidence-bounded run.
 
-The required frozen-binary run (five discarded warmup processes and 30 paired
+The current frozen-binary run (five discarded warmup processes and 30 paired
 fresh processes per workload) is recorded in
-`benchmarks/results/gpui-shell-jit-v1.{json,md}`. Every process is pinned to
-one selected CPU (`GPUI_SHELL_JIT_CPU`, default `0`), then records 500
+`benchmarks/results/gpui-shell-mixed-v1.{json,md}`. Every process is pinned to
+one selected CPU (`GPUI_SHELL_JIT_CPU`, default `0`), then records 200
 identical renders with the true nearest-rank P99. Reload records the median of
-five fresh module-generation observations and retains suspend, module
-evaluation, instantiation, render, and deferred-resume phase timings in each
-raw sample; no observation is discarded.
+five fresh module-generation observations and retains module evaluation,
+instantiation, render, and total timing in every raw sample; no observation is
+discarded.
 
-The current evidence passes every strict gate: the host-heavy panel's P99 CI
-is -7.21%..+2.74%, first-window is -0.77%..+0.44%, and hot reload is
--3.37%..+0.84%. The suitable numeric layout workload is 39.82x..40.19x with
-16,835 native entries and zero fallback. Checksums and script-render counts
-match in all 30 pairs.
+The matrix separates three parts of the product workload: a host-heavy panel,
+a pure numeric render kernel, and a mixed market panel that computes 96 quote
+scores, aggregates and sorts them, then builds a 12-row visible list through
+the real GPUI builder API. On the recorded x86_64 Linux host, the mixed panel
+runs at 2.32x..2.34x the interpreter's steady-state speed and 2.20x..2.27x its
+P99 speed. The numeric kernel runs at 15.34x..18.33x speed, while the
+host-heavy panel runs at 0.99x the interpreter's speed and remains inside the
+5% guard. First-window and hot-reload speeds are both 0.99x..1.00x.
+
+All 30 pairs retain identical checksums, snapshot SHA-256 values, and render
+counts. The mixed workload records 732,467 native entries with zero fallback
+and zero deoptimization. It also exposes 120 optimizing-tier invalid-artifact
+compile failures (four per automatic process); these do not affect semantics
+or the measured native path, but eliminating or correctly categorizing them is
+the first follow-up target.
 
 The exact external write required is permission to modify these sibling files
 and refresh its `Cargo.lock`:

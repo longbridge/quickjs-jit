@@ -270,6 +270,34 @@ Fibonacci kernels are profitable, while broad strings/JSON/collections/
 closures/async workers may still be interpreter-only, and the guarded Tier 1
 array traversal is not yet a demonstrated speedup.
 
+## Measured gpui-shell mixed-workload target
+
+The clean x86_64 Linux evidence in
+`benchmarks/results/gpui-shell-mixed-v1.{json,md}` adds a product-shaped market
+panel: compute 96 quote scores, aggregate and sort them, then build a 12-row
+visible list through GPUI host builders. Across 30 interleaved fresh-process
+pairs after five discarded warmups, automatic mode runs at 2.32x..2.34x the
+interpreter's steady-state speed and 2.20x..2.27x its P99 speed. It records
+732,467 native entries, zero fallback, zero deoptimization, and exact snapshot
+and render-count parity. The host-heavy panel remains inside its 5% guard.
+
+This changes the next optimization order for gpui-shell work:
+
+1. Trace and eliminate, or correctly reject before compilation, the four
+   optimizing-tier invalid artifacts produced per mixed automatic process.
+   Add a focused comparator/object-property reproduction and require zero
+   invalid artifacts before treating this path as fully healthy.
+2. Split the mixed workload into stable stage variants so compute,
+   array/object sorting, and visible-list host construction can be compared
+   independently without adding timers inside the JavaScript hot path.
+3. Optimize the array/object stage only after the stage evidence identifies
+   it as material. Prefer stable shape/property specialization and hoisted
+   array guards; preserve exact sort comparator behavior and automatic
+   fallback.
+4. Retain the existing product gates: mixed native coverage and semantic
+   parity, at least 2x for the suitable compute workload, and no more than 5%
+   regression for panel steady-state, P99, first-window, or hot reload.
+
 After M2 (`docs/M2.md`), the core comparison/bitwise/`%`/unary/tail-call
 opcode set is native in both tiers. The next backlog items in priority order
 are: caching native entry handles on the C side so generic native-to-native
