@@ -365,3 +365,48 @@ retirement; check the top key before consuming, and preserve empty-stack
 handling for the test that sends DEOPT exit without an enter. This next change
 is not implemented. Feedback observation, tier-state lookups, and exact metric
 publication also remain substantial sampled costs.
+
+
+PR #18 merged as a38bd01. Work continued on perf/m3-native-timing-stack:
+active execution timers now use one LIFO Vec with exact key/tier attribution,
+replacing the per-function hash map of vectors. The insertion allocation
+regression goes from 105 allocations/reallocations to zero across 100 distinct
+sequential functions after warming one slot. The runtime passes 515 release
+tests and 87 ASAN/LSAN tests; independent review found no remaining issue.
+
+The first direct-call Tier2 diagnostic exposed premature benchmark readiness
+(leaf optimized before caller). The harness now honors explicit
+`tier2ReadyInstalls` (four for call-heavy), blocks the blacklist shortcut for
+that requirement, executes stable quiet iterations, and rejects required-Tier2
+compilation during timing. Unsupported probes keep bounded fallback. All 28
+benchmark tests pass, including a real direct-call steady entry-delta check;
+the two forced-Tier2 tests also pass ASAN/LSAN. Updated script checksums include
+three pre-existing stale local entries; those other script bodies are unchanged.
+
+Both merged-M3 and timing-stack runtimes were rebuilt with the corrected
+harness. Four fresh 5/30/10 paired comparisons are archived under
+`benchmarks/results/m3-timing-stack-settled-*-paired.json`. Relative to merged
+M3, generic automatic is 1.011x speed (interval only narrowly above parity).
+Generic Tier1 and recursive Tier1 are tied with wide intervals and long tails;
+do not retain the earlier narrow improvement claims. Direct calls and interpreter
+controls are tied; scalar Tier2 is 1.011x and automatic 1.007x, without isolated
+causal attribution. Final engine order is balanced independently of mode order
+(15/15 latency, 5/5 throughput); it supersedes an unbalanced two-engine run. Generic
+requested Tier2 still executes Tier1; automatic recursion still has no native
+entries. Original diagnostics are retained with the old harness and explicit
+readiness limitations. All measurement processes for this step have finished.
+The clean-source acceptance result still predates these changes and remains
+incomplete/failing; do not call the broader overhead target complete.
+
+Next read-only investigations found two bounded opportunities, not implemented:
+- In ProductionBackend::record_hot, capture baseline tier_state once after
+  maintenance_if_due(false). Subsequent feedback does not change publication;
+  failed prepare_baseline_direct_refresh leaves state unchanged, and success
+  immediately returns. Reuse the local value instead of three lookups.
+- FeedbackTable::observe_type performs contains_key/get/entry on the same
+  BTreeMap; use one entry match, rejecting only vacant entries at capacity and
+  preserving saturated drop counts and wrapping version updates. observe_call
+  can likewise derive is_new from the entry match; calls do not share the type
+  table capacity. Add focused version/full-capacity/zero-arity/widening coverage
+  before changing these routines. Keep every admitted observation and exact
+  generation identity; do not skip feedback simply because timing is expensive.

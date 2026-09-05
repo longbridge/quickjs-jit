@@ -7,6 +7,8 @@ globalThis.workloadArgument = increment;
 // The leaf, initial caller, and direct-edge caller refresh must all publish
 // before the harness starts steady-state timing.
 globalThis.tier1ReadyInstalls = 3;
+// Forced Tier 2 needs both baseline and both optimizing publications.
+globalThis.tier2ReadyInstalls = 4;
 
 function workload(iterations, seed, target) {
   let value = seed;
