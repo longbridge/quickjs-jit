@@ -26,6 +26,16 @@ The default policy is five warmups, 30 fresh-process latency samples, and ten
 one-second throughput windows per workload and mode. The JSON records those
 actual values. Do not use reduced runs for performance claims.
 
+
+Forced Tier 2 probes can declare `globalThis.tier2ReadyInstalls` to require a
+known publication count before timing. The direct-call probe requires four:
+two baseline and two optimizing artifacts. An unrelated blacklisted function
+cannot bypass that requirement. Both optimized modes execute quiet warmup
+iterations while draining compilation; an explicit forced-Tier2 requirement
+also rejects unsettled startup or new compilation during the timed batch.
+Unsupported probes without the declaration retain bounded interpreter/Tier 1
+fallback. Use the same harness revision for both sides of a runtime comparison.
+
 For a fast functional smoke run of the focused scalar-loop, call-heavy, and
 property-heavy cases:
 

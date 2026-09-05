@@ -553,8 +553,9 @@ struct ProductionBackend {
     // retain their own tier in execution_starts across recursive replacement.
     entry_tiers: std::collections::HashMap<runtime::FunctionKey, runtime::Tier>,
     entry_cache_epoch: u64,
-    execution_starts:
-        std::collections::HashMap<runtime::FunctionKey, Vec<(std::time::Instant, runtime::Tier)>>,
+    // C brackets each native invocation with a synchronous enter/exit pair.
+    // Keep active records through retirement and preserve each invocation's tier.
+    execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
     execution_profiles: std::collections::HashMap<runtime::FunctionKey, ProductionProfile>,
     profitability_evaluations: u64,
     profitability_approved: u64,
@@ -1328,7 +1329,7 @@ impl ProductionBackend {
             adaptive_inputs_recorded: 0,
             snapshot_requests: 0,
             stable_path_compile_requests: 0,
-            execution_starts: std::collections::HashMap::new(),
+            execution_starts: Vec::new(),
             entry_tiers: std::collections::HashMap::new(),
             entry_cache_epoch: 1,
             execution_profiles: std::collections::HashMap::new(),
@@ -2370,9 +2371,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
         self.execution_starts
-            .entry(key)
-            .or_default()
-            .push((std::time::Instant::now(), tier));
+            .push((key, std::time::Instant::now(), tier));
     }
 
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
@@ -2387,7 +2386,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     .observe_return(key, NATIVE_RETURN_FEEDBACK_PC, observed);
             }
         }
-        if let Some((start, tier)) = self.execution_starts.get_mut(&key).and_then(Vec::pop) {
+        // An unmatched callback must not discard a different active timer.
+        // Actual C invocations, including recursive and OSR entries, are LIFO.
+        if let Some((_, start, tier)) = self
+            .execution_starts
+            .last()
+            .copied()
+            .filter(|(active, _, _)| *active == key)
+        {
+            self.execution_starts.pop();
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
             let optimized = tier == runtime::Tier::Optimizing;
             let profile = self.execution_profiles.entry(key).or_default();
@@ -2720,6 +2727,107 @@ mod production_environment_tests {
             event.flags = qjs::JS_JIT_FEEDBACK_CALL_SITE;
         }
         event
+    }
+
+    #[test]
+    fn sequential_native_entries_reuse_timing_storage_across_functions() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        backend.native_enter(1, 1, 0);
+        backend.native_exit(1, 1, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        let mut allocations = 0;
+        for id in 2..102 {
+            ALLOCATIONS.with(|count| count.set(Some(0)));
+            backend.native_enter(id, 1, 0);
+            allocations += ALLOCATIONS.with(|count| count.replace(None).unwrap());
+            // Profile creation on exit is separate from storing an active timer.
+            backend.native_exit(id, 1, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        }
+        assert_eq!(
+            allocations, 0,
+            "sequential entries must reuse warmed timing storage"
+        );
+        assert_eq!((backend.native_entries, backend.native_exits), (101, 101));
+        backend.runtime_detach();
+    }
+
+    #[test]
+    fn native_timing_preserves_recursive_tiers_across_retirement_and_exit_kinds() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        use runtime::{FunctionKey, Tier};
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        let outer = FunctionKey::new(7, 3);
+        let inner = FunctionKey::new(8, 4);
+        backend.entry_tiers.insert(outer, Tier::Baseline);
+        backend.native_enter(7, 3, 0);
+        backend.entry_tiers.insert(inner, Tier::Optimizing);
+        backend.native_enter(8, 4, 12);
+        backend.entry_tiers.insert(outer, Tier::Optimizing);
+        backend.native_enter(7, 3, 0);
+        backend.function_retire(7, 3);
+        backend.native_exit(7, 3, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT);
+        backend.native_exit(8, 4, 12, qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER);
+        backend.native_exit(7, 3, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        let a = backend.execution_profiles[&outer];
+        let b = backend.execution_profiles[&inner];
+        assert_eq!((a.baseline_executions, a.optimized_executions), (1, 1));
+        assert_eq!((b.baseline_executions, b.optimized_executions), (0, 1));
+        assert_eq!(
+            (
+                backend.native_entries,
+                backend.native_exits,
+                backend.osr_attempts
+            ),
+            (3, 3, 1)
+        );
+        backend.runtime_detach();
+    }
+
+    #[test]
+    fn unmatched_native_exit_does_not_consume_another_active_timer() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        use runtime::FunctionKey;
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        backend.native_exit(99, 1, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        backend.native_enter(7, 3, 0);
+        backend.native_enter(8, 4, 0);
+        // Defensive behavior for invalid callback order; C's real pairs are LIFO.
+        backend.native_exit(7, 3, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        assert!(!backend
+            .execution_profiles
+            .contains_key(&FunctionKey::new(7, 3)));
+        backend.native_exit(8, 4, 0, qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION);
+        backend.native_exit(7, 3, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        assert_eq!(
+            backend.execution_profiles[&FunctionKey::new(7, 3)].baseline_executions,
+            1
+        );
+        assert_eq!(
+            backend.execution_profiles[&FunctionKey::new(8, 4)].baseline_executions,
+            1
+        );
+        assert!(!backend
+            .execution_profiles
+            .contains_key(&FunctionKey::new(99, 1)));
+        backend.runtime_detach();
     }
 
     #[test]

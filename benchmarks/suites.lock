@@ -43,7 +43,7 @@ commit = "local"
 subdirectory = "benchmarks/scripts/call-heavy.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
-adapted_sha256 = "596e2e860b92e275a0cb75ddaac1666716d1ec289acd15f0b845c496a8292b26"
+adapted_sha256 = "a6cc40c5fb963f376a4fd35469a59a23b37420c564756319bc6d9c19b35f8fb0"
 
 [[suite]]
 name = "rquickjs-jit-focused-property-heavy"
@@ -52,7 +52,7 @@ commit = "local"
 subdirectory = "benchmarks/scripts/property-heavy.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
-adapted_sha256 = "a7cf0d0becdccf186b5318d414ea4775a8d68332e205550bb013d382b19390f7"
+adapted_sha256 = "10bf81e6d712b8980df2a404be0d0456de92df5afc22ae30e5c086a33dea30cb"
 
 [[suite]]
 name = "rquickjs-jit-focused-fibonacci-iterative"
@@ -79,7 +79,7 @@ commit = "local"
 subdirectory = "benchmarks/scripts/float64-dense.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
-adapted_sha256 = "103f871a1964ff7fe96afdaf93465c2e4870da09cc81c3cbe916b744a00d0240"
+adapted_sha256 = "35220498f859305ab3444f165af3e004136cc69c71bfb19683bbdce24db0163b"
 
 [[suite]]
 name = "rquickjs-jit-matrix-strings-regexp"
@@ -97,7 +97,7 @@ commit = "local"
 subdirectory = "benchmarks/scripts/arrays-typed.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
-adapted_sha256 = "b44c77ea68743bb98d503e9ce194e9ef07c0c7d29bb4ff5ea7e9d2c05f9cbf13"
+adapted_sha256 = "a19284a8c4e7613bfdee18131871f5865f62f05e893d188511209426a5b7687b"
 
 [[suite]]
 name = "rquickjs-jit-matrix-objects-polymorphic"
