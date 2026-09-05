@@ -323,3 +323,16 @@ automatic mode is 1.359x M2 speed, but statistically tied with the pre-buffer
 version. Coverage CI exposed a bundled/fresh bindgen formatting mismatch,
 reproduced locally and corrected across all ten bundles. Follow the current PR
 checks and run the clean-source benchmark matrix before broader acceptance.
+
+
+The clean-source 22-workload/four-mode matrix is now complete and archived in
+`benchmarks/results/m3-clean-matrix.json` and `.md`, with the binary hash and
+CPU affinity in `m3-clean-matrix-launch.json`. No benchmark process remains
+running. All 2,640 retained samples agree on checksums and balance entries/exits.
+The formal performance gate fails: compute geomean is 3.17x–3.23x interpreter
+speed (target 5x); startup/reload regress; real gpui-shell evidence is absent.
+The 10x-kernel, native-tier, profitability-policy and checksum gates pass.
+Generic-call automatic mode is still about 0.12x interpreter speed, so remaining
+per-call callback/validation/profiling cost remains the active overhead target.
+PR #18's latest observed CI has 40 successful checks and sanitizer still active;
+re-query its current head and job status before making any CI completion claim.

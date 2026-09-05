@@ -1,0 +1,17 @@
+{
+  "revision": "4d0a35bafa321766c5f4be44fd2258309ac384f5",
+  "cpu_affinity": [
+    0
+  ],
+  "executable_sha256": "85e999b748efb30dec40b27938fab9d457b0258931997398b22f43032e3cd26b",
+  "command": [
+    "/home/jason/work/quickjs-jit/target/release/jit-bench",
+    "compare",
+    "--modes",
+    "interpreter,tier1,tier2,automatic",
+    "--output",
+    "/tmp/jit-m3-clean-matrix.json",
+    "--report",
+    "/tmp/jit-m3-clean-matrix.md"
+  ]
+}
