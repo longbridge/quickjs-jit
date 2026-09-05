@@ -3574,9 +3574,8 @@ pub struct JSJitBackendVTable {
     pub record_feedback: ::core::option::Option<
         unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void, event: *const JSJitFeedbackEvent),
     >,
-    pub entry_cache_epoch: ::core::option::Option<
-        unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void) -> u64,
-    >,
+    pub entry_cache_epoch:
+        ::core::option::Option<unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void) -> u64>,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
