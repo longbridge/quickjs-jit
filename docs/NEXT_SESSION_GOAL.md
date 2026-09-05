@@ -315,3 +315,11 @@ must retain their code and metadata even after future entries are invalidated.
 Cache hits now reuse a `ProductionEntryPin`; per-call hot/enter/exit callbacks
 remain in place. Do not treat this first cache step as completion of the whole
 native-call overhead target.
+
+
+PR #18 is open on `perf/m3-native-entry-overhead`. Final CALL-buffer diagnostics
+are archived in `benchmarks/results/m3-call-feedback-generic-paired.json`:
+automatic mode is 1.359x M2 speed, but statistically tied with the pre-buffer
+version. Coverage CI exposed a bundled/fresh bindgen formatting mismatch,
+reproduced locally and corrected across all ten bundles. Follow the current PR
+checks and run the clean-source benchmark matrix before broader acceptance.
