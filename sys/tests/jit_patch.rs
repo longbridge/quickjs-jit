@@ -39,6 +39,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0008-tier1-atom-values.patch",
         "0009-tier1-arith-slow.patch",
         "0010-native-entry-cache.patch",
+        "0011-helper-pc-cursor.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }

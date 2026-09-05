@@ -336,3 +336,32 @@ Generic-call automatic mode is still about 0.12x interpreter speed, so remaining
 per-call callback/validation/profiling cost remains the active overhead target.
 PR #18's latest observed CI has 40 successful checks and sanitizer still active;
 re-query its current head and job status before making any CI completion claim.
+
+
+Patch 0011 now caches a validated PC boundary per private function bytecode.
+Forward validation resumes at that boundary; backward PCs rescan. The change
+preserves range/end/opcode semantics and passes 512 release tests, 55 ASAN/LSAN
+tests, 15 ABI tests, 11 patch tests, Clippy, and a mutation-checked helper PC
+regression. Profile attribution fell from 36.08% to 18.24% self sampled cycles.
+Four paired diagnostic reports and two focused repeats are archived as
+`benchmarks/results/m3-pc-cursor-*.json`. Relative to pre-cursor code, Tier 1
+generic calls are 1.135x speed, direct calls 2.226x, and recursion 1.108x.
+Automatic generic calls improve only to 1.007x. Repeats retain small slowdowns
+in automatic direct calls (~2.1%) and Tier 2 scalar loops (~1.5%); see M3.md.
+These are revision diagnostics, not a new clean-source acceptance result.
+All measurement processes for this step completed.
+
+CI run 33960763268 on b7be6a4 passed 41 checks, including memory/address/thread
+sanitizers (one other job skipped). That is the pre-cursor revision: re-query
+PR #18 for the latest cursor commit before claiming its CI passes.
+
+The next concrete overhead candidate is `ProductionBackend.execution_starts`:
+a per-function HashMap of Vecs currently performs hash lookups on every enter
+and exit. Independent lifecycle review found real callback pairs globally
+LIFO, including recursion, OSR, invalidation, retries/deopts and release reentry.
+A single Vec of (FunctionKey, Instant, Tier) could preserve the original key
+and tier while removing those lookups. Do not remove active records on
+retirement; check the top key before consuming, and preserve empty-stack
+handling for the test that sends DEOPT exit without an enter. This next change
+is not implemented. Feedback observation, tier-state lookups, and exact metric
+publication also remain substantial sampled costs.
