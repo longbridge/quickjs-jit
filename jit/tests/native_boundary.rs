@@ -165,6 +165,327 @@ unsafe impl JitBackend for NativeBackend {
 
 struct UnpinnedBackend;
 
+struct CachingBackend {
+    inner: NativeBackend,
+    epoch: Arc<AtomicUsize>,
+    acquisitions: Arc<AtomicUsize>,
+}
+
+unsafe impl JitBackend for CachingBackend {
+    fn acquire_entry(&mut self, id: u64, generation: u64, pc: u32) -> qjs::JSJitEntryHandle {
+        let entry = self.inner.acquire_entry(id, generation, pc);
+        if !entry.pin.is_null() {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+        }
+        entry
+    }
+
+    fn release_entry(&mut self, entry: qjs::JSJitEntryHandle) {
+        self.inner.release_entry(entry);
+    }
+
+    fn entry_cache_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst) as u64
+    }
+}
+
+#[test]
+fn cached_native_entry_reuses_a_pin_until_epoch_change_and_releases_on_detach() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.target = function target() { return 1 }")
+            .unwrap();
+        snapshot(&ctx, &ctx.globals().get::<_, Function>("target").unwrap())
+    });
+    let releases = Arc::new(AtomicUsize::new(0));
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let epoch = Arc::new(AtomicUsize::new(1));
+    let guard = runtime
+        .attach_jit_backend(CachingBackend {
+            inner: NativeBackend::one(&captured, EntryKind::Done, Arc::clone(&releases)),
+            epoch: Arc::clone(&epoch),
+            acquisitions: Arc::clone(&acquisitions),
+        })
+        .unwrap();
+    let invoke = || {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("target").unwrap();
+            assert_eq!(function.call::<_, i32>(()).unwrap(), 42);
+        })
+    };
+    invoke();
+    invoke();
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    guard.suspend().unwrap();
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("target").unwrap();
+        assert_eq!(function.call::<_, i32>(()).unwrap(), 1);
+    });
+    guard.resume().unwrap();
+    invoke();
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+    epoch.store(2, Ordering::SeqCst);
+    invoke();
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 2);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    epoch.store(0, Ordering::SeqCst);
+    invoke();
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 3);
+    assert_eq!(releases.load(Ordering::SeqCst), 3);
+    epoch.store(3, Ordering::SeqCst);
+    invoke();
+    drop(guard);
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 4);
+    assert_eq!(releases.load(Ordering::SeqCst), 4);
+}
+
+struct RecursiveCachePin {
+    epoch: Arc<AtomicUsize>,
+    invalidate: Arc<AtomicBool>,
+    retire: Arc<AtomicBool>,
+    active: AtomicBool,
+}
+
+struct ReentrantCacheRelease {
+    ctx: *mut qjs::JSContext,
+    key: (u64, u64),
+    acquisitions: AtomicUsize,
+    releases: AtomicUsize,
+    reenter: AtomicBool,
+}
+
+unsafe extern "C" fn acquire_reentrant_release(
+    opaque: *mut c_void,
+    id: u64,
+    generation: u64,
+    pc: u32,
+) -> qjs::JSJitEntryHandle {
+    let state = unsafe { &*opaque.cast::<ReentrantCacheRelease>() };
+    let mut entry: qjs::JSJitEntryHandle = unsafe { std::mem::zeroed() };
+    entry.struct_size = std::mem::size_of_val(&entry) as u32;
+    if state.key == (id, generation) && pc == 0 {
+        state.acquisitions.fetch_add(1, Ordering::SeqCst);
+        entry.entry = Some(native_done);
+        entry.helper_abi_version = qjs::QJSJIT_HELPER_ABI_VERSION;
+        entry.pin = Box::into_raw(Box::new(0u8)).cast();
+    }
+    entry
+}
+
+unsafe extern "C" fn release_with_reentry(opaque: *mut c_void, entry: qjs::JSJitEntryHandle) {
+    let state = unsafe { &*opaque.cast::<ReentrantCacheRelease>() };
+    unsafe { drop(Box::from_raw(entry.pin.cast::<u8>())) };
+    state.releases.fetch_add(1, Ordering::SeqCst);
+    if state.reenter.swap(false, Ordering::SeqCst) {
+        unsafe {
+            let global = qjs::JS_GetGlobalObject(state.ctx);
+            let function = qjs::JS_GetPropertyStr(state.ctx, global, c"target".as_ptr());
+            let value = qjs::JS_Call(state.ctx, function, qjs::JS_UNDEFINED, 0, ptr::null_mut());
+            assert_eq!(qjs::JS_VALUE_GET_INT(value), 42);
+            qjs::JS_FreeValue(state.ctx, function);
+            qjs::JS_FreeValue(state.ctx, global);
+        }
+    }
+}
+
+unsafe extern "C" fn constant_cache_epoch(_opaque: *mut c_void) -> u64 {
+    1
+}
+
+#[test]
+fn reentrant_release_cannot_repopulate_entry_cache_during_detach() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.target = function target() { return 1 }")
+            .unwrap();
+        let function: Function = ctx.globals().get("target").unwrap();
+        let captured = snapshot(&ctx, &function);
+        let mut state = ReentrantCacheRelease {
+            ctx: ctx.as_raw().as_ptr(),
+            key: (captured.function_id(), captured.generation()),
+            acquisitions: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+            reenter: AtomicBool::new(false),
+        };
+        let mut vtable: qjs::JSJitBackendVTable = unsafe { std::mem::zeroed() };
+        vtable.struct_size = std::mem::size_of_val(&vtable) as u32;
+        vtable.acquire_entry = Some(acquire_reentrant_release);
+        vtable.release_entry = Some(release_with_reentry);
+        vtable.entry_cache_epoch = Some(constant_cache_epoch);
+        let rt = unsafe { qjs::JS_GetRuntime(state.ctx) };
+        assert_eq!(
+            unsafe {
+                qjs::JS_SetJitBackend(
+                    rt,
+                    &vtable,
+                    (&mut state as *mut ReentrantCacheRelease).cast(),
+                )
+            },
+            qjs::JS_JIT_BACKEND_OK
+        );
+        assert_eq!(function.call::<_, i32>(()).unwrap(), 42);
+        state.reenter.store(true, Ordering::SeqCst);
+        assert_eq!(
+            unsafe { qjs::JS_SetJitBackend(rt, ptr::null(), ptr::null_mut()) },
+            qjs::JS_JIT_BACKEND_OK
+        );
+        assert_eq!(state.acquisitions.load(Ordering::SeqCst), 2);
+        assert_eq!(state.releases.load(Ordering::SeqCst), 2);
+    });
+}
+
+struct RecursiveCacheBackend {
+    key: (u64, u64),
+    epoch: Arc<AtomicUsize>,
+    invalidate: Arc<AtomicBool>,
+    retire: Arc<AtomicBool>,
+    exits: Arc<Mutex<Vec<(u64, u64)>>>,
+    acquisitions: Arc<AtomicUsize>,
+    releases: Arc<AtomicUsize>,
+}
+
+unsafe impl JitBackend for RecursiveCacheBackend {
+    fn acquire_entry(&mut self, id: u64, generation: u64, pc: u32) -> qjs::JSJitEntryHandle {
+        let mut entry: qjs::JSJitEntryHandle = unsafe { std::mem::zeroed() };
+        entry.struct_size = std::mem::size_of_val(&entry) as u32;
+        if (id, generation) == self.key && pc == 0 {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            entry.entry = Some(recursive_cached_entry);
+            entry.helper_abi_version = qjs::QJSJIT_HELPER_ABI_VERSION;
+            entry.pin = Box::into_raw(Box::new(RecursiveCachePin {
+                epoch: Arc::clone(&self.epoch),
+                invalidate: Arc::clone(&self.invalidate),
+                retire: Arc::clone(&self.retire),
+                active: AtomicBool::new(false),
+            }))
+            .cast();
+        }
+        entry
+    }
+
+    fn release_entry(&mut self, entry: qjs::JSJitEntryHandle) {
+        let pin = unsafe { Box::from_raw(entry.pin.cast::<RecursiveCachePin>()) };
+        assert!(
+            !pin.active.load(Ordering::SeqCst),
+            "released an active frame's pin"
+        );
+        self.releases.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn entry_cache_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst) as u64
+    }
+
+    fn function_retire(&mut self, _id: u64, _generation: u64) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn native_exit(&mut self, id: u64, generation: u64, _pc: u32, _kind: u32) {
+        self.exits.lock().unwrap().push((id, generation));
+    }
+}
+
+unsafe extern "C" fn recursive_cached_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJitExit {
+    unsafe {
+        let frame = &mut *frame;
+        let pin = &*frame.entry.pin.cast::<RecursiveCachePin>();
+        assert!(
+            !pin.active.swap(true, Ordering::SeqCst),
+            "shared an active pin"
+        );
+        let n = qjs::JS_VALUE_GET_INT(*frame.arg_buf);
+        if n == 0 {
+            qjs::JS_RunGC(frame.rt);
+            if pin.retire.swap(false, Ordering::SeqCst) {
+                let global = qjs::JS_GetGlobalObject(frame.ctx);
+                let function = qjs::JS_GetPropertyStr(frame.ctx, global, c"target".as_ptr());
+                assert_eq!(
+                    qjs::JS_JitInvalidateFunction(frame.ctx, function),
+                    qjs::JS_JIT_BACKEND_OK
+                );
+                qjs::JS_FreeValue(frame.ctx, function);
+                qjs::JS_FreeValue(frame.ctx, global);
+            }
+            if pin.invalidate.swap(false, Ordering::SeqCst) {
+                pin.epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            frame.result = qjs::JS_MKVAL(qjs::JS_TAG_INT, 0);
+        } else {
+            let global = qjs::JS_GetGlobalObject(frame.ctx);
+            let function = qjs::JS_GetPropertyStr(frame.ctx, global, c"target".as_ptr());
+            let mut argument = qjs::JS_MKVAL(qjs::JS_TAG_INT, n - 1);
+            let value = qjs::JS_Call(frame.ctx, function, qjs::JS_UNDEFINED, 1, &mut argument);
+            qjs::JS_FreeValue(frame.ctx, function);
+            qjs::JS_FreeValue(frame.ctx, global);
+            assert_eq!(qjs::JS_VALUE_GET_TAG(value), qjs::JS_TAG_INT);
+            frame.result = qjs::JS_MKVAL(qjs::JS_TAG_INT, qjs::JS_VALUE_GET_INT(value) + 1);
+        }
+        pin.active.store(false, Ordering::SeqCst);
+    }
+    qjs::JSJitExit::done()
+}
+
+#[test]
+fn cached_entry_recursion_keeps_active_pins_alive_across_gc_and_invalidation() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.target = function target(n) { return -1 }")
+            .unwrap();
+        snapshot(&ctx, &ctx.globals().get::<_, Function>("target").unwrap())
+    });
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let invalidate = Arc::new(AtomicBool::new(false));
+    let retire = Arc::new(AtomicBool::new(false));
+    let exits = Arc::new(Mutex::new(Vec::new()));
+    let guard = runtime
+        .attach_jit_backend(RecursiveCacheBackend {
+            key: (captured.function_id(), captured.generation()),
+            epoch: Arc::new(AtomicUsize::new(1)),
+            invalidate: Arc::clone(&invalidate),
+            retire: Arc::clone(&retire),
+            exits: Arc::clone(&exits),
+            acquisitions: Arc::clone(&acquisitions),
+            releases: Arc::clone(&releases),
+        })
+        .unwrap();
+    let invoke = |n| {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("target").unwrap();
+            assert_eq!(function.call::<_, i32>((n,)).unwrap(), n);
+        })
+    };
+    invoke(0);
+    invalidate.store(true, Ordering::SeqCst);
+    invoke(3);
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 4);
+    assert_eq!(releases.load(Ordering::SeqCst), 4);
+    invoke(0);
+    retire.store(true, Ordering::SeqCst);
+    invoke(2);
+    assert!(
+        exits
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|key| *key == (captured.function_id(), captured.generation())),
+        "active frames must report the generation they entered: {:?}",
+        exits.lock().unwrap()
+    );
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("target").unwrap();
+        assert_eq!(function.call::<_, i32>((0,)).unwrap(), -1);
+    });
+    assert_eq!(acquisitions.load(Ordering::SeqCst), 7);
+    assert_eq!(releases.load(Ordering::SeqCst), 7);
+    drop(guard);
+    assert_eq!(releases.load(Ordering::SeqCst), 7);
+}
+
 unsafe impl JitBackend for UnpinnedBackend {
     fn acquire_entry(&mut self, _id: u64, _generation: u64, _pc: u32) -> qjs::JSJitEntryHandle {
         qjs::JSJitEntryHandle {
@@ -260,6 +581,7 @@ unsafe fn attempt_backend_change(
                 native_enter: None,
                 native_exit: None,
                 record_feedback: None,
+                entry_cache_epoch: None,
             };
             unsafe { qjs::JS_SetJitBackend(rt, &replacement, std::ptr::null_mut()) }
         }

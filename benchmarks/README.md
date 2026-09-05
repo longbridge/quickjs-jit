@@ -56,6 +56,21 @@ it is a designated compute kernel and must enter its requested native tier.
 zero-entry samples remain visible as an explicit fail-closed gap instead of
 being reported as native performance.
 
+`generic-call-entry` isolates the generic native-call boundary with a batched
+short callee taking `(Int32, Bool)`. The Bool argument excludes the numeric
+direct-call signature used by `call-heavy`. The Tier 1 integration test verifies
+one `CALL` helper invocation per iteration and native callee entry, so a future
+specialization change cannot silently turn this into a direct-call benchmark.
+Its checksum is `seed + iterations`. It is non-designated because automatic
+mode may demote this call-only workload. Compare it with `call-heavy` and
+`fibonacci-recursive` when optimizing entry overhead; zero native entries are
+fallback evidence, not an improvement in native entry cost.
+
+New evidence includes `native_acquisitions`: successfully acquired backend
+handles, including OSR. Native executions that reuse a C entry handle increase
+`native_entries` without another acquisition. Older reports omit this optional
+counter; Bun reports it as `null`.
+
 ## Representative performance matrix
 
 The default run also covers the broader JavaScript surface below. Every case

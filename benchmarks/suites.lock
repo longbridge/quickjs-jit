@@ -159,3 +159,12 @@ commit = "excluded-not-imported"
 subdirectory = "resources/tests/JetStream3"
 license = "BSD-2-Clause"
 sha256 = "excluded-not-imported"
+
+[[suite]]
+name = "rquickjs-jit-focused-generic-call-entry"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/generic-call-entry.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40"

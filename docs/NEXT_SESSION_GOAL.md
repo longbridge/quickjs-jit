@@ -275,3 +275,43 @@ opcode set is native in both tiers. The next backlog items in priority order
 are: caching native entry handles on the C side so generic native-to-native
 calls stop paying per-call Rust callbacks; closures (`fclosure`, var-refs);
 `typeof`; `for-of`/iterator opcodes; exception regions and async.
+
+The `generic-call-entry` benchmark now isolates the first item with a short
+`(Int32, Bool)` callee, avoiding the numeric direct-call specialization in
+`call-heavy`. Its Tier 1 integration test proves 1,000 generic `CALL` helper
+invocations and at least 1,001 native entries for a 1,000-iteration batch.
+The four-mode smoke run agrees on checksums; forced Tier 2 currently executes
+Tier 1 for this probe. The in-progress C entry cache is described in `docs/M3.md`.
+Its production test also requires fewer than 100 handle acquisitions per batch.
+The paired diagnostic run records 1.144x the M2 binary's speed in Tier 1 and
+1.228x in automatic mode; see `benchmarks/results/m3-entry-cache-paired.json`.
+The pinned follow-up below resolves the focused interpreter variance and
+completes the three control workloads; clean-source acceptance remains open.
+
+The next incremental change removes per-native-return queue allocation using a
+single synchronous handoff slot. It passes 509 release runtime tests and 39
+AddressSanitizer tests. The pinned three-version generic-call comparison records
+1.319x M2's speed in automatic mode (1.076x the cache-only version); the focused
+interpreter interval is now narrow and tied against cache-only. See
+`benchmarks/results/m3-native-return-generic-paired.json` and `docs/M3.md`.
+All control measurements are complete and archived under
+`benchmarks/results/m3-native-return-*-paired.json`; no benchmark process remains
+running. Direct-call modes are statistically tied with M2. Recursive Tier 1 is
+1.112x M2 speed; automatic recursion has zero native entries and is only an
+interpreter-path control. Scalar-loop automatic mode is 1.037x M2 speed. No
+material steady-state regression appeared in these controls. Startup, reload,
+tail latency, and clean-source acceptance remain open. CALL feedback now reuses its argument/result buffer while preserving arbitrary
+arity, exact order, and rejection of an entire invalid type event. Both warmed
+CALL event forms allocate zero times in the regression test. The final code
+passes 511 release tests, 39 AddressSanitizer tests, and Clippy. Earlier paired
+reports are explicitly tied to the pre-buffer executable hash.
+
+Entry caching must preserve the existing `Coordinator::pin` admission checks:
+installed artifact identity, invalidation, and the optimizing feedback epoch.
+An `ExecutionPin` alone proves code lifetime, not permission for a new entry.
+Also account for `prepare_baseline_direct_refresh`, optimized demotion,
+generation retirement, suspension, and runtime detach. Reentrant active frames
+must retain their code and metadata even after future entries are invalidated.
+Cache hits now reuse a `ProductionEntryPin`; per-call hot/enter/exit callbacks
+remain in place. Do not treat this first cache step as completion of the whole
+native-call overhead target.

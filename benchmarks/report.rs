@@ -599,6 +599,7 @@ mod tests {
             elapsed_ns: b,
             checksum: c.into(),
             native_entries: Some(1),
+            native_acquisitions: Some(1),
             native_exits: Some(1),
             fallback_count: Some(0),
             retry_count: Some(0),

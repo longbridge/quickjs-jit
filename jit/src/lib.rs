@@ -513,9 +513,12 @@ struct ProductionBackend {
     baseline_property_refreshed: std::collections::HashSet<runtime::FunctionKey>,
     tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
+    // CALL feedback consumers finish synchronously and never reenter QuickJS.
+    call_feedback_types: Vec<runtime::ObservedType>,
     shape_feedback: runtime::ShapeFeedbackTable,
     metrics: Arc<Mutex<JitMetrics>>,
     native_entries: u64,
+    native_acquisitions: u64,
     native_exits: u64,
     native_fallbacks: u64,
     native_retries: u64,
@@ -545,8 +548,11 @@ struct ProductionBackend {
     adaptive_inputs_recorded: u64,
     snapshot_requests: u64,
     stable_path_compile_requests: u64,
-    pending_entry_tiers:
-        std::collections::HashMap<runtime::FunctionKey, std::collections::VecDeque<runtime::Tier>>,
+    // Cached C handles can execute repeatedly without another acquisition.
+    // Replacement acquisition updates this before native_enter; active frames
+    // retain their own tier in execution_starts across recursive replacement.
+    entry_tiers: std::collections::HashMap<runtime::FunctionKey, runtime::Tier>,
+    entry_cache_epoch: u64,
     execution_starts:
         std::collections::HashMap<runtime::FunctionKey, Vec<(std::time::Instant, runtime::Tier)>>,
     execution_profiles: std::collections::HashMap<runtime::FunctionKey, ProductionProfile>,
@@ -648,8 +654,10 @@ type PendingDeoptGuards = std::collections::HashMap<
     std::collections::VecDeque<(u32, Option<runtime::ObservedType>)>,
 >;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-type PendingNativeReturns =
-    std::collections::HashMap<(u64, u64), std::collections::VecDeque<runtime::ObservedType>>;
+struct PendingNativeReturn {
+    function: runtime::FunctionKey,
+    observed: runtime::ObservedType,
+}
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 #[derive(Default)]
@@ -660,12 +668,15 @@ struct OsrValidationMetrics {
     deopt_guards: Mutex<PendingDeoptGuards>,
     deopt_materializations: AtomicU64,
     side_path_entries: AtomicU64,
-    /// Return-value types observed at native `DONE` exits, keyed by function
-    /// identity. The interpreter records return feedback at `OP_return`, but
+    /// The trampoline publishes after the native call has returned; C invokes
+    /// native_exit immediately afterward, before any release callback or other
+    /// JavaScript reentry. Even recursion therefore has only one pending return
+    /// per runtime. Keep this handoff inline instead of allocating a queue for
+    /// each call. The interpreter records return feedback at `OP_return`, but
     /// a function that returns natively (including a first invocation that
     /// entered baseline code through OSR) never executes that opcode, and a
     /// call signature that never completes would block Tier 2 forever.
-    native_returns: Mutex<PendingNativeReturns>,
+    native_return: Mutex<Option<PendingNativeReturn>>,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -732,25 +743,26 @@ impl OsrValidationMetrics {
     }
 
     fn mark_native_return(&self, id: u64, generation: u64, observed: runtime::ObservedType) {
-        self.native_returns
+        let mut pending = self
+            .native_return
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry((id, generation))
-            .or_default()
-            .push_back(observed);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(pending.is_none(), "native return callback was not consumed");
+        *pending = Some(PendingNativeReturn {
+            function: runtime::FunctionKey::new(id, generation),
+            observed,
+        });
     }
 
     fn take_native_return(&self, id: u64, generation: u64) -> Option<runtime::ObservedType> {
-        let mut returns = self
-            .native_returns
+        let mut pending = self
+            .native_return
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let queue = returns.get_mut(&(id, generation))?;
-        let observed = queue.pop_front();
-        if queue.is_empty() {
-            returns.remove(&(id, generation));
+        if pending.as_ref()?.function != runtime::FunctionKey::new(id, generation) {
+            return None;
         }
-        observed
+        pending.take().map(|entry| entry.observed)
     }
 }
 
@@ -1047,6 +1059,26 @@ mod production_osr_validation_tests {
     use super::*;
     use rquickjs_core::qjs;
 
+    #[test]
+    fn native_return_handoff_preserves_identity_type_and_recursive_exit_order() {
+        let metrics = OsrValidationMetrics::default();
+        // An inner trampoline completes and its C exit callback consumes the
+        // observation before the outer native call can finish.
+        for (id, generation, observed) in [
+            (7, 3, runtime::ObservedType::Int32),
+            (7, 3, runtime::ObservedType::Float64),
+            (8, 4, runtime::ObservedType::String),
+            (7, 5, runtime::ObservedType::Object),
+            (7, 5, runtime::ObservedType::Bool),
+        ] {
+            metrics.mark_native_return(id, generation, observed);
+            assert_eq!(metrics.take_native_return(id + 1, generation), None);
+            assert_eq!(metrics.take_native_return(id, generation + 1), None);
+            assert_eq!(metrics.take_native_return(id, generation), Some(observed));
+            assert_eq!(metrics.take_native_return(id, generation), None);
+        }
+    }
+
     fn bytes(frame: &qjs::JSJitExecFrame) -> Vec<u8> {
         unsafe {
             core::slice::from_raw_parts(
@@ -1266,9 +1298,11 @@ impl ProductionBackend {
             baseline_property_refreshed: std::collections::HashSet::new(),
             tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
+            call_feedback_types: Vec::new(),
             shape_feedback: runtime::ShapeFeedbackTable::new(3),
             metrics,
             native_entries: 0,
+            native_acquisitions: 0,
             native_exits: 0,
             native_fallbacks: 0,
             native_retries: 0,
@@ -1295,7 +1329,8 @@ impl ProductionBackend {
             snapshot_requests: 0,
             stable_path_compile_requests: 0,
             execution_starts: std::collections::HashMap::new(),
-            pending_entry_tiers: std::collections::HashMap::new(),
+            entry_tiers: std::collections::HashMap::new(),
+            entry_cache_epoch: 1,
             execution_profiles: std::collections::HashMap::new(),
             profitability_evaluations: 0,
             profitability_approved: 0,
@@ -1357,7 +1392,18 @@ impl ProductionBackend {
         }
     }
 
+    fn invalidate_entry_cache(&mut self) {
+        // Epoch zero permanently disables caching after exhaustion: never let
+        // an old handle become admissible again through wraparound.
+        if self.entry_cache_epoch != 0 {
+            self.entry_cache_epoch = self.entry_cache_epoch.checked_add(1).unwrap_or(0);
+        }
+    }
+
     fn maintenance(&mut self) {
+        // Maintenance owns installation, demotion, feedback-epoch updates,
+        // and reclamation. Invalidate before touching any of those states.
+        self.invalidate_entry_cache();
         self.hot_ticks_since_maintenance = 0;
         self.last_scan_feedback_version = self.feedback.version();
         self.clock = self.clock.saturating_add(1);
@@ -1691,6 +1737,7 @@ impl ProductionBackend {
     fn publish_metrics(&mut self) {
         let mut snapshot = self.coordinator.metrics();
         snapshot.native_entries = self.native_entries;
+        snapshot.native_acquisitions = self.native_acquisitions;
         snapshot.native_exits = self.native_exits;
         snapshot.native_fallbacks = self.native_fallbacks;
         snapshot.native_retries = self.native_retries;
@@ -1846,6 +1893,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 .baseline_direct_refresh_ready(key, &feedback)
                 && self.coordinator.prepare_baseline_direct_refresh(key)
             {
+                self.invalidate_entry_cache();
                 self.requested.insert(key);
                 self.queue_reasons
                     .insert(key, runtime::HotReason::CallThreshold);
@@ -1974,33 +2022,36 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.clock = self.clock.saturating_add(1).max(1);
         match event.kind {
             qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL => {
-                if let Some(arguments) = raw_types
-                    .iter()
-                    .copied()
-                    .map(observed)
-                    .collect::<Option<Vec<_>>>()
-                {
-                    if event.flags & qjs::JS_JIT_FEEDBACK_CALL_SITE != 0 {
-                        let Some((&result, arguments)) = arguments.split_last() else {
-                            return;
-                        };
-                        if event.callee.id == 0 || event.callee.generation == 0 {
-                            return;
-                        }
-                        let callee =
-                            runtime::FunctionKey::new(event.callee.id, event.callee.generation);
-                        self.feedback.observe_call_signature_with_identity(
-                            key,
-                            event.pc,
-                            callee,
-                            event.shape_identity,
-                            event.prototype_identity,
-                            arguments,
-                            result,
-                        );
-                    } else {
-                        self.feedback.observe_call(key, &arguments);
+                let arguments = &mut self.call_feedback_types;
+                arguments.clear();
+                arguments.reserve(raw_types.len());
+                for &raw in raw_types {
+                    let Some(value) = observed(raw) else {
+                        // Reject the entire event before mutating feedback.
+                        return;
+                    };
+                    arguments.push(value);
+                }
+                if event.flags & qjs::JS_JIT_FEEDBACK_CALL_SITE != 0 {
+                    let Some((&result, arguments)) = arguments.split_last() else {
+                        return;
+                    };
+                    if event.callee.id == 0 || event.callee.generation == 0 {
+                        return;
                     }
+                    let callee =
+                        runtime::FunctionKey::new(event.callee.id, event.callee.generation);
+                    self.feedback.observe_call_signature_with_identity(
+                        key,
+                        event.pc,
+                        callee,
+                        event.shape_identity,
+                        event.prototype_identity,
+                        arguments,
+                        result,
+                    );
+                } else {
+                    self.feedback.observe_call(key, arguments);
                 }
             }
             qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_RETURN if raw_types.len() == 1 => {
@@ -2280,11 +2331,22 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         empty.pin = pin;
         empty.stack_map_count = stack_map_count;
         empty.helper_abi_version = rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION;
-        self.pending_entry_tiers
-            .entry(key)
-            .or_default()
-            .push_back(acquired_tier);
+        self.entry_tiers.insert(key, acquired_tier);
+        self.native_acquisitions = self.native_acquisitions.saturating_add(1);
         empty
+    }
+
+    fn entry_cache_epoch(&self) -> u64 {
+        if self.coordinator.has_pending_work()
+            || self.feedback.version() != self.last_scan_feedback_version
+            || self.coordinator.installed_count() != self.last_scan_installed
+        {
+            // Force acquisition through maintenance when the admission inputs
+            // changed since the last scan, even before the next hot probe.
+            0
+        } else {
+            self.entry_cache_epoch
+        }
     }
 
     fn release_entry(&mut self, entry: rquickjs_core::qjs::JSJitEntryHandle) {
@@ -2297,9 +2359,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.native_entries = self.native_entries.saturating_add(1);
         let key = runtime::FunctionKey::new(_id, _generation);
         let tier = self
-            .pending_entry_tiers
-            .get_mut(&key)
-            .and_then(std::collections::VecDeque::pop_front)
+            .entry_tiers
+            .get(&key)
+            .copied()
             .unwrap_or(runtime::Tier::Baseline);
         if tier == runtime::Tier::Optimizing {
             self.coordinator.record_tier2_entry();
@@ -2366,6 +2428,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 self.osr_generated_retries = self.osr_generated_retries.saturating_add(1);
             }
         } else if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
+            // Side-exit accounting can unpublish optimizing code immediately,
+            // before the next maintenance pass. Invalidate handles belonging
+            // to still-active recursive frames before they can be cached again.
+            self.invalidate_entry_cache();
             self.native_fallbacks = self.native_fallbacks.saturating_add(1);
             let key = runtime::FunctionKey::new(id, generation);
             if let Some((guard, observed)) = self.osr_validation.take_deopt_guard(id, generation) {
@@ -2430,6 +2496,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
         self.tier2_sources.remove(&key);
+        self.entry_tiers.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();
     }
@@ -2605,6 +2672,151 @@ mod jit_runtime_drop_tests {
 ))]
 mod production_environment_tests {
     use super::*;
+
+    // Count allocations on this test thread only; background compilers and
+    // concurrently running tests keep using the system allocator unobserved.
+    struct CountingAllocator;
+    std::thread_local! {
+        static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = ALLOCATIONS.try_with(|count| {
+                if let Some(n) = count.get() {
+                    count.set(Some(n + 1));
+                }
+            });
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+            let _ = ALLOCATIONS.try_with(|count| {
+                if let Some(n) = count.get() {
+                    count.set(Some(n + 1));
+                }
+            });
+            unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, ptr, layout, size) }
+        }
+    }
+
+    fn call_event(types: &[u32], callsite: bool) -> rquickjs_core::qjs::JSJitFeedbackEvent {
+        use rquickjs_core::qjs;
+        // All-zero scalar fields and a null pointer are valid for this C event.
+        let mut event: qjs::JSJitFeedbackEvent = unsafe { core::mem::zeroed() };
+        event.struct_size = core::mem::size_of_val(&event) as u32;
+        event.kind = qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL;
+        event.function.id = 7;
+        event.function.generation = 3;
+        event.callee.id = 8;
+        event.callee.generation = 4;
+        event.pc = 12;
+        event.types = types.as_ptr();
+        event.type_count = types.len() as u32;
+        if callsite {
+            event.flags = qjs::JS_JIT_FEEDBACK_CALL_SITE;
+        }
+        event
+    }
+
+    #[test]
+    fn stable_call_feedback_does_not_allocate_after_warmup() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        let types = [qjs::JSJitValueType_JS_JIT_VALUE_INT32; 32];
+        for callsite in [false, true] {
+            let event = call_event(&types, callsite);
+            backend.record_feedback(&event);
+            ALLOCATIONS.with(|count| count.set(Some(0)));
+            for _ in 0..100 {
+                backend.record_feedback(&event);
+            }
+            let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+            assert_eq!(allocations, 0, "stable CALL event must reuse storage");
+        }
+        backend.runtime_detach();
+    }
+
+    #[test]
+    fn call_feedback_preserves_wide_arguments_and_rejects_entire_invalid_events() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        use runtime::{FunctionKey, ObservedType};
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        let key = FunctionKey::new(7, 3);
+        let mut types = vec![qjs::JSJitValueType_JS_JIT_VALUE_INT32; 32];
+        types[0] = qjs::JSJitValueType_JS_JIT_VALUE_BOOL;
+        types[31] = qjs::JSJitValueType_JS_JIT_VALUE_STRING;
+        backend.record_feedback(&call_event(&types, false));
+        backend.record_feedback(&call_event(&types, true));
+        let snapshot = backend.feedback.snapshot(1);
+        let call = snapshot.call_at(key).unwrap();
+        assert_eq!(call.argc(), 32);
+        assert_eq!(call.argument(0), [ObservedType::Bool]);
+        assert_eq!(call.argument(30), [ObservedType::Int32]);
+        assert_eq!(call.argument(31), [ObservedType::String]);
+        let site = snapshot.call_signature_at(key, 12).unwrap();
+        assert_eq!(site.targets(), [FunctionKey::new(8, 4)]);
+        assert_eq!(site.argument(0), [ObservedType::Bool]);
+        assert_eq!(site.argument(30), [ObservedType::Int32]);
+        assert!(site.argument(31).is_empty());
+        assert_eq!(site.results(), [ObservedType::String]);
+        types[0] = qjs::JSJitValueType_JS_JIT_VALUE_OBJECT;
+        types[31] = u32::MAX;
+        for callsite in [false, true] {
+            backend.record_feedback(&call_event(&types, callsite));
+            assert_eq!(backend.feedback.snapshot(1), snapshot);
+        }
+        // A subsequent short event cannot inherit any stale scratch slots.
+        backend.record_feedback(&call_event(&[qjs::JSJitValueType_JS_JIT_VALUE_BOOL], true));
+        assert_eq!(
+            backend
+                .feedback
+                .snapshot(1)
+                .call_signature_at(key, 12)
+                .unwrap()
+                .results(),
+            [ObservedType::String, ObservedType::Bool]
+        );
+        backend.runtime_detach();
+    }
+
+    #[test]
+    fn deopt_demotions_invalidate_entry_cache_before_periodic_maintenance() {
+        use rquickjs_core::runtime::JitBackend;
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        backend.maintenance();
+        let epoch = backend.entry_cache_epoch();
+        assert_ne!(epoch, 0);
+        for guard in [1, 2] {
+            backend.osr_validation.mark_deopt_guard(7, 3, guard, None);
+            backend.native_exit(7, 3, 0, rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT);
+        }
+        assert_eq!(backend.coordinator.metrics().optimized_demotions, 1);
+        assert_eq!(backend.hot_ticks_since_maintenance, 2);
+        assert_ne!(backend.entry_cache_epoch(), epoch);
+        backend.runtime_detach();
+    }
 
     #[test]
     fn artifact_environment_uses_runtime_abi_target_features_and_config() {

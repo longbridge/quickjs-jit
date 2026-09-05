@@ -38,6 +38,9 @@ pub struct JitMetrics {
     pub peak_compiler_bytes: usize,
     pub evicted: u64,
     pub native_entries: u64,
+    /// Nonempty entry handles acquired from the backend, including OSR.
+    /// Cached C entries execute again without increasing this counter.
+    pub native_acquisitions: u64,
     pub native_exits: u64,
     pub native_fallbacks: u64,
     pub native_retries: u64,
@@ -111,6 +114,7 @@ impl JitMetrics {
             peak_compiler_bytes: 0,
             evicted: 0,
             native_entries: 0,
+            native_acquisitions: 0,
             native_exits: 0,
             native_fallbacks: 0,
             native_retries: 0,

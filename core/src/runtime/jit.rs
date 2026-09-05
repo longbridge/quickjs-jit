@@ -317,6 +317,16 @@ pub unsafe trait JitBackend: Send + 'static {
 
     fn release_entry(&mut self, _entry: qjs::JSJitEntryHandle) {}
 
+    /// Opts into retaining one idle entry handle on the C runtime thread.
+    /// Zero disables caching. A nonzero epoch must change before any existing
+    /// handle becomes inadmissible for another call, including tier replacement,
+    /// demotion and feedback invalidation. Epoch values must never be reused.
+    /// This query must not mutate backend state or reenter JavaScript. Active
+    /// handles remain pinned until their calls return, even across epoch changes.
+    fn entry_cache_epoch(&self) -> u64 {
+        0
+    }
+
     /// Records the exact boundary immediately before a published native entry.
     fn native_enter(&mut self, _id: u64, _generation: u64, _pc: u32) {}
 
@@ -414,6 +424,11 @@ unsafe extern "C" fn release_entry(opaque: *mut c_void, entry: qjs::JSJitEntryHa
     state.backend.release_entry(entry);
 }
 
+unsafe extern "C" fn entry_cache_epoch(opaque: *mut c_void) -> u64 {
+    let state = unsafe { BackendState::from_opaque(opaque) };
+    state.backend.entry_cache_epoch()
+}
+
 unsafe extern "C" fn native_enter(opaque: *mut c_void, id: u64, generation: u64, pc: u32) {
     let state = unsafe { BackendState::from_opaque(opaque) };
     state.backend.native_enter(id, generation, pc);
@@ -463,6 +478,7 @@ static BACKEND_VTABLE: qjs::JSJitBackendVTable = qjs::JSJitBackendVTable {
     native_enter: Some(native_enter),
     native_exit: Some(native_exit),
     record_feedback: Some(record_feedback),
+    entry_cache_epoch: Some(entry_cache_epoch),
 };
 
 /// Owns the token for one backend allocation stored by the raw runtime.
