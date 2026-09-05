@@ -64,6 +64,69 @@ fn run_until_native(source: &str, expression: &str) -> (String, rquickjs_jit::Ji
 }
 
 #[test]
+fn generic_call_entry_benchmark_keeps_the_generic_native_boundary() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .call_threshold(2)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>(include_str!(
+            "../../benchmarks/scripts/generic-call-entry.js"
+        ))
+        .unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        context.with(|ctx| {
+            assert_eq!(
+                ctx.eval::<i32, _>("workload(1000, 7, workloadArgument)")
+                    .unwrap(),
+                1007
+            );
+        });
+        jit.poll();
+        if jit.metrics().installed >= 2 && jit.metrics().pending_worker_jobs == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{:?}", jit.metrics());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = jit.metrics();
+    context.with(|ctx| {
+        let rt = unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
+        let calls = helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL);
+        assert_eq!(
+            ctx.eval::<i32, _>("workload(1000, 7, workloadArgument)")
+                .unwrap(),
+            1007
+        );
+        assert_eq!(
+            helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL) - calls,
+            1000,
+            "the benchmark must not silently become a specialized direct call"
+        );
+    });
+    let after = jit.metrics();
+    assert!(
+        after.native_entries - before.native_entries >= 1001,
+        "{after:?}"
+    );
+    assert_eq!(after.native_entries, after.native_exits);
+    assert!(
+        after.native_acquisitions - before.native_acquisitions < 100,
+        "steady generic calls should reuse C entry pins: before={before:?}, after={after:?}"
+    );
+}
+
+#[test]
 fn production_tier1_installs_and_executes_fixed_and_generic_calls() {
     let (result, metrics) = run_until_native(
         "globalThis.g=(a,b,c,d)=>a+b+c+d;\

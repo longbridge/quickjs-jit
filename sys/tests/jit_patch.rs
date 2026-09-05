@@ -38,6 +38,8 @@ fn copy_patches(destination: &std::path::Path) {
         "0007-msan-slot-boundary.patch",
         "0008-tier1-atom-values.patch",
         "0009-tier1-arith-slow.patch",
+        "0010-native-entry-cache.patch",
+        "0011-helper-pc-cursor.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -96,7 +98,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 19u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 20u"));
     assert!(jit_header.contains("uint64_t payload;"));
     assert!(quickjs.contains("constants[i].payload = 0;"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
@@ -210,7 +212,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 19;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 20;"),
             "{target}"
         );
         assert!(

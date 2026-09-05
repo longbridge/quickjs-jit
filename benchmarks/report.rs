@@ -208,7 +208,7 @@ fn render(data: &BenchmarkFile) -> (String, bool) {
     let t2 = mode(data, "tier2");
     let auto = mode(data, "automatic");
     let bun = mode(data, "bun");
-    let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`. Bun: `{}` at `{}` (SHA-256 `{}`).\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\nA JIT ratio is reported only when that mode actually entered native code; fallback-only timing is shown as `N/A (no native entry)`. Bun remains an external engine comparison.\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | Bun | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.bun_version.as_deref().unwrap_or("N/A"),data.provenance.bun_path.as_deref().unwrap_or("N/A"),data.provenance.bun_sha256.as_deref().unwrap_or("N/A"),data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
+    let mut out=format!("# JIT performance report\n\nStatus: generated from tracked raw `jit-benchmark-v1` evidence. Source `{}` (dirty: {}), QuickJS `{}`; target `{}`; CPU `{}`; power `{}`. Bun: `{}` at `{}` (SHA-256 `{}`).\n\nCommand: `{}`. Schema SHA-256 `{}`; suites lock SHA-256 `{}`.\n\nSampling: {} discarded warmup processes, {} interleaved paired fresh processes, {} interleaved one-second throughput windows, {} joint paired bootstrap resamples.\n\n## Workloads\n\nTier1/Tier2 columns require an entry in the requested tier; automatic accepts either native tier. Without that evidence, timing is shown as `N/A (no qualifying native entry)`. Bun remains an external engine comparison.\n\n| workload (suite) | interpreter median ns | Tier1 | Tier2 | automatic | Bun | T1/T2 entries | fallback/retry | checksum |\n|---|---:|---:|---:|---:|---:|---:|---:|---|\n",data.provenance.source_revision,data.provenance.source_dirty,data.provenance.quickjs_revision,data.provenance.target,data.provenance.cpu.replace('\n'," "),data.provenance.power_mode,data.provenance.bun_version.as_deref().unwrap_or("N/A"),data.provenance.bun_path.as_deref().unwrap_or("N/A"),data.provenance.bun_sha256.as_deref().unwrap_or("N/A"),data.provenance.command.join(" "),data.provenance.schema_sha256,data.provenance.suites_lock_sha256,data.policy.latency_warmups,data.policy.latency_processes,data.policy.throughput_windows,data.policy.bootstrap_resamples);
     let mut checksums = true;
     let mut strict_native = true;
     let mut automatic_policy = false;
@@ -566,7 +566,7 @@ fn fmt_jit_speedup(
         Some(candidate) if candidate.samples.iter().any(|sample| entries(sample) > 0) => {
             fmt(speedup(base, Some(candidate)))
         }
-        Some(_) => "N/A (no native entry)".into(),
+        Some(_) => "N/A (no qualifying native entry)".into(),
         None => "—".into(),
     }
 }
@@ -599,6 +599,7 @@ mod tests {
             elapsed_ns: b,
             checksum: c.into(),
             native_entries: Some(1),
+            native_acquisitions: Some(1),
             native_exits: Some(1),
             fallback_count: Some(0),
             retry_count: Some(0),
@@ -749,7 +750,7 @@ mod tests {
         }
         assert_eq!(
             fmt_jit_speedup(&base, Some(&fallback), |s| s.native_entries.unwrap_or(0)),
-            "N/A (no native entry)"
+            "N/A (no qualifying native entry)"
         );
         fallback.samples[0].native_entries = Some(1);
         assert_eq!(

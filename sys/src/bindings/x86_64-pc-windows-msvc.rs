@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 19;
+pub const QJSJIT_ABI_MINOR: u32 = 20;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -3574,10 +3574,12 @@ pub struct JSJitBackendVTable {
     pub record_feedback: ::core::option::Option<
         unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void, event: *const JSJitFeedbackEvent),
     >,
+    pub entry_cache_epoch:
+        ::core::option::Option<unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void) -> u64>,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 88usize];
+    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 96usize];
     ["Alignment of JSJitBackendVTable"][::core::mem::align_of::<JSJitBackendVTable>() - 8usize];
     ["Offset of field: JSJitBackendVTable::struct_size"]
         [::core::mem::offset_of!(JSJitBackendVTable, struct_size) - 0usize];
@@ -3601,6 +3603,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitBackendVTable, native_exit) - 72usize];
     ["Offset of field: JSJitBackendVTable::record_feedback"]
         [::core::mem::offset_of!(JSJitBackendVTable, record_feedback) - 80usize];
+    ["Offset of field: JSJitBackendVTable::entry_cache_epoch"]
+        [::core::mem::offset_of!(JSJitBackendVTable, entry_cache_epoch) - 88usize];
 };
 pub const JS_JIT_BACKEND_OK: _bindgen_ty_6 = 0;
 pub const JS_JIT_BACKEND_INVALID_ARGUMENT: _bindgen_ty_6 = -1;

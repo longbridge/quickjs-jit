@@ -189,6 +189,7 @@
         "elapsed_ns": { "type": "integer" },
         "checksum": { "type": "string" },
         "native_entries": { "type": ["integer", "null"] },
+        "native_acquisitions": { "type": ["integer", "null"], "minimum": 0 },
         "native_exits": { "type": ["integer", "null"] },
         "fallback_count": { "type": ["integer", "null"] },
         "retry_count": { "type": ["integer", "null"] },

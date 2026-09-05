@@ -275,3 +275,93 @@ opcode set is native in both tiers. The next backlog items in priority order
 are: caching native entry handles on the C side so generic native-to-native
 calls stop paying per-call Rust callbacks; closures (`fclosure`, var-refs);
 `typeof`; `for-of`/iterator opcodes; exception regions and async.
+
+The `generic-call-entry` benchmark now isolates the first item with a short
+`(Int32, Bool)` callee, avoiding the numeric direct-call specialization in
+`call-heavy`. Its Tier 1 integration test proves 1,000 generic `CALL` helper
+invocations and at least 1,001 native entries for a 1,000-iteration batch.
+The four-mode smoke run agrees on checksums; forced Tier 2 currently executes
+Tier 1 for this probe. The in-progress C entry cache is described in `docs/M3.md`.
+Its production test also requires fewer than 100 handle acquisitions per batch.
+The paired diagnostic run records 1.144x the M2 binary's speed in Tier 1 and
+1.228x in automatic mode; see `benchmarks/results/m3-entry-cache-paired.json`.
+The pinned follow-up below resolves the focused interpreter variance and
+completes the three control workloads; clean-source acceptance remains open.
+
+The next incremental change removes per-native-return queue allocation using a
+single synchronous handoff slot. It passes 509 release runtime tests and 39
+AddressSanitizer tests. The pinned three-version generic-call comparison records
+1.319x M2's speed in automatic mode (1.076x the cache-only version); the focused
+interpreter interval is now narrow and tied against cache-only. See
+`benchmarks/results/m3-native-return-generic-paired.json` and `docs/M3.md`.
+All control measurements are complete and archived under
+`benchmarks/results/m3-native-return-*-paired.json`; no benchmark process remains
+running. Direct-call modes are statistically tied with M2. Recursive Tier 1 is
+1.112x M2 speed; automatic recursion has zero native entries and is only an
+interpreter-path control. Scalar-loop automatic mode is 1.037x M2 speed. No
+material steady-state regression appeared in these controls. Startup, reload,
+tail latency, and clean-source acceptance remain open. CALL feedback now reuses its argument/result buffer while preserving arbitrary
+arity, exact order, and rejection of an entire invalid type event. Both warmed
+CALL event forms allocate zero times in the regression test. The final code
+passes 511 release tests, 39 AddressSanitizer tests, and Clippy. Earlier paired
+reports are explicitly tied to the pre-buffer executable hash.
+
+Entry caching must preserve the existing `Coordinator::pin` admission checks:
+installed artifact identity, invalidation, and the optimizing feedback epoch.
+An `ExecutionPin` alone proves code lifetime, not permission for a new entry.
+Also account for `prepare_baseline_direct_refresh`, optimized demotion,
+generation retirement, suspension, and runtime detach. Reentrant active frames
+must retain their code and metadata even after future entries are invalidated.
+Cache hits now reuse a `ProductionEntryPin`; per-call hot/enter/exit callbacks
+remain in place. Do not treat this first cache step as completion of the whole
+native-call overhead target.
+
+
+PR #18 is open on `perf/m3-native-entry-overhead`. Final CALL-buffer diagnostics
+are archived in `benchmarks/results/m3-call-feedback-generic-paired.json`:
+automatic mode is 1.359x M2 speed, but statistically tied with the pre-buffer
+version. Coverage CI exposed a bundled/fresh bindgen formatting mismatch,
+reproduced locally and corrected across all ten bundles. Follow the current PR
+checks and run the clean-source benchmark matrix before broader acceptance.
+
+
+The clean-source 22-workload/four-mode matrix is now complete and archived in
+`benchmarks/results/m3-clean-matrix.json` and `.md`, with the binary hash and
+CPU affinity in `m3-clean-matrix-launch.json`. No benchmark process remains
+running. All 2,640 retained samples agree on checksums and balance entries/exits.
+The formal performance gate fails: compute geomean is 3.17x–3.23x interpreter
+speed (target 5x); startup/reload regress; real gpui-shell evidence is absent.
+The 10x-kernel, native-tier, profitability-policy and checksum gates pass.
+Generic-call automatic mode is still about 0.12x interpreter speed, so remaining
+per-call callback/validation/profiling cost remains the active overhead target.
+PR #18's latest observed CI has 40 successful checks and sanitizer still active;
+re-query its current head and job status before making any CI completion claim.
+
+
+Patch 0011 now caches a validated PC boundary per private function bytecode.
+Forward validation resumes at that boundary; backward PCs rescan. The change
+preserves range/end/opcode semantics and passes 512 release tests, 55 ASAN/LSAN
+tests, 15 ABI tests, 11 patch tests, Clippy, and a mutation-checked helper PC
+regression. Profile attribution fell from 36.08% to 18.24% self sampled cycles.
+Four paired diagnostic reports and two focused repeats are archived as
+`benchmarks/results/m3-pc-cursor-*.json`. Relative to pre-cursor code, Tier 1
+generic calls are 1.135x speed, direct calls 2.226x, and recursion 1.108x.
+Automatic generic calls improve only to 1.007x. Repeats retain small slowdowns
+in automatic direct calls (~2.1%) and Tier 2 scalar loops (~1.5%); see M3.md.
+These are revision diagnostics, not a new clean-source acceptance result.
+All measurement processes for this step completed.
+
+CI run 33960763268 on b7be6a4 passed 41 checks, including memory/address/thread
+sanitizers (one other job skipped). That is the pre-cursor revision: re-query
+PR #18 for the latest cursor commit before claiming its CI passes.
+
+The next concrete overhead candidate is `ProductionBackend.execution_starts`:
+a per-function HashMap of Vecs currently performs hash lookups on every enter
+and exit. Independent lifecycle review found real callback pairs globally
+LIFO, including recursion, OSR, invalidation, retries/deopts and release reentry.
+A single Vec of (FunctionKey, Instant, Tier) could preserve the original key
+and tier while removing those lookups. Do not remove active records on
+retirement; check the top key before consuming, and preserve empty-stack
+handling for the test that sends DEOPT exit without an enter. This next change
+is not implemented. Feedback observation, tier-state lookups, and exact metric
+publication also remain substantial sampled costs.

@@ -77,6 +77,8 @@ pub struct SampleEvidence {
     pub elapsed_ns: u64,
     pub checksum: String,
     pub native_entries: Option<u64>,
+    #[serde(default)]
+    pub native_acquisitions: Option<u64>,
     pub native_exits: Option<u64>,
     pub fallback_count: Option<u64>,
     pub retry_count: Option<u64>,

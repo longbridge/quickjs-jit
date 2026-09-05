@@ -19,6 +19,11 @@ use rquickjs_jit::{
 #[derive(Clone)]
 enum Operation {
     DupFree,
+    ValidatePcs {
+        valid: Vec<usize>,
+        invalid: Option<usize>,
+        verified: Arc<AtomicBool>,
+    },
     ResolveConst(u32),
     ToNumeric,
     ToBool,
@@ -149,6 +154,36 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
         let api = &*(*frame).runtime_api;
         let stack_slot = spec.arg_count + spec.local_count;
         match &spec.operation {
+            Operation::ValidatePcs {
+                valid,
+                invalid,
+                verified,
+            } => {
+                set_stack_depth(frame, 1);
+                for offset in valid {
+                    (*frame).pc = (*frame).bytecode_start.add(*offset);
+                    if api.dup.expect("DUP helper")(frame, 0, stack_slot, 0) < 0 {
+                        return qjs::JSJitExit::exception();
+                    }
+                    if api.free.expect("FREE helper")(frame, 1, stack_slot) < 0 {
+                        return qjs::JSJitExit::exception();
+                    }
+                }
+                if let Some(offset) = invalid {
+                    let before = *(*frame).arg_buf;
+                    (*frame).pc = (*frame).bytecode_start.wrapping_add(*offset);
+                    let status = api.free.expect("FREE helper")(frame, 1, 0);
+                    let after = *(*frame).arg_buf;
+                    verified.store(
+                        status < 0 && before.u.ptr == after.u.ptr && before.tag == after.tag,
+                        Ordering::SeqCst,
+                    );
+                    return qjs::JSJitExit::exception();
+                }
+                verified.store(true, Ordering::SeqCst);
+                (*frame).result = qjs::JS_MKVAL(qjs::JS_TAG_INT, 1);
+                qjs::JSJitExit::done()
+            }
             Operation::DupFree => {
                 set_stack_depth(frame, 1);
                 let status = api.dup.expect("DUP helper")(frame, 0, stack_slot, 0);
@@ -1185,4 +1220,53 @@ fn poll_id_zero_remains_compatible_and_interrupts_native_infinite_work() {
     assert!(result.is_err(), "compiled interrupt became catchable");
     assert_eq!(interrupts.load(Ordering::SeqCst), 1);
     assert_eq!(entries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn helper_pc_validation_preserves_boundaries_across_forward_and_backward_queries() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let snapshot = context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "globalThis.target = function target(o) { let n = 123456; if (o) n += 234567; return n + o.marker }",
+        ).unwrap();
+        let function: Function<'_> = ctx.globals().get("target").unwrap();
+        snapshot(&ctx, &function)
+    });
+    let mut boundaries = vec![0];
+    for instruction in decode_raw(snapshot.bytecode()).unwrap() {
+        boundaries.push(boundaries.last().unwrap() + instruction.bytes().len());
+    }
+    let length = snapshot.bytecode().len();
+    assert_eq!(boundaries.last(), Some(&length));
+    assert!((0..length).any(|offset| !boundaries.contains(&offset)));
+    let mut valid = boundaries.clone();
+    valid.extend(boundaries.iter().rev().copied());
+    valid.extend(boundaries.iter().flat_map(|offset| [*offset, *offset]));
+    // Exercise every operand byte after populating the cursor at many valid PCs.
+    let invalid = (0..=length + 1)
+        .filter(|offset| !boundaries.contains(offset))
+        .map(Some)
+        .chain([Some(usize::MAX), None]);
+    for invalid in invalid {
+        let verified = Arc::new(AtomicBool::new(false));
+        let (_guard, entries) = install(
+            &runtime,
+            &snapshot,
+            Operation::ValidatePcs {
+                valid: valid.clone(),
+                invalid,
+                verified: verified.clone(),
+            },
+        );
+        let result = context.with(|ctx| ctx.eval::<i32, _>("target({marker: 1})"));
+        assert_eq!(result.is_err(), invalid.is_some(), "PC {invalid:?}");
+        assert!(verified.load(Ordering::SeqCst), "PC {invalid:?}");
+        assert_eq!(entries.load(Ordering::SeqCst), 1);
+        if invalid.is_some() {
+            context.with(|ctx| {
+                let _ = ctx.catch();
+            });
+        }
+    }
 }
