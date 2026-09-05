@@ -1836,6 +1836,9 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             return 2;
         }
         self.maintenance_if_due(false);
+        // Maintenance may publish code. Feedback below cannot change this state;
+        // a successful direct refresh returns before the cached value is reused.
+        let baseline_state = self.coordinator.tier_state(key, runtime::Tier::Baseline);
         let observed = match event.feedback_type {
             rquickjs_core::qjs::JSJitFeedbackType_JS_JIT_FEEDBACK_INT32 => {
                 Some(runtime::ObservedType::Int32)
@@ -1879,10 +1882,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
         let probe_inputs = (self.feedback.version(), self.coordinator.installed_count());
         if self.config.tier_policy() == JitTierPolicy::BaselineOnly
-            && matches!(
-                self.coordinator.tier_state(key, runtime::Tier::Baseline),
-                runtime::CompileState::Installed(_)
-            )
+            && matches!(baseline_state, runtime::CompileState::Installed(_))
             && self.direct_refresh_probes.get(&key) != Some(&probe_inputs)
         {
             // The readiness answer depends only on the feedback lattice and
@@ -1902,10 +1902,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 return 1;
             }
         }
-        if matches!(
-            self.coordinator.tier_state(key, runtime::Tier::Baseline),
-            runtime::CompileState::Installed(_)
-        ) || self.profitability_blacklisted.contains(&key)
+        if matches!(baseline_state, runtime::CompileState::Installed(_))
+            || self.profitability_blacklisted.contains(&key)
         {
             let optimizing_ready = match self.coordinator.tier_state(key, runtime::Tier::Optimizing)
             {
@@ -1944,7 +1942,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             return 0;
         }
         if matches!(
-            self.coordinator.tier_state(key, runtime::Tier::Baseline),
+            baseline_state,
             runtime::CompileState::Blacklisted | runtime::CompileState::Installed(_)
         ) {
             self.requested.insert(key);

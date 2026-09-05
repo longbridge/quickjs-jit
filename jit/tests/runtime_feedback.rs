@@ -7,8 +7,8 @@ use rquickjs_core::{
     runtime::{JitBackend, RuntimeJitGuard},
 };
 use rquickjs_jit::runtime::{
-    BinaryFeedbackFlags, FeedbackRepresentation, FeedbackState, FeedbackTable, FunctionKey,
-    ObservedType, MAX_SPECIALIZED_ARGUMENTS,
+    BinaryFeedbackFlags, FeedbackKind, FeedbackRepresentation, FeedbackState, FeedbackTable,
+    FunctionKey, ObservedType, MAX_SPECIALIZED_ARGUMENTS,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -743,4 +743,114 @@ fn call_specialization_rejects_unstable_or_unsupported_signatures() {
         .snapshot(0)
         .call_specialization_at(caller, 43)
         .is_none());
+}
+
+#[test]
+fn type_feedback_at_capacity_keeps_updates_and_versions_only_lattice_changes() {
+    let function = FunctionKey::new(501, 7);
+    let mut feedback = FeedbackTable::new(1, 2);
+    for (observed, state, version) in [
+        (ObservedType::Int32, FeedbackState::Monomorphic, 1),
+        (ObservedType::Int32, FeedbackState::Monomorphic, 1),
+        (ObservedType::Bool, FeedbackState::Polymorphic, 2),
+        (ObservedType::Bool, FeedbackState::Polymorphic, 2),
+        (ObservedType::String, FeedbackState::Megamorphic, 3),
+        (ObservedType::Int32, FeedbackState::Megamorphic, 3),
+    ] {
+        assert_eq!(
+            feedback.observe_type(function, 9, FeedbackKind::Value, observed),
+            state
+        );
+        assert_eq!(feedback.version(), version);
+        assert_eq!(feedback.dropped_observations(), 0);
+        if state == FeedbackState::Polymorphic {
+            assert_eq!(
+                feedback.snapshot(0).entries()[0].observations(),
+                &[ObservedType::Int32, ObservedType::Bool]
+            );
+        }
+    }
+    for (key, pc, kind) in [
+        (FunctionKey::new(501, 8), 9, FeedbackKind::Value),
+        (function, 10, FeedbackKind::Value),
+        (function, 9, FeedbackKind::Exit),
+    ] {
+        assert_eq!(
+            feedback.observe_type(key, pc, kind, ObservedType::Int32),
+            FeedbackState::Megamorphic
+        );
+    }
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback.version(), 3);
+    assert_eq!(feedback.dropped_observations(), 3);
+    let snapshot = feedback.snapshot(0);
+    let entry = &snapshot.entries()[0];
+    assert_eq!(entry.function(), function);
+    assert_eq!(entry.pc(), 9);
+    assert_eq!(entry.kind(), FeedbackKind::Value);
+    assert_eq!(entry.state(), FeedbackState::Megamorphic);
+    assert!(entry.observations().is_empty());
+}
+
+#[test]
+fn zero_type_capacity_rejects_repeated_types_but_admits_independent_calls() {
+    let function = FunctionKey::new(502, 1);
+    let mut feedback = FeedbackTable::new(0, 2);
+    for dropped in 1..=3 {
+        assert_eq!(
+            feedback.observe_type(function, 0, FeedbackKind::Value, ObservedType::Int32),
+            FeedbackState::Megamorphic
+        );
+        assert_eq!(feedback.dropped_observations(), dropped);
+        assert_eq!(feedback.version(), 0);
+        assert!(feedback.is_empty());
+    }
+    feedback.observe_call(function, &[]);
+    assert_eq!(feedback.version(), 1);
+    feedback.observe_call(function, &[]);
+    assert_eq!(feedback.version(), 1);
+    let other_generation = FunctionKey::new(502, 2);
+    feedback.observe_call(other_generation, &[ObservedType::Bool]);
+    assert_eq!(feedback.version(), 2);
+    let snapshot = feedback.snapshot(0);
+    assert_eq!(snapshot.call_argument_types(function), Some(&[][..]));
+    assert_eq!(
+        snapshot.call_argument_types(other_generation),
+        Some(&[ObservedType::Bool][..])
+    );
+    assert_eq!(feedback.dropped_observations(), 3);
+    assert!(feedback.is_empty());
+}
+
+#[test]
+fn call_feedback_keeps_growing_slots_after_arity_and_types_widen() {
+    let function = FunctionKey::new(503, 1);
+    let mut feedback = FeedbackTable::new(0, 1);
+    feedback.observe_call(function, &[ObservedType::Int32]);
+    assert_eq!(feedback.version(), 1);
+    feedback.observe_call(function, &[ObservedType::Int32]);
+    assert_eq!(feedback.version(), 1);
+    feedback.observe_call(function, &[ObservedType::Bool, ObservedType::String]);
+    assert_eq!(feedback.version(), 2);
+    feedback.observe_call(function, &[ObservedType::Bool, ObservedType::String]);
+    assert_eq!(feedback.version(), 2);
+    feedback.observe_call(
+        function,
+        &[
+            ObservedType::Null,
+            ObservedType::String,
+            ObservedType::Float64,
+        ],
+    );
+    assert_eq!(feedback.version(), 3);
+    let snapshot = feedback.snapshot(0);
+    let call = snapshot.call_at(function).unwrap();
+    assert_eq!(call.state(), FeedbackState::Megamorphic);
+    assert_eq!(call.argc(), 3);
+    assert!(call.argument(0).is_empty());
+    assert_eq!(call.argument(1), &[ObservedType::String]);
+    assert_eq!(call.argument(2), &[ObservedType::Float64]);
+    assert_eq!(snapshot.call_argument_types(function), None);
+    feedback.observe_call(function, &[]);
+    assert_eq!(feedback.version(), 3);
 }

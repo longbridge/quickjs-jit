@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Consolidate repeated feedback-table and baseline-tier lookups while preserving feedback versions, capacity behavior, and publication ordering.
+
 - JIT M3: cache one idle native entry handle per runtime with epoch-based
   invalidation (ABI minor 20), remove native-return queue allocation, and reuse
   CALL feedback storage. Reuse validated bytecode boundaries during helper PC
