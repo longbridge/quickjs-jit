@@ -1,0 +1,2178 @@
+{
+  "source_revision": "47aeb11839a51ac9ae5d1d7c4b30c54ad3d3c3b7",
+  "raw_sha256": "befaf0b83e72d330e0f8573850b1f9830b728e3fe5e8ee04f102c0c3cfa1e301",
+  "methodology": {
+    "source_revision": "47aeb11839a51ac9ae5d1d7c4b30c54ad3d3c3b7",
+    "source_dirty_at_start": false,
+    "mode_labels": {
+      "interpreter": "repository-pinned QuickJS-ng interpreter, no JIT backend attached",
+      "automatic": "quickjs-jit automatic tier policy",
+      "bun": "Bun default engine configuration",
+      "tier1": "forced baseline diagnostic",
+      "tier2": "forced optimizing diagnostic"
+    },
+    "bun_version": "1.4.0",
+    "bun_executable": "/home/jason/.bun/bin/bun",
+    "bun_sha256": "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
+    "launcher_source": "#!/bin/sh\n# Preserve the repository worker script while using Bun default engine flags.\nif [ \"$1\" = \"--smol\" ]; then shift; fi\nexec /home/jason/.bun/bin/bun \"$@\"\n",
+    "launcher_sha256": "11ed223037d3f74cc8c2b9986865c2b5c170c843011e57b36186990a12e5b2c3",
+    "benchmark_sha256": "f430ce53b640b8f8e9216384e1fafc312d917195b5477783caf9c13ee02e0699",
+    "harness_sha256": "121aa51f7b138a8b7b9f357dec3b037710d6053d1f152b4b8f2713421c087fff",
+    "cpu_affinity": [
+      0
+    ],
+    "command": "JIT_BENCH_BUN=/tmp/jit-main47a-bun-default taskset -c 0 target/release/jit-bench compare --modes interpreter,tier1,tier2,automatic,bun --output /tmp/jit-main47a-five-engine.json --report /tmp/jit-main47a-five-engine.md",
+    "warmup_caveat": "Identical scripts/arguments and10 timed invocations. Process-internal warmup differs: QuickJS JIT uses adaptive readiness/settling, Bun executes one untimed invocation. Results measure this protocol, not equally warmed peak throughput. Five outer warmup processes do not preserve engine JIT state across fresh processes.",
+    "throughput_caveat": "Throughput counts complete fresh worker processes, including setup/warmup and orchestration, not JS operations. Bun total time is measured by parent and QuickJS phase totals inside worker; do not equate those totals as identical startup boundaries.",
+    "timed_boundary_caveat": "QuickJS timed iterations include Rust workload lookup/invocation, result conversion/checksum formatting and JIT polling; Bun computes its checksum after its timed batch. Engine ratios are for this embedding/protocol, not isolated JS execution. QuickJS interpreter and JIT share the Rust boundary.",
+    "quickjs_baseline_caveat": "QuickJS means repository-pinned QuickJS-ng inside the same Rust benchmark executable with no JIT backend attached, not a separately built upstream qjs CLI. CONFIG_JIT_ABI patches remain compiled into the shared runtime."
+  },
+  "median_definition": "upper median, matching repository reporter",
+  "bootstrap": "10000 joint pair-index resamples; seed20260906; upper medians; 2.5/97.5 percentile with ceil rank",
+  "auto_vs_quickjs_counts": {
+    "faster": 8,
+    "tied": 1,
+    "slower": 13
+  },
+  "auto_vs_bun_counts": {
+    "faster": 2,
+    "tied": 0,
+    "slower": 20
+  },
+  "rows": [
+    {
+      "workload": "quickjs-int-arith",
+      "group": "compute",
+      "designated": true,
+      "median_ms": {
+        "automatic": 1.647821,
+        "bun": 0.914208,
+        "interpreter": 6.804469,
+        "tier1": 2.636803,
+        "tier2": 1.648022
+      },
+      "jit_vs_quickjs": {
+        "speed": 4.1293738822359956,
+        "ci95": [
+          4.078375943756427,
+          4.1468258361017885
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 7.443020625503168,
+        "ci95": [
+          7.352672513217169,
+          7.489964913975567
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.5547981243108323,
+        "ci95": [
+          0.5520734918322868,
+          0.5594895236564658
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.580575416517654,
+        "ci95": [
+          2.548112602171156,
+          2.5880293973512623
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 4.128870245664197,
+        "ci95": [
+          4.078254641249685,
+          4.150180237940847
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "string:4992502500",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 9.031439,
+          "runtime_create_ns": 0.026024,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.108428,
+          "definition_eval_ns": 0.039727,
+          "first_eval_ns": 0.704446,
+          "threshold_crossing_ns": 0.685579,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 6.804469
+        },
+        "automatic": {
+          "total_ns": 37.169978,
+          "runtime_create_ns": 0.025099,
+          "jit_attach_ns": 0.050078,
+          "context_create_ns": 0.10388,
+          "definition_eval_ns": 0.041202,
+          "first_eval_ns": 2.783797,
+          "threshold_crossing_ns": 32.325275,
+          "compile_ns": 29.329973,
+          "install_ns": 0.073253,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.647821
+        },
+        "bun": {
+          "total_ns": 8.499756,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.914208
+        }
+      }
+    },
+    {
+      "workload": "quickjs-bitops",
+      "group": "compute",
+      "designated": false,
+      "median_ms": {
+        "automatic": 0.209048,
+        "bun": 0.017876,
+        "interpreter": 1.20275,
+        "tier1": 0.426556,
+        "tier2": 0.209721
+      },
+      "jit_vs_quickjs": {
+        "speed": 5.753463319429031,
+        "ci95": [
+          5.73499406767143,
+          5.800159484270143
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 67.28294920563884,
+        "ci95": [
+          66.79483046136743,
+          67.89825646794151
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.08551146148253033,
+        "ci95": [
+          0.08501939105859399,
+          0.08637610426043973
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.819676666135279,
+        "ci95": [
+          2.806353307109931,
+          2.8714279594867302
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 5.7350003099355815,
+        "ci95": [
+          5.687208928098141,
+          5.772551438558238
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:c1c8bb05c4000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 1.745364,
+          "runtime_create_ns": 0.023579,
+          "jit_attach_ns": 8.9e-05,
+          "context_create_ns": 0.103133,
+          "definition_eval_ns": 0.029995,
+          "first_eval_ns": 0.122061,
+          "threshold_crossing_ns": 0.119201,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.20275
+        },
+        "automatic": {
+          "total_ns": 13.698472,
+          "runtime_create_ns": 0.024103,
+          "jit_attach_ns": 0.047842,
+          "context_create_ns": 0.101077,
+          "definition_eval_ns": 0.032211,
+          "first_eval_ns": 0.217356,
+          "threshold_crossing_ns": 13.019258,
+          "compile_ns": 11.38253,
+          "install_ns": 0.049214,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.209048
+        },
+        "bun": {
+          "total_ns": 6.976202,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.017876
+        }
+      }
+    },
+    {
+      "workload": "quickjs-fibonacci",
+      "group": "compute",
+      "designated": false,
+      "median_ms": {
+        "automatic": 0.37213,
+        "bun": 0.014348,
+        "interpreter": 0.930783,
+        "tier1": 0.362631,
+        "tier2": 0.37035
+      },
+      "jit_vs_quickjs": {
+        "speed": 2.5012307526939512,
+        "ci95": [
+          2.4812642414819184,
+          2.569327956619276
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 64.87196821856705,
+        "ci95": [
+          64.31320283215327,
+          65.65495882311536
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.038556418455915946,
+        "ci95": [
+          0.038169988695346296,
+          0.03962712957577996
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.566749671153321,
+        "ci95": [
+          2.5261768683739803,
+          2.6054737547277775
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 2.5132523288780884,
+        "ci95": [
+          2.493301854974705,
+          2.5484740412238254
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "number:41d4c00d39400000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 1.407076,
+          "runtime_create_ns": 0.028608,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.10995,
+          "definition_eval_ns": 0.035898,
+          "first_eval_ns": 0.097025,
+          "threshold_crossing_ns": 0.093836,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.930783
+        },
+        "automatic": {
+          "total_ns": 2001.048163,
+          "runtime_create_ns": 0.025007,
+          "jit_attach_ns": 0.048539,
+          "context_create_ns": 0.098946,
+          "definition_eval_ns": 0.033393,
+          "first_eval_ns": 0.236412,
+          "threshold_crossing_ns": 2000.170736,
+          "compile_ns": 10.152177,
+          "install_ns": 0.037603,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.37213
+        },
+        "bun": {
+          "total_ns": 7.615708,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.014348
+        }
+      }
+    },
+    {
+      "workload": "numeric",
+      "group": "compute",
+      "designated": true,
+      "median_ms": {
+        "automatic": 0.026294,
+        "bun": 0.013296,
+        "interpreter": 0.620037,
+        "tier1": 0.212838,
+        "tier2": 0.026095
+      },
+      "jit_vs_quickjs": {
+        "speed": 23.580931010877006,
+        "ci95": [
+          23.29253048780488,
+          24.16038812785388
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 46.63334837545126,
+        "ci95": [
+          44.46691599539701,
+          47.86543535620053
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.5056666920209933,
+        "ci95": [
+          0.5014604908766739,
+          0.5287898379858523
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.9131874947142897,
+        "ci95": [
+          2.86679804326154,
+          2.9831843937642715
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 23.760758766047136,
+        "ci95": [
+          23.473040812416173,
+          24.34940174873447
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:413e809800000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 0.986324,
+          "runtime_create_ns": 0.025944,
+          "jit_attach_ns": 8.6e-05,
+          "context_create_ns": 0.100572,
+          "definition_eval_ns": 0.024717,
+          "first_eval_ns": 0.063846,
+          "threshold_crossing_ns": 0.06156,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.620037
+        },
+        "automatic": {
+          "total_ns": 7.658262,
+          "runtime_create_ns": 0.024344,
+          "jit_attach_ns": 0.048292,
+          "context_create_ns": 0.10029,
+          "definition_eval_ns": 0.028702,
+          "first_eval_ns": 0.190451,
+          "threshold_crossing_ns": 7.206221,
+          "compile_ns": 5.769244,
+          "install_ns": 0.041941,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.026294
+        },
+        "bun": {
+          "total_ns": 6.99445,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.013296
+        }
+      }
+    },
+    {
+      "workload": "scalar-loop",
+      "group": "scalar-loop",
+      "designated": true,
+      "median_ms": {
+        "automatic": 0.026303,
+        "bun": 0.013371,
+        "interpreter": 0.631903,
+        "tier1": 0.212791,
+        "tier2": 0.026174
+      },
+      "jit_vs_quickjs": {
+        "speed": 24.023989658974262,
+        "ci95": [
+          23.382005899705014,
+          24.315913945682027
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 47.259217709969334,
+        "ci95": [
+          46.02597208746921,
+          47.785210739463025
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.5083450556970688,
+        "ci95": [
+          0.5041178692859841,
+          0.5197140793125736
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.969594578718085,
+        "ci95": [
+          2.899367854362649,
+          2.9975689007387345
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 24.14239321464048,
+        "ci95": [
+          23.59617586443783,
+          24.441798941798943
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:413e809800000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 0.993266,
+          "runtime_create_ns": 0.025272,
+          "jit_attach_ns": 8.7e-05,
+          "context_create_ns": 0.101042,
+          "definition_eval_ns": 0.025388,
+          "first_eval_ns": 0.06508,
+          "threshold_crossing_ns": 0.063066,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.631903
+        },
+        "automatic": {
+          "total_ns": 7.619605,
+          "runtime_create_ns": 0.023586,
+          "jit_attach_ns": 0.048013,
+          "context_create_ns": 0.100276,
+          "definition_eval_ns": 0.028308,
+          "first_eval_ns": 0.188981,
+          "threshold_crossing_ns": 7.180433,
+          "compile_ns": 5.781809,
+          "install_ns": 0.04103,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.026303
+        },
+        "bun": {
+          "total_ns": 6.958523,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.013371
+        }
+      }
+    },
+    {
+      "workload": "call-heavy",
+      "group": "call-heavy",
+      "designated": true,
+      "median_ms": {
+        "automatic": 0.316209,
+        "bun": 0.024323,
+        "interpreter": 1.398314,
+        "tier1": 0.474222,
+        "tier2": 0.315775
+      },
+      "jit_vs_quickjs": {
+        "speed": 4.422119547514461,
+        "ci95": [
+          4.391513933903199,
+          4.459822304348101
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 57.48937219915307,
+        "ci95": [
+          55.13752572423619,
+          63.46699288659327
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.07692064425743733,
+        "ci95": [
+          0.06973380908775142,
+          0.08021920271502381
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 2.948648523265475,
+        "ci95": [
+          2.9248487296658165,
+          2.985069427480835
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 4.4281972923759,
+        "ci95": [
+          4.3917305113661405,
+          4.460176654108969
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:40bb580000000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 2.023743,
+          "runtime_create_ns": 0.025137,
+          "jit_attach_ns": 9e-05,
+          "context_create_ns": 0.103761,
+          "definition_eval_ns": 0.040051,
+          "first_eval_ns": 0.145203,
+          "threshold_crossing_ns": 0.142045,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.398314
+        },
+        "automatic": {
+          "total_ns": 18.358403,
+          "runtime_create_ns": 0.024197,
+          "jit_attach_ns": 0.049479,
+          "context_create_ns": 0.101056,
+          "definition_eval_ns": 0.043076,
+          "first_eval_ns": 0.649665,
+          "threshold_crossing_ns": 17.128556,
+          "compile_ns": 15.881736,
+          "install_ns": 0.077896,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.316209
+        },
+        "bun": {
+          "total_ns": 7.274648,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.024323
+        }
+      }
+    },
+    {
+      "workload": "generic-call-entry",
+      "group": "call-heavy",
+      "designated": false,
+      "median_ms": {
+        "automatic": 7.98525,
+        "bun": 0.018642,
+        "interpreter": 1.0784,
+        "tier1": 8.725289,
+        "tier2": 7.671019
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.13504899658745811,
+        "ci95": [
+          0.1342437257623207,
+          0.13561375966356115
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 57.84787040017166,
+        "ci95": [
+          50.67360654196823,
+          59.85527922726768
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.0023345543345543347,
+        "ci95": [
+          0.0022573862206438674,
+          0.0026653034929905823
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.12359476001310674,
+        "ci95": [
+          0.12297526097094098,
+          0.12411906682566003
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.1405810623073675,
+        "ci95": [
+          0.1400327394359222,
+          0.14115621405708942
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "number:409f400000000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 1.610235,
+          "runtime_create_ns": 0.027022,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.109324,
+          "definition_eval_ns": 0.043001,
+          "first_eval_ns": 0.111211,
+          "threshold_crossing_ns": 0.107509,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.0784
+        },
+        "automatic": {
+          "total_ns": 2012.397994,
+          "runtime_create_ns": 0.025225,
+          "jit_attach_ns": 0.050253,
+          "context_create_ns": 0.101436,
+          "definition_eval_ns": 0.040913,
+          "first_eval_ns": 0.591204,
+          "threshold_crossing_ns": 2002.787126,
+          "compile_ns": 9.839733,
+          "install_ns": 0.04025,
+          "osr_ns": 0.0,
+          "steady_state_ns": 7.98525
+        },
+        "bun": {
+          "total_ns": 7.773131,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.018642
+        }
+      }
+    },
+    {
+      "workload": "property-heavy",
+      "group": "property-heavy",
+      "designated": true,
+      "median_ms": {
+        "automatic": 5.152763,
+        "bun": 0.356667,
+        "interpreter": 1.381416,
+        "tier1": 3.097103,
+        "tier2": 5.152993
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.2680922836932341,
+        "ci95": [
+          0.26726064772410885,
+          0.2707536080511546
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 3.873125352219297,
+        "ci95": [
+          3.8325882405404803,
+          3.9092058296533527
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.06921859204469524,
+        "ci95": [
+          0.06890509128318612,
+          0.06998171670515782
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.44603489131617513,
+        "ci95": [
+          0.44425491239988607,
+          0.45047541739477465
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.2680803175940662,
+        "ci95": [
+          0.2674424041407673,
+          0.2707025492764079
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:412e942200000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 1.9985,
+          "runtime_create_ns": 0.026403,
+          "jit_attach_ns": 9.3e-05,
+          "context_create_ns": 0.106214,
+          "definition_eval_ns": 0.039539,
+          "first_eval_ns": 0.141916,
+          "threshold_crossing_ns": 0.142292,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.381416
+        },
+        "automatic": {
+          "total_ns": 32.066889,
+          "runtime_create_ns": 0.02651,
+          "jit_attach_ns": 0.050686,
+          "context_create_ns": 0.103119,
+          "definition_eval_ns": 0.045057,
+          "first_eval_ns": 0.468356,
+          "threshold_crossing_ns": 25.653997,
+          "compile_ns": 18.433801,
+          "install_ns": 0.055553,
+          "osr_ns": 0.0,
+          "steady_state_ns": 5.152763
+        },
+        "bun": {
+          "total_ns": 7.425593,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.356667
+        }
+      }
+    },
+    {
+      "workload": "fibonacci-iterative",
+      "group": "compute",
+      "designated": true,
+      "median_ms": {
+        "automatic": 0.856921,
+        "bun": 1.138774,
+        "interpreter": 33.803632,
+        "tier1": 7.576784,
+        "tier2": 0.845025
+      },
+      "jit_vs_quickjs": {
+        "speed": 39.447781067332926,
+        "ci95": [
+          38.68410246897464,
+          40.35605262656207
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 29.684232341096653,
+        "ci95": [
+          29.475667462594867,
+          29.83579152643442
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 1.3289136338122185,
+        "ci95": [
+          1.3048110768357002,
+          1.360944961824057
+        ],
+        "result": "faster"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 4.461474947682288,
+        "ci95": [
+          4.451505818578679,
+          4.483738726681245
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 40.0031147007485,
+        "ci95": [
+          38.61132058230581,
+          40.360875403594
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:419865fb2c000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 44.08679,
+          "runtime_create_ns": 0.029472,
+          "jit_attach_ns": 9.4e-05,
+          "context_create_ns": 0.111615,
+          "definition_eval_ns": 0.040683,
+          "first_eval_ns": 3.357162,
+          "threshold_crossing_ns": 3.38335,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 33.803632
+        },
+        "automatic": {
+          "total_ns": 45.056722,
+          "runtime_create_ns": 0.029259,
+          "jit_attach_ns": 0.06,
+          "context_create_ns": 0.112956,
+          "definition_eval_ns": 0.048712,
+          "first_eval_ns": 13.46172,
+          "threshold_crossing_ns": 30.369702,
+          "compile_ns": 29.504227,
+          "install_ns": 0.078967,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.856921
+        },
+        "bun": {
+          "total_ns": 9.092929,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.138774
+        }
+      }
+    },
+    {
+      "workload": "fibonacci-recursive",
+      "group": "call-heavy",
+      "designated": false,
+      "median_ms": {
+        "automatic": 12.21491,
+        "bun": 0.282431,
+        "interpreter": 12.075744,
+        "tier1": 102.125384,
+        "tier2": 12.237921
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9886068747129533,
+        "ci95": [
+          0.9841502938370427,
+          0.9930245247523705
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 42.75643962596174,
+        "ci95": [
+          41.61340480903667,
+          43.53704815055718
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.023121824065834296,
+        "ci95": [
+          0.02271650262203917,
+          0.023758591086836568
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.1182442946799593,
+        "ci95": [
+          0.11785802511269625,
+          0.11866323652826177
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9867479942058786,
+        "ci95": [
+          0.9831105346044946,
+          0.991309723376119
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "number:40ba6d0000000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 15.915004,
+          "runtime_create_ns": 0.030732,
+          "jit_attach_ns": 9.3e-05,
+          "context_create_ns": 0.11224,
+          "definition_eval_ns": 0.032747,
+          "first_eval_ns": 1.226038,
+          "threshold_crossing_ns": 1.204409,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 12.075744
+        },
+        "automatic": {
+          "total_ns": 2023.084482,
+          "runtime_create_ns": 0.028193,
+          "jit_attach_ns": 0.062256,
+          "context_create_ns": 0.112622,
+          "definition_eval_ns": 0.042549,
+          "first_eval_ns": 4.733711,
+          "threshold_crossing_ns": 2004.410257,
+          "compile_ns": 4.062955,
+          "install_ns": 0.040335,
+          "osr_ns": 0.0,
+          "steady_state_ns": 12.21491
+        },
+        "bun": {
+          "total_ns": 9.107751,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.282431
+        }
+      }
+    },
+    {
+      "workload": "collections",
+      "group": "compute",
+      "designated": false,
+      "median_ms": {
+        "automatic": 1.797279,
+        "bun": 0.702049,
+        "interpreter": 1.784929,
+        "tier1": 1.793977,
+        "tier2": 1.792073
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9931285014736165,
+        "ci95": [
+          0.9883334101225166,
+          0.9977827396348918
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 2.542456438225822,
+        "ci95": [
+          2.5197145698671455,
+          2.5572476374601023
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.39061770598777373,
+        "ci95": [
+          0.3884600108804849,
+          0.3936628601502001
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.9949564570783237,
+        "ci95": [
+          0.989352710832829,
+          0.9987019314211284
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9960135552513765,
+        "ci95": [
+          0.9916811788345613,
+          0.9997899374449354
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:1018392",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 2.545379,
+          "runtime_create_ns": 0.028748,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.111133,
+          "definition_eval_ns": 0.040257,
+          "first_eval_ns": 0.195659,
+          "threshold_crossing_ns": 0.180698,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.784929
+        },
+        "automatic": {
+          "total_ns": 2003.148045,
+          "runtime_create_ns": 0.025118,
+          "jit_attach_ns": 0.051391,
+          "context_create_ns": 0.106991,
+          "definition_eval_ns": 0.04692,
+          "first_eval_ns": 0.223581,
+          "threshold_crossing_ns": 2000.701566,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.797279
+        },
+        "bun": {
+          "total_ns": 8.172222,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.702049
+        }
+      }
+    },
+    {
+      "workload": "strings-json",
+      "group": "compute",
+      "designated": false,
+      "median_ms": {
+        "automatic": 2.267922,
+        "bun": 0.593462,
+        "interpreter": 2.158027,
+        "tier1": 4.41779,
+        "tier2": 2.210883
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9515437479772232,
+        "ci95": [
+          0.9491929652746525,
+          0.9542949784079977
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 3.636335603627528,
+        "ci95": [
+          3.6088132203321805,
+          3.648250765031842
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.2616765479588804,
+        "ci95": [
+          0.2608217511863055,
+          0.2638516047617787
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.48848564553770096,
+        "ci95": [
+          0.48588529873128783,
+          0.49038964294138976
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9760928099768282,
+        "ci95": [
+          0.9728503581062814,
+          0.979731779345731
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:{\"length\":2000,\"first\":\"abcdefgh\"}",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 3.059446,
+          "runtime_create_ns": 0.028606,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.110433,
+          "definition_eval_ns": 0.039661,
+          "first_eval_ns": 0.251327,
+          "threshold_crossing_ns": 0.224911,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 2.158027
+        },
+        "automatic": {
+          "total_ns": 2004.045257,
+          "runtime_create_ns": 0.026387,
+          "jit_attach_ns": 0.054822,
+          "context_create_ns": 0.10625,
+          "definition_eval_ns": 0.044647,
+          "first_eval_ns": 0.47864,
+          "threshold_crossing_ns": 2000.803601,
+          "compile_ns": 13.942087,
+          "install_ns": 0.037433,
+          "osr_ns": 0.0,
+          "steady_state_ns": 2.267922
+        },
+        "bun": {
+          "total_ns": 7.989688,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.593462
+        }
+      }
+    },
+    {
+      "workload": "calls-closures",
+      "group": "compute",
+      "designated": false,
+      "median_ms": {
+        "automatic": 3.651293,
+        "bun": 0.57326,
+        "interpreter": 3.5944,
+        "tier1": 3.661766,
+        "tier2": 3.656882
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9844183964420276,
+        "ci95": [
+          0.982522333925659,
+          0.9868013440307207
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 6.270104315668283,
+        "ci95": [
+          6.217750672347731,
+          6.322832720685228
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.15700191685520717,
+        "ci95": [
+          0.15566704726243552,
+          0.15830962083565528
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.9816028659395494,
+        "ci95": [
+          0.9797031649972803,
+          0.9837059692048091
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9829138594026277,
+        "ci95": [
+          0.9809495171481906,
+          0.9849590794862465
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:30872",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 4.895512,
+          "runtime_create_ns": 0.026933,
+          "jit_attach_ns": 9e-05,
+          "context_create_ns": 0.109521,
+          "definition_eval_ns": 0.039404,
+          "first_eval_ns": 0.369037,
+          "threshold_crossing_ns": 0.360894,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 3.5944
+        },
+        "automatic": {
+          "total_ns": 2005.997989,
+          "runtime_create_ns": 0.02432,
+          "jit_attach_ns": 0.048222,
+          "context_create_ns": 0.101894,
+          "definition_eval_ns": 0.03587,
+          "first_eval_ns": 0.428047,
+          "threshold_crossing_ns": 2001.33015,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 3.651293
+        },
+        "bun": {
+          "total_ns": 8.293804,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.57326
+        }
+      }
+    },
+    {
+      "workload": "adversarial",
+      "group": "adversarial",
+      "designated": false,
+      "median_ms": {
+        "automatic": 1.062424,
+        "bun": 0.379237,
+        "interpreter": 1.061652,
+        "tier1": 0.771487,
+        "tier2": 1.058304
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.999273359788559,
+        "ci95": [
+          0.9909892827003427,
+          1.0122072691394695
+        ],
+        "result": "tied"
+      },
+      "bun_vs_quickjs": {
+        "speed": 2.7994420375649,
+        "ci95": [
+          2.7561402732711087,
+          2.8489723541433962
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.3569544739200169,
+        "ci95": [
+          0.35135104671248585,
+          0.3624056102087903
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 1.3761113278642414,
+        "ci95": [
+          1.3664531448236796,
+          1.3900535404569792
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 1.0031635522496372,
+        "ci95": [
+          0.9927839252217117,
+          1.0146991926745257
+        ],
+        "result": "tied"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:7995",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 1.58957,
+          "runtime_create_ns": 0.029226,
+          "jit_attach_ns": 9e-05,
+          "context_create_ns": 0.111366,
+          "definition_eval_ns": 0.036114,
+          "first_eval_ns": 0.111776,
+          "threshold_crossing_ns": 0.106371,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.061652
+        },
+        "automatic": {
+          "total_ns": 2002.084702,
+          "runtime_create_ns": 0.026022,
+          "jit_attach_ns": 0.051043,
+          "context_create_ns": 0.104526,
+          "definition_eval_ns": 0.038052,
+          "first_eval_ns": 0.252393,
+          "threshold_crossing_ns": 2000.422455,
+          "compile_ns": 9.713457,
+          "install_ns": 0.036122,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.062424
+        },
+        "bun": {
+          "total_ns": 7.714105,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.379237
+        }
+      }
+    },
+    {
+      "workload": "float64-dense",
+      "group": "float64",
+      "designated": false,
+      "median_ms": {
+        "automatic": 0.371892,
+        "bun": 0.463493,
+        "interpreter": 2.907874,
+        "tier1": 1.634585,
+        "tier2": 0.37793
+      },
+      "jit_vs_quickjs": {
+        "speed": 7.819135663041958,
+        "ci95": [
+          7.70773543526979,
+          7.894699058898744
+        ],
+        "result": "faster"
+      },
+      "bun_vs_quickjs": {
+        "speed": 6.273825063161688,
+        "ci95": [
+          6.210394029619891,
+          6.360916729192142
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 1.2463107568864078,
+        "ci95": [
+          1.2287957539183145,
+          1.260864150064711
+        ],
+        "result": "faster"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 1.778967750224063,
+        "ci95": [
+          1.7655732352045552,
+          1.7855606158998725
+        ],
+        "result": "faster"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 7.694213214087265,
+        "ci95": [
+          7.610593506865967,
+          7.767996844038458
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "number:40a2d29809876024",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 4.013887,
+          "runtime_create_ns": 0.03056,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.110633,
+          "definition_eval_ns": 0.052941,
+          "first_eval_ns": 0.298942,
+          "threshold_crossing_ns": 0.291628,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 2.907874
+        },
+        "automatic": {
+          "total_ns": 63.907169,
+          "runtime_create_ns": 0.028959,
+          "jit_attach_ns": 0.058248,
+          "context_create_ns": 0.110678,
+          "definition_eval_ns": 0.066081,
+          "first_eval_ns": 2.501442,
+          "threshold_crossing_ns": 60.701785,
+          "compile_ns": 60.104053,
+          "install_ns": 0.139323,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.371892
+        },
+        "bun": {
+          "total_ns": 7.914254,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.463493
+        }
+      }
+    },
+    {
+      "workload": "strings-regexp",
+      "group": "strings-regexp",
+      "designated": false,
+      "median_ms": {
+        "automatic": 19.943305,
+        "bun": 1.887424,
+        "interpreter": 19.384228,
+        "tier1": 22.449035,
+        "tier2": 19.9468
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9719666825533682,
+        "ci95": [
+          0.9707110036921738,
+          0.9740360129769473
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 10.270203197585705,
+        "ci95": [
+          10.228376837427293,
+          10.305606195330315
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.09463947926384318,
+        "ci95": [
+          0.09435030716562336,
+          0.09512640432795211
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.863477116054209,
+        "ci95": [
+          0.8626934339405524,
+          0.8653553326326062
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9717963783664547,
+        "ci95": [
+          0.9708258325444066,
+          0.9738308458460304
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:483:10249:|8@57|9@58|10@59",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 25.779143,
+          "runtime_create_ns": 0.030747,
+          "jit_attach_ns": 9e-05,
+          "context_create_ns": 0.109405,
+          "definition_eval_ns": 0.05202,
+          "first_eval_ns": 2.286125,
+          "threshold_crossing_ns": 1.945115,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 19.384228
+        },
+        "automatic": {
+          "total_ns": 2034.800112,
+          "runtime_create_ns": 0.027539,
+          "jit_attach_ns": 0.058809,
+          "context_create_ns": 0.110174,
+          "definition_eval_ns": 0.060236,
+          "first_eval_ns": 5.053848,
+          "threshold_crossing_ns": 2007.146005,
+          "compile_ns": 32.375662,
+          "install_ns": 0.05939,
+          "osr_ns": 0.0,
+          "steady_state_ns": 19.943305
+        },
+        "bun": {
+          "total_ns": 9.567572,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.887424
+        }
+      }
+    },
+    {
+      "workload": "arrays-typed",
+      "group": "arrays-typed",
+      "designated": false,
+      "median_ms": {
+        "automatic": 7.011139,
+        "bun": 0.441653,
+        "interpreter": 4.598559,
+        "tier1": 15.310127,
+        "tier2": 2.756418
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.6558932863832824,
+        "ci95": [
+          0.6535886805424823,
+          0.6584633289970085
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 10.412153885516458,
+        "ci95": [
+          10.278993618977113,
+          10.529493223402627
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.06299304578043596,
+        "ci95": [
+          0.062356517767893464,
+          0.0637762086585114
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.3003606044548161,
+        "ci95": [
+          0.27220205975650613,
+          0.31680725489983996
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 1.6683097411205412,
+        "ci95": [
+          1.6632029342067092,
+          1.6741276063140214
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 30,
+      "auto_deopts": 0,
+      "checksum": "string:33983000:8496750.000:2000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 6.246118,
+          "runtime_create_ns": 0.030325,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.111025,
+          "definition_eval_ns": 0.062065,
+          "first_eval_ns": 0.485362,
+          "threshold_crossing_ns": 0.471874,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 4.598559
+        },
+        "automatic": {
+          "total_ns": 78.717722,
+          "runtime_create_ns": 0.028901,
+          "jit_attach_ns": 0.060726,
+          "context_create_ns": 0.112219,
+          "definition_eval_ns": 0.070337,
+          "first_eval_ns": 2.382943,
+          "threshold_crossing_ns": 68.319977,
+          "compile_ns": 65.199912,
+          "install_ns": 0.131158,
+          "osr_ns": 0.0,
+          "steady_state_ns": 7.011139
+        },
+        "bun": {
+          "total_ns": 8.528117,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.441653
+        }
+      }
+    },
+    {
+      "workload": "objects-polymorphic",
+      "group": "objects-polymorphic",
+      "designated": false,
+      "median_ms": {
+        "automatic": 6.725245,
+        "bun": 0.608141,
+        "interpreter": 6.523461,
+        "tier1": 23.021614,
+        "tier2": 6.707531
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9699960373190866,
+        "ci95": [
+          0.9655848036010822,
+          0.9728545600888264
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 10.726888994493054,
+        "ci95": [
+          10.69278223521586,
+          10.793195147717752
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.09042659412408023,
+        "ci95": [
+          0.0896931048579964,
+          0.090708374680768
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.28336245234586943,
+        "ci95": [
+          0.2823834381186343,
+          0.2840570697715637
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.9725577116229503,
+        "ci95": [
+          0.9697537662585235,
+          0.975009208375344
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "number:413e8c5000000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 8.850227,
+          "runtime_create_ns": 0.029674,
+          "jit_attach_ns": 8.9e-05,
+          "context_create_ns": 0.110577,
+          "definition_eval_ns": 0.053493,
+          "first_eval_ns": 0.796384,
+          "threshold_crossing_ns": 0.663285,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 6.523461
+        },
+        "automatic": {
+          "total_ns": 2012.917366,
+          "runtime_create_ns": 0.027932,
+          "jit_attach_ns": 0.058527,
+          "context_create_ns": 0.1099,
+          "definition_eval_ns": 0.063568,
+          "first_eval_ns": 2.847847,
+          "threshold_crossing_ns": 2002.380055,
+          "compile_ns": 65.791777,
+          "install_ns": 0.079529,
+          "osr_ns": 0.0,
+          "steady_state_ns": 6.725245
+        },
+        "bun": {
+          "total_ns": 8.807616,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.608141
+        }
+      }
+    },
+    {
+      "workload": "calls-recursion-closures",
+      "group": "calls-recursion-closures",
+      "designated": false,
+      "median_ms": {
+        "automatic": 7.664072,
+        "bun": 1.601877,
+        "interpreter": 7.409529,
+        "tier1": 96.815022,
+        "tier2": 37.139178
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9667874988648332,
+        "ci95": [
+          0.9642001014604247,
+          0.9698347268344861
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 4.625529300938836,
+        "ci95": [
+          4.600253326543137,
+          4.650691999171484
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.2090112149259558,
+        "ci95": [
+          0.2076929875768252,
+          0.21035725807032088
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.07653284425220706,
+        "ci95": [
+          0.0761439911141865,
+          0.07666525692261995
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.1995070811744945,
+        "ci95": [
+          0.1988284676807705,
+          0.20022119545665104
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "number:40d4820000000000",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 9.869032,
+          "runtime_create_ns": 0.029544,
+          "jit_attach_ns": 9.6e-05,
+          "context_create_ns": 0.112267,
+          "definition_eval_ns": 0.053786,
+          "first_eval_ns": 0.751147,
+          "threshold_crossing_ns": 0.746284,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 7.409529
+        },
+        "automatic": {
+          "total_ns": 2017.629551,
+          "runtime_create_ns": 0.02836,
+          "jit_attach_ns": 0.062397,
+          "context_create_ns": 0.111359,
+          "definition_eval_ns": 0.063162,
+          "first_eval_ns": 5.697692,
+          "threshold_crossing_ns": 2002.671802,
+          "compile_ns": 7.882769,
+          "install_ns": 0.055299,
+          "osr_ns": 0.0,
+          "steady_state_ns": 7.664072
+        },
+        "bun": {
+          "total_ns": 10.098709,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.601877
+        }
+      }
+    },
+    {
+      "workload": "json-codec",
+      "group": "json-codec",
+      "designated": false,
+      "median_ms": {
+        "automatic": 78.930452,
+        "bun": 10.05028,
+        "interpreter": 78.478067,
+        "tier1": 94.863036,
+        "tier2": 79.277057
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9942685618980112,
+        "ci95": [
+          0.9903762837047413,
+          0.9972558903211085
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 7.808545334060344,
+        "ci95": [
+          7.792208020804069,
+          7.822040547163572
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.12733083043791515,
+        "ci95": [
+          0.12678860900647762,
+          0.12780880063475458
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.8272776237100402,
+        "ci95": [
+          0.8241920907765962,
+          0.8328710857118438
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.989921548172506,
+        "ci95": [
+          0.9870024023701526,
+          0.9917311995490292
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 30,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:2013000:123",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 102.52034,
+          "runtime_create_ns": 0.029963,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.11157,
+          "definition_eval_ns": 0.047956,
+          "first_eval_ns": 8.005252,
+          "threshold_crossing_ns": 7.883835,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 78.478067
+        },
+        "automatic": {
+          "total_ns": 2132.836946,
+          "runtime_create_ns": 0.027908,
+          "jit_attach_ns": 0.062182,
+          "context_create_ns": 0.113896,
+          "definition_eval_ns": 0.058095,
+          "first_eval_ns": 16.781686,
+          "threshold_crossing_ns": 2028.211896,
+          "compile_ns": 33.71344,
+          "install_ns": 0.06272,
+          "osr_ns": 0.0,
+          "steady_state_ns": 78.930452
+        },
+        "bun": {
+          "total_ns": 18.76415,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 10.05028
+        }
+      }
+    },
+    {
+      "workload": "map-set-bigint",
+      "group": "map-set-bigint",
+      "designated": false,
+      "median_ms": {
+        "automatic": 16.383663,
+        "bun": 2.210276,
+        "interpreter": 15.469565,
+        "tier1": 16.35884,
+        "tier2": 15.099187
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.9442067381390841,
+        "ci95": [
+          0.9413300320721,
+          0.9474540733402289
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 6.998929093018248,
+        "ci95": [
+          6.972258015955967,
+          7.020139617652534
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.13490731590365354,
+        "ci95": [
+          0.13440641433808126,
+          0.1356251485012582
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.9456394829951268,
+        "ci95": [
+          0.9415014160339873,
+          0.9493465543113773
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 1.02452966507402,
+        "ci95": [
+          1.0225431505563742,
+          1.0271624559081272
+        ],
+        "result": "faster"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:2000:256:e2edbb6504d6fce8",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 20.386202,
+          "runtime_create_ns": 0.029807,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.110265,
+          "definition_eval_ns": 0.050923,
+          "first_eval_ns": 1.59442,
+          "threshold_crossing_ns": 1.524343,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 15.469565
+        },
+        "automatic": {
+          "total_ns": 2025.589863,
+          "runtime_create_ns": 0.026406,
+          "jit_attach_ns": 0.055392,
+          "context_create_ns": 0.107275,
+          "definition_eval_ns": 0.058731,
+          "first_eval_ns": 1.675244,
+          "threshold_crossing_ns": 2005.630517,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 16.383663
+        },
+        "bun": {
+          "total_ns": 9.978339,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 2.210276
+        }
+      }
+    },
+    {
+      "workload": "exceptions-promises-async",
+      "group": "exceptions-promises-async",
+      "designated": false,
+      "median_ms": {
+        "automatic": 2.848444,
+        "bun": 0.749742,
+        "interpreter": 1.974985,
+        "tier1": 2.855141,
+        "tier2": 3.495115
+      },
+      "jit_vs_quickjs": {
+        "speed": 0.6933557408887098,
+        "ci95": [
+          0.6896632269530165,
+          0.6967677791804929
+        ],
+        "result": "slower"
+      },
+      "bun_vs_quickjs": {
+        "speed": 2.6342195048429993,
+        "ci95": [
+          2.589367004224171,
+          2.6575906496665476
+        ],
+        "result": "faster"
+      },
+      "jit_vs_bun": {
+        "speed": 0.2632110724311238,
+        "ci95": [
+          0.2610737237985012,
+          0.2672117431882383
+        ],
+        "result": "slower"
+      },
+      "tier1_vs_quickjs": {
+        "speed": 0.6917294102112646,
+        "ci95": [
+          0.688826184272521,
+          0.6952262186663678
+        ],
+        "result": "slower"
+      },
+      "tier2_vs_quickjs": {
+        "speed": 0.5650701049893924,
+        "ci95": [
+          0.5608639175023308,
+          0.5678508432483623
+        ],
+        "result": "slower"
+      },
+      "auto_native_samples": 0,
+      "auto_tier2_samples": 0,
+      "auto_deopts": 0,
+      "checksum": "string:124000:72576",
+      "phases_median_ms": {
+        "interpreter": {
+          "total_ns": 2.800001,
+          "runtime_create_ns": 0.028627,
+          "jit_attach_ns": 9.1e-05,
+          "context_create_ns": 0.111673,
+          "definition_eval_ns": 0.051274,
+          "first_eval_ns": 0.214107,
+          "threshold_crossing_ns": 0.198657,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 1.974985
+        },
+        "automatic": {
+          "total_ns": 3004.187339,
+          "runtime_create_ns": 0.029128,
+          "jit_attach_ns": 0.06326,
+          "context_create_ns": 0.113003,
+          "definition_eval_ns": 0.060166,
+          "first_eval_ns": 0.304821,
+          "threshold_crossing_ns": 3000.396206,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 2.848444
+        },
+        "bun": {
+          "total_ns": 9.0617,
+          "runtime_create_ns": 0.0,
+          "jit_attach_ns": 0.0,
+          "context_create_ns": 0.0,
+          "definition_eval_ns": 0.0,
+          "first_eval_ns": 0.0,
+          "threshold_crossing_ns": 0.0,
+          "compile_ns": 0.0,
+          "install_ns": 0.0,
+          "osr_ns": 0.0,
+          "steady_state_ns": 0.749742
+        }
+      }
+    }
+  ]
+}

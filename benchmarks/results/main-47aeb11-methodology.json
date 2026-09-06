@@ -1,0 +1,26 @@
+{
+  "source_revision": "47aeb11839a51ac9ae5d1d7c4b30c54ad3d3c3b7",
+  "source_dirty_at_start": false,
+  "mode_labels": {
+    "interpreter": "repository-pinned QuickJS-ng interpreter, no JIT backend attached",
+    "automatic": "quickjs-jit automatic tier policy",
+    "bun": "Bun default engine configuration",
+    "tier1": "forced baseline diagnostic",
+    "tier2": "forced optimizing diagnostic"
+  },
+  "bun_version": "1.4.0",
+  "bun_executable": "/home/jason/.bun/bin/bun",
+  "bun_sha256": "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
+  "launcher_source": "#!/bin/sh\n# Preserve the repository worker script while using Bun default engine flags.\nif [ \"$1\" = \"--smol\" ]; then shift; fi\nexec /home/jason/.bun/bin/bun \"$@\"\n",
+  "launcher_sha256": "11ed223037d3f74cc8c2b9986865c2b5c170c843011e57b36186990a12e5b2c3",
+  "benchmark_sha256": "f430ce53b640b8f8e9216384e1fafc312d917195b5477783caf9c13ee02e0699",
+  "harness_sha256": "121aa51f7b138a8b7b9f357dec3b037710d6053d1f152b4b8f2713421c087fff",
+  "cpu_affinity": [
+    0
+  ],
+  "command": "JIT_BENCH_BUN=/tmp/jit-main47a-bun-default taskset -c 0 target/release/jit-bench compare --modes interpreter,tier1,tier2,automatic,bun --output /tmp/jit-main47a-five-engine.json --report /tmp/jit-main47a-five-engine.md",
+  "warmup_caveat": "Identical scripts/arguments and10 timed invocations. Process-internal warmup differs: QuickJS JIT uses adaptive readiness/settling, Bun executes one untimed invocation. Results measure this protocol, not equally warmed peak throughput. Five outer warmup processes do not preserve engine JIT state across fresh processes.",
+  "throughput_caveat": "Throughput counts complete fresh worker processes, including setup/warmup and orchestration, not JS operations. Bun total time is measured by parent and QuickJS phase totals inside worker; do not equate those totals as identical startup boundaries.",
+  "timed_boundary_caveat": "QuickJS timed iterations include Rust workload lookup/invocation, result conversion/checksum formatting and JIT polling; Bun computes its checksum after its timed batch. Engine ratios are for this embedding/protocol, not isolated JS execution. QuickJS interpreter and JIT share the Rust boundary.",
+  "quickjs_baseline_caveat": "QuickJS means repository-pinned QuickJS-ng inside the same Rust benchmark executable with no JIT backend attached, not a separately built upstream qjs CLI. CONFIG_JIT_ABI patches remain compiled into the shared runtime."
+}

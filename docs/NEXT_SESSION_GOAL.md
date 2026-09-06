@@ -1,5 +1,14 @@
 # QuickJS JIT implementation goal
 
+> Latest performance checkpoint (2026-09-06): PR #19 and #20 are merged;
+> clean main `47aeb11` has a fresh 22-workload, five-mode comparison including
+> Bun default. See [comparison](../benchmarks/results/main-47aeb11-engines.md)
+> and [next performance targets](PERFORMANCE_NEXT.md). This checkpoint supersedes
+> older branch-status / next-step notes below. Property candidate `9ccda01` on
+> `perf/m3-property-borrowed-guards` is preserved but unmerged and excluded from
+> this baseline. Full performance acceptance still fails; no runtime change was
+> made for this reporting checkpoint.
+
 ## Objective
 
 Implement a production-quality JIT for QuickJS in the independent
