@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry as MapEntry, BTreeMap};
 
 use super::FunctionKey;
 
@@ -795,8 +795,10 @@ impl FeedbackTable {
     }
 
     pub fn observe_call(&mut self, function: FunctionKey, arguments: &[ObservedType]) {
-        let is_new = !self.calls.contains_key(&function);
-        let call = self.calls.entry(function).or_default();
+        let (call, is_new) = match self.calls.entry(function) {
+            MapEntry::Occupied(entry) => (entry.into_mut(), false),
+            MapEntry::Vacant(entry) => (entry.insert(CallFeedbackEntry::default()), true),
+        };
         let before = (
             call.arities.len(),
             call.arity_megamorphic,
@@ -1028,15 +1030,20 @@ impl FeedbackTable {
         observation: ObservedType,
     ) -> FeedbackState {
         let key = FeedbackKey { function, pc, kind };
-        if !self.entries.contains_key(&key) && self.entries.len() >= self.capacity {
-            self.dropped = self.dropped.saturating_add(1);
-            return FeedbackState::Megamorphic;
-        }
-        let before = self.entries.get(&key).map(entry_shape);
-        let entry = self.entries.entry(key).or_insert_with(|| Entry {
-            observations: Vec::with_capacity(self.diversity_limit),
-            megamorphic: false,
-        });
+        let at_capacity = self.entries.len() >= self.capacity;
+        let (entry, before) = match self.entries.entry(key) {
+            MapEntry::Occupied(entry) => {
+                let before = entry_shape(entry.get());
+                (entry.into_mut(), Some(before))
+            }
+            MapEntry::Vacant(entry) => {
+                if at_capacity {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return FeedbackState::Megamorphic;
+                }
+                (entry.insert(empty_entry(self.diversity_limit)), None)
+            }
+        };
         let state = entry.observe(observation, self.diversity_limit);
         if before != Some(entry_shape(entry)) {
             self.version = self.version.wrapping_add(1);

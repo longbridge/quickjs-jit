@@ -410,3 +410,37 @@ Next read-only investigations found two bounded opportunities, not implemented:
   table capacity. Add focused version/full-capacity/zero-arity/widening coverage
   before changing these routines. Keep every admitted observation and exact
   generation identity; do not skip feedback simply because timing is expensive.
+
+
+Follow-up on perf/m3-feedback-lookups (parent 35edb4c / PR #19):
+- observe_type/observe_call now use one B-tree entry search; record_hot reuses
+  baseline state captured after maintenance. Three added characterization tests
+  preserve exact versions, capacity/rejections, generation identity, independent
+  call capacity and megamorphic slot growth. Capacity/arity mutant checks fail
+  as intended. 518 release tests, 82 ASAN/LSAN tests and workspace Clippy pass.
+  Independent review found no issue.
+- Property profiling is archived in m3-property-helper-profile.json. The enlarged
+  automatic probe attributes 55.82% self cycles to helper frame validation,
+  7.02% shape guard, 6.74% Free, 3.95% MaterializeOwner; it includes warmup.
+- Next priority is optimized property ownership: use a proven argument/local
+  owner directly for the nonallocating shape guard only when ALL live stack
+  provenance is immediate primitive or argument/local alias. Spill canonical
+  args/locals and PC, expose stack_top=base. Guard exceptions return with the
+  empty cleanup-safe stack; misses/tag mismatches first materialize the full
+  original stack with the existing bridge. Successful hits need no temporary
+  owners or corresponding frees. Preserve every shape-generation check.
+  OwnedSlot/Unknown anywhere on the live stack keeps current lowering; OSR
+  without an explicit owner proof must do the same. See M3.md for tests.
+- This property optimization and the complete fresh matrix are not implemented
+  or completed by the lookup cleanup. Continue toward the pasted-file objective.
+
+Final query-stage measurements are complete (no live benchmark process):
+`benchmarks/results/m3-feedback-lookups-*-paired.json` covers property,
+generic calls, direct calls, recursion and scalar loops at full 5/30/10 settings.
+Baseline is a38bd01 with the identical corrected harness; candidate includes
+both timing stack and query consolidation. Generic Tier1 1.193x (CI1.190–1.197),
+generic automatic 1.181x (1.175–1.185), recursive Tier1 1.187x (1.183–1.189).
+All direct/property/interpreter comparisons are tied. Scalar Tier2 1.035x and
+automatic 1.041x have no isolated causal attribution. All provenance/order/sample
+qualification checks passed; diagnostics remain dirty-source, not full-matrix
+acceptance. Next implementation priority remains the property ownership path.
