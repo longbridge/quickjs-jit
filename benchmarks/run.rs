@@ -383,6 +383,17 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             )
         })
         .map_err(err)?;
+    let tier2_ready_installs = context
+        .with(|ctx| ctx.eval::<Option<u64>, _>(
+            "typeof globalThis.tier2ReadyInstalls === 'number' ? globalThis.tier2ReadyInstalls : undefined",
+        ))
+        .map_err(err)?;
+    let required_installs = if mode == "tier2" {
+        tier2_ready_installs.unwrap_or(1)
+    } else {
+        tier1_ready_installs
+    };
+    let required_tier2 = mode == "tier2" && tier2_ready_installs.is_some();
     let start = Instant::now();
     let _first_checksum = invoke_workload(&context)?;
     phases.first_eval_ns = ns(start.elapsed());
@@ -405,10 +416,8 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             // queue has drained: the one-shot top-level script is rejected
             // on the first poll while the workload's own tiers are still
             // compiling behind it.
-            if native_ready(mode, &before, tier1_ready_installs)
-                || (mode != "automatic"
-                    && before.blacklisted > 0
-                    && before.pending_worker_jobs == 0)
+            if native_ready(mode, &before, required_installs)
+                || blacklist_can_end_warmup(mode, &before, required_tier2)
             {
                 break;
             }
@@ -420,25 +429,12 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             break;
         }
     }
-    // Automatic tiering may queue one more version right after its first
-    // Tier 2 entry (a side path or a refreshed caller). Let that bounded tail
-    // of compilation settle before the steady state is timed; a sample whose
-    // compilation never settles is still rejected below.
+    // Both optimized modes can publish a leaf before its caller is ready.
+    // Execute the workload while draining the bounded tail of compilation.
+    let mut settled = true;
     if let Some(jit) = &jit {
-        if mode == "automatic" {
-            let settle_deadline = Instant::now() + Duration::from_secs(1);
-            let mut quiet_polls = 0;
-            while quiet_polls < 3 && Instant::now() < settle_deadline {
-                let _settle_checksum = invoke_workload(&context)?;
-                jit.poll();
-                before = jit.metrics();
-                if before.pending_worker_jobs == 0 && before.pending_snapshot_bytes == 0 {
-                    quiet_polls += 1;
-                } else {
-                    quiet_polls = 0;
-                    std::thread::sleep(Duration::from_micros(200));
-                }
-            }
+        if matches!(mode, "tier2" | "automatic") {
+            (before, settled) = settle_compilation(&context, jit, Duration::from_secs(1))?;
         }
     }
     phases.threshold_crossing_ns = ns(threshold_start.elapsed());
@@ -458,6 +454,14 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     } else {
         0
     };
+    let steady_start = jit.as_ref().map(Jit::metrics).unwrap_or_default();
+    if required_tier2
+        && (!settled
+            || !native_ready("tier2", &steady_start, required_installs)
+            || !compilation_quiet(&before, &steady_start))
+    {
+        return Err("required Tier2 publications did not settle before timing".into());
+    }
     let start = Instant::now();
     let mut checksum = String::new();
     for _ in 0..10 {
@@ -467,6 +471,12 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         }
     }
     phases.steady_state_ns = ns(start.elapsed());
+    if required_tier2 {
+        let steady_end = jit.as_ref().map(Jit::metrics).unwrap_or_default();
+        if !compilation_quiet(&steady_start, &steady_end) {
+            return Err("required Tier2 benchmark compiled during steady-state timing".into());
+        }
+    }
     // A completion that landed during the last steady-state invocation is
     // drained by polling without further JavaScript execution; the timing
     // above is untouched.
@@ -620,17 +630,64 @@ fn selected_workloads() -> Result<Vec<&'static Workload>, String> {
     }
     Ok(selected)
 }
-fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics, tier1_ready_installs: u64) -> bool {
+fn native_ready(mode: &str, m: &rquickjs_jit::JitMetrics, required_installs: u64) -> bool {
     match mode {
         "interpreter" => true,
-        "tier1" => m.native_entries > 0 && m.installed >= tier1_ready_installs,
-        "tier2" => m.tier2_entries > 0,
+        "tier1" => m.native_entries > 0 && m.installed >= required_installs,
+        "tier2" => {
+            m.tier2_entries > 0
+                && m.installed >= required_installs
+                && m.pending_worker_jobs == 0
+                && m.pending_snapshot_bytes == 0
+        }
         "automatic" => {
             m.tier2_entries > 0 && m.pending_worker_jobs == 0 && m.pending_snapshot_bytes == 0
         }
         _ => false,
     }
 }
+fn blacklist_can_end_warmup(
+    mode: &str,
+    m: &rquickjs_jit::JitMetrics,
+    required_tier2: bool,
+) -> bool {
+    mode != "automatic"
+        && !required_tier2
+        && m.blacklisted > 0
+        && m.pending_worker_jobs == 0
+        && m.pending_snapshot_bytes == 0
+}
+
+fn compilation_quiet(before: &rquickjs_jit::JitMetrics, after: &rquickjs_jit::JitMetrics) -> bool {
+    after.pending_worker_jobs == 0
+        && after.pending_snapshot_bytes == 0
+        && after.installed == before.installed
+        && after.snapshot_requests == before.snapshot_requests
+}
+
+fn settle_compilation(
+    context: &Context,
+    jit: &Jit,
+    timeout: Duration,
+) -> Result<(rquickjs_jit::JitMetrics, bool), String> {
+    let deadline = Instant::now() + timeout;
+    let mut before = jit.metrics();
+    let mut quiet_polls = 0;
+    while quiet_polls < 3 && Instant::now() < deadline {
+        invoke_workload(context)?;
+        jit.poll();
+        let after = jit.metrics();
+        if compilation_quiet(&before, &after) {
+            quiet_polls += 1;
+        } else {
+            quiet_polls = 0;
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        before = after;
+    }
+    Ok((before, quiet_polls >= 3))
+}
+
 fn threshold_timeout(mode: &str) -> Duration {
     if mode == "interpreter" {
         Duration::ZERO
@@ -1047,6 +1104,53 @@ mod tests {
         assert_eq!(threshold_timeout("automatic"), Duration::from_secs(2));
     }
     #[test]
+    fn forced_tier2_warmup_waits_for_the_required_publications_and_pending_compilation() {
+        let mut metrics = rquickjs_jit::JitMetrics::default();
+        metrics.native_entries = 8;
+        metrics.tier2_entries = 1;
+        metrics.installed = 3;
+        // The optimized leaf is not evidence that its caller is ready.
+        assert!(!native_ready("tier2", &metrics, 4));
+        metrics.installed = 4;
+        metrics.pending_worker_jobs = 1;
+        assert!(!native_ready("tier2", &metrics, 4));
+        metrics.pending_worker_jobs = 0;
+        metrics.pending_snapshot_bytes = 1;
+        assert!(!native_ready("tier2", &metrics, 4));
+        metrics.pending_snapshot_bytes = 0;
+        assert!(native_ready("tier2", &metrics, 4));
+    }
+
+    #[test]
+    fn explicit_tier2_requirement_cannot_be_bypassed_by_an_unrelated_blacklist() {
+        let mut metrics = rquickjs_jit::JitMetrics::default();
+        metrics.blacklisted = 1;
+        assert!(!blacklist_can_end_warmup("tier2", &metrics, true));
+        // Unsupported probes without a declaration retain bounded fallback.
+        assert!(blacklist_can_end_warmup("tier2", &metrics, false));
+        metrics.pending_snapshot_bytes = 1;
+        assert!(!blacklist_can_end_warmup("tier2", &metrics, false));
+    }
+
+    #[test]
+    fn compilation_quiet_requires_stable_publications_and_snapshot_requests() {
+        let before = rquickjs_jit::JitMetrics::default();
+        let mut after = before.clone();
+        assert!(compilation_quiet(&before, &after));
+        after.installed = 1;
+        assert!(!compilation_quiet(&before, &after));
+        after.installed = 0;
+        after.snapshot_requests = 1;
+        assert!(!compilation_quiet(&before, &after));
+        after.snapshot_requests = 0;
+        after.pending_worker_jobs = 1;
+        assert!(!compilation_quiet(&before, &after));
+        after.pending_worker_jobs = 0;
+        after.pending_snapshot_bytes = 1;
+        assert!(!compilation_quiet(&before, &after));
+    }
+
+    #[test]
     fn automatic_warmup_waits_for_tier2_and_pending_compilation() {
         let mut metrics = rquickjs_jit::JitMetrics::default();
         metrics.native_entries = 8;
@@ -1169,6 +1273,64 @@ mod tests {
                 workload.name
             );
         }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn forced_tier2_direct_call_probe_is_quiet_and_direct_during_steady_execution() {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .call_threshold(1)
+                .loop_threshold(1)
+                .tier_policy(JitTierPolicy::Optimize)
+                .force_optimized_for_test(true)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let source =
+            fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/call-heavy.js")).unwrap();
+        context
+            .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
+            .unwrap();
+        let required = context
+            .with(|ctx| ctx.eval::<u64, _>("globalThis.tier2ReadyInstalls"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            invoke_workload(&context).unwrap();
+            jit.poll();
+            if native_ready("tier2", &jit.metrics(), required) {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        let (before, settled) =
+            settle_compilation(&context, &jit, Duration::from_secs(60)).unwrap();
+        assert!(
+            settled && native_ready("tier2", &before, required),
+            "{before:?}"
+        );
+        for _ in 0..10 {
+            invoke_workload(&context).unwrap();
+            jit.poll();
+        }
+        let after = jit.metrics();
+        assert!(compilation_quiet(&before, &after));
+        let entries = after.tier2_entries - before.tier2_entries;
+        assert!(
+            (10..=20).contains(&entries),
+            "steady Tier2 entries: {entries}"
+        );
+        assert_eq!(after.native_fallbacks, before.native_fallbacks);
+        assert_eq!(after.native_retries, before.native_retries);
     }
 
     #[cfg(all(

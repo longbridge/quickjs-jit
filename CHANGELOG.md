@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JIT M3: cache one idle native entry handle per runtime with epoch-based
   invalidation (ABI minor 20), remove native-return queue allocation, and reuse
   CALL feedback storage. Reuse validated bytecode boundaries during helper PC
-  checks. Add acquisition metrics, lifecycle regressions, and
+  checks, and reuse one native execution timing stack across functions.
+  Add acquisition metrics, lifecycle regressions, and
   paired generic-call diagnostics. See `docs/M3.md`.
 
 ### Deprecated
@@ -30,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 ### Fixed
+
+- Benchmark forced Tier 2 direct calls only after the required caller/callee
+  publications settle; reject compilation during the timed batch and refresh
+  stale local workload checksums.
 
 ### Security
 
