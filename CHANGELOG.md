@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add `quickjs-jit-stdlib`, a single-package redistribution of the LLRT standard modules used by GPUI Shell, with bundled sources, provenance, and no LLRT package dependencies.
+- Add `quickjs-jit-stdlib`, a thin facade over external LLRT standard modules, with host-owned JIT compatibility and no bundled LLRT sources.
 
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
 - JIT M2: Tier 1 and Tier 2 now support the remaining comparison, bitwise, shift, `%`, unary

@@ -18,10 +18,10 @@ and use Cargo source patches from that revision for both `quickjs-jit-core` and
 `quickjs-jit-sys`. Do not combine the published 0.12.2 runtime with 0.12.3
 core or sys crates.
 
-The optional [`quickjs-jit-stdlib`](stdlib/README.md) package redistributes
-LLRT-derived Buffer, Crypto, Path, URL and Zlib modules in one crate. Its LLRT
-implementation dependencies are bundled as source modules; applications do not
-need LLRT packages or a Cargo compatibility patch. Stdlib requires Rust 1.89+.
+The optional [`quickjs-jit-stdlib`](stdlib/README.md) package provides a thin
+facade over external LLRT Buffer, Crypto, Path, URL and Zlib dependencies.
+It contains no LLRT implementation sources. JIT hosts retain their application-owned
+`rquickjs` compatibility patch. Stdlib requires Rust 1.89+ and is Git-only for now.
 
 [![github](https://img.shields.io/badge/github-longbridge/rquickjs-8da0cb.svg?style=for-the-badge&logo=github)](https://github.com/longbridge/rquickjs)
 [![crates](https://img.shields.io/crates/v/quickjs-jit.svg?style=for-the-badge&color=fc8d62&logo=rust)](https://crates.io/crates/quickjs-jit)

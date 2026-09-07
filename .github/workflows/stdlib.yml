@@ -19,20 +19,10 @@ jobs:
           toolchain: stable
       - run: cargo test -p quickjs-jit-stdlib
       - run: cargo test -p quickjs-jit-stdlib --all-features
-
-  package:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
-          submodules: true
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      - name: Verify the redistributed package and local binding releases
-        run: cargo package -p quickjs-jit-sys -p quickjs-jit-core -p quickjs-jit-macro -p quickjs-jit -p quickjs-jit-stdlib
-      - name: Check published dependency boundary
-        run: python3 scripts/check-stdlib-package.py target/package/quickjs-jit-stdlib-*.crate
+          python-version: '3.11'
+      - run: python scripts/check-stdlib-jit.py
 
   msrv:
     runs-on: ubuntu-latest

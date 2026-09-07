@@ -38,7 +38,7 @@ fn crypto_hash_and_compression_roundtrip() {
         import { gzipSync, gunzipSync } from 'zlib';
         const digest = createHash('sha256').update('abc').digest('hex');
         if (digest !== 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') throw Error(digest);
-        const input = Buffer.from('redistributed standard library');
+        const input = Buffer.from('external standard library');
         if (gunzipSync(gzipSync(input)).toString() !== input.toString()) throw Error('compression');
     "#,
     );
