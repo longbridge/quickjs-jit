@@ -1498,6 +1498,7 @@ impl Coordinator {
 
     /// Refreshes the backend's single persistent publication snapshot. The
     /// public `metrics()` accessor remains an independent complete snapshot.
+    #[cfg(any(test, feature = "compiler"))]
     pub(crate) fn refresh_published_metrics(&mut self, snapshot: &mut JitMetrics) {
         if self.metrics.dirty {
             snapshot.clone_from(&self.metrics.value);
