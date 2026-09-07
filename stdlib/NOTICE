@@ -1,0 +1,11 @@
+quickjs-jit-stdlib
+
+Contains modified source from LLRT (https://github.com/awslabs/llrt),
+revision 7b95c82a9b15e7ddfb2778eca4b5a63111e74f51.
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License, Version 2.0; see LICENSE-APACHE.
+
+Modifications: combined runtime crates into modules, adapted internal paths
+and macro references, fixed backend configuration to the GPUI Shell selection,
+and added a single-package public API, tests and distribution metadata.
+Per-file upstream SHA-256 hashes and feature selections are in UPSTREAM.json.

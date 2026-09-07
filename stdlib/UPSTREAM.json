@@ -1,0 +1,197 @@
+{
+  "features": {
+    "llrt_abort": [
+      "default",
+      "sleep-timers"
+    ],
+    "llrt_async_hooks": [
+      "default"
+    ],
+    "llrt_buffer": [
+      "default"
+    ],
+    "llrt_compression": [
+      "brotli-rust",
+      "flate2-rust",
+      "zstd-rust"
+    ],
+    "llrt_context": [
+      "default"
+    ],
+    "llrt_crypto": [
+      "_rustcrypto",
+      "_subtle-full",
+      "crypto-rust",
+      "default"
+    ],
+    "llrt_encoding": [
+      "default"
+    ],
+    "llrt_events": [
+      "default"
+    ],
+    "llrt_exceptions": [
+      "default"
+    ],
+    "llrt_hooking": [
+      "default"
+    ],
+    "llrt_json": [
+      "default"
+    ],
+    "llrt_path": [
+      "default"
+    ],
+    "llrt_stream_web": [
+      "default"
+    ],
+    "llrt_timers": [
+      "default"
+    ],
+    "llrt_url": [
+      "default"
+    ],
+    "llrt_utils": [],
+    "llrt_zlib": [
+      "compression-rust"
+    ]
+  },
+  "files": {
+    "libs/llrt_compression/src/lib.rs": "b1ab223de0b0d5f58de1eb8a9aae4fb2c3bb476773cba4984a82631ea62e7534",
+    "libs/llrt_compression/src/streaming.rs": "0081dee6787c1a055e2dbe518139de799ced8ba215bbf347c194db4ab698ba2d",
+    "libs/llrt_context/src/lib.rs": "378a1b41854247cbf058191013396100056f9a769d00ae03a5ee6f022bcadb16",
+    "libs/llrt_encoding/src/lib.rs": "f6b58ea2878ae0b9c191d86b3224db3989e7fc5c8cbd04b1f2d630325d1c97ec",
+    "libs/llrt_hooking/src/lib.rs": "71e438e92924ebef01bc979172ec4efe0ceef3caec96f083d350700a16f0bc84",
+    "libs/llrt_json/src/escape.rs": "6a9ccc1609ee270f29298a30041ac7d3224fda9c98ef1512e181d9bf8a3d89ee",
+    "libs/llrt_json/src/lib.rs": "f1e4eb2832c8316a2b857123c8d8fbf5c3d5b8049fa0792193a39e76debbc348",
+    "libs/llrt_json/src/parse.rs": "47d87e0544d11a82ed91d61c65ca67e6371cbf4523c061926da7f4846fb93fcf",
+    "libs/llrt_json/src/stringify.rs": "2229cf9fa359b63b1aca49fb2a26882d1333893dc24ef3cb0e2fc555fd752c0f",
+    "libs/llrt_test/src/lib.rs": "957e88cfa7716a9f8fff81b3bd82907681327f67786acd1e571102432a100c85",
+    "libs/llrt_utils/src/any_of.rs": "262075a7da167fb541036f116d2b31e4e45f2614063fc003d7a81499e7cd6c97",
+    "libs/llrt_utils/src/array_buffer.rs": "fb2fd5d4c80478189d0a70011239f3de4f4942f6e492b4e8ebebe013eb5b156c",
+    "libs/llrt_utils/src/bytearray_buffer.rs": "52290d386fa495c51c9dade2379586692350532c58a2e7e5571002791559aa52",
+    "libs/llrt_utils/src/bytes.rs": "da8e4c3bbd6caa604d393c6168a525e502ac0ee7aff325e76daff6fb35f671a2",
+    "libs/llrt_utils/src/class.rs": "10782bc386c2130ccc480c76e4ac03c39d1093216be441248995f91d83b07e33",
+    "libs/llrt_utils/src/clone.rs": "4588ca5d6809d8bc9c57fefa622efa2507ebd79f64a37115fa742bfaa116c322",
+    "libs/llrt_utils/src/ctx.rs": "8876ff8b7acc699baa29080f0089ee6efd1bd3cea23a8281bc8aef9a272806de",
+    "libs/llrt_utils/src/error.rs": "717d8eb504fc1e0a58b9cfbf70aceeb222a779d200df47438e688d89fbd10777",
+    "libs/llrt_utils/src/error_messages.rs": "b0be1dfc426cd07ced60cd60c77a9c633cf74899046204d73b64230a20aca66b",
+    "libs/llrt_utils/src/fs.rs": "994567b6b41773dd7e1ffbc5afec4fb56a73a15d9d20dfc791cec134c3ae705b",
+    "libs/llrt_utils/src/hash.rs": "8f67ad34d50aab82a6228ddf5afefdc7b1ce7f59ed94dc16d6d74274e3f757af",
+    "libs/llrt_utils/src/io.rs": "25f2a8fbfbd761efcf14000a08766d0def23d08ea3e065584bf0a365239a4d33",
+    "libs/llrt_utils/src/latch.rs": "379bb79d20955263d3bab52c2fde86e2f4aad9fa7f5cb09cd5464999d3882b51",
+    "libs/llrt_utils/src/lib.rs": "9d16b23e1eef07fd0cf76fd87ddc895be54c8bfc72219112989c8f9ea026a26d",
+    "libs/llrt_utils/src/macros.rs": "9b2683c35bc32fd5d2e2d15c01b807a7aad661bd9fd941eeba265fad4bd66f20",
+    "libs/llrt_utils/src/mc_oneshot.rs": "9b26ca47bc31d70714542dd4f544279112d5af0eb22ab4f723c1645cb62c82f2",
+    "libs/llrt_utils/src/module.rs": "849fd6a78613f51dd7f7c1c3d13490a0f83cb9aef6353092100e528bf0ab5f3c",
+    "libs/llrt_utils/src/object.rs": "7b6e334461d1d9474eb1e66d2735f445ec7b0866861a4ebfb8136421d5873c21",
+    "libs/llrt_utils/src/option.rs": "0641ba37bf512b4929dbdeeb1e5a13360df6748565d18c701d20c6fef52ddd9f",
+    "libs/llrt_utils/src/primordials.rs": "ebc757c7dcaf146c9d59948e749e9b097b565c6bce845ac1d0c2061cce137a19",
+    "libs/llrt_utils/src/provider.rs": "ffa04d08e605b3a3a133ea1ae8a9e470d092235274d27037ac727b0c4b1c566d",
+    "libs/llrt_utils/src/result.rs": "ff676fef4d64e8af3214467e9f600b529a0af508144dcc8db151fafb1dcc676e",
+    "libs/llrt_utils/src/reuse_list.rs": "e4bb420085fc2bce1f24d234ef7ddb29aac36aee40bb534339d624c978bf10b2",
+    "libs/llrt_utils/src/signals.rs": "5aadbf5a880f5d5eb09066faf20074d3ae8d8177d65b47935cff5ebc15dc84c9",
+    "libs/llrt_utils/src/string.rs": "b25e47b515448beca3239db5085e4bc4648296a7d6c24f544bda5d2ba9fa0311",
+    "libs/llrt_utils/src/sysinfo.rs": "b1912962fb6e3982f763e689c9e4db1e9de8f34ee0099f45b8e44eff8783dd04",
+    "libs/llrt_utils/src/time.rs": "1fea389eb2fac01d34092ffb7bc47d68149719034e40ba7ad48d19cdd2615f19",
+    "modules/llrt_abort/src/abort_controller.rs": "4c47c6b7e5f30d5e3da012bee73be6b6fb8b728a6167a2b58aad792a54d38bd2",
+    "modules/llrt_abort/src/abort_signal.rs": "d8b4acff4703e25275bb31655709ef65d1dabe5eaa20b09bc91271cfef5a7013",
+    "modules/llrt_abort/src/lib.rs": "c6cd0f4c108dcdb9a4e3ad9f8c7aff166de9cd16b743e901ad563b8ba62a5509",
+    "modules/llrt_async_hooks/src/finalization_registry.rs": "49a3303a899205abbcc3cd73498ae7b2b6dbc702165e3b149fde088fc82622a7",
+    "modules/llrt_async_hooks/src/lib.rs": "ed893a0c12a2ba2f6fe7253ab5ea8a7898cb91a895fafcabdf73a7030eb34988",
+    "modules/llrt_buffer/src/array_buffer_view.rs": "3765380e5fd4a0aa88f6ec8379e79cf16820f8bc47226958f72afbae4deaee1b",
+    "modules/llrt_buffer/src/blob.rs": "2241a76288260cc7256b0e83eaac0a86e5d60ca90ecee2b6d4211896e7a46c4d",
+    "modules/llrt_buffer/src/buffer.rs": "af69057974fce798449a5abe2fb5b2ad362a5427253fea2f75fe03ea6cfc5b99",
+    "modules/llrt_buffer/src/file.rs": "66af2d177fde3ec9cb7bf3490ce4ef99e4be75fb7f09f30670ebb9fa621555d4",
+    "modules/llrt_buffer/src/lib.rs": "b4fc7070e5d64ba83adef165db27bd084de4b8c17b68741931e5c753fdcdad06",
+    "modules/llrt_crypto/src/crc32.rs": "20ffd5f2ffe8da6928bb906b718e92342160d8e3f641ecbca5ad0c80456668eb",
+    "modules/llrt_crypto/src/hash.rs": "80ca6b27996d84179dca47253eb447d8aef1ad8b551d8731357ee162011e46a9",
+    "modules/llrt_crypto/src/lib.rs": "c8f1e8a68493a01aa88cb478599e6b46ae830d2c8b0192ea333125cb481fe2e1",
+    "modules/llrt_crypto/src/provider/graviola.rs": "731050853fd6625359a7281eb38b17739ae1c573c41af2a10003e688c4dd5361",
+    "modules/llrt_crypto/src/provider/mod.rs": "d3d7fc77ac421b5dc4b4e885d4a2452a3736f964d3fef5cb81578679f9a16d2b",
+    "modules/llrt_crypto/src/provider/openssl.rs": "1258c73175c608e5a3f37ee52c373a1c52181727aae31d551b9d9bfca36afc51",
+    "modules/llrt_crypto/src/provider/ring.rs": "64df7ff2d40e0e92ecba9dc66a88fee7881ee891133632bcd30165520f24affe",
+    "modules/llrt_crypto/src/provider/rust/aes_variants.rs": "81a6c7434ed235d0f4747a46802d9a8af3929c8fe1c4d9dc628f7e49e741bfc8",
+    "modules/llrt_crypto/src/provider/rust/mod.rs": "428ad9fd283f3384e6ba0bd0e826beb7656c843e9bc36c2c96022ae1dae60172",
+    "modules/llrt_crypto/src/subtle/crypto_key.rs": "710371a2e5166063894880676785aa34452fce4465b82ed428ef0656e715433a",
+    "modules/llrt_crypto/src/subtle/derive_algorithm.rs": "1c32532b9f34131dc23884e90f5092ff6740fa1a511530b3ae1f22df6dea8c08",
+    "modules/llrt_crypto/src/subtle/derive_bits.rs": "e91882fd0c312513964244e98a1ef53504ec74f8320ca9cbf82acfd5ea94afa2",
+    "modules/llrt_crypto/src/subtle/derive_keys.rs": "2c3e0cb4479577b24f60548afa8e956d83378d82862d1cf27b8450e280fb0cfa",
+    "modules/llrt_crypto/src/subtle/digest.rs": "eb2784bf5ec248d860aeb8ac85867f3503ac111dff65ed0ba9d406fc90ff97b7",
+    "modules/llrt_crypto/src/subtle/encryption.rs": "2baf77469ec5c2673a31353246cf6ab2225b09f8c1a9e8a01f156fa60c69a951",
+    "modules/llrt_crypto/src/subtle/encryption_algorithm.rs": "a01dcde97b7317e6a3795592f7f4faadd034ec3de8f13eb64c87f40ab3db7574",
+    "modules/llrt_crypto/src/subtle/export_key.rs": "c3d16f347ad264b14903675b2f4f68f8214b282cdbce0b9d3cfd956232fe3970",
+    "modules/llrt_crypto/src/subtle/generate_key.rs": "545ee866feec5a3987ce5959cb4ec8999ba2bbed64cc2830a0991cd390d2827c",
+    "modules/llrt_crypto/src/subtle/import_key.rs": "080a86eeb879b84a79ab572ea1dba5cb42fcd949a67a99f19b1b598a4826a67d",
+    "modules/llrt_crypto/src/subtle/key_algorithm.rs": "60b413c4581a6de8ad94f3782082810e33cccb4094e7e8e7638a153ce6445d6f",
+    "modules/llrt_crypto/src/subtle/mod.rs": "f4cc187891b18454e69526dbe1e7268d18f33978496093b26bd19c5699c9c269",
+    "modules/llrt_crypto/src/subtle/sign.rs": "b972432009c41cbde4f421b7401849cd3dddcd3ba12faa6457125af9250d8d23",
+    "modules/llrt_crypto/src/subtle/sign_algorithm.rs": "c5238409c833cf1950c6e27c47c7d2ff5da6943cdc5d7398c975a9f0672e6b3a",
+    "modules/llrt_crypto/src/subtle/stubs.rs": "258ad00d09084713e666b982abb0198f35175bb9465e8d35200281d3d251cd74",
+    "modules/llrt_crypto/src/subtle/util.rs": "09bbe7bd35dfae4f1e547b14558d51987c410b330022a27ff1f8639b2dbb3a70",
+    "modules/llrt_crypto/src/subtle/verify.rs": "50b94c3f7476085fa15dfee704c1ae86b45746a715ce31fee0a8a3568562e3a5",
+    "modules/llrt_crypto/src/subtle/wrapping.rs": "438a0b83ff2309e3c040bb3d4d875b8bdd847f338455323427eeb1d1b07b2db6",
+    "modules/llrt_events/src/custom_event.rs": "3fd2b93af9f049f5b422040d267b5db1a91dded37287cb90e94fc7ca69eb7dae",
+    "modules/llrt_events/src/event.rs": "702f6840703b355d025dce272385ab2c3d03776ca06863e9c2161102dca54517",
+    "modules/llrt_events/src/event_target.rs": "cfe75b0e524888916d4c8474cad58563e7793fdb59b64dc1da18f8a0f783871b",
+    "modules/llrt_events/src/lib.rs": "fc9856e7705c6d9a65ea6b32d3b0de5a46a8245c2b05a00714e08a4478f7f2a5",
+    "modules/llrt_exceptions/src/lib.rs": "fdeba55c9e1d6c063db6f89ef06f3b3d3debabd516254d1f574ccd53e43cfdbd",
+    "modules/llrt_path/src/lib.rs": "ce0acd413b638337d77ff9e2db8e462cdb063a29ae4784c93f93315761f023e7",
+    "modules/llrt_stream_web/src/lib.rs": "c4f509808b1f28b45870ccdfc3b4d6b62f07f34219916bca938b5d59108d316a",
+    "modules/llrt_stream_web/src/queuing_strategy/byte_length.rs": "7b7526dc31fd146d9fcf1743fa33cad598447cb08a068be1e7a09e22a8a4b7d3",
+    "modules/llrt_stream_web/src/queuing_strategy/count.rs": "1e14889970137784aa8e4e7696f31daa76dd84fe34561cc8cf9ac41888f6f217",
+    "modules/llrt_stream_web/src/queuing_strategy/mod.rs": "08c8f072d93944f2dd053b1ed7467ce0ab194c7355e033d6c03c9f7e09ec72b5",
+    "modules/llrt_stream_web/src/queuing_strategy/tests.rs": "7d99a2d6e15803a54d6a09bd5725d12d3a468a2649d52903d18fdc93a2e69e5f",
+    "modules/llrt_stream_web/src/readable/byob_reader.rs": "73d37b3bdeef3e69fae2f18d41c401f1a9a0e51a043cdff2469a364cd0fe354c",
+    "modules/llrt_stream_web/src/readable/byte_controller.rs": "34825b23e92952ab626c4523ef299c28b949c803d3bed6cbe9d13e752cd61408",
+    "modules/llrt_stream_web/src/readable/controller.rs": "1cded62c2b1f42cd86c2c28f1feda98170e38fcdc2dae16071cead7a5b83dea1",
+    "modules/llrt_stream_web/src/readable/default_controller.rs": "38a57f17ddd90dd60c74ac755fcc7c903ce6da26a8de7707e9511de32c02912e",
+    "modules/llrt_stream_web/src/readable/default_reader.rs": "ff4a966793df021ede2f425cc90f526eeb87774402dce8539b3c791c1ba91e75",
+    "modules/llrt_stream_web/src/readable/iterator.rs": "76fcc84083dc43775e1fe6edf66ebd7423c7c0055b7ed8326fdae0ada4a8b0ed",
+    "modules/llrt_stream_web/src/readable/mod.rs": "12580d913471a79125547ba9cfbb44cc1da2ba02db1ccb156dea8ab9e6a781ad",
+    "modules/llrt_stream_web/src/readable/objects.rs": "e12343220897d4cdd6317045be90427347102ad0840bedcd2262736e89253f01",
+    "modules/llrt_stream_web/src/readable/reader.rs": "e7458e756d6bae494e2327b5f2eb54d5a100695b1d695644d223c8cd2b11fe4f",
+    "modules/llrt_stream_web/src/readable/stream/algorithms.rs": "8e27781d599e6c04c9a8b94743d327deb47d90f99be4330299e4c9915cd7fe73",
+    "modules/llrt_stream_web/src/readable/stream/mod.rs": "22f338e88b4b9a7bf0af45de220c13a2b45ded9eb6f539b60e8eeeb5b3d80ba8",
+    "modules/llrt_stream_web/src/readable/stream/pipe.rs": "ccfa9c1c85290a0c5e97a5e8d373e6bdd6af80efe7eef3d86b785ed8a3e1083a",
+    "modules/llrt_stream_web/src/readable/stream/source.rs": "789e53bbb1d64b272110f3e6c20f92e5d15039d96abaefc86128bd454f401522",
+    "modules/llrt_stream_web/src/readable/stream/tee.rs": "d173d0a53f8c2590262e0ac40cde9ffb6ad5c05916713395c0fec771bf1a2871",
+    "modules/llrt_stream_web/src/readable_writable_pair.rs": "3f5ca0f7623aa997172df6a95ea5e36fe987c1dac32f8863cac207a111ba4e23",
+    "modules/llrt_stream_web/src/transform/controller.rs": "c02c1501d3463f088afff0b5fa7a0986c4f04df6b5d4e00cb00be3339238935a",
+    "modules/llrt_stream_web/src/transform/mod.rs": "10d7b0d55e4ef16806b80087a18931273a68ff35c1069ccd417b033d4fa4b5a9",
+    "modules/llrt_stream_web/src/transform/stream.rs": "0fa0351f5b1ddc5cd50e5f46d0a7243a3a1fa776b430bc4380d7495849097c40",
+    "modules/llrt_stream_web/src/transform/tests.rs": "732165628d15f5cfc76c4bb212deebbdddc52dc826f4b4e7ddd6fb03fc885834",
+    "modules/llrt_stream_web/src/transform/transformer.rs": "278f08b121ebd3156e68bcb35964e0ed780ed33e49ca9248d310057812e8311d",
+    "modules/llrt_stream_web/src/utils/mod.rs": "b92077176adf26fef7fd9c13e4bfd4b337fadd10dceb39223d09338cefead4fd",
+    "modules/llrt_stream_web/src/utils/promise.rs": "e9de2b34b2f580160734ae884b8c0e91c21c6247fe118fb6a5b399bb74818e28",
+    "modules/llrt_stream_web/src/utils/queue.rs": "dfa3a49a61c14b1f305a0eab6c1a49a20b7f06061bab58fcc108633846336819",
+    "modules/llrt_stream_web/src/writable/default_controller.rs": "cc57d48bc914b327f683be5779c3bd767d881a6f03495592fb56acf03b8f73d6",
+    "modules/llrt_stream_web/src/writable/default_writer.rs": "d9b6caa39d9b1bc645183b4eb4c555da69879a9a7c1521db1715d4826669d01a",
+    "modules/llrt_stream_web/src/writable/mod.rs": "2d272315e87daebea4f30d42613ee9b3fe1313761b8e6f086fe5f3597992a253",
+    "modules/llrt_stream_web/src/writable/objects.rs": "20eaf1c41136739d6ef56c0e853154f7f03533ef02811a04fdfb9dfc48dfbd5a",
+    "modules/llrt_stream_web/src/writable/stream/mod.rs": "4f0ae1e11bad363f8f0532f61b36b1c435ec34bc13c8d8e8d81d37c26fae96ba",
+    "modules/llrt_stream_web/src/writable/stream/sink.rs": "029c389756500e83f3f0f73f0618c3e36e9dfc5d3fb47d3c14110b45ee9bc707",
+    "modules/llrt_stream_web/src/writable/writer.rs": "ec7675027a0080bece5594b0becd2102d66c8e7bb4b0faad4e71bb2aef06b5b1",
+    "modules/llrt_timers/src/lib.rs": "dfb82e2671ab0854c46ec532f22a340fdb7ccd9744aefcad645748c9deacccff",
+    "modules/llrt_url/src/lib.rs": "2c2980426a1566c369cf75d3a63a793ecc67a2796db6b11ac31b63e21bf0edb4",
+    "modules/llrt_url/src/url_class.rs": "c4f9057df44a4ea2876a414d492d2fbbc85d2321da58fa1a1d8a74d952d9e7fa",
+    "modules/llrt_url/src/url_search_params.rs": "e48498686956e9492df7f6b82d480d2f64ee1b2d7a3477f98499daa47d86257d",
+    "modules/llrt_zlib/src/brotli.rs": "4a59a6186ed2525264dff303528cf10d6fc45c5100fec316d04538f293c0c738",
+    "modules/llrt_zlib/src/lib.rs": "a35873cdf3a3baab7233364c61d0cf45f03085211d8d5d70dc192c11a04c35fd",
+    "modules/llrt_zlib/src/zlib.rs": "6dd03456f7ccd0f279c38f7680ec4b4721d6449e524ee214206e843efa06750d",
+    "modules/llrt_zlib/src/zstd.rs": "7511caba3eeed9080c431c3d5c30855307e597b1d066566c07d3a5aae69393ae"
+  },
+  "repository": "https://github.com/awslabs/llrt",
+  "revision": "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51",
+  "roots": {
+    "llrt_buffer": [],
+    "llrt_crypto": [
+      "crypto-rust"
+    ],
+    "llrt_path": [],
+    "llrt_url": [],
+    "llrt_zlib": [
+      "compression-rust"
+    ]
+  }
+}
