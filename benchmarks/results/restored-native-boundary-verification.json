@@ -1,0 +1,8 @@
+{
+  "candidate": "cold-object-probes; native-entry helper experiment reverted",
+  "tests": "30 native boundary tests passed on macOS release and native ARM Linux ASAN",
+  "added_case": "native_to_js_recursion_obeys_stack_limit_and_recovers_after_exception",
+  "test_source_sha256": "9abf9ee6e34fe493bbfa9dcde1001fd0d6ffc53d9f4ece73a30782855d5b5011",
+  "format": "passed",
+  "diff_check": "passed"
+}

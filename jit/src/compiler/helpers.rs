@@ -83,3 +83,21 @@ pub(super) fn generated_signatures(isa: &dyn TargetIsa) -> Result<Vec<Signature>
         })
         .collect()
 }
+
+/// JavaScript truthiness for an IEEE-754 binary64 payload. AArch64 lowering in
+/// Cranelift 0.116 does not implement OrderedNotEqual; integer comparisons also
+/// handle both signed zeros and every NaN payload without an FP comparison.
+pub(super) fn emit_f64_bits_truthy(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    payload: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    let magnitude = builder.ins().band_imm(payload, i64::MAX);
+    let nonzero = builder.ins().icmp_imm(IntCC::NotEqual, magnitude, 0);
+    let not_nan = builder.ins().icmp_imm(
+        IntCC::UnsignedLessThanOrEqual,
+        magnitude,
+        0x7ff0_0000_0000_0000_i64,
+    );
+    builder.ins().band(nonzero, not_nan)
+}

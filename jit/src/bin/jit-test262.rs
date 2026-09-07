@@ -614,6 +614,7 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                         let function = eligible.function.clone();
                         let invocation = eligible.invocation.clone();
                         let mode = options.mode;
+                        let timeout = options.timeout;
                         let runtime_ref = &runtime;
                         let trace_evidence = Arc::clone(&trace_evidence);
                         move |context: &Context| -> Result<(), String> {
@@ -624,7 +625,11 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                             let warm = format!(
                                 "for(let __jit_i=0;__jit_i<256;__jit_i++){{{invocation};}}"
                             );
-                            for _ in 0..128 {
+                            // Compiler readiness depends on elapsed time, not
+                            // interpreter replay speed (especially with coverage
+                            // or sanitizer instrumentation on the worker).
+                            let replay_deadline = Instant::now() + timeout;
+                            while Instant::now() < replay_deadline {
                                 // Re-arm the trace for every replay round. The
                                 // evidence only needs one round in which native
                                 // code executed; accumulating every warm-up
@@ -685,7 +690,7 @@ fn run(options: Options) -> Result<SuiteReport, String> {
                                     evidence.1.dedup();
                                     return Ok(());
                                 }
-                                thread::yield_now();
+                                thread::sleep(Duration::from_millis(1));
                             }
                             Err(format!("forced {function} did not enter requested tier"))
                         }

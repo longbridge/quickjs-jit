@@ -1,0 +1,30 @@
+{
+  "platform": "native aarch64 Linux on Apple M3 via OrbStack; no CPU emulation",
+  "image": "quickjs-jit-asan:arm64",
+  "source_mount": "read-only /src",
+  "tests_passed": 258,
+  "command": "CC=clang RUSTFLAGS=-Zsanitizer=address cargo test -p quickjs-jit-runtime --lib --test runtime_feedback --test property_specialization --test helpers --test background --test gpui_shell_surface --test lifecycle --test optimized -Zbuild-std --target aarch64-unknown-linux-gnu --locked --features compiler,test-support",
+  "sources": {
+    "jit/src/compiler/helpers.rs": "ed7e2a745da358efb0382f1d3e2250b8db4bc987eafdf221531b0e71eed7a88f",
+    "jit/src/compiler/baseline.rs": "5e4742bc87548e6acdecba8b3f70f1363632a57dddc2a4dacaf384024f078ae4",
+    "jit/src/compiler/optimized.rs": "e3f32843e0761b829a04e2c306a6b4d87af6545c291239710b71225d40fe009e",
+    "jit/src/runtime/coordinator.rs": "509fa154c42ea3c3cee0993e6e34f37430d9ebf1fb1aed88a101bed95c135339",
+    "jit/src/lib.rs": "18446fa393f9bb095fe5ed88cdb8cc75c435fe36e66b39182e0aa114b647664b",
+    "jit/tests/optimized.rs": "868963ab843e427937d503976a23d08df60f2360cabaa8743684e755e05e3182",
+    "sys/patches/0001-rquickjs-jit.patch": "b3f8ed2d67653bad98b690d0e5bf5b18ea1958258624a5060f946a31b5bf93b0",
+    "sys/patches/0002-runtime-feedback.patch": "82793058130d7e295eb1b82f871e33537fd85223b7c60e03307e7f6cebf6d95b",
+    "sys/patches/0003-element-layout.patch": "a5daf4a878c34e9a74e756cf46fbb2b8a8b673eca8e8910417e3001e0fe96272",
+    "sys/patches/0004-tier1-globals.patch": "87dfd973eaecaa5056e9341e97c1905436d0a2c3dcd307eea233072e131d30c6",
+    "sys/patches/0005-tier1-constructors.patch": "4b2e5d8d4a74873841681ca8069f1be77804cf5bef18e7cb2e3818418060af82",
+    "sys/patches/0006-tier1-regexp.patch": "c371ffa08b3e0dcaae4c04b54d4ae58e4261cdce0bf02f6b28d88e07cb2dc543",
+    "sys/patches/0007-msan-slot-boundary.patch": "3007127d85757396d4e5be5fec4ec13aef571d5fef30f882636102f2a3c66d44",
+    "sys/patches/0008-tier1-atom-values.patch": "482993bedd2b0908bb3459efa89d1a65c8daec24a99ffe3982a90157f5de7a9e",
+    "sys/patches/0009-tier1-arith-slow.patch": "640c9362df72c991aedfdb294b22a8a8c9e784b71211486354d5c9fff04ef187",
+    "sys/patches/0010-native-entry-cache.patch": "964f4571a065dab73398898ce69cce032e2d578e208c7697ea8dbcb7bbdc64d4",
+    "sys/patches/0011-helper-pc-cursor.patch": "3173f900e20f4810488a4309cf8b3617231c724f07781a84c2553c9fdb2bba0e",
+    "sys/patches/0012-shape-retention.patch": "f73c6fd25b7aec0641d66c049320d2a72f8c59dcbd44514aabe913e48d5890b5",
+    "sys/patches/0013-feedback-gate.patch": "791fc9efeadd55658f031b0671e5fd7fb82304209f0a26067ce76047f0bf36f3",
+    "sys/patches/0014-inactive-probes.patch": "89c7d0b788902f4c405f660da462376356a650f45b77210175d01f26a7334a69",
+    "sys/patches/0015-cold-object-probes.patch": "6c966661b906c1b094ece47c768acd0f6ff6200c88eac5095c9f047f83128a14"
+  }
+}

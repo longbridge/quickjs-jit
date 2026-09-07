@@ -40,6 +40,73 @@ fn feedback_is_bounded_and_transitions_monotonically() {
 }
 
 #[test]
+fn repeated_feedback_preserves_widening_generations_and_capacity_accounting() {
+    let a = FunctionKey::new(7, 1);
+    let next = FunctionKey::new(7, 2);
+    let mut table = FeedbackTable::new(2, 3);
+    for _ in 0..8 {
+        assert_eq!(
+            table.observe_type(a, 1, FeedbackKind::Value, ObservedType::Int32),
+            FeedbackState::Monomorphic
+        );
+        assert_eq!(
+            table.observe_type(next, 1, FeedbackKind::Value, ObservedType::Bool),
+            FeedbackState::Monomorphic
+        );
+    }
+    assert_eq!(
+        table.observe_type(a, 1, FeedbackKind::Value, ObservedType::Float64),
+        FeedbackState::Polymorphic
+    );
+    assert_eq!(
+        table.observe_type(a, 1, FeedbackKind::Value, ObservedType::Int32),
+        FeedbackState::Polymorphic
+    );
+    let version = table.version();
+    for _ in 0..8 {
+        assert_eq!(
+            table.observe_type(a, 1, FeedbackKind::Value, ObservedType::Int32),
+            FeedbackState::Polymorphic
+        );
+        assert_eq!(
+            table.observe_type(next, 1, FeedbackKind::Value, ObservedType::Bool),
+            FeedbackState::Monomorphic
+        );
+        assert_eq!(
+            table.observe_type(a, 2, FeedbackKind::Value, ObservedType::Int32),
+            FeedbackState::Megamorphic
+        );
+    }
+    assert_eq!(table.version(), version);
+    assert_eq!(
+        table.dropped_observations(),
+        8,
+        "repeated rejected observations still count"
+    );
+    table.observe_call(a, &[ObservedType::Int32]);
+    let version = table.version();
+    for _ in 0..8 {
+        table.observe_call(a, &[ObservedType::Int32]);
+    }
+    assert_eq!(table.version(), version);
+    table.observe_call(a, &[ObservedType::Int32, ObservedType::Bool]);
+    table.observe_call(a, &[ObservedType::Float64]);
+    table.observe_call(a, &[ObservedType::Int32]);
+    table.observe_call(next, &[ObservedType::Bool]);
+    let snapshot = table.snapshot(1);
+    let call = snapshot.call_at(a).unwrap();
+    assert_eq!(
+        call.argument(0),
+        [ObservedType::Int32, ObservedType::Float64]
+    );
+    assert_eq!(call.argument(1), [ObservedType::Bool]);
+    assert_eq!(
+        snapshot.call_at(next).unwrap().argument(0),
+        [ObservedType::Bool]
+    );
+}
+
+#[test]
 fn feedback_models_all_arguments_return_sites_and_binary_operands() {
     let function = FunctionKey::new(17, 9);
     let mut table = FeedbackTable::new(32, 3);
@@ -1226,7 +1293,7 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1295,6 +1362,39 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
             .unwrap(),
         1
     );
+    context.with(|ctx| {
+        // Int32 and Bool use only the low 32 bits of QuickJS's value union.
+        // Give the unused high bits a nonzero value to expose full-width tests.
+        for (name, tag) in [
+            ("paddedZero", rquickjs::qjs::JS_TAG_INT),
+            ("paddedFalse", rquickjs::qjs::JS_TAG_BOOL),
+        ] {
+            let raw = rquickjs::qjs::JSValue {
+                u: rquickjs::qjs::JSValueUnion {
+                    float64: f64::from_bits(0x1234_5678_0000_0000),
+                },
+                tag: i64::from(tag),
+            };
+            let value = unsafe { rquickjs::Value::from_raw(ctx.clone(), raw) };
+            ctx.globals().set(name, value).unwrap();
+        }
+    });
+    for (expression, expected) in [
+        ("truth(paddedZero)", 1),
+        ("truth(paddedFalse)", 1),
+        ("truth(0.0)", 1),
+        ("truth(-NaN)", 1),
+        ("truth(Infinity)", 2),
+        ("truth(-Infinity)", 2),
+        ("truth(Number.MIN_VALUE)", 2),
+        ("truth(-Number.MIN_VALUE)", 2),
+    ] {
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>(expression)).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
     jit.poll();
     let after = jit.metrics();
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
@@ -2272,6 +2372,27 @@ fn stable_side_exit_reaches_recompile_threshold_and_unstable_exit_demotes_with_b
 }
 
 #[test]
+fn stable_side_exit_demotes_when_side_path_cannot_stop_repeated_failures() {
+    let key = FunctionKey::new(88, 1);
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+    for count in 1..20 {
+        assert_eq!(
+            coordinator.record_optimized_side_exit(key, 7),
+            if count == 10 {
+                SideExitAction::StablePathThreshold
+            } else {
+                SideExitAction::Counted
+            }
+        );
+    }
+    assert!(matches!(
+        coordinator.record_optimized_side_exit(key, 7),
+        SideExitAction::Demote { .. }
+    ));
+    assert_eq!(coordinator.metrics().optimized_demotions, 1);
+}
+
+#[test]
 fn stable_side_path_request_owns_exact_guard_profile_without_unloading_target() {
     use rquickjs_jit::runtime::{GuardId, SidePathProfile};
     let fixture = SnapshotFixture::compile("(function(a,b){return a-b})");
@@ -2309,16 +2430,64 @@ fn stable_side_path_request_owns_exact_guard_profile_without_unloading_target() 
         result: Ok(CompiledArtifact::empty(optimizing.artifact_key())),
     });
     let before = coordinator.pin(key, Tier::Optimizing).unwrap();
+    assert!(coordinator.record_benefit(key, Tier::Optimizing, 10));
+    assert!(coordinator.record_benefit(key, Tier::Optimizing, 20));
     let profile = SidePathProfile::new(key, GuardId::new(7), 7, ObservedType::Float64, 44);
     coordinator
         .queue_side_path(key, verified, frozen, profile)
         .unwrap();
     assert!(coordinator.pin(key, Tier::Optimizing).is_some());
     assert_eq!(before.key().generation, key.generation);
-
+    // A useful side path must remain queueable/installable while the old
+    // artifact continues hitting its guard, even beyond the failure budget.
+    for _ in 0..24 {
+        assert!(!matches!(
+            coordinator.record_optimized_side_exit_profile(key, 7, Some(ObservedType::Float64)),
+            SideExitAction::Demote { .. }
+        ));
+    }
     let request = coordinator.begin_next().unwrap();
     assert_eq!(request.side_path_profile(), Some(profile));
     assert_ne!(request.artifact_key().specialization_fingerprint, 0);
+    for _ in 0..24 {
+        assert!(!matches!(
+            coordinator.record_optimized_side_exit_profile(key, 7, Some(ObservedType::Float64)),
+            SideExitAction::Demote { .. }
+        ));
+    }
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Optimizing,
+        artifact_key: request.artifact_key(),
+        attempt_id: request.attempt_id(),
+        result: Ok(CompiledArtifact::empty(request.artifact_key())),
+    });
+    assert_eq!(coordinator.metrics().stale_results, 0);
+    assert_eq!(
+        coordinator.pin(key, Tier::Optimizing).unwrap().key(),
+        request.artifact_key()
+    );
+    assert!(coordinator.record_benefit(key, Tier::Optimizing, 7));
+    assert_eq!(
+        before.artifact().benefit().score,
+        30,
+        "replacement must not credit the still-pinned old artifact"
+    );
+    assert_eq!(
+        coordinator
+            .pin(key, Tier::Optimizing)
+            .unwrap()
+            .artifact()
+            .benefit()
+            .score,
+        7
+    );
+
+    assert_eq!(
+        coordinator.record_optimized_side_exit_profile(key, 7, Some(ObservedType::Float64)),
+        SideExitAction::Counted,
+        "replacement artifact starts a fresh guard failure budget"
+    );
 }
 
 #[test]
@@ -2655,7 +2824,7 @@ fn tail_call_lowers_as_a_guarded_call_followed_by_the_done_exit() {
 /// published Tier 2 machine code on a synthetic frame. This bypasses the
 /// Tier 1 policy entirely and checks results, exit kinds and resume pcs.
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]

@@ -505,9 +505,10 @@ struct ProductionBackend {
     coordinator: runtime::Coordinator,
     workers: runtime::BackgroundCompiler,
     requested: std::collections::HashSet<runtime::FunctionKey>,
-    hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
+    // Hot identity tables use VM-assigned keys, never guest-provided names.
+    hotness: rustc_hash::FxHashMap<runtime::FunctionKey, runtime::HotnessState>,
     optimizing_requested: std::collections::HashSet<runtime::FunctionKey>,
-    optimizing_hotness: std::collections::HashMap<runtime::FunctionKey, runtime::HotnessState>,
+    optimizing_hotness: rustc_hash::FxHashMap<runtime::FunctionKey, runtime::HotnessState>,
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     baseline_property_refreshed: std::collections::HashSet<runtime::FunctionKey>,
@@ -551,12 +552,12 @@ struct ProductionBackend {
     // Cached C handles can execute repeatedly without another acquisition.
     // Replacement acquisition updates this before native_enter; active frames
     // retain their own tier in execution_starts across recursive replacement.
-    entry_tiers: std::collections::HashMap<runtime::FunctionKey, runtime::Tier>,
+    entry_tiers: rustc_hash::FxHashMap<runtime::FunctionKey, runtime::Tier>,
     entry_cache_epoch: u64,
     // C brackets each native invocation with a synchronous enter/exit pair.
     // Keep active records through retirement and preserve each invocation's tier.
     execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
-    execution_profiles: std::collections::HashMap<runtime::FunctionKey, ProductionProfile>,
+    execution_profiles: rustc_hash::FxHashMap<runtime::FunctionKey, ProductionProfile>,
     profitability_evaluations: u64,
     profitability_approved: u64,
     profitability_rejected: u64,
@@ -564,11 +565,11 @@ struct ProductionBackend {
     /// Baseline was measured harmful and unpublished.  This is deliberately
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
-    profitability_blacklisted: std::collections::HashSet<runtime::FunctionKey>,
+    profitability_blacklisted: rustc_hash::FxHashSet<runtime::FunctionKey>,
     /// Immutable generations for which neither tier can ever produce code.
     /// `record_hot` reports these to QuickJS so it can turn off all probes and
     /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
-    feedback_disabled: std::collections::HashSet<runtime::FunctionKey>,
+    feedback_disabled: rustc_hash::FxHashSet<runtime::FunctionKey>,
     benefit_recordings: u64,
     measured_benefit_ns: u64,
     compiler_measurements: Arc<CompilerMeasurements>,
@@ -1292,9 +1293,9 @@ impl ProductionBackend {
             config,
             workers,
             requested: std::collections::HashSet::new(),
-            hotness: std::collections::HashMap::new(),
+            hotness: rustc_hash::FxHashMap::default(),
             optimizing_requested: std::collections::HashSet::new(),
-            optimizing_hotness: std::collections::HashMap::new(),
+            optimizing_hotness: rustc_hash::FxHashMap::default(),
             optimizing_snapshots: std::collections::HashMap::new(),
             baseline_property_refreshed: std::collections::HashSet::new(),
             tier2_sources: std::collections::HashMap::new(),
@@ -1330,15 +1331,15 @@ impl ProductionBackend {
             snapshot_requests: 0,
             stable_path_compile_requests: 0,
             execution_starts: Vec::new(),
-            entry_tiers: std::collections::HashMap::new(),
+            entry_tiers: rustc_hash::FxHashMap::default(),
             entry_cache_epoch: 1,
-            execution_profiles: std::collections::HashMap::new(),
+            execution_profiles: rustc_hash::FxHashMap::default(),
             profitability_evaluations: 0,
             profitability_approved: 0,
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
-            profitability_blacklisted: std::collections::HashSet::new(),
-            feedback_disabled: std::collections::HashSet::new(),
+            profitability_blacklisted: rustc_hash::FxHashSet::default(),
+            feedback_disabled: rustc_hash::FxHashSet::default(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
             compiler_measurements,
@@ -1736,7 +1737,8 @@ impl ProductionBackend {
     /// snapshot. Cheap enough to run on every native exit so `Jit::metrics`
     /// stays exact even when the full maintenance pass is skipped.
     fn publish_metrics(&mut self) {
-        let mut snapshot = self.coordinator.metrics();
+        let mut snapshot = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
+        self.coordinator.refresh_published_metrics(&mut snapshot);
         snapshot.native_entries = self.native_entries;
         snapshot.native_acquisitions = self.native_acquisitions;
         snapshot.native_exits = self.native_exits;
@@ -1774,7 +1776,6 @@ impl ProductionBackend {
             .osr_validation
             .deopt_materializations
             .load(Ordering::Relaxed);
-        *self.metrics.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
     }
 
     fn clear_failed_request(&mut self, key: runtime::FunctionKey) {

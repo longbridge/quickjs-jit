@@ -350,3 +350,53 @@ fn reload_generation_gc_and_runtime_teardown_are_composable() {
     drop(runtime);
     assert!(dropped.load(Ordering::SeqCst));
 }
+
+#[test]
+fn market_sort_shape_churn_has_bounded_deopts() {
+    let runtime = JitRuntime::builder().build().unwrap();
+    let context = JsContext::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            function compareQuotes(left, right) { return right.score - left.score; }
+            globalThis.quotes = Array.from({length: 96}, (_, index) => ({index, score: index}));
+            function sortQuotes() {
+                quotes.reverse();
+                quotes.sort(compareQuotes);
+                for (let i = 0; i < quotes.length; i++) {
+                    if (quotes[i].score !== 95 - i) throw new Error("incorrect sort");
+                }
+            }
+        "#,
+        )
+        .unwrap();
+    });
+    // Keep the training shapes alive until the real comparator is installed;
+    // then change only shape identity while preserving its object/value types.
+    for _ in 0..128 {
+        context.with(|ctx| ctx.eval::<(), _>("sortQuotes()").unwrap());
+        runtime.jit().poll();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let warm = runtime.metrics();
+    assert!(warm.tier2_entries > 0, "{warm:?}");
+    assert_eq!(warm.native_fallbacks, 0, "{warm:?}");
+    context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "quotes = quotes.map(q => ({extra: true, index: q.index, score: q.score}))",
+        )
+        .unwrap();
+        for _ in 0..128 {
+            ctx.eval::<(), _>("sortQuotes()").unwrap();
+        }
+    });
+    runtime.jit().poll();
+    let metrics = runtime.metrics();
+    assert!(
+        metrics.native_fallbacks > 0,
+        "shape change must exercise deopt: {metrics:?}"
+    );
+    assert!(metrics.native_fallbacks <= 20, "{metrics:?}");
+    assert!(metrics.optimized_demotions > 0, "{metrics:?}");
+    assert_eq!(metrics.invalid_artifacts, 0, "{metrics:?}");
+}

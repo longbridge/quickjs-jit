@@ -654,6 +654,10 @@ pub struct FeedbackTable {
     /// callbacks skip the snapshot/scan work that could not produce a
     /// different answer.
     version: u64,
+    recent_types: [Option<(FeedbackKey, ObservedType, FeedbackState, u64)>; 4],
+    recent_type_cursor: usize,
+    last_call: Option<FunctionKey>,
+    last_call_arguments: Vec<ObservedType>,
     entries: BTreeMap<FeedbackKey, Entry>,
     calls: BTreeMap<FunctionKey, CallFeedbackEntry>,
     binaries: BTreeMap<(FunctionKey, u32), BinaryFeedbackEntry>,
@@ -780,6 +784,10 @@ impl FeedbackTable {
             diversity_limit: diversity_limit.max(1),
             dropped: 0,
             version: 0,
+            recent_types: [None; 4],
+            recent_type_cursor: 0,
+            last_call: None,
+            last_call_arguments: Vec::new(),
             entries: BTreeMap::new(),
             calls: BTreeMap::new(),
             binaries: BTreeMap::new(),
@@ -795,6 +803,11 @@ impl FeedbackTable {
     }
 
     pub fn observe_call(&mut self, function: FunctionKey, arguments: &[ObservedType]) {
+        // Call feedback is a monotonic lattice, not an execution counter. An
+        // identical event has already contributed every argument and its arity.
+        if self.last_call == Some(function) && self.last_call_arguments == arguments {
+            return;
+        }
         let (call, is_new) = match self.calls.entry(function) {
             MapEntry::Occupied(entry) => (entry.into_mut(), false),
             MapEntry::Vacant(entry) => (entry.insert(CallFeedbackEntry::default()), true),
@@ -829,6 +842,9 @@ impl FeedbackTable {
         if is_new || before != after {
             self.version = self.version.wrapping_add(1);
         }
+        self.last_call = Some(function);
+        self.last_call_arguments.clear();
+        self.last_call_arguments.extend_from_slice(arguments);
     }
 
     pub fn observe_return(&mut self, function: FunctionKey, pc: u32, result: ObservedType) {
@@ -1030,6 +1046,18 @@ impl FeedbackTable {
         observation: ObservedType,
     ) -> FeedbackState {
         let key = FeedbackKey { function, pc, kind };
+        // A cached result is valid only at the same lattice version: a later
+        // observation can widen the state returned for an older known type.
+        if let Some((_, _, state, _)) =
+            self.recent_types
+                .iter()
+                .flatten()
+                .find(|(cached, ty, _, version)| {
+                    *cached == key && *ty == observation && *version == self.version
+                })
+        {
+            return *state;
+        }
         let at_capacity = self.entries.len() >= self.capacity;
         let (entry, before) = match self.entries.entry(key) {
             MapEntry::Occupied(entry) => {
@@ -1048,6 +1076,10 @@ impl FeedbackTable {
         if before != Some(entry_shape(entry)) {
             self.version = self.version.wrapping_add(1);
         }
+        // Capacity-rejected observations return above and are never cached:
+        // each rejected event must still increment the dropped counter.
+        self.recent_types[self.recent_type_cursor] = Some((key, observation, state, self.version));
+        self.recent_type_cursor = (self.recent_type_cursor + 1) % self.recent_types.len();
         state
     }
 

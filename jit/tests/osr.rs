@@ -434,8 +434,34 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
         0
     );
     let result = context.with(|ctx| {
+        // A faster interpreter can finish this first invocation while an
+        // instrumented compiler is still producing its OSR child. Yield only
+        // until native helpers have actually run, rather than racing a fixed
+        // iteration count against worker scheduling. Keep a bounded deadline
+        // so broken OSR still fails instead of hanging the test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        ctx.globals().set("paceUntilNative", rquickjs::function::Func::from(
+            move |ctx: rquickjs::Ctx<'_>| -> rquickjs::Result<()> {
+                let mut counters: rquickjs_core::qjs::JSJitHelperCounters =
+                    unsafe { core::mem::zeroed() };
+                counters.struct_size = core::mem::size_of_val(&counters) as u32;
+                let rt = unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
+                assert_eq!(unsafe {
+                    rquickjs_core::qjs::JS_JitGetHelperCounters(rt, &mut counters)
+                }, 0);
+                if counters.dup_count == 0 && counters.free_count == 0 {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(rquickjs::Exception::throw_message(
+                            &ctx, "timed out waiting for first-invocation OSR",
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(())
+            },
+        )).unwrap();
         ctx.eval::<i32, _>(
-            "let events=0,reentered=0; function nested(){reentered++} let state={limit:50000,get next(){events++;nested();return events}}; function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s} f(state,0)",
+            "let events=0,reentered=0; function nested(){reentered++} let state={limit:50000,get next(){paceUntilNative();events++;nested();return events}}; function f(state,z){let s=state.next;for(let i=z;i<state.limit;i++){s=state.next}return s} f(state,0)",
         )
     }).unwrap_or_else(|error| panic!("{error:?}; {:?}", jit.metrics()));
     assert_eq!(result, 50001);

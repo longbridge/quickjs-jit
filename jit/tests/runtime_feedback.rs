@@ -854,3 +854,145 @@ fn call_feedback_keeps_growing_slots_after_arity_and_types_widen() {
     feedback.observe_call(function, &[]);
     assert_eq!(feedback.version(), 3);
 }
+
+#[test]
+fn retained_feedback_shapes_have_bounded_storage_and_detach_releases_them() {
+    use rquickjs::{Function, Object};
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>("function read(o) { return o.answer; }")
+            .unwrap()
+    });
+    runtime.run_gc();
+    let before = runtime.memory_usage();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let guard = RuntimeJitGuard::attach(&runtime, CaptureBackend(events)).unwrap();
+    context.with(|ctx| {
+        let read: Function = ctx.globals().get("read").unwrap();
+        for index in 0..512 {
+            let object = Object::new(ctx.clone()).unwrap();
+            object.set(format!("padding_{index}"), 0).unwrap();
+            object.set("answer", index).unwrap();
+            assert_eq!(read.call::<_, i32>((object,)).unwrap(), index);
+        }
+    });
+    runtime.run_gc();
+    let retained = runtime.memory_usage();
+    assert!(retained.shape_count > before.shape_count);
+    assert!(retained.shape_count <= before.shape_count + 64);
+    assert!(
+        retained.shape_size - before.shape_size + retained.atom_size - before.atom_size
+            <= 16 * 1024
+    );
+    assert_eq!(retained.obj_count, before.obj_count);
+    drop(guard);
+    runtime.run_gc();
+    let detached = runtime.memory_usage();
+    assert_eq!(detached.shape_count, before.shape_count);
+    assert_eq!(detached.atom_count, before.atom_count);
+    assert_eq!(detached.obj_count, before.obj_count);
+}
+
+#[test]
+fn feedback_cache_does_not_retain_oversized_property_names_or_contexts() {
+    use rquickjs::{Function, Object};
+    let runtime = Runtime::new().unwrap();
+    // Initialize the runtime-owned emergency error before measuring realm lifetime.
+    drop(Context::full(&runtime).unwrap());
+    runtime.run_gc();
+    let before_context = runtime.memory_usage();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let _guard = RuntimeJitGuard::attach(&runtime, CaptureBackend(events)).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>("function read(o) { return o.answer; }")
+            .unwrap()
+    });
+    runtime.run_gc();
+    let before = runtime.memory_usage();
+    context.with(|ctx| {
+        let read: Function = ctx.globals().get("read").unwrap();
+        for index in 0..8 {
+            let object = Object::new(ctx.clone()).unwrap();
+            object
+                .set(format!("{}_{index}", "x".repeat(64 * 1024)), 0)
+                .unwrap();
+            object.set("answer", index).unwrap();
+            assert_eq!(read.call::<_, i32>((object,)).unwrap(), index);
+        }
+    });
+    runtime.run_gc();
+    let after = runtime.memory_usage();
+    assert_eq!(after.shape_count, before.shape_count);
+    assert_eq!(after.atom_count, before.atom_count);
+    context.with(|ctx| assert_eq!(ctx.eval::<i32, _>("read({answer: 42})").unwrap(), 42));
+    drop(context);
+    runtime.run_gc();
+    let after_context = runtime.memory_usage();
+    assert_eq!(after_context.obj_count, before_context.obj_count);
+    assert_eq!(after_context.shape_count, before_context.shape_count);
+}
+
+#[test]
+fn arithmetic_feedback_rechecks_suspension_after_primitive_conversion() {
+    use rquickjs::{function::Func, Ctx};
+    let runtime = Runtime::new().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let guard = RuntimeJitGuard::attach(&runtime, CaptureBackend(events.clone())).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.globals()
+            .set(
+                "setSuspended",
+                Func::from(|ctx: Ctx<'_>, suspended: bool| {
+                    // Called from JavaScript with the runtime lock already held.
+                    let status = unsafe {
+                        qjs::JS_SetJitSuspended(
+                            qjs::JS_GetRuntime(ctx.as_raw().as_ptr()),
+                            suspended as _,
+                        )
+                    };
+                    assert_eq!(status, 0);
+                }),
+            )
+            .unwrap();
+        ctx.eval::<(), _>("function add(a,b){return a+b} function less(a,b){return a<b}")
+            .unwrap();
+        assert_eq!(
+            ctx.eval::<i32, _>("add({valueOf(){return 40}},2)").unwrap(),
+            42
+        );
+    });
+    assert!(events.lock().unwrap().iter().any(|event| event.kind
+        == qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY
+        && event.types
+            == [
+                qjs::JSJitValueType_JS_JIT_VALUE_OBJECT,
+                qjs::JSJitValueType_JS_JIT_VALUE_INT32,
+                qjs::JSJitValueType_JS_JIT_VALUE_INT32
+            ]));
+    for script in [
+        "add({valueOf(){setSuspended(true);return 40}},2) === 42",
+        "less({valueOf(){setSuspended(true);return 40}},42)",
+        "+({valueOf(){setSuspended(true);return 42}}) === 42",
+        "-({valueOf(){setSuspended(true);return -42}}) === 42",
+    ] {
+        guard.resume().unwrap();
+        events.lock().unwrap().clear();
+        context.with(|ctx| assert!(ctx.eval::<bool, _>(script).unwrap()));
+        assert!(!events.lock().unwrap().iter().any(|event| matches!(
+            event.kind,
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY
+                | qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CONVERSION
+        )));
+    }
+    guard.resume().unwrap();
+    events.lock().unwrap().clear();
+    context.with(|ctx| assert_eq!(ctx.eval::<i32, _>("add(40,2)").unwrap(), 42));
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY));
+}

@@ -1,0 +1,355 @@
+warning: unused workspace dependency `rquickjs`
+  --> Cargo.toml:37:1
+   |
+37 | rquickjs = { package = "quickjs-jit", version = "0.12.7", path = "./", default-features = false }
+   | ^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `rquickjs`
+warning: workspace (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> Cargo.toml:8:1
+  |
+8 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> sys/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-sys` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> core/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-core` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> macro/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-macro` (manifest) generated 1 warning
+   Compiling quickjs-jit-sys v0.12.7 (/src/sys)
+   Compiling quickjs-jit-runtime v0.12.7 (/src/jit)
+   Compiling quickjs-jit-core v0.12.7 (/src/core)
+   Compiling quickjs-jit v0.12.7 (/src)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.78s
+     Running unittests src/lib.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/209983a785d7f1bb/out/rquickjs_jit-209983a785d7f1bb)
+
+running 50 tests
+test ir::optimized::ownership_tests::borrowed_values_cannot_be_consumed_or_duplicated_after_move ... ok
+test compiler::baseline::tests::unresolved_numeric_constant_is_guarded_at_use_instead_of_retrying_at_entry ... ok
+test bytecode::decode::tests::generated_metadata_matches_the_linked_c_table ... ok
+test code_cache::evict::tests::eviction_uses_measured_benefit_per_charged_byte ... ok
+test compiler::baseline::target_identity_tests::target_identity_is_the_canonical_identity_of_the_compilers_actual_isa ... ok
+test platform::mac_jit_policy_tests::policy_is_immutable_and_mismatch_avoids_platform_calls ... ok
+test jit_runtime_drop_tests::owning_runtime_drops_jit_guard_before_quickjs_runtime ... ok
+test platform::mac_jit_policy_tests::unsupported_write_protection_does_not_initialize_policy ... ok
+test platform::mac_jit_policy_tests::safe_callback_policy_requires_prior_unsafe_bootstrap ... ok
+test jit_runtime_drop_tests::reports_whether_a_jit_backend_is_attached ... ok
+test platform::mmap_result_tests::address_zero_is_categorized_and_cleaned_up ... ok
+test production_environment_tests::artifact_environment_uses_runtime_abi_target_features_and_config ... ok
+test compiler::baseline::tests::entry_domain_analysis_exhaustively_handles_every_ir_op_variant ... ok
+test platform::linux::tests::cache_sync_republishes_new_bytes_at_the_same_virtual_address ... ok
+test production_environment_tests::deopt_demotions_invalidate_entry_cache_before_periodic_maintenance ... ok
+test production_environment_tests::call_feedback_preserves_wide_arguments_and_rejects_entire_invalid_events ... ok
+test compiler::baseline::target_identity_tests::every_codegen_setting_value_participates_in_target_identity ... ok
+test production_environment_tests::unmatched_native_exit_does_not_consume_another_active_timer ... ok
+test production_osr_validation_tests::every_invalid_osr_field_retries_without_mutating_the_frame ... ok
+test production_environment_tests::native_timing_preserves_recursive_tiers_across_retirement_and_exit_kinds ... ok
+test production_osr_validation_tests::invalid_stress_frame_is_byte_identical_and_does_not_arm_stress_gc ... ok
+test production_osr_validation_tests::native_return_handoff_preserves_identity_type_and_recursive_exit_order ... ok
+test production_osr_validation_tests::osr_success_is_counted_only_after_frame_validation ... ok
+test production_environment_tests::sequential_native_entries_reuse_timing_storage_across_functions ... ok
+test production_osr_validation_tests::validation_retry_is_not_attributed_to_generated_native_code ... ok
+test runtime::background::tests::construction_does_not_start_workers_before_eligible_work_exists ... ok
+test production_environment_tests::stable_call_feedback_does_not_allocate_after_warmup ... ok
+test runtime::coordinator::tests::compiler_panic_becomes_failure_completion_without_unwinding ... ok
+test runtime::background::tests::first_queued_request_starts_the_configured_workers ... ok
+test runtime::hotness_tests::adaptive_thresholds_are_consumed_by_hotness_decisions ... ok
+test runtime::hotness_tests::adaptive_thresholds_are_integer_deterministic_and_neutral_without_measurements ... ok
+test runtime::coordinator::tests::published_metrics_remain_exact_across_compilation_and_native_exits ... ok
+test runtime::hotness_tests::cumulative_timings_are_normalized_once ... ok
+test runtime::hotness_tests::eight_short_callbacks_do_not_queue_and_counters_saturate ... ok
+test runtime::hotness_tests::fixed_policy_is_deterministic_for_reports ... ok
+test runtime::hotness_tests::exact_default_call_and_loop_boundaries_queue_once ... ok
+test runtime::hotness_tests::automatic_trial_requires_measured_baseline_and_positive_modeled_benefit ... ok
+test runtime::coordinator::tests::mock_compiler_waits_for_release_before_submitting_completion ... ok
+test runtime::hotness_tests::measured_profitability_keeps_host_heavy_code_at_baseline ... ok
+test runtime::hotness_tests::hotness_counters_saturate_and_submission_is_single_shot ... ok
+test runtime::hotness_tests::measured_profitability_optimizes_hot_numeric_code_after_break_even ... ok
+test runtime::invalidate::shape_tests::prototype_generation_change_invalidates_shape_specialization ... ok
+test runtime::invalidate::shape_tests::shape_and_prototype_generation_changes_recursively_invalidate_dependents ... ok
+test runtime::shape_feedback::tests::a_new_generation_replaces_the_stale_layout_for_the_same_shape ... ok
+test runtime::invalidate::shape_tests::polymorphic_shape_dependencies_are_bounded ... ok
+test runtime::shape_feedback::tests::lattice_widens_monotonically_and_is_bounded ... ok
+test runtime::shape_feedback::tests::sites_are_keyed_by_exact_function_generation_and_pc ... ok
+test runtime::shape_feedback::tests::observation_requires_exact_shape_and_prototype_generations ... ok
+test ir::optimized::ownership_tests::call_ownership_protocol_balances_refcounts_under_stress ... ok
+test bytecode::decode::tests::arbitrary_byte_sequences_decode_completely_or_return_an_error ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/background.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/bfffa350c9026e88/out/background-bfffa350c9026e88)
+
+running 15 tests
+test foreground_submission_never_waits_for_blocked_compiler ... ok
+test compile_deadline_is_categorized_and_interpretation_remains_available ... ok
+test configured_workers_receive_compilations_concurrently ... ok
+test eight_short_callbacks_do_not_request_a_snapshot ... ok
+test pending_snapshot_and_ir_quotas_are_total_and_release_via_raii ... ok
+test generator_resume_keeps_jit_stack_capacity_initialized ... ok
+test saturated_completion_mailbox_does_not_deadlock_shutdown ... ok
+test snapshot_quota_falls_back_without_disabling_runtime ... ok
+test shutdown_cooperatively_cancels_a_blocked_compiler ... ok
+test saturated_worker_mailbox_rolls_request_back_to_queue ... ok
+test stale_completion_after_reload_is_discarded ... ok
+test production_backend_receives_owned_snapshots_automatically ... ok
+test pending_job_poll_installs_without_an_additional_eligible_function_call ... ok
+test two_production_runtimes_compile_install_execute_and_retire_independently ... ok
+test thousand_hot_reload_completions_stay_generation_isolated ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.24s
+
+     Running tests/gpui_shell_surface.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/13c83621e729ed0e/out/gpui_shell_surface-13c83621e729ed0e)
+
+running 6 tests
+test current_gpui_shell_quickjs_surface_runs_against_jit_runtime ... ok
+test rejected_continuation_does_not_starve_later_shell_work ... ok
+test reload_generation_gc_and_runtime_teardown_are_composable ... ok
+test deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing ... ok
+test rendering_events_and_async_continuations_share_live_script_state ... ok
+test market_sort_shape_churn_has_bounded_deopts ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s
+
+     Running tests/helpers.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/a33d8a314af0b138/out/helpers-a33d8a314af0b138)
+
+running 16 tests
+test dup_and_free_are_balanced_without_changing_the_borrowed_input ... ok
+test call_is_reentrant_and_keeps_borrowed_values_live_across_forced_cycle_gc ... ok
+test add_slow_preserves_symbol_to_primitive_order_and_exception_order ... ok
+test helper_pc_validation_preserves_boundaries_across_forward_and_backward_queries ... ok
+test property_get_routes_getters_and_proxies_through_the_existing_catch_path ... ok
+test poll_id_zero_remains_compatible_and_interrupts_native_infinite_work ... ok
+test conversion_comparison_and_allocation_helpers_return_owned_values ... ok
+test scratch_tail_does_not_overlap_captured_local_var_refs ... ok
+test shape_guard_matches_exact_rooted_shape_and_misses_without_mutating_values ... ok
+test property_set_consumes_the_value_on_success_and_exception ... ok
+test resolve_const_duplicates_the_active_function_constant ... ok
+test zero_logical_stack_has_two_explicit_clear_scratch_slots ... ok
+test arith_slow_helpers_reject_foreign_opcodes_without_touching_operands ... ok
+test unary_arith_slow_matches_interpreter_semantics_and_consumes_the_input ... ok
+test binary_arith_slow_matches_interpreter_semantics_and_consumes_both_operands ... ok
+test invalid_identity_map_index_and_slot_are_rejected_before_touching_values ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/lifecycle.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/affda3028f0d014c/out/lifecycle-affda3028f0d014c)
+
+running 58 tests
+test artifact_identity_distinguishes_every_compatibility_field ... ok
+test active_optimizing_code_retains_baseline_after_invalidation ... ok
+test bounded_reclamation_revisits_tier1_after_removing_tier2 ... ok
+test baseline_retry_cannot_switch_to_optimizing_tier ... ok
+test artifact_publication_failures_are_categorized_as_install_failures ... ok
+test cache_charges_owned_relocation_metadata ... ok
+test active_execution_pin_prevents_eviction ... ok
+test advancing_retirement_watermark_unpublishes_every_lower_generation ... ok
+test cache_enforces_code_and_metadata_quotas_independently ... ok
+test cache_rejects_single_oversize_artifact_without_mutation ... ok
+test backend_attached_before_the_first_context_executes_after_context_initialization ... ok
+test cache_enforces_byte_quota_with_deterministic_multi_eviction ... ok
+test call_specialization_registry_builds_stable_bounded_artifact_identity ... ok
+test cache_evicts_low_benefit_least_recent_artifact ... ok
+test call_version_registry_bounds_distinct_versions_and_attempts ... ok
+test compiled_call_target_is_generation_pinned_and_rejects_new_stale_resolutions ... ok
+test compiler_failures_are_categorized_without_losing_the_total ... ok
+test compiled_call_target_requires_an_installed_optimizing_callee ... ok
+test compiled_artifact_owns_code_and_all_runtime_metadata ... ok
+test completion_channel_is_bounded_and_drained_only_by_coordinator ... ok
+test completion_drain_obeys_exact_budget_and_reports_remaining_work ... ok
+test call_version_identity_distinguishes_generation_target_signature_and_epoch ... ok
+test coordinator_propagates_full_environment_into_artifact_identity ... ok
+test coordinator_retries_cache_install_while_all_artifacts_are_pinned ... ok
+test dependency_release_is_reconsidered_during_transactional_multi_eviction ... ok
+test final_pin_drop_marks_invalidated_artifact_for_explicit_poll_reclamation ... ok
+test deterministic_harness_rejects_stale_and_blacklists_per_generation ... ok
+test failed_dependency_aware_eviction_plan_is_transactional ... ok
+test evicting_optimizing_artifact_restores_baseline_install_state ... ok
+test coordinator_rejects_snapshot_from_a_different_function_generation ... ok
+test full_new_generation_admission_still_retires_older_in_flight_work ... ok
+test mismatched_failure_identity_leaves_legitimate_attempt_in_flight ... ok
+test old_same_key_retry_completion_cannot_satisfy_new_attempt ... ok
+test optimizing_artifact_requires_exact_baseline_deopt_target ... ok
+test guard_drop_leaves_runtime_clones_and_contexts_interpreter_only ... ok
+test profitability_demoted_baseline_is_not_terminal_for_tier2_feedback ... ok
+test newer_generation_retires_older_in_flight_compilation ... ok
+test optimizing_install_replaces_entry_but_retains_baseline_target ... ok
+test mismatched_artifact_identity_leaves_legitimate_attempt_in_flight ... ok
+test repeated_failures_blacklist_only_the_generation ... ok
+test optimizing_queue_requires_an_installed_baseline ... ok
+test optimized_demotion_does_not_republish_an_absent_baseline ... ok
+test released_invalidated_artifact_is_reclaimed_before_live_eviction ... ok
+test repeated_instability_cannot_reset_its_budget_by_recompiling_successfully ... ok
+test replacement_and_invalidation_update_cache_byte_charge ... ok
+test optimizing_failure_preserves_baseline_and_its_own_retry_state ... ok
+test raw_runtime_forces_detach_and_drains_work_while_guard_survives ... ok
+test retiring_an_installed_dependency_retires_itself_and_transitive_dependents ... ok
+test request_queue_saturation_is_bounded_and_observable ... ok
+test runtime_owned_registry_releases_functions_before_free_while_guard_survives ... ok
+test same_generation_and_specialization_signature_has_a_version_limit ... ok
+test shutdown_closes_publication_and_retires_pending_work ... ok
+test runtime_poll_shares_budget_between_completions_and_reclamation ... ok
+test stale_result_is_never_installed ... ok
+test shutdown_unpublishes_and_drains_installed_artifacts ... ok
+test stale_dependency_rejects_artifact_before_publication ... ok
+test wrong_tier_completion_does_not_consume_legitimate_in_flight_request ... ok
+test registry_mutation_and_reads_are_synchronized_across_safe_scoped_threads ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/optimized.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/fef4255ee6f012d8/out/optimized-fef4255ee6f012d8)
+
+running 77 tests
+test alternating_argument_types_widen_each_call_slot_without_shifting_positions ... ok
+test compile_request_carries_the_runtime_epoch_to_the_worker ... ok
+test compile_request_owns_an_immutable_feedback_snapshot ... ok
+test cse_rewrites_uses_to_the_canonical_ssa_value ... ok
+test dependency_invalidation_is_transitive_and_generation_exact ... ok
+test direct_call_entry_uses_only_unboxed_float64_abi ... ok
+test feedback_is_bounded_and_transitions_monotonically ... ok
+test feedback_lattice_only_widens_and_flags_accumulate ... ok
+test feedback_models_all_arguments_return_sites_and_binary_operands ... ok
+test direct_call_entry_uses_only_unboxed_int32_abi_and_checked_arithmetic ... ok
+test automatic_profitability_blacklist_unpublishes_harmful_baseline ... ok
+test counted_loop_increment_bounded_by_its_header_compare_needs_no_overflow_exit ... ok
+test bitops_loop_lowers_to_native_shift_and_xor_instructions ... ok
+test integer_zero_times_negative_one_folds_to_negative_zero ... ok
+test increments_without_a_strict_upper_bound_keep_their_overflow_exit ... ok
+test comparisons_lower_to_native_compares_without_helper_calls ... ok
+test local_cse_and_dce_are_effect_free_and_bounded ... ok
+test m2_core_opcodes::argument_and_local_stores_redefine_the_frame_slot ... ok
+test guard_specific_float_side_path_changes_machine_guard_and_preserves_profile ... ok
+test m2_core_opcodes::bitwise_not_applies_to_int32_and_converts_floats_exactly ... ok
+test m2_core_opcodes::constants_push_exact_tagged_values ... ok
+test independent_optimized_machine_lowers_numeric_loop ... ok
+test m2_core_opcodes::get_loc0_loc1_pushes_both_locals_in_order ... ok
+test m2_core_opcodes::decrement_family_mirrors_increment_with_exact_overflow ... ok
+test m2_core_opcodes::goto_with_a_32_bit_label_branches_exactly ... ok
+test m2_core_opcodes::is_undefined_and_is_null_test_the_tag ... ok
+test m2_core_opcodes::local_arithmetic_updates_the_slot_in_place ... ok
+test m2_core_opcodes::logical_not_computes_truthiness_natively_for_primitives ... ok
+test iterative_fibonacci_multi_local_loop_translates_to_optimized_ir ... ok
+test m2_core_opcodes::modulo_computes_only_exact_int32_remainders ... ok
+test iterative_fibonacci_enters_tier2_with_multi_local_loop_phis ... ok
+test mixed_numeric_folding_preserves_negative_zero_nan_and_overflow ... ok
+test m2_core_opcodes::negation_and_plus_compute_exact_numeric_results ... ok
+test monomorphic_call_emits_pointer_guard_and_unboxed_native_abi ... ok
+test narrow_optimizer_preserves_javascript_numeric_edges ... ok
+test m2_core_opcodes::shifts_mask_the_count_and_unsigned_shift_renormalizes ... ok
+test primary_optimized_artifact_is_keyed_by_the_bounded_feedback_signature ... ok
+test optimized_passes_rewrite_the_emitted_machine_plan ... ok
+test production_cse_keys_exact_ssa_operands_and_respects_frame_writes ... ok
+test production_optimized_ir_is_independent_ssa_with_loop_guards ... ok
+test modulo_loop_lowers_to_a_guarded_srem ... ok
+test int_arith_kernel_inner_loop_is_an_unboxed_int32_loop_around_native_calls ... ok
+test production_tier2_direct_call_checks_object_before_payload ... ok
+test production_feedback_installs_and_executes_the_int32_add_specialization ... ok
+test m2_core_opcodes::equality_opcodes_compute_exact_results_and_deopt_on_coercions ... ok
+test automatic_call_heavy_promotes_the_direct_edge_caller ... ok
+test m2_core_opcodes::stack_shuffles_permute_values_exactly_like_the_interpreter ... ok
+test production_tier2_waits_for_and_calls_a_direct_callee ... ok
+test repeated_feedback_preserves_widening_generations_and_capacity_accounting ... ok
+test side_path_queue_rejects_stale_or_mismatched_profiles ... ok
+test production_tier2_executes_packed_and_typed_element_loops ... ok
+test stable_float64_feedback_selects_strict_direct_float_arithmetic ... ok
+test production_worker_installs_and_enters_narrow_tier2_native_code ... ok
+test stable_int32_add_feedback_selects_a_guarded_integer_only_hot_path ... ok
+test stable_int32_loop_carries_unboxed_i32_ssa_through_the_header ... ok
+test stable_float64_loop_stays_native_without_a_side_path ... ok
+test stable_int32_sub_mul_div_use_checked_native_operations ... ok
+test stable_monomorphic_call_lowers_with_visible_owner_provenance ... ok
+test production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch ... ok
+test stable_side_exit_demotes_when_side_path_cannot_stop_repeated_failures ... ok
+test stable_side_exit_reaches_recompile_threshold_and_unstable_exit_demotes_with_backoff ... ok
+test stable_side_path_request_owns_exact_guard_profile_without_unloading_target ... ok
+test stable_packed_element_loop_lowers_to_native_tier2_loads ... ok
+test storing_a_proven_heap_argument_alias_into_a_local_fails_closed ... ok
+test automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion ... ok
+test tail_call_lowers_as_a_guarded_call_followed_by_the_done_exit ... ok
+test tier2_feedback_requires_exact_generation_stable_value_and_nonzero_epoch ... ok
+test tier2_plan_is_exact_for_numeric_locals_and_rejects_unsupported_semantics ... ok
+test stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version ... ok
+test tier2_rejects_captured_loop_headers_with_live_operand_stack ... ok
+test worker_snapshot_contains_stable_tokens_not_runtime_pointers ... ok
+test storing_an_unproven_alias_into_a_local_guards_the_tag_before_the_spill ... ok
+test stable_typed_element_loop_lowers_native_loads_and_stores ... ok
+test production_tier2_runs_the_int_arith_kernel_end_to_end ... ok
+test signature_completes_when_the_first_invocation_returns_natively ... ok
+test production_tier2_caller_executes_a_monomorphic_compiled_callee ... ok
+test production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.09s
+
+     Running tests/property_specialization.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/f51022b210b96625/out/property_specialization-f51022b210b96625)
+
+running 9 tests
+test megamorphic_property_site_fails_closed_to_the_generic_tier ... ok
+test inherited_accessor_and_refcounted_values_fail_closed ... ok
+test guarded_own_primitive_property_lowers_with_owned_deopt_bridge ... ok
+test bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores ... ok
+test bounded_polymorphic_property_emits_one_shape_guard_per_layout ... ok
+test production_bounded_polymorphic_property_hits_each_layout_without_deopt ... ok
+test temporary_receivers_keep_shared_shape_guards_stable_across_gc ... ok
+test borrowed_property_store_preserves_live_aliases_and_deopt_owners ... ok
+test production_property_specialization_survives_shape_mutation_and_stress_gc ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/runtime_feedback.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/4d0090797d298fb4/out/runtime_feedback-4d0090797d298fb4)
+
+running 27 tests
+test branch_feedback_tracks_condition_type_and_both_outcomes_monotonically ... ok
+test call_signature_lattice_tracks_exact_targets_arguments_and_results ... ok
+test call_feedback_keeps_growing_slots_after_arity_and_types_widen ... ok
+test call_feedback_records_argc_and_every_argument_type_once ... ok
+test accessor_and_proxy_property_paths_do_not_claim_fixed_locations ... ok
+test arithmetic_feedback_rechecks_suspension_after_primitive_conversion ... ok
+test call_specialization_rejects_unstable_or_unsupported_signatures ... ok
+test binary_feedback_records_operands_result_and_numeric_edge_flags ... ok
+test callsite_feedback_records_caller_target_arguments_and_result_at_exact_pc ... ok
+test conversion_feedback_is_exact_bounded_and_queryable ... ok
+test dynamic_add_records_int_float_and_string_without_changing_results ... ok
+test exception_and_bigint_do_not_change_interpreter_semantics ... ok
+test feedback_survives_nested_calls_and_full_gc_between_executions ... ok
+test float_feedback_is_supported_but_mixed_or_unstable_feedback_is_not ... ok
+test specialization_rejects_unstable_arity_zero_epoch_and_unbounded_arguments ... ok
+test stable_numeric_call_signature_produces_an_exact_bounded_key ... ok
+test interpreter_reports_conversion_and_branch_feedback_at_exact_sites ... ok
+test stable_numeric_feedback_produces_a_tier2_signature ... ok
+test specialization_fingerprint_is_stable_and_sensitive_to_key_fields ... ok
+test return_feedback_is_keyed_by_exact_site_and_preserves_dynamic_types ... ok
+test property_feedback_records_real_shape_prototype_and_location_only_for_fast_data_properties ... ok
+test zero_type_capacity_rejects_repeated_types_but_admits_independent_calls ... ok
+test type_feedback_at_capacity_keeps_updates_and_versions_only_lattice_changes ... ok
+test terminal_backend_response_disables_hot_and_feedback_callbacks_in_quickjs ... ok
+test stable_object_and_int_feedback_produces_a_tier2_loop_signature ... ok
+test feedback_cache_does_not_retain_oversized_property_names_or_contexts ... ok
+test retained_feedback_shapes_have_bounded_storage_and_detach_releases_them ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
