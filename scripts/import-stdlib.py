@@ -134,7 +134,7 @@ for name in names:
         output.write_text(text)
 
 shutil.copy2(root / 'LICENSE', dest / 'LICENSE-APACHE')
-shutil.copy2(root / 'NOTICE', dest / 'NOTICE-LLRT')
+(dest / 'NOTICE-LLRT').write_text('\n'.join(line.rstrip() for line in (root / 'NOTICE').read_text().splitlines()) + '\n')
 (dest / 'UPSTREAM.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n')
 
 def value(v):
