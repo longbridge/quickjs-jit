@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     bytecode::VerifiedFunction,
@@ -602,7 +602,7 @@ pub struct Coordinator {
     side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
     specialization_versions: HashMap<(FunctionKey, u64), u8>,
     call_specialization_versions: HashMap<FunctionKey, HashMap<u64, u8>>,
-    profitability_demotions: HashSet<FunctionKey>,
+    profitability_demotions: FxHashSet<FunctionKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -697,7 +697,7 @@ impl Coordinator {
             side_exit_observations: HashMap::new(),
             specialization_versions: HashMap::new(),
             call_specialization_versions: HashMap::new(),
-            profitability_demotions: HashSet::new(),
+            profitability_demotions: FxHashSet::default(),
         }
     }
 
