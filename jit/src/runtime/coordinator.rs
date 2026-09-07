@@ -7,6 +7,8 @@ use std::{
     },
 };
 
+use rustc_hash::FxHashMap;
+
 use crate::{
     bytecode::VerifiedFunction,
     code_cache::{ArtifactKey, ArtifactVersionIdentity, CodeCache, CompiledArtifact, ExecutionPin},
@@ -547,23 +549,52 @@ impl FunctionState {
     }
 }
 
+/// Tracks mutations to compilation counters. Native-entry counters bypass the
+/// dirty bit because publication refreshes those fields on every native exit.
+#[derive(Debug)]
+struct CoordinatorMetrics {
+    value: JitMetrics,
+    dirty: bool,
+}
+
+impl std::ops::Deref for CoordinatorMetrics {
+    type Target = JitMetrics;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl std::ops::DerefMut for CoordinatorMetrics {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // All normal field updates invalidate publication, including future
+        // counters added to the coordinator.
+        self.dirty = true;
+        &mut self.value
+    }
+}
+
 #[derive(Debug)]
 pub struct Coordinator {
     max_queue_len: usize,
     max_attempts: u8,
     clock: u64,
     queue: VecDeque<CompileRequest>,
-    functions: HashMap<FunctionKey, FunctionState>,
+    // Keys are VM-assigned identities, not guest-controlled strings.
+    functions: FxHashMap<FunctionKey, FunctionState>,
     current_generations: HashMap<u64, u64>,
     in_flight: HashMap<FunctionKey, InFlight>,
     next_attempt_id: u64,
-    metrics: JitMetrics,
+    metrics: CoordinatorMetrics,
     completion_sender: Option<SyncSender<CompileCompletion>>,
     completion_receiver: Option<Receiver<CompileCompletion>>,
     completion_signals: Arc<CompletionQueueSignals>,
     shutdown: bool,
     cache: CodeCache,
     installed_keys: HashMap<(FunctionKey, Tier), ArtifactKey>,
+    // Non-owning lookup cache. Every installed-key mutation clears it, so
+    // repeated native exits can credit the same exact artifact without hashing
+    // its function and tier again. Cache residency is still checked below.
+    last_benefit_target: Option<(FunctionKey, Tier, ArtifactKey)>,
     environment: ArtifactEnvironment,
     dependencies: DependencyGraph,
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
@@ -644,17 +675,21 @@ impl Coordinator {
             max_attempts,
             clock: 0,
             queue: VecDeque::new(),
-            functions: HashMap::new(),
+            functions: FxHashMap::default(),
             current_generations: HashMap::new(),
             in_flight: HashMap::new(),
             next_attempt_id: 0,
-            metrics: JitMetrics::disabled(),
+            metrics: CoordinatorMetrics {
+                value: JitMetrics::disabled(),
+                dirty: true,
+            },
             completion_sender: Some(completion_sender),
             completion_receiver: Some(completion_receiver),
             completion_signals,
             shutdown: false,
             cache,
             installed_keys: HashMap::new(),
+            last_benefit_target: None,
             environment,
             dependencies: DependencyGraph::default(),
             latest_feedback_epochs: HashMap::new(),
@@ -1138,8 +1173,18 @@ impl Coordinator {
                         for evicted in insert.evictions() {
                             self.record_eviction(*evicted);
                         }
+                        self.last_benefit_target = None;
                         self.installed_keys
                             .insert((completion.key, completion.requested_tier), artifact_key);
+                        if completion.requested_tier == Tier::Optimizing {
+                            // Reset the per-artifact retry counts, but preserve
+                            // guard/type instability history across recompiles.
+                            if let Some(exits) = self.side_exits.get_mut(&completion.key) {
+                                for count in exits.values_mut() {
+                                    *count = 0;
+                                }
+                            }
+                        }
                         if expected.side_path {
                             self.latest_feedback_epochs
                                 .insert(completion.key, expected.feedback_epoch);
@@ -1261,6 +1306,7 @@ impl Coordinator {
     }
 
     fn retire_state(&mut self, key: FunctionKey) {
+        self.last_benefit_target = None;
         self.queue.retain(|request| request.key != key);
         self.in_flight.remove(&key);
         let function = self.functions.entry(key).or_default();
@@ -1276,6 +1322,7 @@ impl Coordinator {
     }
 
     fn record_eviction(&mut self, evicted: ArtifactKey) {
+        self.last_benefit_target = None;
         let key = FunctionKey::new(evicted.function_id, evicted.generation);
         self.installed_keys.remove(&(key, evicted.tier));
         if let Some(record) = self.functions.get_mut(&key) {
@@ -1320,6 +1367,7 @@ impl Coordinator {
     /// interpreter. Automatic tiering uses this only after its bounded
     /// profitability retries are exhausted; BaselineOnly never calls it.
     pub fn demote_baseline_to_interpreter(&mut self, key: FunctionKey) -> bool {
+        self.last_benefit_target = None;
         let Some(function) = self.functions.get_mut(&key) else {
             return false;
         };
@@ -1381,6 +1429,7 @@ impl Coordinator {
     /// executions retain their publication pin; new entries use the
     /// interpreter until the refreshed artifact is installed.
     pub fn prepare_baseline_direct_refresh(&mut self, key: FunctionKey) -> bool {
+        self.last_benefit_target = None;
         let Some(function) = self.functions.get_mut(&key) else {
             return false;
         };
@@ -1412,7 +1461,10 @@ impl Coordinator {
         if state != CompileState::Cold {
             return state;
         }
-        if self.installed_keys.contains_key(&(key, tier)) {
+        // Publication already proves residency for the active tier. A lower
+        // installed tier may coexist with it, so retain the exact-key lookup
+        // only when asking about that non-published tier.
+        if function.published == Some(tier) || self.installed_keys.contains_key(&(key, tier)) {
             CompileState::Installed(tier)
         } else {
             CompileState::Cold
@@ -1422,13 +1474,13 @@ impl Coordinator {
     /// Reports immutable generations that cannot publish either native tier.
     /// Profitability demotions remain probeable for their bounded Tier2 trial.
     pub fn is_terminally_blacklisted(&self, key: FunctionKey) -> bool {
-        matches!(
-            self.tier_state(key, Tier::Optimizing),
-            CompileState::Blacklisted
-        ) || (matches!(
-            self.tier_state(key, Tier::Baseline),
-            CompileState::Blacklisted
-        ) && !self.profitability_demotions.contains(&key))
+        let Some(function) = self.functions.get(&key) else {
+            return false;
+        };
+        !function.retired
+            && (function.optimizing.state == CompileState::Blacklisted
+                || (function.baseline.state == CompileState::Blacklisted
+                    && !self.profitability_demotions.contains(&key)))
     }
 
     pub fn advance_clock(&mut self, now: u64) {
@@ -1436,12 +1488,27 @@ impl Coordinator {
     }
 
     pub fn metrics(&self) -> JitMetrics {
-        let mut metrics = self.metrics.clone();
+        let mut metrics = self.metrics.value.clone();
         metrics.completion_queue_saturated =
             self.completion_signals.saturated.load(Ordering::Acquire);
         metrics.code_bytes = self.cache.charged_code_bytes();
         metrics.metadata_bytes = self.cache.charged_metadata_bytes();
         metrics
+    }
+
+    /// Refreshes the backend's single persistent publication snapshot. The
+    /// public `metrics()` accessor remains an independent complete snapshot.
+    pub(crate) fn refresh_published_metrics(&mut self, snapshot: &mut JitMetrics) {
+        if self.metrics.dirty {
+            snapshot.clone_from(&self.metrics.value);
+            self.metrics.dirty = false;
+        }
+        snapshot.completion_queue_saturated =
+            self.completion_signals.saturated.load(Ordering::Acquire);
+        snapshot.code_bytes = self.cache.charged_code_bytes();
+        snapshot.metadata_bytes = self.cache.charged_metadata_bytes();
+        snapshot.tier2_entries = self.metrics.value.tier2_entries;
+        snapshot.side_path_entries = self.metrics.value.side_path_entries;
     }
 
     pub fn set_native_enabled(&mut self, enabled: bool) {
@@ -1460,18 +1527,28 @@ impl Coordinator {
     }
 
     pub fn record_tier2_entry(&mut self) {
-        self.metrics.tier2_entries = self.metrics.tier2_entries.saturating_add(1);
+        self.metrics.value.tier2_entries = self.metrics.value.tier2_entries.saturating_add(1);
     }
 
     /// Feeds observed time saved by an installed artifact into cache eviction.
     pub fn record_benefit(&mut self, key: FunctionKey, tier: Tier, saved_ns: u64) -> bool {
-        let Some(artifact) = self.installed_keys.get(&(key, tier)).copied() else {
-            return false;
+        let artifact = match self.last_benefit_target {
+            Some((function, cached_tier, artifact)) if function == key && cached_tier == tier => {
+                artifact
+            }
+            _ => {
+                let Some(artifact) = self.installed_keys.get(&(key, tier)).copied() else {
+                    return false;
+                };
+                self.last_benefit_target = Some((key, tier, artifact));
+                artifact
+            }
         };
         self.cache.record_benefit(artifact, saved_ns).is_ok()
     }
     pub fn record_side_path_entries(&mut self, count: u64) {
-        self.metrics.side_path_entries = self.metrics.side_path_entries.saturating_add(count);
+        self.metrics.value.side_path_entries =
+            self.metrics.value.side_path_entries.saturating_add(count);
     }
     pub fn record_deopt(&mut self, guard_failure: bool) {
         self.metrics.deopts = self.metrics.deopts.saturating_add(1);
@@ -1500,11 +1577,22 @@ impl Coordinator {
         self.side_exit_observations
             .entry(observation_key)
             .or_insert(observed);
+        let side_path_pending = self.functions.get(&key).is_some_and(|function| {
+            matches!(
+                function.optimizing.state,
+                CompileState::Queued(_) | CompileState::Compiling(_)
+            )
+        });
         let exits = self.side_exits.entry(key).or_default();
         let count = exits.entry(guard).or_default();
         *count = count.saturating_add(1);
         let count = *count;
-        if exits.len() > 1 || observation_changed {
+        // A stable guard gets one opportunity to compile a side path at ten
+        // exits. If no replacement is pending, stability alone must not keep
+        // failing code published forever (e.g. repeated Object shape misses).
+        // Let authorized work finish: ten fast calls must not cancel a valid
+        // side path just because its compiler worker has not been scheduled.
+        if exits.len() > 1 || observation_changed || (count >= 20 && !side_path_pending) {
             let function = self.functions.entry(key).or_default();
             function.instability_attempts = function.instability_attempts.saturating_add(1);
             let attempts = function.instability_attempts;
@@ -1521,9 +1609,13 @@ impl Coordinator {
                     retry_after,
                 }
             };
+            self.last_benefit_target = None;
             self.installed_keys.remove(&(key, Tier::Optimizing));
             if let Some(function) = self.functions.get_mut(&key) {
-                function.published = Some(Tier::Baseline);
+                function.published = self
+                    .installed_keys
+                    .contains_key(&(key, Tier::Baseline))
+                    .then_some(Tier::Baseline);
             }
             self.metrics.optimized_demotions = self.metrics.optimized_demotions.saturating_add(1);
             SideExitAction::Demote { retry_after }
@@ -1537,6 +1629,7 @@ impl Coordinator {
     /// Atomically returns an installed optimizing tier to a queueable state
     /// while preserving its baseline deopt target.
     pub fn prepare_stable_path_recompile(&mut self, key: FunctionKey) -> bool {
+        self.last_benefit_target = None;
         if !self.installed_keys.contains_key(&(key, Tier::Baseline))
             || self
                 .installed_keys
@@ -1662,6 +1755,43 @@ mod tests {
         CompileSnapshot::from_untrusted_bytecode(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
             .verify(VerifyLimits::default())
             .unwrap()
+    }
+
+    #[test]
+    fn published_metrics_remain_exact_across_compilation_and_native_exits() {
+        fn check(coordinator: &mut Coordinator, published: &mut JitMetrics) {
+            coordinator.refresh_published_metrics(published);
+            assert_eq!(*published, coordinator.metrics());
+        }
+        let mut coordinator = Coordinator::with_limits(1, 1, 4, 3);
+        let mut published = JitMetrics::disabled();
+        check(&mut coordinator, &mut published);
+        let key = FunctionKey::new(1, 1);
+        coordinator.queue(key, Tier::Baseline, snapshot()).unwrap();
+        check(&mut coordinator, &mut published);
+        let request = coordinator.begin_next().unwrap();
+        check(&mut coordinator, &mut published);
+        coordinator.complete(CompileCompletion {
+            key,
+            requested_tier: request.tier,
+            artifact_key: request.artifact_key,
+            attempt_id: request.attempt_id,
+            result: Err(CompileFailure::UnsupportedOpcode),
+        });
+        check(&mut coordinator, &mut published);
+        for index in 0..128 {
+            coordinator.record_tier2_entry();
+            coordinator.record_side_path_entries(index % 3);
+            check(&mut coordinator, &mut published);
+        }
+        coordinator.record_deopt(true);
+        coordinator.set_worker_usage(2, 128, 256);
+        check(&mut coordinator, &mut published);
+        coordinator.record_tier2_entry();
+        check(&mut coordinator, &mut published);
+        assert_eq!(published.tier2_entries, 129);
+        assert_eq!(published.deopts, 1);
+        assert_eq!(published.compile_failures, 1);
     }
 
     #[test]

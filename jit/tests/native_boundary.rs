@@ -420,6 +420,10 @@ unsafe extern "C" fn recursive_cached_entry(frame: *mut qjs::JSJitExecFrame) -> 
             let value = qjs::JS_Call(frame.ctx, function, qjs::JS_UNDEFINED, 1, &mut argument);
             qjs::JS_FreeValue(frame.ctx, function);
             qjs::JS_FreeValue(frame.ctx, global);
+            if qjs::JS_IsException(value) {
+                pin.active.store(false, Ordering::SeqCst);
+                return qjs::JSJitExit::exception();
+            }
             assert_eq!(qjs::JS_VALUE_GET_TAG(value), qjs::JS_TAG_INT);
             frame.result = qjs::JS_MKVAL(qjs::JS_TAG_INT, qjs::JS_VALUE_GET_INT(value) + 1);
         }
@@ -484,6 +488,51 @@ fn cached_entry_recursion_keeps_active_pins_alive_across_gc_and_invalidation() {
     assert_eq!(releases.load(Ordering::SeqCst), 7);
     drop(guard);
     assert_eq!(releases.load(Ordering::SeqCst), 7);
+}
+
+#[test]
+fn native_to_js_recursion_obeys_stack_limit_and_recovers_after_exception() {
+    let runtime = Runtime::new().unwrap();
+    // Leave room for instrumented C frames while bounding deep recursion.
+    runtime.set_max_stack_size(512 * 1024);
+    let context = Context::full(&runtime).unwrap();
+    let captured = context.with(|ctx| {
+        ctx.eval::<(), _>("globalThis.target = function target(n) { return -1 }")
+            .unwrap();
+        snapshot(&ctx, &ctx.globals().get::<_, Function>("target").unwrap())
+    });
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let guard = runtime
+        .attach_jit_backend(RecursiveCacheBackend {
+            key: (captured.function_id(), captured.generation()),
+            epoch: Arc::new(AtomicUsize::new(1)),
+            invalidate: Arc::new(AtomicBool::new(false)),
+            retire: Arc::new(AtomicBool::new(false)),
+            exits: Arc::new(Mutex::new(Vec::new())),
+            acquisitions: Arc::clone(&acquisitions),
+            releases: Arc::clone(&releases),
+        })
+        .unwrap();
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("target").unwrap();
+        assert_eq!(
+            function.call::<_, i32>((2,)).unwrap(),
+            2,
+            "shallow call before overflow"
+        );
+        assert!(function.call::<_, i32>((10_000,)).is_err());
+        let exception = ctx.catch();
+        let message: String = exception.as_object().unwrap().get("message").unwrap();
+        assert!(message.contains("stack"), "{message}");
+        assert_eq!(function.call::<_, i32>((2,)).unwrap(), 2);
+    });
+    assert!(acquisitions.load(Ordering::SeqCst) > 2);
+    drop(guard);
+    assert_eq!(
+        acquisitions.load(Ordering::SeqCst),
+        releases.load(Ordering::SeqCst)
+    );
 }
 
 unsafe impl JitBackend for UnpinnedBackend {

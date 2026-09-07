@@ -1,7 +1,7 @@
 #![cfg(all(
     feature = "compiler",
     feature = "test-support",
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -280,7 +280,7 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
             &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
         )
         .expect("bounded primitive store PIC");
-    // Two owner materializations + two SHAPE_GUARD calls + two balanced FREEs.
+    // Two SHAPE_GUARD calls; the two owner materializations run only on deopt.
     let call_width = if cfg!(rquickjs_memory_sanitizer) {
         4
     } else {
@@ -288,7 +288,7 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
     };
     assert_eq!(
         clif.matches("call_indirect").count(),
-        6 * call_width,
+        4 * call_width,
         "{clif}"
     );
     assert!(clif.matches("store.i64").count() >= 4, "{clif}");
@@ -368,4 +368,160 @@ fn inherited_accessor_and_refcounted_values_fail_closed() {
             .lower_with_feedback_for_test(&verified, key, &feedback)
             .is_err());
     }
+}
+
+#[test]
+fn borrowed_property_store_preserves_live_aliases_and_deopt_owners() {
+    use rquickjs::{Context, Function, Object, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.left={answer:0};globalThis.right={answer:42};
+         function copy(o,other){o.answer=other.answer;return o.answer}",
+            )
+        })
+        .unwrap();
+    let call = || {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("copy").unwrap();
+            let left: Object = ctx.globals().get("left").unwrap();
+            let right: Object = ctx.globals().get("right").unwrap();
+            assert_eq!(f.call::<_, i32>((left, right)).unwrap(), 42);
+        })
+    };
+    for _ in 0..10_000 {
+        call();
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
+    // A borrowed destination remains live below the source property's operand.
+    // Fresh objects must be reclaimed after both guarded loads and stores.
+    runtime.run_gc();
+    let objects_before = runtime.memory_usage().obj_count;
+    for _ in 0..1_024 {
+        context
+            .with(|ctx| {
+                ctx.eval::<(), _>("if(copy({answer:0},{answer:42})!==42)throw Error('copy')")
+            })
+            .unwrap();
+    }
+    runtime.run_gc();
+    assert_eq!(runtime.memory_usage().obj_count, objects_before);
+    assert!(jit.metrics().tier2_entries > before.tier2_entries);
+    // Keep the same shape but change the property's value to a heap reference.
+    // Both operands must acquire owners before the interpreter resumes the copy.
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "right.answer='forty'+String(2);
+             if(copy(left,right)!=='forty2')throw Error('type miss')",
+            )
+        })
+        .unwrap();
+    assert!(jit.metrics().deopts > before.deopts);
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "Object.defineProperty(right,'answer',{get(){throw Error('getter')}});
+         try {copy(left,right);throw Error('missing exception')} catch(e) {
+             if(e.message!=='getter')throw e;
+         }",
+            )
+        })
+        .unwrap();
+    runtime.run_gc();
+}
+
+#[test]
+fn temporary_receivers_keep_shared_shape_guards_stable_across_gc() {
+    use rquickjs::{Array, Context, Function, Object, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>("globalThis.shared={answer:41};function read(o){return o.answer}")
+        })
+        .unwrap();
+    for _ in 0..10_000 {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("read").unwrap();
+            let o: Object = ctx.globals().get("shared").unwrap();
+            assert_eq!(f.call::<_, i32>((o,)).unwrap(), 41);
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
+    context
+        .with(|ctx| ctx.eval::<(), _>("shared=null;globalThis.blockers=null"))
+        .unwrap();
+    runtime.run_gc();
+    let objects_before = runtime.memory_usage().obj_count;
+    // Occupy freed shape allocations with distinct live layouts, so pointer
+    // reuse cannot accidentally make an unrooted old guard match again.
+    context.with(|ctx| {
+        let blockers = Array::new(ctx.clone()).unwrap();
+        for index in 0..128 {
+            let object = Object::new(ctx.clone()).unwrap();
+            object.set(format!("padding{index}"), index).unwrap();
+            blockers.set(index, object).unwrap();
+        }
+        ctx.globals().set("blockers", blockers).unwrap();
+    });
+    for index in 0..1_024 {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("read").unwrap();
+            let object = Object::new(ctx.clone()).unwrap();
+            object.set("answer", index).unwrap();
+            assert_eq!(f.call::<_, i32>((object,)).unwrap(), index);
+        });
+        if index % 32 == 0 {
+            runtime.run_gc();
+        }
+        jit.poll();
+    }
+    let after = jit.metrics();
+    assert_eq!(after.deopts, before.deopts, "{before:?} -> {after:?}");
+    assert!(
+        after.tier2_entries >= before.tier2_entries + 1_024,
+        "{after:?}"
+    );
+    context
+        .with(|ctx| ctx.eval::<(), _>("blockers=null"))
+        .unwrap();
+    runtime.run_gc();
+    assert_eq!(runtime.memory_usage().obj_count, objects_before);
 }

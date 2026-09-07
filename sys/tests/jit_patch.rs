@@ -6,11 +6,16 @@ mod patch;
 use std::{fs, path::PathBuf, time::SystemTime};
 
 fn scratch_dir() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("rquickjs-jit-patch-{}-{nonce}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "rquickjs-jit-patch-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn copy_baseline(destination: &std::path::Path) {
@@ -40,6 +45,10 @@ fn copy_patches(destination: &std::path::Path) {
         "0009-tier1-arith-slow.patch",
         "0010-native-entry-cache.patch",
         "0011-helper-pc-cursor.patch",
+        "0012-shape-retention.patch",
+        "0013-feedback-gate.patch",
+        "0014-inactive-probes.patch",
+        "0015-cold-object-probes.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }

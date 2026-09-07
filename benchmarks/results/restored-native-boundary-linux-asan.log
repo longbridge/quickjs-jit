@@ -1,0 +1,85 @@
+warning: unused workspace dependency `rquickjs`
+  --> Cargo.toml:37:1
+   |
+37 | rquickjs = { package = "quickjs-jit", version = "0.12.7", path = "./", default-features = false }
+   | ^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `rquickjs`
+warning: workspace (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> Cargo.toml:8:1
+  |
+8 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> sys/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-sys` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> core/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-core` (manifest) generated 1 warning
+warning: explicit `package.readme` can be inferred
+ --> macro/Cargo.toml:7:1
+  |
+7 | readme = "README.md"
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::manual_readme` is set to `warn` by default
+help: consider removing `package.readme`
+warning: `quickjs-jit-macro` (manifest) generated 1 warning
+   Compiling quickjs-jit-sys v0.12.7 (/src/sys)
+   Compiling quickjs-jit-runtime v0.12.7 (/src/jit)
+   Compiling quickjs-jit-core v0.12.7 (/src/core)
+   Compiling quickjs-jit v0.12.7 (/src)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.75s
+     Running tests/native_boundary.rs (/target/aarch64-unknown-linux-gnu/debug/build/quickjs-jit-runtime/16f8774a40ffdbed/out/native_boundary-16f8774a40ffdbed)
+
+running 30 tests
+test backend_replace_during_entry_is_busy_and_releases_the_captured_pin_once ... ok
+test backend_detach_during_acquire_is_busy_and_releases_the_captured_pin_once ... ok
+test backend_detach_during_entry_is_busy_and_releases_the_captured_pin_once ... ok
+test closure_objects_share_bytecode_identity_and_retire_only_at_finalization ... ok
+test cached_native_entry_reuses_a_pin_until_epoch_change_and_releases_on_detach ... ok
+test deopt_rejects_a_pc_inside_an_instruction_as_uncatchable_after_releasing_the_pin ... ok
+test cached_entry_recursion_keeps_active_pins_alive_across_gc_and_invalidation ... ok
+test distinct_bytecode_allocations_with_identical_bodies_get_distinct_ids ... ok
+test backend_replace_during_acquire_is_busy_and_releases_the_captured_pin_once ... ok
+test deopt_resumes_after_the_materialized_side_effect_exactly_once ... ok
+test backtrace_allocation_failure_cannot_disarm_an_uncatchable_interrupt ... ok
+test malformed_deopt_with_pending_exception_frees_exception_and_transferred_result ... ok
+test invalidation_prevents_acquiring_an_entry_from_the_retired_generation ... ok
+test malformed_exception_exit_frees_its_forbidden_transferred_result ... ok
+test malformed_done_rejects_exception_sentinel_without_a_pending_exception ... ok
+test malformed_done_with_pending_exception_frees_exception_and_transferred_result ... ok
+test malformed_exit_is_uncatchable_when_error_allocation_fails ... ok
+test explicit_invalidation_keeps_identity_and_advances_generation ... ok
+test malformed_retry_with_pending_exception_frees_exception_and_transferred_result ... ok
+test malformed_interrupt_exit_frees_its_forbidden_transferred_result ... ok
+test native_entry_without_a_lifetime_pin_is_not_called ... ok
+test native_return_enters_c_done_cleanup_and_releases_the_pin ... ok
+test native_exception_is_caught_by_the_existing_js_catch_path ... ok
+test native_interrupt_remains_uncatchable ... ok
+test every_exit_requires_both_reserved_scratch_slots_to_be_clear ... ok
+test native_to_js_recursion_obeys_stack_limit_and_recovers_after_exception ... ok
+test osr_retry_restarts_at_the_polled_pc_without_replaying_the_prefix ... ok
+test verified_loop_header_can_enter_native_code_from_an_osr_poll ... ok
+test reentrant_release_cannot_repopulate_entry_cache_during_detach ... ok
+test primitive_interrupt_is_uncatchable_when_error_allocation_fails ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s

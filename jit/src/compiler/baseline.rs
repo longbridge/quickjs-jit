@@ -6084,12 +6084,9 @@ fn emit_truthy(builder: &mut FunctionBuilder<'_>, value: Pair) -> Value {
     let is_undefined = tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED);
     let is_float = tag_is(builder, value.tag, qjs::JS_TAG_FLOAT64);
     let empty = builder.ins().bor(is_null, is_undefined);
-    let integer_truthy = builder.ins().icmp_imm(IntCC::NotEqual, value.payload, 0);
-    let float = builder
-        .ins()
-        .bitcast(types::F64, MemFlags::new(), value.payload);
-    let zero = builder.ins().f64const(0.0);
-    let float_truthy = builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
+    let integer = builder.ins().ireduce(types::I32, value.payload);
+    let integer_truthy = builder.ins().icmp_imm(IntCC::NotEqual, integer, 0);
+    let float_truthy = super::helpers::emit_f64_bits_truthy(builder, value.payload);
     let scalar_truthy = builder.ins().select(is_float, float_truthy, integer_truthy);
     let false_value = builder.ins().iconst(types::I8, 0);
     builder.ins().select(empty, false_value, scalar_truthy)

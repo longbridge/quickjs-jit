@@ -1800,7 +1800,7 @@ fn lower_optimized_machine(
                                 }
                             }
                             "if_false8" | "if_true8" | "if_false" | "if_true" => {
-                                use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+                                use cranelift_codegen::ir::condcodes::IntCC;
                                 depth = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
@@ -1912,18 +1912,13 @@ fn lower_optimized_machine(
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 );
                                 builder.switch_to_block(truth_block);
+                                let integer = builder.ins().ireduce(types::I32, condition.payload);
                                 let integer_truth =
-                                    builder
-                                        .ins()
-                                        .icmp_imm(IntCC::NotEqual, condition.payload, 0);
-                                let float = builder.ins().bitcast(
-                                    types::F64,
-                                    MemFlags::new(),
+                                    builder.ins().icmp_imm(IntCC::NotEqual, integer, 0);
+                                let float_truth = super::helpers::emit_f64_bits_truthy(
+                                    &mut builder,
                                     condition.payload,
                                 );
-                                let zero = builder.ins().f64const(0.0);
-                                let float_truth =
-                                    builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
                                 let numeric_truth =
                                     builder.ins().select(is_float, float_truth, integer_truth);
                                 let false_value = builder.ins().iconst(types::I8, 0);
@@ -2644,7 +2639,7 @@ fn emit_opt_unary(
     pc: u32,
     guard: u32,
 ) -> Result<(), CompileFailure> {
-    use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     use rquickjs_core::qjs;
     let index = depth
@@ -2732,11 +2727,7 @@ fn emit_opt_unary(
             let numeric_truth = if env.int32_loop {
                 integer_truth
             } else {
-                let float = builder
-                    .ins()
-                    .bitcast(types::F64, MemFlags::new(), value.payload);
-                let zero = builder.ins().f64const(0.0);
-                let float_truth = builder.ins().fcmp(FloatCC::OrderedNotEqual, float, zero);
+                let float_truth = super::helpers::emit_f64_bits_truthy(builder, value.payload);
                 builder.ins().select(is_float, float_truth, integer_truth)
             };
             let false_value = builder.ins().iconst(types::I8, 0);
@@ -4021,6 +4012,25 @@ fn emit_opt_guarded_property(
     let object_index = depth
         .checked_sub(if store { 2 } else { 1 })
         .ok_or(CompileFailure::InvalidArtifact)?;
+    // A leaf shape guard can borrow the receiver from an existing root. This
+    // requires every live stack value to be either rooted there or primitive;
+    // no temporary owner may disappear from the helper's visible stack.
+    let borrowed_slot = if stack_provenance[..depth].iter().all(|source| {
+        matches!(
+            source,
+            OptProvenance::Argument(_)
+                | OptProvenance::Local(_)
+                | OptProvenance::ImmediatePrimitive
+        )
+    }) {
+        match stack_provenance[object_index] {
+            OptProvenance::Argument(index) => Some(index),
+            OptProvenance::Local(index) => arguments.len().checked_add(index),
+            _ => None,
+        }
+    } else {
+        None
+    };
     for (index, vars) in arguments.iter().enumerate() {
         let v = opt_use(builder, *vars);
         opt_store(builder, arg_buf, index, v);
@@ -4040,29 +4050,35 @@ fn emit_opt_guarded_property(
     builder
         .ins()
         .store(MemFlags::new(), current_pc, frame, layout.pc);
-    // SHAPE_GUARD validates its operand against stack_top. Materialize the
-    // borrowed SSA aliases as real interpreter owners before exposing them to
-    // the helper; incremental stack_top updates make DUP OOM cleanup exact.
-    opt_own_stack_for_exit(
-        builder,
-        frame,
-        sret,
-        stack_base,
-        depth,
-        arguments.len() + locals.len(),
-        stack_provenance,
-        helper_signatures,
-        pointer_type,
-        layout,
-    )?;
+    if borrowed_slot.is_some() {
+        // The stack contains SSA scratch aliases, not reference-counted owners.
+        // Exception cleanup must see only the rooted argument/local buffers.
+        opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
+    } else {
+        opt_own_stack_for_exit(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            depth,
+            arguments.len() + locals.len(),
+            stack_provenance,
+            helper_signatures,
+            pointer_type,
+            layout,
+        )?;
+    }
     if properties.is_empty() || properties.len() > 3 {
         return Err(CompileFailure::InvalidArtifact);
     }
-    let flat = arguments
-        .len()
-        .checked_add(locals.len())
-        .and_then(|n| n.checked_add(object_index))
-        .and_then(|n| u32::try_from(n).ok())
+    let flat = borrowed_slot
+        .or_else(|| {
+            arguments
+                .len()
+                .checked_add(locals.len())?
+                .checked_add(object_index)
+        })
+        .and_then(|slot| u32::try_from(slot).ok())
         .ok_or(CompileFailure::ResourceLimit)?;
     let api = builder
         .ins()
@@ -4193,6 +4209,20 @@ fn emit_opt_guarded_property(
         0,
     );
     builder.switch_to_block(deopt);
+    if borrowed_slot.is_some() {
+        opt_own_stack_for_exit(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            depth,
+            arguments.len() + locals.len(),
+            stack_provenance,
+            helper_signatures,
+            pointer_type,
+            layout,
+        )?;
+    }
     let start = builder
         .ins()
         .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
@@ -4209,34 +4239,61 @@ fn emit_opt_guarded_property(
         guard,
     );
     builder.switch_to_block(continuation);
-    // Every borrowed alias below the operands was materialized as an owner
-    // for the guard's exception path; hand those references back before the
-    // operand slots are released, or each guarded access leaks one.
-    opt_release_materialized_aliases(
-        builder,
-        frame,
-        sret,
-        stack_base,
-        stack_provenance,
-        0..object_index,
-        depth,
-        arguments.len() + locals.len(),
-        helper_signatures,
-        pointer_type,
-        layout,
-    )?;
-    opt_release_owned_stack(
-        builder,
-        frame,
-        sret,
-        stack_base,
-        object_index,
-        depth,
-        arguments.len() + locals.len(),
-        helper_signatures,
-        pointer_type,
-        layout,
-    )?;
+    if borrowed_slot.is_some() {
+        // Keep scratch aliases outside the owning stack even when the primitive
+        // result below advances stack_top. Their values remain live in SSA.
+        let undefined = OptPair {
+            payload: builder.ins().iconst(types::I64, 0),
+            tag: builder
+                .ins()
+                .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
+        };
+        for (index, provenance) in stack_provenance.iter().take(depth).enumerate() {
+            if matches!(
+                provenance,
+                OptProvenance::Argument(_) | OptProvenance::Local(_)
+            ) {
+                opt_store(builder, stack_base, index, undefined);
+            }
+        }
+        opt_set_stack_top(
+            builder,
+            frame,
+            stack_base,
+            object_index,
+            pointer_type,
+            layout,
+        );
+    } else {
+        // Every borrowed alias below the operands was materialized as an owner
+        // for the guard's exception path; hand those references back before the
+        // operand slots are released, or each guarded access leaks one.
+        opt_release_materialized_aliases(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            stack_provenance,
+            0..object_index,
+            depth,
+            arguments.len() + locals.len(),
+            helper_signatures,
+            pointer_type,
+            layout,
+        )?;
+        opt_release_owned_stack(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            object_index,
+            depth,
+            arguments.len() + locals.len(),
+            helper_signatures,
+            pointer_type,
+            layout,
+        )?;
+    }
     if store {
         for provenance in &mut stack_provenance[object_index..depth] {
             *provenance = OptProvenance::Unknown;

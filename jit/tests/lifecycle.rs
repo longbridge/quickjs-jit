@@ -262,6 +262,37 @@ fn install_empty(
 }
 
 #[test]
+fn optimized_demotion_does_not_republish_an_absent_baseline() {
+    let mut coordinator = coordinator(4);
+    let key = FunctionKey::new(118, 1);
+    let snapshot = coordinator_snapshot();
+    install_empty(&mut coordinator, key, Tier::Baseline, snapshot.clone());
+    install_empty(&mut coordinator, key, Tier::Optimizing, snapshot);
+    assert!(coordinator.record_benefit(key, Tier::Baseline, 10));
+    assert!(coordinator.record_benefit(key, Tier::Baseline, 20));
+    let baseline_pin = coordinator.pin(key, Tier::Baseline).unwrap();
+    assert_eq!(baseline_pin.artifact().benefit().score, 30);
+    assert!(coordinator.demote_baseline_to_interpreter(key));
+    assert!(!coordinator.record_benefit(key, Tier::Baseline, 100));
+    assert_eq!(baseline_pin.artifact().benefit().score, 30);
+    coordinator.record_optimized_side_exit(key, 1);
+    assert!(matches!(
+        coordinator.record_optimized_side_exit(key, 2),
+        SideExitAction::Demote { .. }
+    ));
+    assert!(coordinator.pin(key, Tier::Baseline).is_none());
+    assert!(coordinator.pin(key, Tier::Optimizing).is_none());
+    assert_eq!(coordinator.state(key), CompileState::Blacklisted);
+    assert!(!coordinator.is_terminally_blacklisted(key));
+    coordinator.retire(key);
+    assert!(!coordinator.is_terminally_blacklisted(key));
+    assert_eq!(
+        coordinator.tier_state(key, Tier::Baseline),
+        CompileState::Retired
+    );
+}
+
+#[test]
 fn same_generation_and_specialization_signature_has_a_version_limit() {
     let mut coordinator = coordinator(2);
     let key = FunctionKey::new(19, 1);
