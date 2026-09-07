@@ -51,9 +51,13 @@ fn forced(mode: &str) {
         ])
         .status()
         .unwrap();
-    assert!(status.success());
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert!(
+        status.success(),
+        "{mode} failed: {}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
     for case in report["cases"].as_array().unwrap() {
         assert!(case["native"]["native_entries"].as_u64().unwrap() > 0);
         assert_eq!(case["native"]["unexpected_fallbacks"], 0);
