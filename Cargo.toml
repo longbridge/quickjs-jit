@@ -22,6 +22,7 @@ members = [
   "jit",
   "benchmarks",
   "macro",
+  "compat/rquickjs",
   "examples/native-module",
   "examples/module-loader",
   "examples/import-attributes",

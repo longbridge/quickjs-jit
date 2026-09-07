@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bundle an unpublished `rquickjs` compatibility facade for dependencies such as LLRT to share the quickjs-jit types and VM.
+
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
 - JIT M2: Tier 1 and Tier 2 now support the remaining comparison, bitwise, shift, `%`, unary
   numeric, constant, stack-shuffle, tail-call, `null`, and empty-string opcodes; the JIT ABI
