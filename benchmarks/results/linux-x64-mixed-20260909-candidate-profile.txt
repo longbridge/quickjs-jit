@@ -1,0 +1,642 @@
+Print limit set to 0
+Functions sorted by metric: Exclusive Total CPU Time
+
+Excl. Total   Incl. Total    Name
+CPU           CPU
+ sec.      %   sec.      %
+1.198 100.00  1.198 100.00   <Total>
+0.248  20.71  0.862  71.94   JS_CallInternal
+0.065   5.39  0.075   6.30   <static>@0xa5c2b (<libc.so.6>)
+0.053   4.43  0.166  13.82   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::native_exit
+0.040   3.30  0.040   3.30   <Unknown>
+0.038   3.17  0.038   3.22   qjsjit_validate_helper_frame
+0.037   3.09  0.037   3.09   <rquickjs_jit::ProductionBackend>::publish_metrics
+0.032   2.63  0.051   4.22   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::record_feedback
+0.030   2.51  0.035   2.92   rquickjs_jit::production_entry_trampoline
+0.028   2.34  0.067   5.55   JS_JitHelperShapeGuard
+0.025   2.13  0.074   6.18   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::record_hot
+0.024   1.96  0.056   4.68   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::native_enter
+0.022   1.88  0.034   2.80   <rquickjs_jit::runtime::coordinator::Coordinator>::record_benefit
+0.021   1.75  0.021   1.75   <rquickjs_jit::runtime::coordinator::Coordinator>::tier_state
+0.015   1.25  0.015   1.25   <rquickjs_jit::runtime::feedback::FeedbackTable>::observe_binary
+0.015   1.21  0.015   1.21   <static>@0x175a00 (<libc.so.6>)
+0.013   1.09  0.030   2.51   JS_CreateProperty
+0.013   1.04  0.013   1.04   JS_FreeValue
+0.012   1.00  0.012   1.00   <rquickjs_jit::runtime::coordinator::Coordinator>::is_terminally_blacklisted
+0.011   0.96  0.011   0.96   <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, rquickjs_jit::code_cache::artifact::ArtifactKey, usize, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<rquickjs_jit::code_cache::artifact::ArtifactKey>
+0.011   0.96  0.019   1.63   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::init
+0.011   0.88  0.011   0.88   <rquickjs_jit::runtime::feedback::FeedbackTable>::observe_type
+0.008   0.67  0.034   2.80   qjsjit_record_binary_feedback
+0.007   0.58  0.035   2.96   qjsjit_record_feedback
+0.007   0.58  0.009   0.75   qjsjit_record_property_feedback.isra.0
+0.006   0.54  0.013   1.09   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::try_to_allocate_bundle_to_reg
+0.006   0.54  0.006   0.54   free
+0.006   0.54  0.015   1.25   next_token
+0.006   0.54  0.022   1.84   realloc
+0.006   0.54  0.394  32.90   rqsort.constprop.3
+0.006   0.50  0.006   0.50   __JS_FindAtom.constprop.0
+0.006   0.50  0.009   0.71   add_shape_property
+0.005   0.46  0.005   0.46   malloc
+0.005   0.42  0.007   0.63   <rquickjs_jit::runtime::background::BackgroundCompiler>::dispatch_next
+0.005   0.42  0.005   0.42   <static>@0xa43e4 (<libc.so.6>)
+0.004   0.38  0.004   0.38   <rquickjs_jit::runtime::feedback::FeedbackTable>::observe_call
+0.004   0.38  0.026   2.17   add_property
+0.004   0.33  0.007   0.63   <cranelift_codegen::egraph::elaborate::Elaborator>::elaborate
+0.004   0.33  0.029   2.38   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::run
+0.004   0.33  0.004   0.33   __vdso_clock_gettime
+0.004   0.33  0.008   0.67   cranelift_codegen::legalizer::simple_legalize
+0.004   0.33  0.036   3.05   js_malloc_rt
+0.004   0.29  0.004   0.29   <alloc::string::String as core::fmt::Write>::write_char
+0.004   0.29  0.004   0.29   <regalloc2::ion::data_structures::LiveRanges>::add
+0.004   0.29  0.037   3.09   <rquickjs_core::context::ctx::Ctx>::handle_panic_inner::<rquickjs_sys::JSValue, core::panic::unwind_safe::AssertUnwindSafe<<rquickjs_core::class::ffi::VTable>::call_impl<rquickjs_core::value::function::ffi::RustFunction>::{closure#0}>>
+0.004   0.29  0.004   0.29   __vdso_clock_gettime
+0.004   0.29  0.004   0.29   __vdso_clock_gettime
+0.004   0.29  0.004   0.29   __vdso_clock_gettime
+0.004   0.29  0.169  14.11   rquickjs_core::runtime::jit::native_exit
+0.003   0.25  0.003   0.25   <alloc::collections::binary_heap::BinaryHeap<regalloc2::ion::data_structures::PrioQueueEntry>>::pop
+0.003   0.25  0.003   0.25   <rquickjs_jit::runtime::feedback::FeedbackTable>::observe_branch
+0.003   0.25  0.004   0.29   JS_DefineProperty
+0.003   0.25  0.021   1.80   JS_FreeValueRT
+0.003   0.25  0.004   0.33   JS_GetPropertyInternal
+0.003   0.25  0.004   0.29   JS_NewObjectProtoClass
+0.003   0.25  0.003   0.25   __vdso_clock_gettime
+0.003   0.25  0.003   0.25   __vdso_clock_gettime
+0.003   0.25  0.003   0.25   __vdso_clock_gettime
+0.003   0.25  0.013   1.09   core::fmt::write
+0.003   0.25  0.003   0.25   malloc_usable_size
+0.003   0.21  0.003   0.21   <alloc::collections::btree::map::BTreeMap<regalloc2::ion::data_structures::LiveRangeKey, regalloc2::ion::data_structures::LiveRangeIndex>>::range::<regalloc2::ion::data_structures::LiveRangeKey, core::ops::range::RangeFrom<regalloc2::ion::data_structures::LiveRangeKey>>
+0.003   0.21  0.003   0.21   <cranelift_codegen::ir::dfg::ValueData as core::convert::From<cranelift_codegen::ir::dfg::ValueDataPacked>>::from
+0.003   0.21  0.042   3.51   <rquickjs_core::class::ffi::VTable>::call_impl::<rquickjs_core::value::function::ffi::RustFunction>
+0.003   0.21  0.008   0.67   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::acquire_entry
+0.003   0.21  0.004   0.38   <rquickjs_jit::runtime::coordinator::Coordinator>::pin
+0.003   0.21  0.032   2.67   <std::time::Instant>::elapsed
+0.003   0.21  0.004   0.33   __JS_NewAtom
+0.003   0.21  0.003   0.21   __vdso_clock_gettime
+0.003   0.21  0.003   0.21   __vdso_clock_gettime
+0.003   0.21  0.003   0.21   __vdso_clock_gettime
+0.003   0.21  0.058   4.84   clock_gettime
+0.003   0.21  0.008   0.67   js_array_push
+0.003   0.21  0.243  20.33   js_call_c_function
+0.003   0.21  0.003   0.21   mprotect
+0.003   0.21  0.076   6.39   rquickjs_core::runtime::jit::record_hot
+0.002   0.17  0.002   0.17   <[u8]>::repeat
+0.002   0.17  0.015   1.21   <gpui_shell::engine::quickjs::text_constructor::{closure#0} as rquickjs_core::value::function::IntoJsFunc<(rquickjs_core::context::ctx::Ctx, alloc::string::String)>>::call
+0.002   0.17  0.008   0.67   <gpui_shell::spec::SpecArena>::push
+0.002   0.17  0.003   0.21   <hashbrown::map::HashMap<cranelift_codegen::alias_analysis::MemoryLoc, (cranelift_codegen::ir::entities::Inst, cranelift_codegen::ir::entities::Value), rustc_hash::FxBuildHasher>>::insert
+0.002   0.17  0.002   0.17   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::entry_cache_epoch
+0.002   0.17  0.002   0.17   <rquickjs_jit::runtime::background::BackgroundCompiler>::drain_overflow
+0.002   0.17  0.003   0.25   <u32 as rquickjs_core::value::convert::FromJs>::from_js
+0.002   0.17  0.002   0.17   JS_DupContext
+0.002   0.17  0.008   0.67   JS_SetPropertyInternal2
+0.002   0.17  0.002   0.17   JS_SetUncatchableError
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   __vdso_clock_gettime
+0.002   0.17  0.002   0.17   core::ptr::drop_glue::<rquickjs_jit::ProductionEntryPin>
+0.002   0.17  0.018   1.50   free_object
+0.002   0.17  0.003   0.25   gc_decref
+0.002   0.17  0.003   0.21   gpui_shell::style::apply_param
+0.002   0.17  0.005   0.46   resolve_labels
+0.002   0.17  0.002   0.17   resolve_scope_var
+0.002   0.17  0.004   0.33   rquickjs_core::runtime::jit::entry_cache_epoch
+0.002   0.17  0.002   0.17   set_value
+0.002   0.13  0.005   0.42   <(rquickjs_core::context::ctx::Ctx, alloc::string::String) as rquickjs_core::value::function::params::FromParams>::from_params
+0.002   0.13  0.003   0.21   <(rquickjs_core::context::ctx::Ctx, u32, u16) as rquickjs_core::value::function::params::FromParams>::from_params
+0.002   0.13  0.005   0.46   <(rquickjs_core::context::ctx::Ctx, u32, u32) as rquickjs_core::value::function::params::FromParams>::from_params
+0.002   0.13  0.008   0.67   <<gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#25} as rquickjs_core::value::function::IntoJsFunc<(rquickjs_core::context::ctx::Ctx, u32, u32)>>::call
+0.002   0.13  0.004   0.38   <<gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#26} as rquickjs_core::value::function::IntoJsFunc<(rquickjs_core::context::ctx::Ctx, u32, u16)>>::call
+0.002   0.13  0.004   0.38   <alloc::collections::btree::map::BTreeMap<regalloc2::ion::data_structures::LiveRangeKey, regalloc2::ion::data_structures::LiveRangeIndex>>::insert
+0.002   0.13  0.004   0.33   <cranelift_codegen::egraph::OptimizeCtx>::insert_pure_enode
+0.002   0.13  0.021   1.75   <cranelift_codegen::isa::x64::X64Backend as cranelift_codegen::isa::TargetIsa>::compile_function
+0.002   0.13  0.013   1.09   <cranelift_codegen::write::PlainWriter as cranelift_codegen::write::FuncWriter>::write_instruction
+0.002   0.13  0.002   0.13   <hashbrown::map::HashMap<regalloc2::ion::data_structures::LiveBundleIndex, (), core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>::insert
+0.002   0.13  0.002   0.17   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::insert_use_into_liverange
+0.002   0.13  0.007   0.58   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::split_and_requeue_bundle
+0.002   0.13  0.002   0.13   <regalloc2::ion::data_structures::VRegs>::add
+0.002   0.13  0.002   0.13   <rquickjs_core::value::function::params::Params>::from_ffi_class
+0.002   0.13  0.002   0.17   <smallvec::SmallVec<[cranelift_codegen::ir::types::Type; 16]> as core::iter::traits::collect::Extend<cranelift_codegen::ir::types::Type>>::extend::<<cranelift_codegen::ir::dfg::DataFlowGraph>::inst_result_types::InstResultTypes>
+0.002   0.13  0.002   0.13   <std::sync::mpmc::array::Channel<rquickjs_jit::runtime::coordinator::CompileCompletion>>::try_recv
+0.002   0.13  0.061   5.09   <std::sys::pal::unix::time::Timespec>::now
+0.002   0.13  0.002   0.13   <std::sys::pal::unix::time::Timespec>::sub_timespec
+0.002   0.13  0.003   0.25   JS_ConcatString2
+0.002   0.13  0.002   0.13   JS_FreeContext
+0.002   0.13  0.002   0.13   JS_GetGlobalVar
+0.002   0.13  0.029   2.38   JS_NewObjectFromShape
+0.002   0.13  0.002   0.13   JS_ToCStringLen2
+0.002   0.13  0.002   0.13   __vdso_clock_gettime
+0.002   0.13  0.002   0.13   __vdso_clock_gettime
+0.002   0.13  0.002   0.13   __vdso_clock_gettime
+0.002   0.13  0.002   0.13   __vdso_clock_gettime
+0.002   0.13  0.002   0.13   __vdso_clock_gettime
+0.002   0.13  0.004   0.38   core::slice::sort::unstable::quicksort::quicksort::<(&str, u16), <(&str, u16) as core::cmp::PartialOrd>::lt>
+0.002   0.13  0.002   0.13   cranelift_codegen::inst_predicates::is_pure_for_egraph
+0.002   0.13  0.002   0.17   cranelift_codegen::remove_constant_phis::do_remove_constant_phis
+0.002   0.13  0.216  18.08   js_array_cmp_generic
+0.002   0.13  0.002   0.13   js_def_malloc
+0.002   0.13  0.003   0.25   js_free_rt
+0.002   0.13  0.005   0.46   js_free_shape0
+0.001   0.08  0.001   0.08   <alloc::vec::Vec<(&str, u16)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, u16), core::iter::adapters::map::Map<std::collections::hash::map::Iter<&str, u16>, gpui_shell::style::nullary_styles::{closure#0}>>>::from_iter
+0.001   0.08  0.001   0.08   <alloc::vec::Vec<rquickjs_jit::runtime::coordinator::FunctionKey> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::coordinator::FunctionKey, core::iter::adapters::copied::Copied<std::collections::hash::set::Iter<rquickjs_jit::runtime::coordinator::FunctionKey>>>>::from_iter
+0.001   0.08  0.001   0.08   <alloc::vec::Vec<rquickjs_jit::runtime::coordinator::FunctionKey> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::coordinator::FunctionKey, core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<std::collections::hash::map::Keys<rquickjs_jit::runtime::coordinator::FunctionKey, rquickjs_jit::bytecode::verify::VerifiedFunction>>, <rquickjs_jit::ProductionBackend>::maintenance::{closure#1}>>>::from_iter
+0.001   0.08  0.001   0.08   <cranelift_codegen::alias_analysis::LastStores>::update
+0.001   0.08  0.015   1.29   <cranelift_codegen::egraph::EgraphPass>::run
+0.001   0.08  0.004   0.33   <cranelift_codegen::ir::builder::InsertBuilder<&mut cranelift_codegen::cursor::FuncCursor> as cranelift_codegen::ir::builder::InstBuilder>::UnaryImm
+0.001   0.08  0.001   0.08   <cranelift_codegen::ir::dfg::DataFlowGraph>::ctrl_typevar
+0.001   0.08  0.004   0.29   <cranelift_codegen::ir::dfg::DataFlowGraph>::make_inst_results
+0.001   0.08  0.003   0.21   <cranelift_codegen::ir::dfg::DataFlowGraph>::value_def
+0.001   0.08  0.001   0.08   <cranelift_codegen::ir::layout::Layout>::insert_inst
+0.001   0.08  0.001   0.08   <cranelift_codegen::isa::x64::inst::args::SyntheticAmode>::finalize
+0.001   0.08  0.001   0.08   <cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend> as cranelift_codegen::isa::x64::lower::isle::generated_code::Context>::i32_from_iconst
+0.001   0.08  0.001   0.08   <cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst> as regalloc2::Function>::inst_operands
+0.001   0.08  0.012   1.00   <gpui_shell::spec::SpecArena>::write_tree
+0.001   0.08  0.001   0.08   <regalloc2::Bump as allocator_api2::stable::alloc::Allocator>::allocate
+0.001   0.08  0.001   0.08   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::compute_requirement
+0.001   0.08  0.001   0.08   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::recompute_bundle_properties
+0.001   0.08  0.001   0.08   <regalloc2::ion::data_structures::LiveBundles>::add
+0.001   0.08  0.002   0.13   <rquickjs_core::context::ctx::Ctx as rquickjs_core::value::function::params::FromParam>::from_param
+0.001   0.08  0.001   0.08   <rquickjs_core::value::function::Function>::new::<(rquickjs_core::context::ctx::Ctx,), gpui_shell::engine::quickjs::context_object::{closure#0}>
+0.001   0.08  0.033   2.76   <rquickjs_core::value::function::ffi::RustFunction as rquickjs_core::class::JsClass>::call
+0.001   0.08  0.001   0.08   <rquickjs_core::value::object::property::Property<&str> as rquickjs_core::value::object::property::AsProperty<&str>>::config
+0.001   0.08  0.002   0.13   <rquickjs_jit::ir::optimized::OptimizedIr>::translate
+0.001   0.08  0.001   0.08   <rquickjs_jit::runtime::shape_feedback::ShapeFeedbackTable>::observe
+0.001   0.08  0.001   0.08   <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+0.001   0.08  0.001   0.08   <std::sync::mpmc::Sender<rquickjs_jit::runtime::coordinator::CompileCompletion> as core::ops::drop::Drop>::drop
+0.001   0.08  0.002   0.17   <u32 as core::fmt::Display>::fmt
+0.001   0.08  0.001   0.08   JS_AtomToString
+0.001   0.08  0.001   0.08   JS_AtomToValue
+0.001   0.08  0.773  64.59   JS_Call
+0.001   0.08  0.001   0.08   JS_DupAtom
+0.001   0.08  0.001   0.08   JS_FreeAtomRT
+0.001   0.08  0.004   0.29   JS_FreeAtomStruct
+0.001   0.08  0.001   0.08   JS_GetPrototypePrimitive.isra.0
+0.001   0.08  0.001   0.08   JS_HasException
+0.001   0.08  0.001   0.08   JS_MarkValue
+0.001   0.08  0.002   0.13   JS_ResizeAtomHash
+0.001   0.08  0.013   1.04   JS_RunGC
+0.001   0.08  0.001   0.08   __vdso_clock_gettime
+0.001   0.08  0.001   0.08   __vdso_clock_gettime
+0.001   0.08  0.002   0.17   add_fast_array_element
+0.001   0.08  0.005   0.46   alloc::fmt::format::format_inner
+0.001   0.08  0.001   0.08   code_match
+0.001   0.08  0.003   0.25   cranelift_codegen::opts::generated_code::constructor_simplify::<cranelift_codegen::opts::IsleContext, smallvec::SmallVec<[cranelift_codegen::ir::entities::Value; 5]>>
+0.001   0.08  0.001   0.08   exchange_int128s
+0.001   0.08  0.022   1.84   gpui_shell::engine::quickjs::context_object
+0.001   0.08  0.002   0.17   js_atod
+0.001   0.08  0.004   0.29   js_clone_shape
+0.001   0.08  0.015   1.25   js_realloc_rt
+0.001   0.08  0.001   0.08   munmap
+0.001   0.08  0.056   4.68   rquickjs_core::runtime::jit::record_feedback
+0.001   0.08  0.001   0.08   skip_dead_code
+0.001   0.04  0.001   0.08   <&gpui_shell::value::Bridged as core::fmt::Debug>::fmt
+0.001   0.04  0.001   0.04   <&str as core::fmt::Display>::fmt
+0.001   0.04  0.001   0.04   <() as cranelift_bforest::Comparator<cranelift_codegen::ir::entities::Inst>>::search
+0.001   0.04  0.001   0.04   <<cranelift_codegen::ir::dfg::DataFlowGraph>::inst_result_types::InstResultTypes as core::iter::traits::iterator::Iterator>::next
+0.001   0.04  0.001   0.04   <<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::emit::{closure#2} as cranelift_codegen::machinst::reg::OperandVisitorImpl>::reg_maybe_fixed
+0.001   0.04  0.001   0.04   <<rquickjs_core::value::function::Function>::new<(), gpui_shell::engine::quickjs::theme_api::install::{closure#0}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.001   0.04  0.005   0.42   <<rquickjs_core::value::function::Function>::new<(rquickjs_core::context::ctx::Ctx, u32, u16), <gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#26}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.001   0.04  0.001   0.04   <alloc::collections::btree::map::BTreeMap<u32, usize> as core::iter::traits::collect::FromIterator<(u32, usize)>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<rquickjs_jit::bytecode::cfg::BasicBlock>>, rquickjs_jit::bytecode::cfg::build::{closure#3}>>
+0.001   0.04  0.002   0.17   <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+0.001   0.04  0.001   0.04   <alloc::string::String as core::fmt::Write>::write_char
+0.001   0.04  0.002   0.13   <alloc::string::String as core::fmt::Write>::write_str
+0.001   0.04  0.002   0.13   <alloc::string::String as core::fmt::Write>::write_str
+0.001   0.04  0.002   0.17   <alloc::vec::Vec<gpui_shell::spec::SpecNode> as core::ops::drop::Drop>::drop
+0.001   0.04  0.001   0.08   <bumpalo::Bump>::grow
+0.001   0.04  0.001   0.04   <core::fmt::Formatter as core::fmt::Write>::write_fmt
+0.001   0.04  0.004   0.33   <core::fmt::Formatter>::pad
+0.001   0.04  0.001   0.04   <core::iter::adapters::chain::Chain<core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<cranelift_codegen::ir::instructions::BlockCall>, core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, <cranelift_codegen::ir::dfg::DataFlowGraph>::inst_values::{closure#0}>> as core::iter::traits::iterator::Iterator>::fold::<cranelift_codegen::egraph::cost::Cost, core::iter::adapters::copied::copy_fold<cranelift_codegen::ir::entities::Value, cranelift_codegen::egraph::cost::Cost, core::iter::adapters::map::map_fold<cranelift_codegen::ir::entities::Value, cranelift_codegen::egraph::cost::Cost, cranelift_codegen::egraph::cost::Cost, <cranelift_codegen::egraph::elaborate::Elaborator>::compute_best_values::{closure#0}, <cranelift_codegen::egraph::cost::Cost as core::iter::traits::accum::Sum>::sum<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::iter::adapters::chain::Chain<core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<cranelift_codegen::ir::instructions::BlockCall>, core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, <cranelift_codegen::ir::dfg::DataFlowGraph>::inst_values::{closure#0}>>>, <cranelift_codegen::egraph::elaborate::Elaborator>::compute_best_values::{closure#0}>>::{closure#0}>::{closure#0}>::{closure#0}>
+0.001   0.04  0.001   0.04   <core::iter::adapters::copied::Copied<core::iter::adapters::chain::Chain<core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<cranelift_codegen::ir::instructions::BlockCall>, core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, <cranelift_codegen::ir::dfg::DataFlowGraph>::inst_values::{closure#0}>>> as core::iter::traits::iterator::Iterator>::next
+0.001   0.04  0.001   0.08   <cranelift_bforest::path::Path<cranelift_bforest::set::SetTypes<cranelift_codegen::ir::entities::Block>>>::find
+0.001   0.04  0.001   0.04   <cranelift_codegen::alias_analysis::AliasAnalysis>::compute_block_input_states::{closure#1}
+0.001   0.04  0.003   0.25   <cranelift_codegen::alias_analysis::AliasAnalysis>::process_inst
+0.001   0.04  0.043   3.59   <cranelift_codegen::context::Context>::compile
+0.001   0.04  0.001   0.08   <cranelift_codegen::egraph::cost::Cost>::of_pure_op::<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::iter::adapters::chain::Chain<core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<cranelift_codegen::ir::instructions::BlockCall>, core::slice::iter::Iter<cranelift_codegen::ir::entities::Value>, <cranelift_codegen::ir::dfg::DataFlowGraph>::inst_values::{closure#0}>>>, <cranelift_codegen::egraph::elaborate::Elaborator>::compute_best_values::{closure#0}>>
+0.001   0.04  0.001   0.08   <cranelift_codegen::ir::dfg::DataFlowGraph>::resolve_all_aliases
+0.001   0.04  0.001   0.04   <cranelift_codegen::ir::instructions::InstructionData>::arguments
+0.001   0.04  0.001   0.04   <cranelift_codegen::ir::instructions::InstructionData>::eq::<<cranelift_codegen::egraph::GVNContext as cranelift_codegen::ctxhash::CtxEq<(cranelift_codegen::ir::types::Type, cranelift_codegen::ir::instructions::InstructionData), (cranelift_codegen::ir::types::Type, cranelift_codegen::ir::instructions::InstructionData)>>::ctx_eq::{closure#0}>
+0.001   0.04  0.001   0.04   <cranelift_codegen::ir::instructions::OperandConstraint>::resolve
+0.001   0.04  0.001   0.04   <cranelift_codegen::ir::layout::Layout>::assign_inst_seq
+0.001   0.04  0.001   0.04   <cranelift_codegen::isa::x64::inst::args::CC>::invert
+0.001   0.04  0.001   0.04   <cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>::available_in_any_isa
+0.001   0.04  0.001   0.04   <cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>::load::<cranelift_codegen::isa::x64::lower::isle::generated_code::Amode>
+0.001   0.04  0.001   0.04   <cranelift_codegen::machinst::buffer::MachBuffer<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst> as cranelift_codegen::isa::x64::encoding::ByteSink>::put4
+0.001   0.04  0.001   0.04   <cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend> as cranelift_codegen::isa::x64::lower::isle::generated_code::Context>::fits_in_64
+0.001   0.04  0.001   0.08   <cranelift_codegen::machinst::lower::Lower<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::new
+0.001   0.04  0.001   0.04   <cranelift_codegen::machinst::reg::OperandCollector<<cranelift_codegen::machinst::vcode::VCodeBuilder<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::collect_operands::{closure#0}> as cranelift_codegen::machinst::reg::OperandVisitor>::add_operand
+0.001   0.04  0.001   0.04   <cranelift_codegen::machinst::vcode::VRegAllocator<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::alloc
+0.001   0.04  0.001   0.04   <cranelift_codegen::opts::MaybeUnaryEtorIter as cranelift_codegen::opts::generated_code::ContextIter>::next
+0.001   0.04  0.001   0.04   <cranelift_entity::list::EntityList<cranelift_codegen::ir::entities::Value>>::grow
+0.001   0.04  0.001   0.08   <cranelift_entity::list::EntityList<cranelift_codegen::ir::entities::Value>>::push
+0.001   0.04  0.001   0.04   <cranelift_entity::map::SecondaryMap<cranelift_codegen::ir::entities::Inst, cranelift_codegen::ir::layout::InstNode>>::resize_for_index_mut
+0.001   0.04  0.001   0.04   <cranelift_entity::map::SecondaryMap<cranelift_codegen::ir::entities::Value, alloc::vec::Vec<cranelift_codegen::ir::entities::Value>>>::resize_for_index_mut
+0.001   0.04  0.001   0.04   <cranelift_frontend::frontend::FunctionBuilder>::def_var
+0.001   0.04  0.001   0.04   <gpui::app::entity_map::EntityMap>::reserve::<gpui_shell::tests::benchmark::Empty>
+0.001   0.04  0.001   0.04   <gpui::app::entity_map::LeakDetector as core::ops::drop::Drop>::drop
+0.001   0.04  0.001   0.04   <gpui::app::test_context::VisualTestContext>::update::<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#1}>
+0.001   0.04  0.001   0.04   <gpui::elements::div::Div as gpui::element::Element>::id
+0.001   0.04  0.001   0.04   <gpui::window::Window>::with_image_cache::<<gpui::elements::div::Div as gpui::element::Element>::request_layout::{closure#1}, gpui::taffy::LayoutId>
+0.001   0.04  0.002   0.13   <gpui_shell::engine::quickjs::constructor::{closure#0} as rquickjs_core::value::function::IntoJsFunc<(rquickjs_core::context::ctx::Ctx,)>>::call
+0.001   0.04  0.626  52.32   <gpui_shell::metrics::Metrics>::time_script_render::<(core::result::Result<u32, anyhow::Error>, alloc::rc::Rc<gpui_shell::policy::Policy>), <gpui_shell::engine::quickjs::ShellRuntime>::build_snapshot::{closure#0}::{closure#0}>
+0.001   0.04  0.001   0.04   <gpui_shell::spec::SpecArena>::attach
+0.001   0.04  0.001   0.04   <gpui_shell::spec::SpecArena>::push_op
+0.001   0.04  0.001   0.04   <hashbrown::raw::RawTable<(<regalloc2::ion::data_structures::Env<_>>::apply_allocations_and_insert_moves::BlockparamSourceKey, regalloc2::Allocation)>>::insert::<hashbrown::map::make_hasher<<regalloc2::ion::data_structures::Env<_>>::apply_allocations_and_insert_moves::BlockparamSourceKey, regalloc2::Allocation, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>::{closure#0}>
+0.001   0.04  0.001   0.04   <hashbrown::raw::RawTable<(core::any::TypeId, core::option::Option<rquickjs_core::value::object::Object>)>>::reserve_rehash::<hashbrown::map::make_hasher<core::any::TypeId, core::option::Option<rquickjs_core::value::object::Object>, std::hash::random::RandomState>::{closure#0}>
+0.001   0.04  0.001   0.04   <hashbrown::raw::RawTable<(gpui::app::entity_map::HandleId, core::option::Option<backtrace::capture::Backtrace>)>>::remove_entry::<hashbrown::map::equivalent_key<gpui::app::entity_map::HandleId, gpui::app::entity_map::HandleId, core::option::Option<backtrace::capture::Backtrace>>::{closure#0}>
+0.001   0.04  0.001   0.04   <hashbrown::raw::RawTable<(regalloc2::index::Inst, regalloc2::PRegSet)>>::reserve_rehash::<hashbrown::map::make_hasher<regalloc2::index::Inst, regalloc2::PRegSet, rustc_hash::FxBuildHasher>::{closure#0}>
+0.001   0.04  0.001   0.04   <hashbrown::raw::RawTable<(rquickjs_jit::runtime::coordinator::FunctionKey, (u8, u64))>>::reserve_rehash::<hashbrown::map::make_hasher<rquickjs_jit::runtime::coordinator::FunctionKey, (u8, u64), std::hash::random::RandomState>::{closure#0}>
+0.001   0.04  0.001   0.04   <regalloc2::indexset::IndexSet>::union_with
+0.001   0.04  0.001   0.04   <regalloc2::ion::reg_traversal::RegTraversalIter as core::iter::traits::iterator::Iterator>::next
+0.001   0.04  0.001   0.04   <rquickjs_core::class::ffi::VTable>::finalizer_impl::<rquickjs_core::value::function::ffi::RustFunction>
+0.001   0.04  0.001   0.04   <rquickjs_core::context::ctx::Ctx>::handle_exception
+0.001   0.04  0.001   0.08   <rquickjs_core::runtime::opaque::Opaque>::get_or_insert_prototype::<rquickjs_core::value::function::ffi::RustFunction>
+0.001   0.04  0.001   0.04   <rquickjs_core::value::Value>::as_object
+0.001   0.04  0.001   0.04   <rquickjs_core::value::Value>::type_of
+0.001   0.04  0.001   0.04   <rquickjs_core::value::function::Function>::new::<(rquickjs_core::context::ctx::Ctx,), gpui_shell::engine::quickjs::context_object::{closure#3}>
+0.001   0.04  0.001   0.04   <rquickjs_core::value::function::params::ParamsAccessor>::arg
+0.001   0.04  0.001   0.08   <rquickjs_core::value::object::Object>::get::<&str, rquickjs_core::value::function::Function>
+0.001   0.04  0.001   0.04   <rquickjs_core::value::promise::Promise>::finish::<()>
+0.001   0.04  0.003   0.25   <rquickjs_core::value::string::String>::to_string
+0.001   0.04  0.016   1.34   <rquickjs_jit::ProductionBackend>::maintenance
+0.001   0.04  0.001   0.04   <rquickjs_jit::runtime::coordinator::Coordinator>::begin_next
+0.001   0.04  0.002   0.17   <rquickjs_jit::runtime::coordinator::Coordinator>::drain_completions_with_budget
+0.001   0.04  0.001   0.04   <smallvec::SmallVec<[(regalloc2::Allocation, regalloc2::Allocation, core::option::Option<regalloc2::VReg>); 16]>>::retain::<<regalloc2::moves::ParallelMoves<core::option::Option<regalloc2::VReg>>>::resolve::{closure#1}>
+0.001   0.04  0.001   0.04   <smallvec::SmallVec<[cranelift_codegen::isa::x64::lower::isle::generated_code::MInst; 4]> as core::ops::drop::Drop>::drop
+0.001   0.04  0.001   0.04   <smallvec::SmallVec<[cranelift_codegen::remove_constant_phis::OutEdge; 2]> as core::iter::traits::collect::Extend<cranelift_codegen::remove_constant_phis::OutEdge>>::extend::<core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<cranelift_codegen::remove_constant_phis::OutEdge>>>
+0.001   0.04  0.001   0.04   <smallvec::SmallVec<[u32; 16]>>::try_grow
+0.001   0.04  0.001   0.04   <static>@0x8a5d2 (<libm.so.6>)
+0.001   0.04  0.001   0.04   <static>@0xa0914 (<libc.so.6>)
+0.001   0.04  0.001   0.08   <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&(rquickjs_jit::runtime::coordinator::FunctionKey, rquickjs_jit::runtime::coordinator::Tier)>
+0.001   0.04  0.001   0.08   <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&(u64, u64)>
+0.001   0.04  0.001   0.04   <std::time::Instant>::now
+0.001   0.04  0.001   0.08   <str as core::fmt::Debug>::fmt
+0.001   0.04  0.001   0.04   <taffy::tree::taffy_tree::TaffyTree<gpui::taffy::NodeContext>>::clear
+0.001   0.04  0.001   0.04   <usize as rquickjs_core::value::convert::FromJs>::from_js
+0.001   0.04  0.001   0.04   JS_AddIntrinsicDOMException
+0.001   0.04  0.034   2.84   JS_DefinePropertyValue
+0.001   0.04  0.001   0.04   JS_FreeAtom
+0.001   0.04  0.001   0.04   JS_GetOwnPropertyNamesInternal
+0.001   0.04  0.001   0.08   JS_GetPropertyValue
+0.001   0.04  0.001   0.08   JS_IteratorNext.constprop.0
+0.001   0.04  0.006   0.54   JS_NewAtomLen
+0.001   0.04  0.003   0.25   JS_NewStringLen
+0.001   0.04  0.005   0.42   JS_SetProperty
+0.001   0.04  0.006   0.50   JS_SetPropertyValue
+0.001   0.04  0.001   0.04   __rustc::__rdl_alloc
+0.001   0.04  0.001   0.04   __rustc::__rust_dealloc
+0.001   0.04  0.001   0.04   __rustc::__rust_no_alloc_shim_is_unstable_v2
+0.001   0.04  0.001   0.04   __vdso_clock_gettime
+0.001   0.04  0.001   0.04   __vdso_clock_gettime
+0.001   0.04  0.001   0.04   __vdso_clock_gettime
+0.001   0.04  0.001   0.04   __vdso_clock_gettime
+0.001   0.04  0.001   0.04   __vdso_clock_gettime
+0.001   0.04  0.001   0.04   core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+0.001   0.04  0.001   0.04   core::ptr::drop_glue::<core::option::Option<serde_json::map::Map<alloc::string::String, serde_json::value::Value>>>
+0.001   0.04  0.001   0.04   core::slice::sort::shared::pivot::median3_rec::<(&str, u16), <(&str, u16) as core::cmp::PartialOrd>::lt>
+0.001   0.04  0.002   0.17   core::slice::sort::shared::smallsort::small_sort_general::<(&str, u16), <(&str, u16) as core::cmp::PartialOrd>::lt>
+0.001   0.04  0.001   0.04   core::slice::sort::unstable::ipnsort::<(alloc::string::String, alloc::string::String), <(alloc::string::String, alloc::string::String) as core::cmp::PartialOrd>::lt>
+0.001   0.04  0.001   0.04   cranelift_codegen::inst_predicates::has_lowering_side_effect
+0.001   0.04  0.001   0.04   cranelift_codegen::inst_predicates::visit_block_succs::<<cranelift_codegen::flowgraph::ControlFlowGraph>::compute_block::{closure#0}>
+0.001   0.04  0.001   0.04   cranelift_codegen::isa::unwind::systemv::create_unwind_info_from_insts::<cranelift_codegen::isa::x64::inst::unwind::systemv::RegisterMapper>
+0.001   0.04  0.001   0.04   cranelift_codegen::isa::x64::encoding::rex::emit_modrm_sib_disp
+0.001   0.04  0.001   0.04   cranelift_codegen::isa::x64::encoding::rex::emit_std_enc_mem
+0.001   0.04  0.004   0.29   cranelift_codegen::isa::x64::inst::emit::emit
+0.001   0.04  0.001   0.08   cranelift_codegen::isa::x64::inst::x64_get_operands::<<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::emit::{closure#2}>
+0.001   0.04  0.002   0.13   cranelift_codegen::write::write_value_aliases
+0.001   0.04  0.001   0.08   dbuf_put_u16.isra.0
+0.001   0.04  0.001   0.04   find_jump_target
+0.001   0.04  0.001   0.04   gc_decref_child
+0.001   0.04  0.001   0.04   gpui::styled::styled_reflection::methods::<gpui::style::StyleRefinement>
+0.001   0.04  0.001   0.04   gpui_shell::spec::Component::Text
+0.001   0.04  0.001   0.04   gpui_shell::style::parse_length
+0.001   0.04  0.462  38.54   gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample
+0.001   0.04  0.001   0.04   js__malloc_usable_size
+0.001   0.04  0.001   0.04   js_array_iterator_next
+0.001   0.04  0.001   0.04   js_bytecode_function_mark
+0.001   0.04  0.003   0.21   js_calloc_rt
+0.001   0.04  0.003   0.25   js_closure2
+0.001   0.04  0.011   0.88   js_create_function
+0.001   0.04  0.001   0.04   js_get_fast_array_element
+0.001   0.04  0.030   2.55   js_malloc
+0.001   0.04  0.001   0.08   js_new_string8_len
+0.001   0.04  0.022   1.84   js_parse_assign_expr2
+0.001   0.04  0.021   1.71   js_parse_expr2
+0.001   0.04  0.020   1.67   js_parse_expr_binary.constprop.5
+0.001   0.04  0.020   1.67   js_parse_postfix_expr
+0.001   0.04  0.001   0.04   js_parse_template
+0.001   0.04  0.001   0.04   js_strict_eq_slow
+0.001   0.04  0.005   0.42   js_string_concat
+0.001   0.04  0.001   0.08   llrt_buffer::init
+0.001   0.04  0.001   0.04   lre_compile
+0.001   0.04  0.001   0.04   mpb_shr_round.part.0
+0.001   0.04  0.004   0.33   parse_ident
+0.001   0.04  0.002   0.17   qjsjit_discard_cached_entry
+0.001   0.04  0.004   0.29   resolve_variables
+0.001   0.04  0.001   0.08   round_to_d.constprop.0
+0.001   0.04  0.043   3.55   rquickjs_core::class::ffi::call
+0.001   0.04  0.057   4.72   rquickjs_core::runtime::jit::native_enter
+0.001   0.04  0.003   0.21   rquickjs_core::runtime::jit::submit_snapshot
+0.001   0.04  0.001   0.04   rquickjs_jit::bytecode::decode::decode_bounded
+0.001   0.04  0.001   0.04   update_token_ident.constprop.0
+0.      0.    0.001   0.04   <&cranelift_codegen::ir::entities::Value as core::fmt::Display>::fmt
+0.      0.    0.002   0.13   <&mut cranelift_codegen::cursor::FuncCursor as cranelift_codegen::ir::builder::InstInserterBase>::insert_built_inst
+0.      0.    0.001   0.04   <&smallvec::SmallVec<[gpui_shell::value::Bridged; 2]> as core::fmt::Debug>::fmt
+0.      0.    0.003   0.21   <&str as rquickjs_core::value::convert::IntoAtom>::into_atom
+0.      0.    0.003   0.25   <&str as rquickjs_core::value::convert::IntoJs>::into_js
+0.      0.    0.001   0.04   <(gpui_shell::engine::quickjs::RegisteredComponentModule, rquickjs_core::loader::module_loader::ModuleLoader, rquickjs_core::loader::module_loader::ModuleLoader, gpui_shell::engine::quickjs::host_modules::HostModuleLoader, gpui_shell::engine::quickjs::AppModules) as rquickjs_core::loader::Loader>::load
+0.      0.    0.001   0.04   <(rquickjs_core::context::ctx::Ctx, u32, usize, rquickjs_core::value::function::types::Opt<gpui_shell::engine::quickjs::StyleArgument>) as rquickjs_core::value::function::params::FromParams>::from_params
+0.      0.    0.003   0.21   <<gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#27} as rquickjs_core::value::function::IntoJsFunc<(rquickjs_core::context::ctx::Ctx, u32, usize, rquickjs_core::value::function::types::Opt<gpui_shell::engine::quickjs::StyleArgument>)>>::call
+0.      0.    0.015   1.21   <<rquickjs_core::value::function::Function>::new<(rquickjs_core::context::ctx::Ctx, alloc::string::String), gpui_shell::engine::quickjs::text_constructor::{closure#0}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.      0.    0.008   0.67   <<rquickjs_core::value::function::Function>::new<(rquickjs_core::context::ctx::Ctx, u32, u32), <gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#25}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.      0.    0.003   0.21   <<rquickjs_core::value::function::Function>::new<(rquickjs_core::context::ctx::Ctx, u32, usize, rquickjs_core::value::function::types::Opt<gpui_shell::engine::quickjs::StyleArgument>), <gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}::{closure#27}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.      0.    0.002   0.13   <<rquickjs_core::value::function::Function>::new<(rquickjs_core::context::ctx::Ctx,), gpui_shell::engine::quickjs::constructor::{closure#0}>::{closure#0} as rquickjs_core::value::function::ffi::RustFunc>::call
+0.      0.    0.002   0.17   <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<regalloc2::ion::data_structures::LiveRangeKey, regalloc2::ion::data_structures::SpillSetIndex>>>::new_uninit_in
+0.      0.    0.001   0.04   <alloc::boxed::Box<str> as core::clone::Clone>::clone
+0.      0.    0.001   0.04   <alloc::collections::vec_deque::VecDeque<usize>>::grow
+0.      0.    0.003   0.21   <alloc::raw_vec::RawVec<bool>>::grow_one
+0.      0.    0.001   0.04   <alloc::raw_vec::RawVec<cranelift_bforest::node::NodeData<cranelift_bforest::set::SetTypes<cranelift_codegen::ir::entities::Block>>>>::grow_one
+0.      0.    0.001   0.04   <alloc::raw_vec::RawVec<cranelift_codegen::ir::extfunc::AbiParam>>::grow_one
+0.      0.    0.002   0.13   <alloc::raw_vec::RawVec<gpui_shell::spec::SpecNode>>::grow_one
+0.      0.    0.001   0.04   <alloc::raw_vec::RawVec<u32>>::grow_one
+0.      0.    0.001   0.04   <alloc::raw_vec::RawVec<usize>>::grow_one
+0.      0.    0.002   0.17   <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+0.      0.    0.004   0.29   <alloc::raw_vec::RawVecInner>::finish_grow
+0.      0.    0.003   0.25   <alloc::raw_vec::RawVecInner>::finish_grow
+0.      0.    0.003   0.21   <alloc::raw_vec::RawVecInner>::finish_grow
+0.      0.    0.001   0.04   <alloc::raw_vec::RawVecInner>::finish_grow
+0.      0.    0.001   0.04   <alloc::rc::Rc<bumpalo::Bump>>::drop_slow
+0.      0.    0.010   0.84   <alloc::rc::Rc<gpui_shell::engine::quickjs::ShellRuntime>>::drop_slow
+0.      0.    0.003   0.21   <alloc::rc::Rc<gpui_shell::snapshot::SnapshotInner>>::drop_slow
+0.      0.    0.010   0.84   <alloc::rc::Rc<rquickjs_core::safe_ref::Mut<rquickjs_core::runtime::raw::RawRuntime>>>::drop_slow
+0.      0.    0.001   0.08   <alloc::string::String as rquickjs_core::value::convert::FromAtom>::from_atom
+0.      0.    0.003   0.25   <alloc::string::String as rquickjs_core::value::convert::FromJs>::from_js
+0.      0.    0.001   0.04   <alloc::sync::Arc<lock_api::rwlock::RwLock<parking_lot::raw_rwlock::RawRwLock, gpui::app::entity_map::EntityRefCounts>>>::drop_slow
+0.      0.    0.001   0.04   <alloc::vec::Vec<rquickjs_jit::ir::optimized::OptimizedNode> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::ir::optimized::OptimizedNode, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<core::slice::iter::Iter<rquickjs_jit::ir::optimized::OptimizedNode>, <rquickjs_jit::ir::optimized::OptimizedIr>::translate::{closure#6}>>>>::from_iter
+0.      0.    0.001   0.04   <alloc::vec::Vec<rquickjs_jit::runtime::feedback::BinaryFeedbackSnapshot> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::feedback::BinaryFeedbackSnapshot, core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::BinaryFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#2}>>>::from_iter
+0.      0.    0.001   0.04   <alloc::vec::Vec<rquickjs_jit::runtime::feedback::CallFeedbackSnapshot> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::feedback::CallFeedbackSnapshot, core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<rquickjs_jit::runtime::coordinator::FunctionKey, rquickjs_jit::runtime::feedback::CallFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#1}>>>::from_iter
+0.      0.    0.001   0.04   <alloc::vec::Vec<rquickjs_jit::runtime::feedback::CallSignatureFeedbackSnapshot> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::feedback::CallSignatureFeedbackSnapshot, core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::CallSignatureFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#5}>>>::from_iter
+0.      0.    0.001   0.04   <alloc::vec::Vec<rquickjs_jit::runtime::feedback::ObservedType> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<rquickjs_jit::runtime::feedback::ObservedType, core::iter::adapters::map::Map<core::slice::iter::Iter<rquickjs_jit::runtime::feedback::Entry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#1}::{closure#2}::{closure#0}>>>::from_iter
+0.      0.    0.001   0.04   <alloc::vec::Vec<u8> as core::convert::From<&str>>::from
+0.      0.    0.001   0.04   <alloc::vec::Vec<u8>>::into_boxed_slice
+0.      0.    0.001   0.04   <bumpalo::Bump>::alloc_layout_slow
+0.      0.    0.001   0.04   <core::fmt::Formatter>::debug_tuple_field1_finish
+0.      0.    0.001   0.04   <core::fmt::builders::DebugSet>::entry
+0.      0.    0.001   0.04   <core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<core::slice::iter::Iter<rquickjs_jit::ir::optimized::OptimizedNode>, <rquickjs_jit::ir::optimized::OptimizedIr>::translate::{closure#6}>> as core::iter::traits::iterator::Iterator>::next
+0.      0.    0.001   0.04   <core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::BinaryFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#2}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<rquickjs_jit::runtime::feedback::BinaryFeedbackSnapshot, <alloc::vec::Vec<rquickjs_jit::runtime::feedback::BinaryFeedbackSnapshot>>::extend_trusted<core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::BinaryFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#2}>>::{closure#0}>::{closure#0}>
+0.      0.    0.001   0.04   <core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::CallSignatureFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#5}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<rquickjs_jit::runtime::feedback::CallSignatureFeedbackSnapshot, <alloc::vec::Vec<rquickjs_jit::runtime::feedback::CallSignatureFeedbackSnapshot>>::extend_trusted<core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<(rquickjs_jit::runtime::coordinator::FunctionKey, u32), rquickjs_jit::runtime::feedback::CallSignatureFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#5}>>::{closure#0}>::{closure#0}>
+0.      0.    0.001   0.04   <core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<rquickjs_jit::runtime::coordinator::FunctionKey, rquickjs_jit::runtime::feedback::CallFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#1}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<rquickjs_jit::runtime::feedback::CallFeedbackSnapshot, <alloc::vec::Vec<rquickjs_jit::runtime::feedback::CallFeedbackSnapshot>>::extend_trusted<core::iter::adapters::map::Map<alloc::collections::btree::map::Iter<rquickjs_jit::runtime::coordinator::FunctionKey, rquickjs_jit::runtime::feedback::CallFeedbackEntry>, <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot::{closure#1}>>::{closure#0}>::{closure#0}>
+0.      0.    0.001   0.04   <cranelift_bforest::map::MapCursor<cranelift_codegen::ir::entities::Inst, cranelift_codegen::ir::entities::Block, ()>>::insert
+0.      0.    0.002   0.13   <cranelift_codegen::alias_analysis::AliasAnalysis>::new
+0.      0.    0.043   3.55   <cranelift_codegen::context::Context>::compile_stencil
+0.      0.    0.023   1.92   <cranelift_codegen::context::Context>::optimize
+0.      0.    0.001   0.08   <cranelift_codegen::egraph::elaborate::Elaborator>::maybe_remat_arg
+0.      0.    0.002   0.13   <cranelift_codegen::flowgraph::ControlFlowGraph>::add_edge
+0.      0.    0.002   0.17   <cranelift_codegen::flowgraph::ControlFlowGraph>::compute
+0.      0.    0.001   0.08   <cranelift_codegen::ir::dfg::DataFlowGraph>::block_call
+0.      0.    0.001   0.08   <cranelift_codegen::ir::dfg::DataFlowGraph>::clone_inst
+0.      0.    0.001   0.04   <cranelift_codegen::ir::dfg::DataFlowGraph>::value_alias_dest_for_serialization
+0.      0.    0.001   0.08   <cranelift_codegen::ir::entities::Value as core::fmt::Display>::fmt
+0.      0.    0.011   0.96   <cranelift_codegen::ir::function::DisplayFunction as alloc::string::SpecToString>::spec_to_string
+0.      0.    0.001   0.04   <cranelift_codegen::ir::immediates::Imm64 as core::fmt::Display>::fmt
+0.      0.    0.001   0.04   <cranelift_codegen::ir::immediates::Offset32 as core::fmt::Display>::fmt
+0.      0.    0.001   0.04   <cranelift_codegen::ir::layout::Layout>::append_inst
+0.      0.    0.001   0.04   <cranelift_codegen::ir::types::Type as core::fmt::Display>::fmt
+0.      0.    0.001   0.04   <cranelift_codegen::isa::x64::abi::X64ABIMachineSpec as cranelift_codegen::machinst::abi::ABIMachineSpec>::gen_clobber_restore
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::abi::Callee<cranelift_codegen::isa::x64::abi::X64ABIMachineSpec>>::gen_epilogue
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend> as cranelift_codegen::isa::x64::lower::isle::generated_code::Context>::gen_return
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::lower::Lower<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::gen_return
+0.      0.    0.004   0.33   <cranelift_codegen::machinst::lower::Lower<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::lower::<cranelift_codegen::isa::x64::X64Backend>
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::lower::Lower<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::put_value_in_regs
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::reg::OperandCollector<<cranelift_codegen::machinst::vcode::VCodeBuilder<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::collect_operands::{closure#0}> as cranelift_codegen::machinst::reg::OperandVisitorImpl>::reg_maybe_fixed
+0.      0.    0.002   0.13   <cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::emit::{closure#0}
+0.      0.    0.001   0.08   <cranelift_codegen::machinst::vcode::VCodeBuilder<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::build
+0.      0.    0.001   0.04   <cranelift_codegen::machinst::vcode::VRegAllocator<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::alloc_with_maybe_fact
+0.      0.    0.001   0.04   <cranelift_codegen::timing::DefaultProfiler as cranelift_codegen::timing::Profiler>::start_pass
+0.      0.    0.001   0.04   <cranelift_entity::map::SecondaryMap<cranelift_codegen::ir::entities::Block, cranelift_codegen::remove_constant_phis::BlockSummary>>::resize_for_index_mut
+0.      0.    0.001   0.04   <cranelift_entity::map::SecondaryMap<cranelift_codegen::ir::entities::Value, cranelift_codegen::ir::entities::Block>>::resize_for_index_mut
+0.      0.    0.001   0.04   <cranelift_frontend::frontend::FuncInstBuilder as cranelift_codegen::ir::builder::InstBuilder>::iadd_imm::<i64>
+0.      0.    0.001   0.08   <cranelift_frontend::frontend::FuncInstBuilder as cranelift_codegen::ir::builder::InstBuilderBase>::build
+0.      0.    0.001   0.04   <cranelift_frontend::frontend::FunctionBuilder>::finalize
+0.      0.    0.001   0.04   <gpui::app::App as gpui::AppContext>::update_window::<core::result::Result<gpui_shell::engine::quickjs::ViewObject, anyhow::Error>, <gpui::app::test_context::VisualTestContext>::update<core::result::Result<gpui_shell::engine::quickjs::ViewObject, anyhow::Error>, gpui_shell::tests::snapshot::set_flag::{closure#0}>::{closure#0}>
+0.      0.    0.131  10.90   <gpui::app::App as gpui::AppContext>::update_window::<gpui_shell::snapshot::RenderSnapshot, <gpui::app::test_context::VisualTestContext>::update<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#2}>::{closure#0}>
+0.      0.    0.217  18.16   <gpui::app::App as gpui::AppContext>::update_window::<gpui_shell::snapshot::RenderSnapshot, <gpui::app::test_context::VisualTestContext>::update<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#3}>::{closure#0}>
+0.      0.    0.013   1.04   <gpui::app::App as gpui::AppContext>::update_window::<gpui_shell::snapshot::RenderSnapshot, <gpui::app::test_context::VisualTestContext>::update<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#5}>::{closure#0}>
+0.      0.    0.001   0.08   <gpui::app::App>::open_window::<gpui_shell::tests::benchmark::Empty, <gpui::app::test_context::TestAppContext>::add_window<gpui_shell::tests::benchmark::runtime_with_source::{closure#2}, gpui_shell::tests::benchmark::Empty>::{closure#0}>
+0.      0.    0.001   0.04   <gpui::app::entity_map::AnyEntity as core::ops::drop::Drop>::drop
+0.      0.    0.001   0.08   <gpui::app::test_context::TestAppContext>::add_window::<gpui_shell::tests::benchmark::runtime_with_source::{closure#2}, gpui_shell::tests::benchmark::Empty>
+0.      0.    0.001   0.04   <gpui::app::test_context::VisualTestContext>::update::<core::result::Result<gpui_shell::engine::quickjs::ViewObject, anyhow::Error>, gpui_shell::tests::benchmark::runtime_with_source::{closure#3}>
+0.      0.    0.131  10.90   <gpui::app::test_context::VisualTestContext>::update::<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#2}>
+0.      0.    0.217  18.16   <gpui::app::test_context::VisualTestContext>::update::<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#3}>
+0.      0.    0.013   1.04   <gpui::app::test_context::VisualTestContext>::update::<gpui_shell::snapshot::RenderSnapshot, gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::__emit_one_jit_acceptance_sample::{closure#5}>
+0.      0.    0.001   0.08   <gpui::element::Drawable<gpui::elements::div::Div>>::request_layout
+0.      0.    0.001   0.08   <gpui::element::Drawable<gpui::view::ViewElement<gpui::view::AnyView>>>::request_layout
+0.      0.    0.001   0.04   <gpui::elements::div::Div as gpui::element::Element>::request_layout
+0.      0.    0.002   0.13   <gpui::window::Window>::draw
+0.      0.    0.001   0.04   <gpui_shell::engine::quickjs::ShellRuntime>::attach
+0.      0.    0.360  30.06   <gpui_shell::engine::quickjs::ShellRuntime>::build_snapshot
+0.      0.    0.626  52.28   <gpui_shell::engine::quickjs::ShellRuntime>::call_render
+0.      0.    0.626  52.28   <gpui_shell::engine::quickjs::ShellRuntime>::call_render_once
+0.      0.    0.001   0.04   <gpui_shell::engine::quickjs::ShellRuntime>::instantiate
+0.      0.    0.004   0.38   <gpui_shell::engine::quickjs::ShellRuntime>::load_source_with_lease
+0.      0.    0.004   0.38   <gpui_shell::engine::quickjs::ShellRuntime>::load_source_with_lease::{closure#0}
+0.      0.    0.069   5.72   <gpui_shell::engine::quickjs::ShellRuntime>::new_isolated
+0.      0.    0.069   5.72   <gpui_shell::engine::quickjs::ShellRuntime>::new_isolated_with_components_and_dependency_store
+0.      0.    0.069   5.72   <gpui_shell::engine::quickjs::ShellRuntime>::new_isolated_with_components_dependency_store_and_runtime
+0.      0.    0.067   5.55   <gpui_shell::engine::quickjs::ShellRuntime>::with_js::<(), <gpui_shell::engine::quickjs::ShellRuntime>::install_globals::{closure#0}>::{closure#0}
+0.      0.    0.001   0.04   <gpui_shell::policy::Policy>::new
+0.      0.    0.011   0.92   <gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+0.      0.    0.001   0.04   <hashbrown::map::HashMap<regalloc2::index::Inst, regalloc2::PRegSet, rustc_hash::FxBuildHasher>>::insert
+0.      0.    0.001   0.04   <hashbrown::map::HashMap<rquickjs_jit::runtime::coordinator::FunctionKey, (), std::hash::random::RandomState>>::contains_key::<rquickjs_jit::runtime::coordinator::FunctionKey>
+0.      0.    0.001   0.04   <hashbrown::map::HashMap<rquickjs_jit::runtime::coordinator::FunctionKey, (u8, u64), std::hash::random::RandomState>>::insert
+0.      0.    0.001   0.04   <hashbrown::raw::RawTable<(cranelift_codegen::alias_analysis::MemoryLoc, (cranelift_codegen::ir::entities::Inst, cranelift_codegen::ir::entities::Value))>>::reserve_rehash::<hashbrown::map::make_hasher<cranelift_codegen::alias_analysis::MemoryLoc, (cranelift_codegen::ir::entities::Inst, cranelift_codegen::ir::entities::Value), rustc_hash::FxBuildHasher>::{closure#0}>
+0.      0.    0.001   0.04   <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+0.      0.    0.001   0.08   <llrt_crypto::Crypto as rquickjs_core::class::JsClass>::prototype
+0.      0.    0.001   0.04   <llrt_utils::primordials::BasePrimordials as llrt_utils::primordials::Primordial>::init
+0.      0.    0.001   0.04   <llrt_utils::primordials::BasePrimordials as llrt_utils::primordials::Primordial>::new
+0.      0.    0.001   0.08   <regalloc2::Bump as allocator_api2::stable::alloc::Allocator>::grow
+0.      0.    0.001   0.04   <regalloc2::ion::data_structures::Env<_>>::resolve_inserted_moves::redundant_move_process_side_effects::<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>
+0.      0.    0.002   0.13   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::add_liverange_to_vreg
+0.      0.    0.001   0.08   <regalloc2::ion::data_structures::Env<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>>::new
+0.      0.    0.001   0.04   <regalloc2::moves::ParallelMoves<core::option::Option<regalloc2::VReg>>>::resolve
+0.      0.    0.001   0.04   <rquickjs_core::class::Class<llrt_crypto::subtle::crypto_key::CryptoKey>>::define
+0.      0.    0.002   0.17   <rquickjs_core::class::Class<rquickjs_core::value::function::ffi::RustFunction>>::instance
+0.      0.    0.002   0.13   <rquickjs_core::context::base::Context>::full
+0.      0.    0.004   0.38   <rquickjs_core::context::base::Context>::with::<<gpui_shell::engine::quickjs::ShellRuntime>::with_js<gpui_shell::engine::quickjs::ViewType, <gpui_shell::engine::quickjs::ShellRuntime>::load_source_with_lease::{closure#0}::{closure#0}>::{closure#0}, core::result::Result<gpui_shell::engine::quickjs::ViewType, anyhow::Error>>
+0.      0.    0.626  52.28   <rquickjs_core::context::base::Context>::with::<<gpui_shell::engine::quickjs::ShellRuntime>::with_js<u32, <gpui_shell::engine::quickjs::ShellRuntime>::call_render_once::{closure#0}>::{closure#0}, core::result::Result<u32, anyhow::Error>>
+0.      0.    0.001   0.08   <rquickjs_core::context::ctx::Ctx as core::clone::Clone>::clone
+0.      0.    0.057   4.72   <rquickjs_core::context::ctx::Ctx>::eval_raw::<&str>
+0.      0.    0.053   4.43   <rquickjs_core::context::ctx::Ctx>::eval_with_options::<(), &str>
+0.      0.    0.001   0.04   <rquickjs_core::loader::LoaderHolder>::load_raw
+0.      0.    0.001   0.04   <rquickjs_core::loader::LoaderHolder>::new::<(gpui_shell::engine::quickjs::RegisteredComponentModule, rquickjs_core::loader::builtin_resolver::BuiltinResolver, rquickjs_core::loader::builtin_resolver::BuiltinResolver, gpui_shell::engine::quickjs::host_modules::HostModuleLoader, gpui_shell::engine::quickjs::AppModules), (gpui_shell::engine::quickjs::RegisteredComponentModule, rquickjs_core::loader::module_loader::ModuleLoader, rquickjs_core::loader::module_loader::ModuleLoader, gpui_shell::engine::quickjs::host_modules::HostModuleLoader, gpui_shell::engine::quickjs::AppModules)>
+0.      0.    0.001   0.04   <rquickjs_core::loader::module_loader::ModuleLoader as rquickjs_core::loader::Loader>::load
+0.      0.    0.001   0.04   <rquickjs_core::runtime::base::Runtime>::set_loader::<(gpui_shell::engine::quickjs::RegisteredComponentModule, rquickjs_core::loader::builtin_resolver::BuiltinResolver, rquickjs_core::loader::builtin_resolver::BuiltinResolver, gpui_shell::engine::quickjs::host_modules::HostModuleLoader, gpui_shell::engine::quickjs::AppModules), (gpui_shell::engine::quickjs::RegisteredComponentModule, rquickjs_core::loader::module_loader::ModuleLoader, rquickjs_core::loader::module_loader::ModuleLoader, gpui_shell::engine::quickjs::host_modules::HostModuleLoader, gpui_shell::engine::quickjs::AppModules)>
+0.      0.    0.001   0.08   <rquickjs_core::runtime::opaque::Opaque>::get_or_insert_prototype::<llrt_crypto::Crypto>
+0.      0.    0.001   0.04   <rquickjs_core::runtime::opaque::Opaque>::get_or_insert_prototype::<llrt_crypto::subtle::crypto_key::CryptoKey>
+0.      0.    0.010   0.84   <rquickjs_core::runtime::raw::RawRuntime as core::ops::drop::Drop>::drop
+0.      0.    0.001   0.04   <rquickjs_core::value::Value as core::clone::Clone>::clone
+0.      0.    0.001   0.08   <rquickjs_core::value::atom::Atom>::to_string
+0.      0.    0.001   0.08   <rquickjs_core::value::function::Constructor>::new_class::<llrt_crypto::Crypto, llrt_crypto::__impl_methods_Crypto__::__impl_new, (rquickjs_core::context::ctx::Ctx,)>
+0.      0.    0.001   0.04   <rquickjs_core::value::function::Constructor>::new_class::<llrt_crypto::subtle::crypto_key::CryptoKey, llrt_crypto::subtle::crypto_key::__impl_methods_CryptoKey__::__impl_constructor, (rquickjs_core::context::ctx::Ctx,)>
+0.      0.    0.009   0.75   <rquickjs_core::value::function::Function>::call::<(rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#0}, (rquickjs_core::context::ctx::Ctx,)>,), rquickjs_core::value::object::Object>
+0.      0.    0.602  50.23   <rquickjs_core::value::function::Function>::call::<(rquickjs_core::value::function::types::This<rquickjs_core::value::object::Object>, rquickjs_core::value::object::Object), rquickjs_core::value::Value>
+0.      0.    0.001   0.08   <rquickjs_core::value::function::Function>::new::<(rquickjs_core::context::ctx::Ctx,), gpui_shell::engine::quickjs::context_object::{closure#2}>
+0.      0.    0.008   0.67   <rquickjs_core::value::function::args::Args as core::ops::drop::Drop>::drop
+0.      0.    0.001   0.08   <rquickjs_core::value::function::args::Args>::apply::<()>
+0.      0.    0.602  50.23   <rquickjs_core::value::function::args::Args>::apply::<rquickjs_core::value::Value>
+0.      0.    0.008   0.67   <rquickjs_core::value::function::args::Args>::apply::<rquickjs_core::value::object::Object>
+0.      0.    0.001   0.08   <rquickjs_core::value::function::args::Args>::push_arg::<rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#0}, (rquickjs_core::context::ctx::Ctx,)>>
+0.      0.    0.004   0.29   <rquickjs_core::value::module::Module>::declare::<&str, &str>
+0.      0.    0.001   0.04   <rquickjs_core::value::module::Module>::eval
+0.      0.    0.001   0.04   <rquickjs_core::value::object::IterState>::new
+0.      0.    0.001   0.08   <rquickjs_core::value::object::Object>::get::<&str, rquickjs_core::value::Value>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::get::<&str, rquickjs_core::value::function::Function>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::get::<&str, rquickjs_core::value::object::Object>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::new
+0.      0.    0.001   0.08   <rquickjs_core::value::object::Object>::prop::<rquickjs_core::value::atom::predefined::PredefinedAtom, rquickjs_core::value::object::property::Property<&str>, &str>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::set::<&str, rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#1}, (rquickjs_core::context::ctx::Ctx, rquickjs_core::value::function::types::Opt<rquickjs_core::value::Value>)>>
+0.      0.    0.002   0.13   <rquickjs_core::value::object::Object>::set::<&str, rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#2}, (rquickjs_core::context::ctx::Ctx,)>>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::set::<&str, rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#3}, (rquickjs_core::context::ctx::Ctx,)>>
+0.      0.    0.001   0.08   <rquickjs_core::value::object::Object>::set::<&str, rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::context_object::{closure#4}, ()>>
+0.      0.    0.001   0.04   <rquickjs_core::value::object::Object>::set::<&str, rquickjs_core::value::function::types::Func<gpui_shell::engine::quickjs::window_api::install::{closure#1}, (rquickjs_core::context::ctx::Ctx,)>>
+0.      0.    0.004   0.33   <rquickjs_core::value::object::Object>::set::<alloc::string::String, rquickjs_core::value::Value>
+0.      0.    0.001   0.08   <rquickjs_core::value::object::ObjectKeysIter<alloc::string::String> as core::iter::traits::iterator::Iterator>::next
+0.      0.    0.010   0.84   <rquickjs_jit::JitRuntime as core::ops::drop::Drop>::drop
+0.      0.    0.063   5.26   <rquickjs_jit::MeasuredCompiler<rquickjs_jit::DeferredTieredCompiler> as rquickjs_jit::compiler::Compiler>::compile
+0.      0.    0.063   5.26   <rquickjs_jit::MeasuredCompiler<rquickjs_jit::DeferredTieredCompiler> as rquickjs_jit::compiler::Compiler>::compile_controlled
+0.      0.    0.002   0.17   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::release_entry
+0.      0.    0.002   0.17   <rquickjs_jit::ProductionBackend as rquickjs_core::runtime::jit::JitBackend>::submit_snapshot
+0.      0.    0.001   0.04   <rquickjs_jit::ProductionBackend>::fail_before_queue
+0.      0.    0.053   4.47   <rquickjs_jit::compiler::baseline::BaselineCompiler as rquickjs_jit::compiler::Compiler>::compile
+0.      0.    0.053   4.47   <rquickjs_jit::compiler::baseline::BaselineCompiler>::compile_with_policy_and_specializations
+0.      0.    0.053   4.47   <rquickjs_jit::compiler::baseline::BaselineCompiler>::compile_with_policy_start
+0.      0.    0.001   0.04   <rquickjs_jit::compiler::baseline::HelperLowering>::invoke
+0.      0.    0.001   0.04   <rquickjs_jit::compiler::baseline::TargetIdentity>::from_isa
+0.      0.    0.009   0.79   <rquickjs_jit::compiler::optimized::Tier2Compiler as rquickjs_jit::compiler::Compiler>::compile
+0.      0.    0.001   0.04   <rquickjs_jit::runtime::feedback::FeedbackSnapshot>::bounded_specialization
+0.      0.    0.002   0.13   <rquickjs_jit::runtime::feedback::FeedbackTable>::snapshot
+0.      0.    0.001   0.04   <smallvec::SmallVec<[u32; 16]>>::reserve_one_unchecked
+0.      0.    0.074   6.18   <static>@0x14aed (<libgp-collector.so>)
+0.      0.    0.074   6.18   <static>@0x97b0a (<libc.so.6>)
+0.      0.    0.001   0.04   <std::sys::fs::unix::File>::open_c
+0.      0.    0.074   6.18   <std::sys::thread::unix::Thread>::new::thread_start
+0.      0.    0.001   0.04   <std::sys::thread_local::native::lazy::Storage<core::cell::RefCell<alloc::rc::Rc<gpui_shell::policy::Policy>>, ()>>::get_or_init_slow::<gpui_shell::policy::DEFAULT::__rust_std_internal_init_fn>
+0.      0.    0.063   5.26   <std::thread::lifecycle::spawn_unchecked<<rquickjs_jit::runtime::background::BackgroundCompiler>::start_workers::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+0.      0.    0.011   0.92   <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+0.      0.    0.001   0.04   JS_AddIntrinsicAToB
+0.      0.    0.001   0.04   JS_AddIntrinsicBaseObjects
+0.      0.    0.001   0.04   JS_AddIntrinsicBigInt
+0.      0.    0.001   0.04   JS_AddIntrinsicPromise
+0.      0.    0.001   0.04   JS_AtomToCStringLen
+0.      0.    0.003   0.25   JS_DefineAutoInitProperty
+0.      0.    0.001   0.08   JS_DefineObjectName.constprop.0
+0.      0.    0.057   4.72   JS_Eval
+0.      0.    0.001   0.04   JS_EvalFunction
+0.      0.    0.025   2.13   JS_EvalFunctionInternal
+0.      0.    0.057   4.72   JS_EvalThis2
+0.      0.    0.010   0.84   JS_FreeRuntime
+0.      0.    0.002   0.13   JS_GetIterator
+0.      0.    0.001   0.04   JS_GetProperty
+0.      0.    0.001   0.04   JS_NewCConstructor.constprop.0
+0.      0.    0.001   0.04   JS_NewCFunction2
+0.      0.    0.001   0.08   JS_NewCFunction3
+0.      0.    0.002   0.13   JS_NewContext
+0.      0.    0.001   0.04   JS_NewPromiseCapability
+0.      0.    0.001   0.04   JS_SetPropertyFunctionList
+0.      0.    0.002   0.17   JS_SetPropertyUint32
+0.      0.    0.002   0.13   JS_ToStringInternal
+0.      0.    0.057   4.72   __JS_EvalInternal
+0.      0.    0.001   0.04   add_arg
+0.      0.    0.001   0.04   core::fmt::float::float_to_decimal_common_shortest::<f64>
+0.      0.    0.003   0.21   core::ptr::drop_glue::<gpui_shell::spec::SpecArena>
+0.      0.    0.001   0.04   core::ptr::drop_glue::<rquickjs_core::value::Value>
+0.      0.    0.001   0.04   core::ptr::drop_glue::<rquickjs_core::value::object::Object>
+0.      0.    0.010   0.84   core::ptr::drop_glue::<rquickjs_jit::JitRuntime>
+0.      0.    0.001   0.04   cranelift_codegen::isa::x64::emit_unwind_info
+0.      0.    0.001   0.04   cranelift_codegen::isa::x64::inst::x64_get_operands::<cranelift_codegen::machinst::reg::OperandCollector<<cranelift_codegen::machinst::vcode::VCodeBuilder<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>::collect_operands::{closure#0}>>
+0.      0.    0.001   0.04   cranelift_codegen::isa::x64::lower::isle::generated_code::constructor_amode_imm_reg::<cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend>>
+0.      0.    0.003   0.21   cranelift_codegen::isa::x64::lower::isle::generated_code::constructor_lower::<cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend>>
+0.      0.    0.001   0.04   cranelift_codegen::isa::x64::lower::isle::generated_code::constructor_to_amode_add::<cranelift_codegen::machinst::isle::IsleContext<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst, cranelift_codegen::isa::x64::X64Backend>>
+0.      0.    0.002   0.13   cranelift_codegen::write::alias_map
+0.      0.    0.015   1.21   cranelift_codegen::write::write_function
+0.      0.    0.004   0.38   cranelift_codegen::write::write_operands
+0.      0.    0.001   0.04   dbuf_put_leb128
+0.      0.    0.001   0.08   dbuf_putc.isra.0
+0.      0.    0.001   0.04   free_function_bytecode
+0.      0.    0.002   0.17   get_var_ref
+0.      0.    0.011   0.92   gpui::test::run_test
+0.      0.    0.001   0.04   gpui_shell::engine::quickjs::element_id
+0.      0.    0.001   0.08   gpui_shell::engine::quickjs::sandbox::install
+0.      0.    0.003   0.21   gpui_shell::engine::quickjs::standard::install
+0.      0.    0.001   0.04   gpui_shell::engine::quickjs::window_api::install
+0.      0.    0.001   0.04   gpui_shell::style::definite_length
+0.      0.    0.005   0.46   gpui_shell::style::nullary_styles
+0.      0.    0.011   0.92   gpui_shell::tests::benchmark::emit_one_jit_acceptance_sample::{closure#0}
+0.      0.    0.071   5.93   gpui_shell::tests::benchmark::runtime_with_source
+0.      0.    0.001   0.04   js_array_finalizer
+0.      0.    0.001   0.04   js_array_mark
+0.      0.    0.224  18.66   js_array_sort
+0.      0.    0.002   0.17   js_atof
+0.      0.    0.001   0.08   js_bytecode_function_finalizer
+0.      0.    0.015   1.21   js_closure
+0.      0.    0.001   0.04   js_compile_regexp
+0.      0.    0.001   0.08   js_create_array_iterator
+0.      0.    0.001   0.04   js_create_resolving_functions
+0.      0.    0.002   0.13   js_for_of_start
+0.      0.    0.001   0.04   js_host_resolve_imported_module
+0.      0.    0.002   0.17   js_mallocz
+0.      0.    0.002   0.17   js_new_function_def
+0.      0.    0.001   0.04   js_new_shape2.constprop.0
+0.      0.    0.003   0.25   js_object_create
+0.      0.    0.001   0.04   js_object_seal
+0.      0.    0.001   0.04   js_parse_array_literal
+0.      0.    0.004   0.38   js_parse_block
+0.      0.    0.001   0.08   js_parse_class
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.0
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.1
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.2
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.3
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.4
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.6
+0.      0.    0.020   1.67   js_parse_expr_binary.constprop.7
+0.      0.    0.019   1.59   js_parse_expr_paren
+0.      0.    0.021   1.71   js_parse_function_decl2.constprop.0
+0.      0.    0.020   1.67   js_parse_logical_and_or
+0.      0.    0.005   0.42   js_parse_object_literal
+0.      0.    0.005   0.46   js_parse_skip_parens_token
+0.      0.    0.021   1.75   js_parse_statement_or_decl
+0.      0.    0.020   1.67   js_parse_unary
+0.      0.    0.010   0.84   js_parse_var
+0.      0.    0.009   0.71   js_realloc
+0.      0.    0.008   0.67   js_realloc2
+0.      0.    0.001   0.04   js_realloc_array
+0.      0.    0.001   0.04   js_resolve_module.part.0
+0.      0.    0.002   0.17   js_strndup
+0.      0.    0.002   0.13   llrt_crypto::init
+0.      0.    0.001   0.04   open
+0.      0.    0.001   0.04   push_scope
+0.      0.    0.010   0.84   regalloc2::ion::run::<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>
+0.      0.    0.011   0.92   regalloc2::run::<cranelift_codegen::machinst::vcode::VCode<cranelift_codegen::isa::x64::lower::isle::generated_code::MInst>>
+0.      0.    0.003   0.21   resize_properties
+0.      0.    0.002   0.13   rquickjs_core::class::ffi::callable_finalizer
+0.      0.    0.008   0.67   rquickjs_core::runtime::jit::acquire_entry
+0.      0.    0.003   0.21   rquickjs_core::runtime::jit::release_entry
+0.      0.    0.001   0.04   rquickjs_jit::bytecode::cfg::build
+0.      0.    0.001   0.08   rquickjs_jit::bytecode::verify::verify
+0.      0.    0.001   0.04   rquickjs_jit::compiler::baseline::analyze_entry_domains
+0.      0.    0.001   0.04   rquickjs_jit::compiler::baseline::emit_exit
+0.      0.    0.007   0.63   rquickjs_jit::compiler::baseline::finalize_optimized_machine
+0.      0.    0.001   0.04   rquickjs_jit::compiler::baseline::lower_dup_if_refcounted
+0.      0.    0.001   0.04   rquickjs_jit::compiler::baseline::lower_free_if_refcounted
+0.      0.    0.002   0.17   rquickjs_jit::compiler::baseline::lower_function
+0.      0.    0.001   0.04   rquickjs_jit::compiler::baseline::materialize_frame
+0.      0.    0.008   0.67   rquickjs_jit::compiler::optimized::lower_optimized_machine
+0.      0.    0.001   0.04   std::fs::write::inner
+0.      0.    0.063   5.26   std::sys::backtrace::__rust_begin_short_backtrace::<<rquickjs_jit::runtime::background::BackgroundCompiler>::start_workers::{closure#0}, ()>
+0.      0.    0.011   0.92   std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()>
+0.      0.    0.001   0.04   string_buffer_end
+0.      0.    0.002   0.13   string_buffer_init2.constprop.0
+0.      0.    0.011   0.92   test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>>
+0.      0.    0.011   0.92   test::run_test::{closure#0}
+0.      0.    0.001   0.04   u32toa

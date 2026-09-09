@@ -68,23 +68,77 @@ It optionally supports mathematical extensions such as big decimal floating poin
 
 ## Experimental JIT performance
 
-The optional `quickjs-jit-runtime` package (normally imported as
-`rquickjs-jit`) provides a feedback-driven baseline and
-optimizing JIT with automatic fallback to the QuickJS interpreter. Lower
-latency is better in the focused compute results below.
+Every JIT optimization must include benchmarks against **QuickJS, Bun, and
+quickjs-jit**, with the complete per-scenario comparison in this README.
+Bun default is the external performance target; the previous JIT revision
+tracks regressions, and the interpreter establishes whether native execution
+is profitable. See the [repository rules](AGENTS.md#performance-reporting) and
+[next optimization targets](docs/PERFORMANCE_NEXT.md).
 
-| Scenario | QuickJS | QuickJS + forced Tier 2 | Bun | QuickJS vs JIT | JIT vs Bun |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Scalar loop | 836.946 us | 25.837 us | 12.983 us | JIT 32.39x faster | JIT 1.99x slower |
-| Numeric loop | 823.818 us | 25.715 us | 12.358 us | JIT 32.04x faster | JIT 2.08x slower |
-| Iterative Fibonacci, `fib(40) x 2000` | 33.780 ms | 753.907 us | 1.093 ms | JIT 44.81x faster | JIT 1.45x faster |
+**Last complete matrix: 2026-09-06, revision `47aeb11`, Bun 1.4.0.**
+This is historical evidence, before PR #24. The current runtime checkpoint
+`07535b1` has **not** been remeasured against Bun across this matrix. The
+[separate gpui-shell mixed regression](docs/MIXED_REGRESSION_20260909.md)
+records current-runtime host evidence; it does not update these Bun results.
 
-These are medians from 30 interleaved fresh processes after five warmup
-processes. Every engine produced the same checksum. See the
-[benchmark methodology and full evidence](benchmarks/README.md), including
-native-entry, fallback, deoptimization, confidence-interval, lifecycle, and
-provenance data. These focused numbers use forced optimizing Tier 2 and should
-not be read as performance guarantees for arbitrary JavaScript.
+QuickJS is the repository-pinned QuickJS-ng interpreter without an attached
+JIT backend. quickjs-jit uses **production automatic tiering**, including
+fallbacks. Forced Tier 1/2 results remain in the linked diagnostic report.
+Absolute values below are median **milliseconds per batch of 10 workload
+calls**, not per individual function call. Speed ratios are quickjs-jit relative
+to the named baseline: above 1x is faster; below 1x is slower. Brackets contain
+paired 95% confidence intervals.
+
+| Scenario | QuickJS ms | Bun ms | quickjs-jit ms | JIT / QuickJS speed [95%] | JIT / Bun speed [95%] |
+| --- | ---: | ---: | ---: | --- | --- |
+| quickjs-int-arith | 6.8045 | 0.9142 | 1.6478 | 4.129x [4.078, 4.147] | 0.555x [0.552, 0.559] |
+| quickjs-bitops | 1.2027 | 0.0179 | 0.2090 | 5.753x [5.735, 5.800] | 0.086x [0.085, 0.086] |
+| quickjs-fibonacci | 0.9308 | 0.0143 | 0.3721 | 2.501x [2.481, 2.569] | 0.039x [0.038, 0.040] |
+| numeric | 0.6200 | 0.0133 | 0.0263 | 23.581x [23.293, 24.160] | 0.506x [0.501, 0.529] |
+| scalar-loop | 0.6319 | 0.0134 | 0.0263 | 24.024x [23.382, 24.316] | 0.508x [0.504, 0.520] |
+| call-heavy | 1.3983 | 0.0243 | 0.3162 | 4.422x [4.392, 4.460] | 0.077x [0.070, 0.080] |
+| generic-call-entry | 1.0784 | 0.0186 | 7.9852 | 0.135x [0.134, 0.136] | 0.002x [0.002, 0.003] |
+| property-heavy | 1.3814 | 0.3567 | 5.1528 | 0.268x [0.267, 0.271] | 0.069x [0.069, 0.070] |
+| fibonacci-iterative | 33.8036 | 1.1388 | 0.8569 | 39.448x [38.684, 40.356] | 1.329x [1.305, 1.361] |
+| fibonacci-recursive | 12.0757 | 0.2824 | 12.2149 | 0.989x [0.984, 0.993] | 0.023x [0.023, 0.024] |
+| collections | 1.7849 | 0.7020 | 1.7973 | 0.993x [0.988, 0.998] | 0.391x [0.388, 0.394] |
+| strings-json | 2.1580 | 0.5935 | 2.2679 | 0.952x [0.949, 0.954] | 0.262x [0.261, 0.264] |
+| calls-closures | 3.5944 | 0.5733 | 3.6513 | 0.984x [0.983, 0.987] | 0.157x [0.156, 0.158] |
+| adversarial | 1.0617 | 0.3792 | 1.0624 | 0.999x [0.991, 1.012] | 0.357x [0.351, 0.362] |
+| float64-dense | 2.9079 | 0.4635 | 0.3719 | 7.819x [7.708, 7.895] | 1.246x [1.229, 1.261] |
+| strings-regexp | 19.3842 | 1.8874 | 19.9433 | 0.972x [0.971, 0.974] | 0.095x [0.094, 0.095] |
+| arrays-typed | 4.5986 | 0.4417 | 7.0111 | 0.656x [0.654, 0.658] | 0.063x [0.062, 0.064] |
+| objects-polymorphic | 6.5235 | 0.6081 | 6.7252 | 0.970x [0.966, 0.973] | 0.090x [0.090, 0.091] |
+| calls-recursion-closures | 7.4095 | 1.6019 | 7.6641 | 0.967x [0.964, 0.970] | 0.209x [0.208, 0.210] |
+| json-codec | 78.4781 | 10.0503 | 78.9305 | 0.994x [0.990, 0.997] | 0.127x [0.127, 0.128] |
+| map-set-bigint | 15.4696 | 2.2103 | 16.3837 | 0.944x [0.941, 0.947] | 0.135x [0.134, 0.136] |
+| exceptions-promises-async | 1.9750 | 0.7497 | 2.8484 | 0.693x [0.690, 0.697] | 0.263x [0.261, 0.267] |
+
+The adversarial interpreter comparison is statistically tied: between 0.9%
+slower and 1.2% faster. All other displayed intervals exclude parity, but the
+cross-engine protocol limitations below preclude claims of peak engine speed.
+Fallback-only and slower scenarios are retained in the table.
+
+Environment: Linux x86_64, Intel i7-13700KF, CPU 0 affinity, powersave,
+Rust 1.98.0 release; QuickJS-ng `fd0a0210b7be00957751871e7e01b8291268fc29`.
+Each scenario/mode has five discarded warmup processes, 30 interleaved fresh
+processes, and ten one-second throughput windows. All 3,300 latency samples
+have matching checksums across engines. The displayed speed ratios use ratios
+of medians with 10,000 paired bootstrap resamples, rather than geometric means.
+
+**Historical protocol limitations:** Bun had one process-internal warmup call;
+QuickJS JIT used adaptive readiness/settling. QuickJS timings include Rust-side
+lookup/call, checksum conversion and polling; Bun computes its checksum after
+timing. A recorded launcher removed the runner's `--smol` flag to use Bun
+defaults. These are measurements of that embedding/protocol, not equivalent
+peak-throughput measurements. The next matrix must align those boundaries and
+warmup policies before setting new Bun-relative optimization targets.
+
+[Full analysis and tier diagnostics](benchmarks/results/main-47aeb11-engines.md),
+[raw samples](benchmarks/results/main-47aeb11-engines.json),
+[versions, hashes, flags and reproduction](benchmarks/results/main-47aeb11-methodology.json),
+[derived data and intervals](benchmarks/results/main-47aeb11-summary.json), and
+[benchmark instructions](benchmarks/README.md).
 
 ## Community development
 

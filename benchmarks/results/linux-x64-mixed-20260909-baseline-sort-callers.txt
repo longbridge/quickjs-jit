@@ -1,0 +1,17 @@
+Print limit set to 30
+Callers and callees sorted by metric: Attributed Total CPU Time
+
+Attr. Total    Name
+CPU
+ sec.      %
+============== Callers
+0.041  48.81   <Total>
+0.043  51.19   js_array_sort
+
+============== Stack Fragment
+0.004   5.36   rqsort.constprop.3
+
+============== Callees
+0.040  47.02   JS_Call
+0.039  46.43   js_array_cmp_generic
+0.001   1.19   exchange_int128s
