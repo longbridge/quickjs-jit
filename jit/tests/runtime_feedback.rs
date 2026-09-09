@@ -996,3 +996,69 @@ fn arithmetic_feedback_rechecks_suspension_after_primitive_conversion() {
         .iter()
         .any(|event| event.kind == qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_BINARY));
 }
+
+#[test]
+fn stable_bool_argument_specializes_tagged_frames_and_direct_calls() {
+    let function = FunctionKey::new(771, 4);
+    let caller = FunctionKey::new(772, 4);
+    let mut feedback = FeedbackTable::new(32, 2);
+    feedback.observe_call(function, &[ObservedType::Int32, ObservedType::Bool]);
+    feedback.observe_return(function, 19, ObservedType::Int32);
+    feedback.observe_binary(
+        function,
+        7,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        BinaryFeedbackFlags::NONE,
+    );
+    feedback.observe_call_signature(
+        caller,
+        3,
+        function,
+        &[ObservedType::Int32, ObservedType::Bool],
+        ObservedType::Int32,
+    );
+    let frozen = feedback.snapshot(23);
+    let signature = frozen
+        .bounded_specialization(function)
+        .expect("stable Bool argument must not indefinitely block numeric Tier2 admission");
+    assert_eq!(signature.arity(), 2);
+    assert_eq!(signature.result(), FeedbackRepresentation::Int32);
+    assert_ne!(
+        signature.arguments()[0],
+        signature.arguments()[1],
+        "Bool must retain its tag identity, not become Int32"
+    );
+    assert!(
+        frozen.call_specialization_at(caller, 3).is_some(),
+        "Bool arguments retain their representation in direct-call feedback"
+    );
+    let mut numeric = FeedbackTable::new(32, 2);
+    numeric.observe_call(function, &[ObservedType::Int32, ObservedType::Int32]);
+    numeric.observe_return(function, 19, ObservedType::Int32);
+    numeric.observe_binary(
+        function,
+        7,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        ObservedType::Int32,
+        BinaryFeedbackFlags::NONE,
+    );
+    assert_ne!(
+        signature.fingerprint(),
+        numeric
+            .snapshot(23)
+            .bounded_specialization(function)
+            .unwrap()
+            .fingerprint()
+    );
+    feedback.observe_call(function, &[ObservedType::Int32, ObservedType::Int32]);
+    assert!(
+        feedback
+            .snapshot(24)
+            .bounded_specialization(function)
+            .is_none(),
+        "a changing argument type must invalidate bounded admission"
+    );
+}

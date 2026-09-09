@@ -185,6 +185,22 @@
         "phases"
       ],
       "properties": {
+        "protocol": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["name", "script_sha256", "driver_sha256", "warmup_batches", "calls_per_batch", "warmup_batch_ns", "fixed_metrics_before", "fixed_metrics_after", "readiness_diagnostic_ns"],
+          "properties": {
+            "name": { "const": "shared-js-fixed-warmup-v2" },
+            "script_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "driver_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "warmup_batches": { "const": 64 },
+            "calls_per_batch": { "const": 10 },
+            "warmup_batch_ns": { "type": "array", "minItems": 64, "maxItems": 64, "items": { "type": "integer", "minimum": 0 } },
+            "fixed_metrics_before": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "fixed_metrics_after": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "readiness_diagnostic_ns": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
         "pair_index": { "type": "integer" },
         "elapsed_ns": { "type": "integer" },
         "checksum": { "type": "string" },

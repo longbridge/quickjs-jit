@@ -30,6 +30,7 @@ fn call_specialization_fingerprint(key: &CallSpecializationKey) -> u64 {
             FeedbackRepresentation::Int32 => 1,
             FeedbackRepresentation::Float64 => 2,
             FeedbackRepresentation::HeapRef => 3,
+            FeedbackRepresentation::Bool => 4,
         }
     }
     let mut state = 0xcbf2_9ce4_8422_2325;
@@ -1498,9 +1499,11 @@ impl Coordinator {
 
     /// Refreshes the backend's single persistent publication snapshot. The
     /// public `metrics()` accessor remains an independent complete snapshot.
+    /// Returns whether the whole snapshot was replaced, including caller-owned fields.
     #[cfg(any(test, feature = "compiler"))]
-    pub(crate) fn refresh_published_metrics(&mut self, snapshot: &mut JitMetrics) {
-        if self.metrics.dirty {
+    pub(crate) fn refresh_published_metrics(&mut self, snapshot: &mut JitMetrics) -> bool {
+        let replaced = self.metrics.dirty;
+        if replaced {
             snapshot.clone_from(&self.metrics.value);
             self.metrics.dirty = false;
         }
@@ -1510,6 +1513,7 @@ impl Coordinator {
         snapshot.metadata_bytes = self.cache.charged_metadata_bytes();
         snapshot.tier2_entries = self.metrics.value.tier2_entries;
         snapshot.side_path_entries = self.metrics.value.side_path_entries;
+        replaced
     }
 
     pub fn set_native_enabled(&mut self, enabled: bool) {
@@ -1756,6 +1760,22 @@ mod tests {
         CompileSnapshot::from_untrusted_bytecode(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
             .verify(VerifyLimits::default())
             .unwrap()
+    }
+
+    #[test]
+    fn publication_reports_when_backend_owned_fields_need_restoring() {
+        let mut coordinator = Coordinator::with_limits(1, 1, 4, 3);
+        let mut published = JitMetrics::disabled();
+        assert!(coordinator.refresh_published_metrics(&mut published));
+        published.snapshot_requests = 17;
+        coordinator.record_tier2_entry();
+        assert!(!coordinator.refresh_published_metrics(&mut published));
+        assert_eq!(published.snapshot_requests, 17);
+        assert_eq!(published.tier2_entries, 1);
+        coordinator.record_deopt(true);
+        assert!(coordinator.refresh_published_metrics(&mut published));
+        assert_eq!(published.snapshot_requests, 0);
+        assert_eq!(published.deopts, 1);
     }
 
     #[test]

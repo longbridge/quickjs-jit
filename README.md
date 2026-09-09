@@ -75,70 +75,122 @@ tracks regressions, and the interpreter establishes whether native execution
 is profitable. See the [repository rules](AGENTS.md#performance-reporting) and
 [next optimization targets](docs/PERFORMANCE_NEXT.md).
 
-**Last complete matrix: 2026-09-06, revision `47aeb11`, Bun 1.4.0.**
-This is historical evidence, before PR #24. The current runtime checkpoint
-`07535b1` has **not** been remeasured against Bun across this matrix. The
-[separate gpui-shell mixed regression](docs/MIXED_REGRESSION_20260909.md)
-records current-runtime host evidence; it does not update these Bun results.
+<!-- BEGIN JIT_MATRIX -->
 
-QuickJS is the repository-pinned QuickJS-ng interpreter without an attached
-JIT backend. quickjs-jit uses **production automatic tiering**, including
-fallbacks. Forced Tier 1/2 results remain in the linked diagnostic report.
-Absolute values below are median **milliseconds per batch of 10 workload
-calls**, not per individual function call. Speed ratios are quickjs-jit relative
-to the named baseline: above 1x is faster; below 1x is slower. Brackets contain
-paired 95% confidence intervals.
+**Complete 24-scenario matrix: candidate4, measured 2026-09-10.**
+**Host compute regression remains unresolved:** automatic hot reload is
+0.9444x baseline speed [0.9373, 0.9518], and interpreter steady-state is
+0.9329x [0.9303, 0.9354]. The host regression budget has not passed; this is
+measured candidate evidence, not an acceptance claim. See the
+[implementation, paired controls, and host findings](docs/BUN_BOUNDARIES_20260909.md).
 
-| Scenario | QuickJS ms | Bun ms | quickjs-jit ms | JIT / QuickJS speed [95%] | JIT / Bun speed [95%] |
+Measured source snapshot: `candidate4`, binary SHA-256 `b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3`.
+QuickJS and automatic use that same binary; QuickJS means JIT detached. Bun
+1.4.0 uses default flags `[]`, executable `/home/jason/.bun/bin/bun`,
+SHA-256 `33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b`. Host: 13th Gen Intel(R) Core(TM) i7-13700KF; Linux-7.1.9-arch1-2-x86_64-with-glibc2.44; pinned
+CPU 2; governor `powersave`; `rustc 1.98.1 (48a229cea 2026-09-01)`. Exact compiler/build,
+source revision/patch manifests, and host details belong to the linked archive;
+this renderer does not infer unrecorded source revisions from binary names.
+
+Protocol `shared-js-fixed-warmup-v2`: one initial call, then 64 batches of ten calls, followed
+by one measured ten-call batch. All engines run the same driver, input policy,
+sequential Promise completion, and result storage; checksums run after timing.
+Driver SHA-256 `60408ad6d28c58e7f20161c17a5db11fc142685fdd07ec7dbf35d7bb02a8f7c5`. Each row has five discarded processes/config and
+30 interleaved retained fresh-process pairs/config. Absolute timings are
+medians in **ms per ten workload calls**. Speed ratios are geometric means of
+paired reference-latency/automatic-latency ratios, with deterministic 10,000
+paired percentile-bootstrap resamples (seed 20260909); they are not ratios of the
+displayed medians. Above 1x is faster than the named baseline. Intervals crossing
+1x are statistically tied, with the slower/faster range shown explicitly.
+
+These are fixed-warmup latencies. Samples are not excluded because they lack
+native entries, compile during the window, fall back, or run slowly. QuickJS
+includes one outer Rust call/Promise bridge; both engines include shared driver
+array/closure work. Fixed counters surround the batch before checksum execution
+and aggregate driver plus workload, not a named function. The quiet count means
+zero pending jobs/snapshot bytes at both endpoints and no observed installation
+or compile-time increment, not proof of an engine's peak tier. Native counts do
+not establish Bun's tier.
+
+Readiness diagnostics are collected later only for QuickJS; their timings and
+cumulative counters must not replace fixed-window evidence or be divided into
+Bun's differently conditioned latency. This latency matrix contains no JS
+throughput windows, matched settled-state Bun samples, per-call P99, or host
+snapshot measurement. Those requirements remain separate; `mixed-quotes` is a
+pure JS kernel, not GPUI snapshot timing. Legacy gate reporting rejects this
+protocol. [Raw evidence](benchmarks/results/bun-boundaries-20260909-evidence.tar.gz) and [machine-readable summary](benchmarks/results/bun-boundaries-20260909-matrix.json).
+
+| Workload | QuickJS ms | Bun ms | automatic ms | automatic / QuickJS speed [95% CI] | automatic / Bun speed [95% CI] |
 | --- | ---: | ---: | ---: | --- | --- |
-| quickjs-int-arith | 6.8045 | 0.9142 | 1.6478 | 4.129x [4.078, 4.147] | 0.555x [0.552, 0.559] |
-| quickjs-bitops | 1.2027 | 0.0179 | 0.2090 | 5.753x [5.735, 5.800] | 0.086x [0.085, 0.086] |
-| quickjs-fibonacci | 0.9308 | 0.0143 | 0.3721 | 2.501x [2.481, 2.569] | 0.039x [0.038, 0.040] |
-| numeric | 0.6200 | 0.0133 | 0.0263 | 23.581x [23.293, 24.160] | 0.506x [0.501, 0.529] |
-| scalar-loop | 0.6319 | 0.0134 | 0.0263 | 24.024x [23.382, 24.316] | 0.508x [0.504, 0.520] |
-| call-heavy | 1.3983 | 0.0243 | 0.3162 | 4.422x [4.392, 4.460] | 0.077x [0.070, 0.080] |
-| generic-call-entry | 1.0784 | 0.0186 | 7.9852 | 0.135x [0.134, 0.136] | 0.002x [0.002, 0.003] |
-| property-heavy | 1.3814 | 0.3567 | 5.1528 | 0.268x [0.267, 0.271] | 0.069x [0.069, 0.070] |
-| fibonacci-iterative | 33.8036 | 1.1388 | 0.8569 | 39.448x [38.684, 40.356] | 1.329x [1.305, 1.361] |
-| fibonacci-recursive | 12.0757 | 0.2824 | 12.2149 | 0.989x [0.984, 0.993] | 0.023x [0.023, 0.024] |
-| collections | 1.7849 | 0.7020 | 1.7973 | 0.993x [0.988, 0.998] | 0.391x [0.388, 0.394] |
-| strings-json | 2.1580 | 0.5935 | 2.2679 | 0.952x [0.949, 0.954] | 0.262x [0.261, 0.264] |
-| calls-closures | 3.5944 | 0.5733 | 3.6513 | 0.984x [0.983, 0.987] | 0.157x [0.156, 0.158] |
-| adversarial | 1.0617 | 0.3792 | 1.0624 | 0.999x [0.991, 1.012] | 0.357x [0.351, 0.362] |
-| float64-dense | 2.9079 | 0.4635 | 0.3719 | 7.819x [7.708, 7.895] | 1.246x [1.229, 1.261] |
-| strings-regexp | 19.3842 | 1.8874 | 19.9433 | 0.972x [0.971, 0.974] | 0.095x [0.094, 0.095] |
-| arrays-typed | 4.5986 | 0.4417 | 7.0111 | 0.656x [0.654, 0.658] | 0.063x [0.062, 0.064] |
-| objects-polymorphic | 6.5235 | 0.6081 | 6.7252 | 0.970x [0.966, 0.973] | 0.090x [0.090, 0.091] |
-| calls-recursion-closures | 7.4095 | 1.6019 | 7.6641 | 0.967x [0.964, 0.970] | 0.209x [0.208, 0.210] |
-| json-codec | 78.4781 | 10.0503 | 78.9305 | 0.994x [0.990, 0.997] | 0.127x [0.127, 0.128] |
-| map-set-bigint | 15.4696 | 2.2103 | 16.3837 | 0.944x [0.941, 0.947] | 0.135x [0.134, 0.136] |
-| exceptions-promises-async | 1.9750 | 0.7497 | 2.8484 | 0.693x [0.690, 0.697] | 0.263x [0.261, 0.267] |
+| mixed-quotes | 2.349774 | 0.147462 | 2.736590 | 0.8595x [0.8568, 0.8627] | 0.0542x [0.0536, 0.0549] |
+| quickjs-int-arith | 5.357147 | 0.131634 | 1.634172 | 3.2921x [3.2831, 3.3018] | 0.0831x [0.0811, 0.0855] |
+| quickjs-bitops | 1.144004 | 0.152575 | 0.205012 | 5.5814x [5.5525, 5.6111] | 0.7575x [0.7399, 0.7778] |
+| quickjs-fibonacci | 0.839358 | 0.144318 | 0.359949 | 2.3896x [2.3486, 2.4372] | 0.4116x [0.4054, 0.4184] |
+| numeric | 0.488411 | 0.129795 | 0.021608 | 22.4911x [22.2385, 22.7115] | 6.1432x [5.9995, 6.3035] |
+| scalar-loop | 0.489399 | 0.132878 | 0.021566 | 22.2350x [21.4209, 22.7450] | 6.0842x [5.8316, 6.3037] |
+| call-heavy | 1.261803 | 0.006315 | 0.312781 | 4.0333x [3.9902, 4.0812] | 0.0203x [0.0202, 0.0205] |
+| generic-call-entry | 0.934287 | 0.004954 | 0.231675 | 4.0356x [4.0086, 4.0622] | 0.0225x [0.0213, 0.0251] |
+| generic-call-fallback | 1.274439 | 0.008116 | 3.786595 | 0.3376x [0.3360, 0.3391] | 0.0022x [0.0021, 0.0022] |
+| property-heavy | 1.029746 | 0.007804 | 0.325760 | 3.1635x [3.1323, 3.1971] | 0.0243x [0.0238, 0.0252] |
+| fibonacci-iterative | 29.467614 | 0.936226 | 0.878952 | 33.7586x [33.3822, 34.1502] | 1.0773x [1.0613, 1.0940] |
+| fibonacci-recursive | 9.865694 | 0.549300 | 9.895509 | 0.9992x [0.9965, 1.0023]; statistically tied; between 0.3% slower and 0.2% faster | 0.0555x [0.0549, 0.0560] |
+| collections | 1.575133 | 0.137655 | 1.576190 | 1.0005x [0.9968, 1.0055]; statistically tied; between 0.3% slower and 0.5% faster | 0.0877x [0.0871, 0.0883] |
+| strings-json | 1.972826 | 0.187261 | 2.025572 | 0.9753x [0.9704, 0.9801] | 0.0901x [0.0879, 0.0923] |
+| calls-closures | 3.489562 | 0.228020 | 3.519299 | 0.9897x [0.9845, 0.9946] | 0.0619x [0.0596, 0.0640] |
+| adversarial | 0.914932 | 0.125981 | 0.916971 | 1.0023x [0.9906, 1.0145]; statistically tied; between 0.9% slower and 1.4% faster | 0.1394x [0.1361, 0.1434] |
+| float64-dense | 2.281055 | 0.148484 | 0.362700 | 6.3050x [6.2579, 6.3595] | 0.4153x [0.4097, 0.4221] |
+| strings-regexp | 19.591037 | 1.309532 | 20.241909 | 0.9663x [0.9622, 0.9690] | 0.0648x [0.0643, 0.0652] |
+| arrays-typed | 4.160535 | 0.138155 | 2.534226 | 1.6407x [1.6359, 1.6455] | 0.0548x [0.0544, 0.0552] |
+| objects-polymorphic | 6.268702 | 0.202083 | 6.652939 | 0.9425x [0.9385, 0.9462] | 0.0304x [0.0303, 0.0306] |
+| calls-recursion-closures | 6.464855 | 0.206337 | 6.552003 | 0.9888x [0.9854, 0.9927] | 0.0317x [0.0315, 0.0321] |
+| json-codec | 77.302303 | 7.727146 | 78.995999 | 0.9843x [0.9758, 0.9981] | 0.0978x [0.0974, 0.0981] |
+| map-set-bigint | 17.486868 | 0.971720 | 16.617827 | 1.0430x [1.0259, 1.0590] | 0.0591x [0.0584, 0.0598] |
+| exceptions-promises-async | 2.323206 | 0.288878 | 3.487680 | 0.6624x [0.6530, 0.6694] | 0.0825x [0.0811, 0.0838] |
 
-The adversarial interpreter comparison is statistically tied: between 0.9%
-slower and 1.2% faster. All other displayed intervals exclude parity, but the
-cross-engine protocol limitations below preclude claims of peak engine speed.
-Fallback-only and slower scenarios are retained in the table.
+## Separate QuickJS execution diagnostics
 
-Environment: Linux x86_64, Intel i7-13700KF, CPU 0 affinity, powersave,
-Rust 1.98.0 release; QuickJS-ng `fd0a0210b7be00957751871e7e01b8291268fc29`.
-Each scenario/mode has five discarded warmup processes, 30 interleaved fresh
-processes, and ten one-second throughput windows. All 3,300 latency samples
-have matching checksums across engines. The displayed speed ratios use ratios
-of medians with 10,000 paired bootstrap resamples, rather than geometric means.
+| Workload | quiet fixed batches / 30 | native entry delta | Tier2 entry delta | deopt delta | later readiness median ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| mixed-quotes | 30 | 6990 | 6980 | 0 | 2.752615 |
+| quickjs-int-arith | 30 | 10 | 10 | 0 | 1.618791 |
+| quickjs-bitops | 30 | 10 | 10 | 0 | 0.204897 |
+| quickjs-fibonacci | 30 | 10 | 0 | 0 | 0.371977 |
+| numeric | 30 | 10 | 10 | 0 | 0.021836 |
+| scalar-loop | 30 | 10 | 10 | 0 | 0.021813 |
+| call-heavy | 30 | 10 | 10 | 0 | 0.313397 |
+| generic-call-entry | 30 | 10 | 10 | 0 | 0.225981 |
+| generic-call-fallback | 30 | 20000 | 20000 | 0 | 3.785854 |
+| property-heavy | 30 | 10 | 10 | 0 | 0.319246 |
+| fibonacci-iterative | 30 | 10 | 10 | 0 | 0.880027 |
+| fibonacci-recursive | 30 | 0 | 0 | 0 | 9.921852 |
+| collections | 30 | 0 | 0 | 0 | 1.586696 |
+| strings-json | 30 | 0 | 0 | 0 | 2.031513 |
+| calls-closures | 30 | 0 | 0 | 0 | 3.521440 |
+| adversarial | 30 | 0 | 0 | 0 | 0.935643 |
+| float64-dense | 30 | 10 | 10 | 0 | 0.364465 |
+| strings-regexp | 30 | 0 | 0 | 0 | 20.256235 |
+| arrays-typed | 30 | 20 | 20 | 0 | 2.535597 |
+| objects-polymorphic | 30 | 0 | 0 | 0 | 6.687356 |
+| calls-recursion-closures | 30 | 0 | 0 | 0 | 6.534747 |
+| json-codec | 30 | 0 | 0 | 0 | 79.607234 |
+| map-set-bigint | 30 | 0 | 0 | 0 | 16.940369 |
+| exceptions-promises-async | 30 | 0 | 0 | 0 | 3.538708 |
 
-**Historical protocol limitations:** Bun had one process-internal warmup call;
-QuickJS JIT used adaptive readiness/settling. QuickJS timings include Rust-side
-lookup/call, checksum conversion and polling; Bun computes its checksum after
-timing. A recorded launcher removed the runner's `--smol` flag to use Bun
-defaults. These are measurements of that embedding/protocol, not equivalent
-peak-throughput measurements. The next matrix must align those boundaries and
-warmup policies before setting new Bun-relative optimization targets.
+All 24 scenarios are included. Zero-entry rows measure attached-runtime fallback;
+aggregate native/Tier2 counts do not identify the tier of an individual callee.
+The original branch-leaf call probe can now use compiled caller plus direct ABI;
+`generic-call-fallback` preserves effectful non-direct calls and native entries.
+It does not prove a compiled caller invokes the C CALL helper on every iteration.
 
-[Full analysis and tier diagnostics](benchmarks/results/main-47aeb11-engines.md),
+<!-- END JIT_MATRIX -->
+
+**Historical matrix:** the 2026-09-06 `47aeb11` results used different warmup
+and host timing boundaries and must not be divided into these v2 timings to
+claim an optimization gain. The historical [full table and tier diagnostics](benchmarks/results/main-47aeb11-engines.md),
 [raw samples](benchmarks/results/main-47aeb11-engines.json),
-[versions, hashes, flags and reproduction](benchmarks/results/main-47aeb11-methodology.json),
-[derived data and intervals](benchmarks/results/main-47aeb11-summary.json), and
-[benchmark instructions](benchmarks/README.md).
+[versions, flags, and reproduction](benchmarks/results/main-47aeb11-methodology.json),
+and [derived intervals](benchmarks/results/main-47aeb11-summary.json) remain
+available. [Benchmark commands and protocol details](benchmarks/README.md).
 
 ## Community development
 

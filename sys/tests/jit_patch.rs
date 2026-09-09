@@ -49,6 +49,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0013-feedback-gate.patch",
         "0014-inactive-probes.patch",
         "0015-cold-object-probes.patch",
+        "0017-shape-generation.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -107,7 +108,10 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 20u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 21u"));
+    assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
+    assert!(quickjs.contains("uint64_t jit_shape_generation;"));
+    assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
     assert!(jit_header.contains("uint64_t payload;"));
     assert!(quickjs.contains("constants[i].payload = 0;"));
     assert!(quickjs.contains("JS_JitHelperShapeGuard"));
@@ -221,7 +225,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 20;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 21;"),
             "{target}"
         );
         assert!(

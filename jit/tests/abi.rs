@@ -418,7 +418,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 20);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 21);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 9);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
@@ -575,4 +575,122 @@ fn bundled_targets_match_fresh_bindgen_output() {
             "{target}"
         );
     }
+}
+
+#[test]
+fn exported_property_layout_tracks_descriptor_mutation_and_preserves_value_only_stores() {
+    use rquickjs::{Context, Object, Runtime};
+    use rquickjs_core::qjs;
+
+    let mut info: qjs::JSJitABIInfo = unsafe { std::mem::zeroed() };
+    info.struct_size = std::mem::size_of_val(&info) as u32;
+    assert_eq!(
+        unsafe { qjs::JS_GetJitABIInfo(&mut info) },
+        qjs::JS_JIT_BACKEND_OK
+    );
+    let layout = info.property_layout;
+    assert_eq!(
+        layout.struct_size as usize,
+        std::mem::size_of::<qjs::JSJitPropertyLayout>()
+    );
+    assert_eq!(
+        std::mem::offset_of!(qjs::JSJitABIInfo, property_layout_fingerprint),
+        std::mem::offset_of!(qjs::JSJitABIInfo, element_layout)
+            + std::mem::size_of::<qjs::JSJitElementLayout>()
+    );
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        // No backend/artifact exists: seed an observation token to exercise the
+        // C mutation contract directly, including already-unhashed shapes.
+        for mutation in [
+            "o.z=3",
+            "for(let i=0;i<100;i++)o['new'+i]=i",
+            "delete o.x",
+            "Object.defineProperty(o,'x',{writable:false})",
+            "Object.defineProperty(o,'x',{enumerable:false})",
+            "Object.defineProperty(o,'x',{get(){return 7}})",
+            "Object.setPrototypeOf(o,{inherited:8})",
+            "Object.freeze(o)",
+            "Object.seal(o)",
+            "for(let i=0;i<20;i++)delete o['p'+i]",
+        ] {
+            ctx.eval::<(), _>("globalThis.o=Object.create(null);o.x=1;o.y=2;for(let i=0;i<24;i++)o['p'+i]=i;Object.defineProperty(o,'y',{enumerable:false})").unwrap();
+            let object: Object = ctx.globals().get("o").unwrap();
+            let raw = object.as_value().as_raw();
+            let object_ptr = unsafe { raw.u.ptr.cast::<u8>() };
+            let shape = unsafe {
+                object_ptr.add(layout.object_shape_offset as usize).cast::<*mut u8>().read()
+            };
+            let generation = unsafe { shape.add(layout.shape_generation_offset as usize).cast::<u64>() };
+            assert_eq!(unsafe { generation.read() }, 0);
+            unsafe { generation.write(0x1234_5678_9abc_def0) };
+            ctx.eval::<(), _>("o.x=9").unwrap();
+            assert_eq!(unsafe { generation.read() }, 0x1234_5678_9abc_def0,
+                "a primitive value-only store preserves the descriptor token");
+            let properties = unsafe {
+                object_ptr.add(layout.object_properties_offset as usize).cast::<*const qjs::JSValue>().read()
+            };
+            assert_eq!(unsafe { properties.read().u.int32 }, 9);
+            ctx.eval::<(), _>(mutation).unwrap();
+            let current_shape = unsafe {
+                object_ptr.add(layout.object_shape_offset as usize).cast::<*mut u8>().read()
+            };
+            let current_generation = unsafe {
+                current_shape.add(layout.shape_generation_offset as usize).cast::<u64>().read()
+            };
+            assert!(current_shape != shape || current_generation != 0x1234_5678_9abc_def0,
+                "descriptor mutation retained the guarded identity/token: {mutation}");
+            assert_eq!(current_generation, 0, "{mutation}");
+        }
+    });
+}
+
+#[cfg(all(feature = "compiler", feature = "test-support"))]
+#[test]
+fn property_feedback_tokens_are_stable_then_renewed_after_mutation() {
+    use rquickjs::{Context, Object, Runtime};
+    use rquickjs_core::qjs;
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let _jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(100_000)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let mut info: qjs::JSJitABIInfo = unsafe { std::mem::zeroed() };
+    info.struct_size = std::mem::size_of_val(&info) as u32;
+    assert_eq!(
+        unsafe { qjs::JS_GetJitABIInfo(&mut info) },
+        qjs::JS_JIT_BACKEND_OK
+    );
+    context.with(|ctx| {
+        let token = |object: &Object| unsafe {
+            let ptr = object.as_value().as_raw().u.ptr.cast::<u8>();
+            let shape = ptr.add(info.property_layout.object_shape_offset as usize).cast::<*const u8>().read();
+            (shape, shape.add(info.property_layout.shape_generation_offset as usize).cast::<u64>().read())
+        };
+        ctx.eval::<(), _>("globalThis.a={x:1,y:2};globalThis.b={x:3,y:4};function readToken(o){return o.x};readToken(a)").unwrap();
+        let a: Object = ctx.globals().get("a").unwrap();
+        let b: Object = ctx.globals().get("b").unwrap();
+        let first = token(&a);
+        assert_ne!(first.1, 0, "interpreter feedback assigns a token");
+        assert_eq!(token(&b), first, "canonical shapes share an observation interval");
+        ctx.eval::<(), _>("a.x=9;readToken(a)").unwrap();
+        assert_eq!(token(&a), first, "value-only stores preserve the observed layout");
+        ctx.eval::<(), _>("Object.defineProperty(a,'x',{enumerable:false})").unwrap();
+        assert_eq!(token(&a).1, 0, "clone is unobserved");
+        assert_eq!(token(&b), first, "copy-on-write leaves the old observed shape valid");
+        ctx.eval::<(), _>("readToken(a)").unwrap();
+        let second = token(&a);
+        assert!(second.1 > first.1, "new observation never reuses the old token");
+        ctx.eval::<(), _>("Object.defineProperty(a,'x',{writable:false})").unwrap();
+        assert_eq!(token(&a).1, 0, "already-unhashed mutation also invalidates");
+        ctx.eval::<(), _>("readToken(a)").unwrap();
+        assert!(token(&a).1 > second.1);
+    });
 }

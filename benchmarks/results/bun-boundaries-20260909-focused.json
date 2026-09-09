@@ -1,0 +1,373 @@
+[
+  {
+    "workload": "generic-call-entry",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 26.200678484786092,
+        "ci95": [
+          25.446453025242374,
+          26.685087626775065
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 2444.6% and 2568.5% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 3.991966792534679,
+        "ci95": [
+          3.871308624458994,
+          4.072355128988199
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 287.1% and 307.2% faster"
+      },
+      "baseline/bun": {
+        "speed": 0.021052887344272114,
+        "ci95": [
+          0.02039727766945645,
+          0.02149024681140417
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 97.9% and 98.0% slower"
+      }
+    },
+    "median_ns": 231265.0,
+    "baseline_median_ns": 6151912.5,
+    "interpreter_median_ns": 935744.5,
+    "bun_median_ns": 4928.0,
+    "native_entry_range": [
+      10,
+      10
+    ],
+    "tier2_entry_range": [
+      10,
+      10
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.2051549950022677,
+        "ci95": [
+          1.2013511239750554,
+          1.2086619393775193
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 20.1% and 20.9% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 0.33868266863340235,
+        "ci95": [
+          0.3367066037326422,
+          0.3408426481803953
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 65.9% and 66.3% slower"
+      },
+      "baseline/bun": {
+        "speed": 0.002174787569073147,
+        "ci95": [
+          0.002139197909026963,
+          0.002241207725680495
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 99.8% and 99.8% slower"
+      }
+    },
+    "median_ns": 3782505.0,
+    "baseline_median_ns": 4559163.5,
+    "interpreter_median_ns": 1273396.0,
+    "bun_median_ns": 8121.5,
+    "native_entry_range": [
+      20000,
+      20000
+    ],
+    "tier2_entry_range": [
+      20000,
+      20000
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 2.653093800112554,
+        "ci95": [
+          2.640990060424681,
+          2.663219998781891
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 164.1% and 166.3% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 1.6377790345319103,
+        "ci95": [
+          1.6312712135786365,
+          1.6439155077036485
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 63.1% and 64.4% faster"
+      },
+      "baseline/bun": {
+        "speed": 0.05503207082826706,
+        "ci95": [
+          0.05458442598887113,
+          0.05549857222405396
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 94.5% and 94.5% slower"
+      }
+    },
+    "median_ns": 2539940.0,
+    "baseline_median_ns": 6738469.0,
+    "interpreter_median_ns": 4156941.0,
+    "bun_median_ns": 138941.0,
+    "native_entry_range": [
+      20,
+      20
+    ],
+    "tier2_entry_range": [
+      20,
+      20
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 6.911385257036372,
+        "ci95": [
+          6.851089211519962,
+          6.979507355790988
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 585.1% and 598.0% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 3.1693006396782732,
+        "ci95": [
+          3.1338335774063433,
+          3.2049033442547095
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 213.4% and 220.5% faster"
+      },
+      "baseline/bun": {
+        "speed": 0.02410003687925304,
+        "ci95": [
+          0.023575678108961166,
+          0.02500591109797336
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 97.5% and 97.6% slower"
+      }
+    },
+    "median_ns": 328733.0,
+    "baseline_median_ns": 2276580.5,
+    "interpreter_median_ns": 1036970.0,
+    "bun_median_ns": 7821.0,
+    "native_entry_range": [
+      10,
+      10
+    ],
+    "tier2_entry_range": [
+      10,
+      10
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0727075937715804,
+        "ci95": [
+          1.0689605650199736,
+          1.0763978106531549
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 6.9% and 7.6% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 0.8581882451205544,
+        "ci95": [
+          0.855157213204307,
+          0.8615137389709272
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 13.8% and 14.5% slower"
+      },
+      "baseline/bun": {
+        "speed": 0.053777433095503334,
+        "ci95": [
+          0.053446259167957165,
+          0.05416077823490722
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 94.6% and 94.7% slower"
+      }
+    },
+    "median_ns": 2740854.0,
+    "baseline_median_ns": 2946512.0,
+    "interpreter_median_ns": 2349948.0,
+    "bun_median_ns": 147415.0,
+    "native_entry_range": [
+      6990,
+      6990
+    ],
+    "tier2_entry_range": [
+      6980,
+      6980
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0038864613408376,
+        "ci95": [
+          0.991478928381518,
+          1.013405713797402
+        ],
+        "statistically_tied": true,
+        "interpretation": "statistically tied; between 0.9% slower and 1.3% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 22.610118727105597,
+        "ci95": [
+          22.289130329039455,
+          22.870754895091522
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 2128.9% and 2187.1% faster"
+      },
+      "baseline/bun": {
+        "speed": 6.141272651216177,
+        "ci95": [
+          6.040477423492183,
+          6.2445491150046974
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 504.0% and 524.5% faster"
+      }
+    },
+    "median_ns": 21534.0,
+    "baseline_median_ns": 21742.5,
+    "interpreter_median_ns": 488876.5,
+    "bun_median_ns": 132458.0,
+    "native_entry_range": [
+      10,
+      10
+    ],
+    "tier2_entry_range": [
+      10,
+      10
+    ],
+    "compilation_quiet_samples": 30
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "candidate",
+    "mode": "automatic",
+    "candidate_label": "candidate4",
+    "experiment": "final-candidate4",
+    "binary_sha256": {
+      "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+      "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+    },
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0143717048087955,
+        "ci95": [
+          0.9642958511118859,
+          1.0852526120609847
+        ],
+        "statistically_tied": true,
+        "interpretation": "statistically tied; between 3.6% slower and 8.5% faster"
+      },
+      "candidate/interpreter": {
+        "speed": 3.9651058396747425,
+        "ci95": [
+          3.858381917716992,
+          4.035488384693096
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 285.8% and 303.5% faster"
+      },
+      "baseline/bun": {
+        "speed": 0.02040067778341404,
+        "ci95": [
+          0.019616242339937376,
+          0.02133913378164996
+        ],
+        "statistically_tied": false,
+        "interpretation": "between 97.9% and 98.0% slower"
+      }
+    },
+    "median_ns": 313311.0,
+    "baseline_median_ns": 312268.5,
+    "interpreter_median_ns": 1247884.0,
+    "bun_median_ns": 6335.5,
+    "native_entry_range": [
+      10,
+      10
+    ],
+    "tier2_entry_range": [
+      10,
+      10
+    ],
+    "compilation_quiet_samples": 30
+  }
+]

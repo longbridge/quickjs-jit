@@ -146,6 +146,9 @@ pub struct CodeCache {
     charged_metadata_bytes: usize,
     clock: u64,
     artifacts: BTreeMap<ArtifactKey, Arc<CachedArtifact>>,
+    // Only resident artifacts may be cached here. `remove` clears this owner
+    // before uncharging/removing its target, preserving deopt-pin lifetimes.
+    last_benefit_target: Option<Arc<CachedArtifact>>,
     reclaim_needed: Arc<AtomicBool>,
 }
 
@@ -161,6 +164,7 @@ impl CodeCache {
             charged_metadata_bytes: 0,
             clock: 0,
             artifacts: BTreeMap::new(),
+            last_benefit_target: None,
             reclaim_needed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -292,6 +296,13 @@ impl CodeCache {
     }
 
     fn remove(&mut self, key: ArtifactKey) -> Option<Arc<CachedArtifact>> {
+        if self
+            .last_benefit_target
+            .as_ref()
+            .is_some_and(|target| target.artifact.key() == key)
+        {
+            self.last_benefit_target = None;
+        }
         let artifact = self.artifacts.remove(&key)?;
         self.charged_bytes = self.charged_bytes.saturating_sub(artifact.charge_bytes);
         self.charged_code_bytes = self.charged_code_bytes.saturating_sub(artifact.code_bytes);
@@ -316,10 +327,20 @@ impl CodeCache {
 
     pub fn record_benefit(&mut self, key: ArtifactKey, benefit: u64) -> Result<(), CacheError> {
         let tick = self.next_tick();
-        let artifact = self
-            .artifacts
-            .get(&key)
-            .ok_or(CacheError::MissingArtifact)?;
+        if self
+            .last_benefit_target
+            .as_ref()
+            .is_none_or(|target| target.artifact.key() != key)
+        {
+            self.last_benefit_target = Some(Arc::clone(
+                self.artifacts
+                    .get(&key)
+                    .ok_or(CacheError::MissingArtifact)?,
+            ));
+        }
+        // Repeated short native returns borrow the resident Arc without either
+        // another tree search or another reference-count operation.
+        let artifact = self.last_benefit_target.as_ref().unwrap();
         artifact.artifact.record_benefit(benefit);
         artifact.last_used.store(tick, Ordering::Release);
         Ok(())
@@ -493,5 +514,108 @@ impl Drop for ExecutionPin {
         if previous == 1 && self.artifact.invalidated.load(Ordering::Acquire) {
             self.reclaim_needed.store(true, Ordering::Release);
         }
+    }
+}
+
+#[cfg(test)]
+mod benefit_tests {
+    use super::*;
+
+    fn artifact(id: u64, tier: Tier) -> CompiledArtifact {
+        let mut key = CompiledArtifact::fake(tier).key();
+        key.function_id = id;
+        CompiledArtifact::from_parts(
+            key,
+            CodeAllocation::inert(vec![0]),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn repeated_benefit_preserves_exact_counts_ticks_and_eviction_order() {
+        let mut cache = CodeCache::new(2);
+        let a = artifact(1, Tier::Baseline).key();
+        let b = artifact(2, Tier::Baseline).key();
+        cache.insert(artifact(1, Tier::Baseline)).unwrap();
+        cache.insert(artifact(2, Tier::Baseline)).unwrap();
+        cache.record_benefit(a, 10).unwrap();
+        cache.record_benefit(b, 10).unwrap();
+        // Equal benefit, but the repeated zero update must still touch b.
+        cache.touch(a);
+        cache.record_benefit(b, 0).unwrap();
+        let resident = &cache.artifacts[&b];
+        assert_eq!(
+            resident.artifact.benefit(),
+            BenefitSnapshot {
+                executions: 2,
+                score: 10
+            }
+        );
+        assert_eq!(resident.last_used.load(Ordering::Acquire), 6);
+        assert_eq!(
+            cache.insert(artifact(3, Tier::Baseline)).unwrap().evicted(),
+            Some(a)
+        );
+    }
+
+    #[test]
+    fn benefit_target_replacement_drops_old_artifact_and_starts_new_counters() {
+        let mut cache = CodeCache::new(2);
+        let key = artifact(1, Tier::Baseline).key();
+        cache.insert(artifact(1, Tier::Baseline)).unwrap();
+        let old = Arc::downgrade(&cache.artifacts[&key]);
+        cache.record_benefit(key, 10).unwrap();
+        cache.insert(artifact(1, Tier::Baseline)).unwrap();
+        assert!(old.upgrade().is_none());
+        cache.record_benefit(key, 7).unwrap();
+        assert_eq!(
+            cache.artifacts[&key].artifact.benefit(),
+            BenefitSnapshot {
+                executions: 1,
+                score: 7
+            }
+        );
+    }
+
+    #[test]
+    fn benefit_target_does_not_retain_evicted_artifact() {
+        let mut cache = CodeCache::new(1);
+        let key = artifact(1, Tier::Baseline).key();
+        cache.insert(artifact(1, Tier::Baseline)).unwrap();
+        let old = Arc::downgrade(&cache.artifacts[&key]);
+        cache.record_benefit(key, 10).unwrap();
+        cache.insert(artifact(2, Tier::Baseline)).unwrap();
+        assert!(old.upgrade().is_none());
+        assert_eq!(
+            cache.record_benefit(key, 3),
+            Err(CacheError::MissingArtifact)
+        );
+        assert_eq!(
+            cache.clock, 4,
+            "even a missing target advances the cache clock"
+        );
+    }
+
+    #[test]
+    fn benefit_target_does_not_delay_deopt_dependency_reclamation() {
+        let mut cache = CodeCache::new(2);
+        let key = artifact(1, Tier::Optimizing).key();
+        cache.insert(artifact(1, Tier::Baseline)).unwrap();
+        cache.insert(artifact(1, Tier::Optimizing)).unwrap();
+        let pin = cache.pin(key).unwrap();
+        let old = Arc::downgrade(&cache.artifacts[&key]);
+        cache.record_benefit(key, 10).unwrap();
+        assert_eq!(cache.invalidate(FunctionKey::new(1, 0)), 0);
+        // An invalidated but still resident artifact retains existing recording
+        // semantics; it becomes inaccessible only when actually removed.
+        cache.record_benefit(key, 20).unwrap();
+        assert_eq!(pin.artifact().benefit().score, 30);
+        drop(pin);
+        assert_eq!(cache.poll_reclamation(), 2);
+        assert!(old.upgrade().is_none());
+        assert_eq!(cache.charged_bytes(), 0);
     }
 }

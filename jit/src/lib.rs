@@ -518,6 +518,7 @@ struct ProductionBackend {
     call_feedback_types: Vec<runtime::ObservedType>,
     shape_feedback: runtime::ShapeFeedbackTable,
     metrics: Arc<Mutex<JitMetrics>>,
+    cold_metrics_dirty: bool,
     native_entries: u64,
     native_acquisitions: u64,
     native_exits: u64,
@@ -1303,6 +1304,7 @@ impl ProductionBackend {
             call_feedback_types: Vec::new(),
             shape_feedback: runtime::ShapeFeedbackTable::new(3),
             metrics,
+            cold_metrics_dirty: true,
             native_entries: 0,
             native_acquisitions: 0,
             native_exits: 0,
@@ -1414,6 +1416,7 @@ impl ProductionBackend {
         let install_started = std::time::Instant::now();
         self.coordinator.drain_completions();
         if self.coordinator.metrics().installed > installed_before {
+            self.cold_metrics_dirty = true;
             self.install_ns = self.install_ns.saturating_add(
                 install_started
                     .elapsed()
@@ -1570,6 +1573,7 @@ impl ProductionBackend {
             #[cfg(not(feature = "test-support"))]
             let forced_call_only = false;
             if generic_call_without_loop && !forced_call_only {
+                self.cold_metrics_dirty = true;
                 self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
                 self.optimizing_snapshots.remove(&key);
                 self.feedback_disabled.insert(key);
@@ -1600,7 +1604,46 @@ impl ProductionBackend {
                 && (observed.call_at(key).is_some() || observed.has_stable_value_for(key))
                 && observed.bounded_specialization(key).is_none()
             {
-                continue;
+                // Mixed Int32/Float64 array loops need not ever acquire one
+                // uniform scalar signature. After complete baseline calls,
+                // admit their existing guarded element lowering to the normal
+                // profitability trial. Opcode presence alone is insufficient:
+                // require observed object arguments and numeric returns too.
+                let observed_element_loop = has_loop
+                    && snapshot
+                        .instructions()
+                        .iter()
+                        .any(|instruction| instruction.opcode().name() == "get_array_el")
+                    && self
+                        .execution_profiles
+                        .get(&key)
+                        .is_some_and(|profile| profile.baseline_executions >= 8)
+                    && observed
+                        .call_at(key)
+                        .is_some_and(|call| call.state() == runtime::FeedbackState::Monomorphic)
+                    && observed
+                        .call_argument_types(key)
+                        .is_some_and(|types| types.contains(&runtime::ObservedType::Object));
+                let mut numeric_returns = observed
+                    .entries()
+                    .iter()
+                    .filter(|entry| {
+                        entry.function() == key && entry.kind() == runtime::FeedbackKind::Exit
+                    })
+                    .peekable();
+                let completed_numeric_returns = numeric_returns.peek().is_some()
+                    && numeric_returns.all(|entry| {
+                        !entry.observations().is_empty()
+                            && entry.observations().iter().all(|observed| {
+                                matches!(
+                                    observed,
+                                    runtime::ObservedType::Int32 | runtime::ObservedType::Float64
+                                )
+                            })
+                    });
+                if !observed_element_loop || !completed_numeric_returns {
+                    continue;
+                }
             }
             #[cfg(feature = "test-support")]
             let forced = self.config.force_optimized();
@@ -1638,12 +1681,14 @@ impl ProductionBackend {
                     code_bytes: measured.bytecodes.saturating_mul(8),
                     ..runtime::Profile::default()
                 };
+                self.cold_metrics_dirty = true;
                 self.profitability_evaluations = self.profitability_evaluations.saturating_add(1);
                 if runtime::Profitability::default()
                     .evaluate_trial(profile)
                     .tier
                     != runtime::Decision::Optimize
                 {
+                    self.cold_metrics_dirty = true;
                     self.profitability_rejected = self.profitability_rejected.saturating_add(1);
                     let entry = self
                         .profitability_backoff
@@ -1659,6 +1704,7 @@ impl ProductionBackend {
                     continue;
                 }
                 self.profitability_backoff.remove(&key);
+                self.cold_metrics_dirty = true;
                 self.profitability_approved = self.profitability_approved.saturating_add(1);
             }
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
@@ -1715,6 +1761,7 @@ impl ProductionBackend {
         );
         while matches!(self.workers.dispatch_next(&mut self.coordinator), Ok(true)) {}
         let (jobs, snapshots, ir) = self.workers.live_usage();
+        self.cold_metrics_dirty = true;
         self.peak_compiler_bytes = self
             .peak_compiler_bytes
             .max(self.workers.peak_compiler_bytes());
@@ -1734,11 +1781,11 @@ impl ProductionBackend {
     }
 
     /// Copies the backend's counters into the externally visible metrics
-    /// snapshot. Cheap enough to run on every native exit so `Jit::metrics`
-    /// stays exact even when the full maintenance pass is skipped.
+    /// snapshot. Native and asynchronous counters remain exact on every exit;
+    /// admission and compilation counters are copied only after a mutation.
     fn publish_metrics(&mut self) {
         let mut snapshot = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
-        self.coordinator.refresh_published_metrics(&mut snapshot);
+        let replaced = self.coordinator.refresh_published_metrics(&mut snapshot);
         snapshot.native_entries = self.native_entries;
         snapshot.native_acquisitions = self.native_acquisitions;
         snapshot.native_exits = self.native_exits;
@@ -1750,25 +1797,30 @@ impl ProductionBackend {
         snapshot.osr_attempts = self.osr_attempts;
         snapshot.osr_validated_successes = self.osr_validation.successes.load(Ordering::Relaxed);
         snapshot.osr_generated_retries = self.osr_generated_retries;
-        snapshot.hot_call_queues = self.hot_call_queues;
-        snapshot.hot_loop_queues = self.hot_loop_queues;
-        snapshot.adaptive_neutral_queues = self.adaptive_neutral_queues;
-        snapshot.adaptive_inputs_recorded = self.adaptive_inputs_recorded;
-        snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
-        snapshot.snapshot_requests = self.snapshot_requests;
-        snapshot.stable_path_compile_requests = self.stable_path_compile_requests;
-        snapshot.generic_call_rejections = self.generic_call_rejections;
-        snapshot.profitability_evaluations = self.profitability_evaluations;
-        snapshot.profitability_approved = self.profitability_approved;
-        snapshot.profitability_rejected = self.profitability_rejected;
+        // A full coordinator copy also clears backend-owned fields. Restore
+        // cold counters in that case even when they have not changed locally.
+        if replaced || self.cold_metrics_dirty {
+            snapshot.hot_call_queues = self.hot_call_queues;
+            snapshot.hot_loop_queues = self.hot_loop_queues;
+            snapshot.adaptive_neutral_queues = self.adaptive_neutral_queues;
+            snapshot.adaptive_inputs_recorded = self.adaptive_inputs_recorded;
+            snapshot.adaptive_size_factor_disabled = self.adaptive_inputs_recorded;
+            snapshot.snapshot_requests = self.snapshot_requests;
+            snapshot.stable_path_compile_requests = self.stable_path_compile_requests;
+            snapshot.generic_call_rejections = self.generic_call_rejections;
+            snapshot.profitability_evaluations = self.profitability_evaluations;
+            snapshot.profitability_approved = self.profitability_approved;
+            snapshot.profitability_rejected = self.profitability_rejected;
+            snapshot.install_ns = self.install_ns;
+            snapshot.peak_compiler_bytes = self.peak_compiler_bytes;
+            self.cold_metrics_dirty = false;
+        }
         snapshot.benefit_recordings = self.benefit_recordings;
         snapshot.measured_benefit_ns = self.measured_benefit_ns;
         snapshot.compile_ns = self
             .compiler_measurements
             .elapsed_ns
             .load(Ordering::Relaxed);
-        snapshot.install_ns = self.install_ns;
-        snapshot.peak_compiler_bytes = self.peak_compiler_bytes;
         snapshot.osr_not_ready = self.osr_not_ready;
         snapshot.osr_map_misses = self.osr_map_misses;
         snapshot.osr_validation_failures = self.osr_validation_failures;
@@ -1899,6 +1951,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 self.requested.insert(key);
                 self.queue_reasons
                     .insert(key, runtime::HotReason::CallThreshold);
+                self.cold_metrics_dirty = true;
                 self.snapshot_requests = self.snapshot_requests.saturating_add(1);
                 return 1;
             }
@@ -1937,6 +1990,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             };
             if matches!(decision, runtime::HotDecision::Queue(_)) {
                 self.optimizing_requested.insert(key);
+                self.cold_metrics_dirty = true;
                 self.snapshot_requests = self.snapshot_requests.saturating_add(1);
                 return 1;
             }
@@ -1980,6 +2034,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if let runtime::HotDecision::Queue(reason) = decision {
             self.requested.insert(key);
             self.queue_reasons.insert(key, reason);
+            self.cold_metrics_dirty = true;
             self.snapshot_requests = self.snapshot_requests.saturating_add(1);
             1
         } else {
@@ -2188,6 +2243,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             .count()
             .try_into()
             .unwrap_or(u64::MAX);
+        self.cold_metrics_dirty = true;
         self.adaptive_inputs_recorded = self.adaptive_inputs_recorded.saturating_add(1);
         debug_assert_eq!(
             adaptive.thresholds().rationale,
@@ -2215,13 +2271,16 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             Ok(()) => {
                 match self.queue_reasons.get(&key).copied() {
                     Some(runtime::HotReason::CallThreshold) => {
+                        self.cold_metrics_dirty = true;
                         self.hot_call_queues = self.hot_call_queues.saturating_add(1);
                     }
                     Some(runtime::HotReason::LoopThreshold) => {
+                        self.cold_metrics_dirty = true;
                         self.hot_loop_queues = self.hot_loop_queues.saturating_add(1);
                     }
                     _ => {}
                 }
+                self.cold_metrics_dirty = true;
                 self.adaptive_neutral_queues = self.adaptive_neutral_queues.saturating_add(1);
                 self.prequeue_backoff.remove(&key);
                 if let Some(snapshot) = tier2_snapshot {
@@ -2480,6 +2539,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                                 .queue_side_path(key, snapshot, feedback, profile)
                                 .is_ok()
                         }) {
+                            self.cold_metrics_dirty = true;
                             self.stable_path_compile_requests =
                                 self.stable_path_compile_requests.saturating_add(1);
                         }
@@ -2726,6 +2786,68 @@ mod production_environment_tests {
             event.flags = qjs::JS_JIT_FEEDBACK_CALL_SITE;
         }
         event
+    }
+
+    #[test]
+    fn native_exit_publishes_exact_metrics_during_nested_calls_and_cold_updates() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        let metrics = Arc::new(Mutex::new(JitMetrics::default()));
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::clone(&metrics),
+        )
+        .unwrap();
+        backend.poll();
+        backend.native_enter(7, 3, 0);
+        backend.native_enter(8, 4, 0);
+        backend.native_exit(8, 4, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        {
+            let published = metrics.lock().unwrap();
+            assert_eq!((published.native_entries, published.native_exits), (2, 1));
+        }
+
+        // A hot event can request a snapshot after its own maintenance check.
+        // The next native exit must publish that cold counter immediately.
+        let mut event: qjs::JSJitHotEvent = unsafe { core::mem::zeroed() };
+        event.struct_size = core::mem::size_of_val(&event) as u32;
+        event.function.id = 9;
+        event.function.generation = 1;
+        event.kind = qjs::JSJitHotKind_JS_JIT_HOT_CALL;
+        event.count = backend.config.call_threshold();
+        assert_eq!(backend.record_hot(&event), 1);
+        backend
+            .compiler_measurements
+            .elapsed_ns
+            .store(1234, Ordering::Relaxed);
+        backend
+            .osr_validation
+            .deopt_materializations
+            .store(2, Ordering::Relaxed);
+        backend.native_exit(7, 3, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DONE);
+        let before_deopt = metrics.lock().unwrap().clone();
+        assert_eq!(
+            (before_deopt.native_entries, before_deopt.native_exits),
+            (2, 2)
+        );
+        assert_eq!(before_deopt.snapshot_requests, 1);
+        assert_eq!(before_deopt.compile_ns, 1234);
+        assert_eq!(before_deopt.deopt_materializations, 2);
+
+        // Deopt dirties the coordinator snapshot, which replaces even the
+        // backend-owned counters. Their published values must be restored.
+        backend.native_enter(8, 4, 0);
+        backend.native_exit(8, 4, 0, qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT);
+        let after_deopt = metrics.lock().unwrap().clone();
+        assert_eq!(after_deopt.snapshot_requests, 1);
+        assert_eq!(
+            (after_deopt.native_entries, after_deopt.native_exits),
+            (3, 3)
+        );
+        assert_eq!(after_deopt.native_fallbacks, 1);
+        assert_eq!(after_deopt.deopts, 1);
+        backend.runtime_detach();
     }
 
     #[test]

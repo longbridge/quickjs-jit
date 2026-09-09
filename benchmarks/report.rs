@@ -28,6 +28,15 @@ fn real_main() -> Result<bool, String> {
 }
 
 fn validate(data: &BenchmarkFile) -> Result<(), String> {
+    if data
+        .modes
+        .iter()
+        .flat_map(|m| &m.workloads)
+        .flat_map(|w| &w.samples)
+        .any(|s| s.protocol.is_some())
+    {
+        return Err("incompatible timing protocol: the legacy gate reporter cannot evaluate shared-js-fixed-warmup-v2; use fixed-window metrics and report readiness diagnostics separately".into());
+    }
     if data.schema != "jit-benchmark-v1" {
         return Err("unsupported schema".into());
     }
@@ -595,6 +604,7 @@ mod tests {
     use super::*;
     fn evidence(pair: u32, b: u64, c: &str) -> SampleEvidence {
         SampleEvidence {
+            protocol: None,
             pair_index: pair,
             elapsed_ns: b,
             checksum: c.into(),
@@ -690,6 +700,15 @@ mod tests {
             exclusions: vec![],
         }
     }
+    #[test]
+    fn legacy_gate_reporter_rejects_new_fixed_warmup_protocol() {
+        let mut data = valid_file();
+        data.modes[0].workloads[0].samples[0].protocol = Some(Default::default());
+        assert!(validate(&data)
+            .unwrap_err()
+            .contains("incompatible timing protocol"));
+    }
+
     #[test]
     fn validator_rejects_dirty_or_stale_provenance() {
         let mut data = valid_file();

@@ -168,3 +168,21 @@ subdirectory = "benchmarks/scripts/generic-call-entry.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
 adapted_sha256 = "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40"
+
+[[suite]]
+name = "rquickjs-jit-matrix-mixed-quotes"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/mixed-quotes.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-adaptation"
+adapted_sha256 = "1d670a5575e2f01ddf6c583ee0afb1e54e6f39743f4e6592a2dce43a4c04dc44"
+
+[[suite]]
+name = "rquickjs-jit-focused-generic-call-fallback"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/generic-call-fallback.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596"

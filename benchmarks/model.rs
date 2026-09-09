@@ -73,6 +73,8 @@ pub struct PhaseTiming {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SampleEvidence {
+    #[serde(default)]
+    pub protocol: Option<ProtocolEvidence>,
     pub pair_index: u32,
     pub elapsed_ns: u64,
     pub checksum: String,
@@ -200,4 +202,19 @@ mod tests {
         assert_eq!(p99, 100);
         assert!(ci[0] <= median && median <= ci[1]);
     }
+}
+
+/// Protocol identity separates these fixed-warmup timings from historical v1 timing.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtocolEvidence {
+    pub name: String,
+    pub script_sha256: String,
+    pub driver_sha256: String,
+    pub warmup_batches: u32,
+    pub calls_per_batch: u32,
+    pub warmup_batch_ns: Vec<u64>,
+    pub fixed_metrics_before: Option<std::collections::BTreeMap<String, u64>>,
+    pub fixed_metrics_after: Option<std::collections::BTreeMap<String, u64>>,
+    pub readiness_diagnostic_ns: Option<u64>,
 }

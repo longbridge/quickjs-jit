@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 20;
+pub const ABI_MINOR: u16 = 21;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -26,6 +26,7 @@ pub enum AbiStructure {
     RuntimeApi,
     HelperTable,
     ElementLayout,
+    PropertyLayout,
     BackendVTable,
 }
 
@@ -135,6 +136,15 @@ pub(crate) struct ElementLayout {
     pub float64_array_class_id: i64,
 }
 
+/// Validated runtime offsets for native shape generation guards.
+#[cfg(feature = "compiler")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PropertyLayout {
+    pub object_shape_offset: i32,
+    pub object_properties_offset: i32,
+    pub shape_generation_offset: i32,
+}
+
 impl AbiInfo {
     pub fn linked() -> Result<Self, AbiError> {
         let info = Self::query_linked()?;
@@ -189,6 +199,16 @@ impl AbiInfo {
             array_class_id: raw.array_class_id as i64,
             int32_array_class_id: raw.int32_array_class_id as i64,
             float64_array_class_id: raw.float64_array_class_id as i64,
+        }
+    }
+
+    #[cfg(feature = "compiler")]
+    pub(crate) fn property_layout(&self) -> PropertyLayout {
+        let raw = self.raw.property_layout;
+        PropertyLayout {
+            object_shape_offset: raw.object_shape_offset as i32,
+            object_properties_offset: raw.object_properties_offset as i32,
+            shape_generation_offset: raw.shape_generation_offset as i32,
         }
     }
 
@@ -248,6 +268,14 @@ impl AbiInfo {
             || raw.element_layout_fingerprint != element_layout_fingerprint()
         {
             Some(AbiMismatch::StructureLayout(AbiStructure::ElementLayout))
+        } else if raw.property_layout.struct_size
+            != mem::size_of::<qjs::JSJitPropertyLayout>() as u32
+            || raw.property_layout_fingerprint != property_layout_fingerprint()
+            || raw.property_layout.object_shape_offset > i32::MAX as u32
+            || raw.property_layout.object_properties_offset > i32::MAX as u32
+            || raw.property_layout.shape_generation_offset > i32::MAX as u32
+        {
+            Some(AbiMismatch::StructureLayout(AbiStructure::PropertyLayout))
         } else if raw.backend_vtable_layout_fingerprint != backend_vtable_layout_fingerprint() {
             Some(AbiMismatch::StructureLayout(AbiStructure::BackendVTable))
         } else if raw.build_fingerprint != expected_build_fingerprint() {
@@ -298,6 +326,9 @@ impl AbiInfo {
             }
             AbiMismatch::StructureLayout(AbiStructure::HelperTable) => {
                 self.raw.helper_table_fingerprint ^= 1
+            }
+            AbiMismatch::StructureLayout(AbiStructure::PropertyLayout) => {
+                self.raw.property_layout_fingerprint ^= 1
             }
             AbiMismatch::StructureLayout(AbiStructure::ElementLayout) => {
                 self.raw.element_layout_fingerprint ^= 1
@@ -726,8 +757,29 @@ fn abi_info_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitABIInfo, element_layout),
             mem::size_of::<qjs::JSJitElementLayout>(),
         ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, property_layout_fingerprint),
+            8,
+        ),
+        (
+            mem::offset_of!(qjs::JSJitABIInfo, property_layout),
+            mem::size_of::<qjs::JSJitPropertyLayout>(),
+        ),
     ] {
         hash = layout_field(hash, offset, size);
+    }
+    hash
+}
+
+fn property_layout_fingerprint() -> u64 {
+    let mut hash = layout_start::<qjs::JSJitPropertyLayout>();
+    for offset in [
+        mem::offset_of!(qjs::JSJitPropertyLayout, struct_size),
+        mem::offset_of!(qjs::JSJitPropertyLayout, object_shape_offset),
+        mem::offset_of!(qjs::JSJitPropertyLayout, object_properties_offset),
+        mem::offset_of!(qjs::JSJitPropertyLayout, shape_generation_offset),
+    ] {
+        hash = layout_field(hash, offset, 4);
     }
     hash
 }
@@ -845,5 +897,30 @@ fn expected_build_fingerprint() -> u64 {
     hash = hash_u64(hash, exit_layout_fingerprint());
     hash = hash_u64(hash, runtime_api_layout_fingerprint());
     hash = hash_u64(hash, HELPER_TABLE_FINGERPRINT);
-    hash_u64(hash, element_layout_fingerprint())
+    hash = hash_u64(hash, element_layout_fingerprint());
+    hash_u64(hash, property_layout_fingerprint())
+}
+
+#[cfg(test)]
+mod property_layout_tests {
+    use super::*;
+
+    #[test]
+    fn property_layout_mismatch_is_rejected() {
+        let valid = AbiInfo::linked().unwrap();
+        for field in 0..3 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.raw.property_layout_fingerprint ^= 1,
+                1 => invalid.raw.property_layout.struct_size -= 1,
+                _ => invalid.raw.property_layout.shape_generation_offset = u32::MAX,
+            }
+            assert_eq!(
+                invalid.validate(),
+                Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                    AbiStructure::PropertyLayout
+                )))
+            );
+        }
+    }
 }

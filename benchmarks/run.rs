@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+const BATCH_DRIVER: &str = include_str!("batch-driver.js");
+const FIXED_WARMUP_BATCHES: usize = 64;
+
 const DEFAULT_WARMUPS: usize = 5;
 const DEFAULT_SAMPLES: usize = 30;
 const DEFAULT_WINDOWS: usize = 10;
@@ -37,6 +40,13 @@ struct Workload {
     file: &'static str,
 }
 const WORKLOADS: &[Workload] = &[
+    Workload {
+        name: "mixed-quotes",
+        suite: "rquickjs-jit matrix",
+        group: "mixed-quotes",
+        designated: false,
+        file: "mixed-quotes.js",
+    },
     Workload {
         name: "quickjs-int-arith",
         suite: "QuickJS microbench",
@@ -85,6 +95,13 @@ const WORKLOADS: &[Workload] = &[
         group: "call-heavy",
         designated: false,
         file: "generic-call-entry.js",
+    },
+    Workload {
+        name: "generic-call-fallback",
+        suite: "rquickjs-jit focused",
+        group: "call-heavy",
+        designated: false,
+        file: "generic-call-fallback.js",
     },
     Workload {
         name: "property-heavy",
@@ -219,6 +236,8 @@ struct WorkerResult {
     active_ir_bytes: u64,
     automatic_ready: bool,
     phases: PhaseTiming,
+    #[serde(default)]
+    protocol: model::ProtocolEvidence,
 }
 
 fn main() {
@@ -333,6 +352,13 @@ fn measure_interleaved(modes: &[String]) -> Result<Vec<ModeResult>, String> {
 
 fn worker(mode: &str, script: &str) -> Result<(), String> {
     validate_mode(mode)?;
+    if mode == "bun" {
+        println!(
+            "{}",
+            serde_json::to_string(&bun_child(Path::new(script))?).map_err(err)?
+        );
+        return Ok(());
+    }
     let total = Instant::now();
     let source = fs::read(script).map_err(err)?;
     let mut phases = PhaseTiming::default();
@@ -375,6 +401,9 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     context
         .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
         .map_err(err)?;
+    context
+        .with(|ctx| ctx.eval::<(), _>(BATCH_DRIVER))
+        .map_err(err)?;
     phases.definition_eval_ns = ns(start.elapsed());
     let tier1_ready_installs = context
         .with(|ctx| {
@@ -395,8 +424,27 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     };
     let required_tier2 = mode == "tier2" && tier2_ready_installs.is_some();
     let start = Instant::now();
-    let _first_checksum = invoke_workload(&context)?;
+    let _first_checksum = timed_batch_count(&context, 1)?;
     phases.first_eval_ns = ns(start.elapsed());
+    let mut protocol = model::ProtocolEvidence {
+        name: "shared-js-fixed-warmup-v2".into(),
+        script_sha256: sha256_file(script),
+        driver_sha256: sha256("batch-driver.js"),
+        warmup_batches: FIXED_WARMUP_BATCHES as u32,
+        calls_per_batch: 10,
+        ..Default::default()
+    };
+    for _ in 0..FIXED_WARMUP_BATCHES {
+        let (elapsed, _) = timed_batch(&context)?;
+        protocol.warmup_batch_ns.push(elapsed);
+        if let Some(jit) = &jit {
+            jit.poll();
+        }
+    }
+    let (fixed_elapsed, fixed_checksum, before_fixed, after_fixed) =
+        timed_batch_recorded(&context, 10, jit.as_ref())?;
+    protocol.fixed_metrics_before = before_fixed;
+    protocol.fixed_metrics_after = after_fixed;
     let threshold_start = Instant::now();
     let threshold_deadline = threshold_start + threshold_timeout(mode);
     let mut install_poll = 0u64;
@@ -462,15 +510,12 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     {
         return Err("required Tier2 publications did not settle before timing".into());
     }
-    let start = Instant::now();
-    let mut checksum = String::new();
-    for _ in 0..10 {
-        checksum = invoke_workload(&context)?;
-        if let Some(jit) = &jit {
-            jit.poll();
-        }
+    let (diagnostic_elapsed, diagnostic_checksum) = timed_batch(&context)?;
+    if diagnostic_checksum != fixed_checksum {
+        return Err("checksum changed after readiness diagnostic".into());
     }
-    phases.steady_state_ns = ns(start.elapsed());
+    protocol.readiness_diagnostic_ns = Some(diagnostic_elapsed);
+    phases.steady_state_ns = diagnostic_elapsed;
     if required_tier2 {
         let steady_end = jit.as_ref().map(Jit::metrics).unwrap_or_default();
         if !compilation_quiet(&steady_start, &steady_end) {
@@ -497,8 +542,8 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     let abi = AbiInfo::linked().map_err(err)?;
     phases.total_ns = ns(total.elapsed());
     let result = WorkerResult {
-        elapsed_ns: phases.steady_state_ns,
-        checksum,
+        elapsed_ns: fixed_elapsed,
+        checksum: fixed_checksum,
         native_entries: metrics.native_entries,
         native_acquisitions: metrics.native_acquisitions,
         native_exits: metrics.native_exits,
@@ -521,9 +566,66 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
         active_ir_bytes: metrics.peak_compiler_bytes as u64,
         automatic_ready: mode != "automatic" || native_ready(mode, &metrics, tier1_ready_installs),
         phases,
+        protocol,
     };
     println!("{}", serde_json::to_string(&result).map_err(err)?);
     Ok(())
+}
+
+fn timed_batch(context: &Context) -> Result<(u64, String), String> {
+    timed_batch_count(context, 10)
+}
+fn timed_batch_count(context: &Context, count: u32) -> Result<(u64, String), String> {
+    let (elapsed, checksum, _, _) = timed_batch_recorded(context, count, None)?;
+    Ok((elapsed, checksum))
+}
+
+type MetricSnapshot = BTreeMap<String, u64>;
+fn timed_batch_recorded(
+    context: &Context,
+    count: u32,
+    jit: Option<&Jit>,
+) -> Result<(u64, String, Option<MetricSnapshot>, Option<MetricSnapshot>), String> {
+    context
+        .with(|ctx| {
+            let batch: Function = ctx.globals().get("benchmarkBatch")?;
+            let checksum: Function = ctx.globals().get("benchmarkChecksum")?;
+            let before = jit.map(|j| metric_snapshot(&j.metrics()));
+            let start = Instant::now();
+            let result: Value = batch.call((count,))?;
+            if let Some(promise) = result.as_promise() {
+                promise.finish::<Value>()?;
+            }
+            let elapsed = ns(start.elapsed());
+            // Capture before checksum JS executes, so checksum compilation/entries
+            // cannot be mistaken for native execution of the measured workload.
+            let after = jit.map(|j| metric_snapshot(&j.metrics()));
+            Ok((elapsed, checksum.call::<_, String>(())?, before, after))
+        })
+        .map_err(|e: rquickjs::Error| err(e))
+}
+
+fn metric_snapshot(m: &rquickjs_jit::JitMetrics) -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        ("native_entries".into(), m.native_entries),
+        ("native_exits".into(), m.native_exits),
+        ("tier2_entries".into(), m.tier2_entries),
+        ("deopts".into(), m.deopts),
+        ("native_acquisitions".into(), m.native_acquisitions),
+        ("native_retries".into(), m.native_retries),
+        ("compile_failures".into(), m.compile_failures),
+        ("snapshot_requests".into(), m.snapshot_requests),
+        ("blacklisted".into(), m.blacklisted),
+        ("native_fallbacks".into(), m.native_fallbacks),
+        ("installed".into(), m.installed),
+        ("compile_ns".into(), m.compile_ns),
+        ("install_ns".into(), m.install_ns),
+        ("pending_worker_jobs".into(), m.pending_worker_jobs as u64),
+        (
+            "pending_snapshot_bytes".into(),
+            m.pending_snapshot_bytes as u64,
+        ),
+    ])
 }
 
 fn invoke_workload(context: &Context) -> Result<String, String> {
@@ -770,6 +872,7 @@ fn evidence_for_mode(mode: &str, pair: usize, r: WorkerResult) -> SampleEvidence
         metadata_bytes: (!external).then_some(r.metadata_bytes),
         peak_compiler_bytes: (!external).then_some(r.active_ir_bytes),
         phases: r.phases,
+        protocol: Some(r.protocol),
     }
 }
 fn rotated<'a>(modes: &'a [String], round: usize) -> impl Iterator<Item = &'a str> + 'a {
@@ -810,19 +913,29 @@ fn child(executable: &Path, mode: &str, script: &Path) -> Result<WorkerResult, S
 }
 fn bun_child(script: &Path) -> Result<WorkerResult, String> {
     let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
-    let wrapper = r#"
-import { readFileSync } from 'node:fs';
+    let wrapper = format!(
+        r#"
+import {{ readFileSync }} from 'node:fs';
 (0,eval)(readFileSync(process.argv[1],'utf8'));
-const first=workload(2000,0,globalThis.workloadArgument); if(first&&typeof first.then==='function') await first;
-const start=Bun.nanoseconds(); let result;
-for(let i=0;i<10;i++){result=workload(2000,0,globalThis.workloadArgument);if(result&&typeof result.then==='function')result=await result}
-const elapsed=Bun.nanoseconds()-start;
-function checksum(v){if(typeof v==='number'){const b=new ArrayBuffer(8),d=new DataView(b);d.setFloat64(0,v,false);return 'number:'+d.getBigUint64(0,false).toString(16).padStart(16,'0')}if(typeof v==='string')return 'string:'+v;if(typeof v==='boolean')return 'boolean:'+v;if(v===null)return 'null';if(v===undefined)return 'undefined';throw new Error('checksum primitive required')}
-console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
-"#;
+(0,eval)({driver});
+let first=benchmarkBatch(1); if(first&&typeof first.then==='function') await first; benchmarkChecksum();
+const warmup_batch_ns=[];
+async function measure() {{
+ const start=Bun.nanoseconds();
+ let result=benchmarkBatch(10); if(result&&typeof result.then==='function') await result;
+ const elapsed=Bun.nanoseconds()-start;
+ return [elapsed,benchmarkChecksum()];
+}}
+for(let i=0;i<{warmups};i++) warmup_batch_ns.push((await measure())[0]);
+const [elapsed_ns,checksum]=await measure();
+console.log(JSON.stringify({{elapsed_ns,checksum,warmup_batch_ns}}));
+"#,
+        driver = serde_json::to_string(BATCH_DRIVER).map_err(err)?,
+        warmups = FIXED_WARMUP_BATCHES
+    );
     let started = Instant::now();
     let output = Command::new(&bun)
-        .args(["--smol", "-e", wrapper])
+        .args(["-e", &wrapper])
         .arg(script)
         .output()
         .map_err(err)?;
@@ -833,6 +946,7 @@ console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
     struct BunOut {
         elapsed_ns: u64,
         checksum: String,
+        warmup_batch_ns: Vec<u64>,
     }
     let out: BunOut = serde_json::from_slice(&output.stdout).map_err(err)?;
     let phases = PhaseTiming {
@@ -864,6 +978,15 @@ console.log(JSON.stringify({elapsed_ns:elapsed,checksum:checksum(result)}));
         metadata_bytes: 0,
         active_ir_bytes: 0,
         automatic_ready: true,
+        protocol: model::ProtocolEvidence {
+            name: "shared-js-fixed-warmup-v2".into(),
+            script_sha256: sha256_file(&script.to_string_lossy()),
+            driver_sha256: sha256("batch-driver.js"),
+            warmup_batches: FIXED_WARMUP_BATCHES as u32,
+            calls_per_batch: 10,
+            warmup_batch_ns: out.warmup_batch_ns,
+            ..Default::default()
+        },
         phases,
     })
 }
@@ -910,8 +1033,9 @@ fn write_file(path: &str, modes: Vec<ModeResult>) -> Result<(), String> {
 }
 fn provenance() -> Result<Provenance, String> {
     let (stripped_no_jit_bytes, stripped_jit_bytes) = stripped_probe_sizes()?;
-    let bun_path = command("sh", &["-c", "command -v bun"]);
-    let bun_available = !bun_path.is_empty();
+    let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
+    let bun_path = command("sh", &["-c", "command -v -- \"$1\"", "sh", &bun]);
+    let bun_available = !bun_path.is_empty() && bun_path != "unknown";
     Ok(Provenance {
         source_revision: command("git", &["rev-parse", "HEAD"]),
         quickjs_revision: command("git", &["-C", "sys/quickjs", "rev-parse", "HEAD"]),
@@ -1051,6 +1175,30 @@ fn err(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn shared_driver_preserves_arguments_consumes_all_results_and_awaits_sequentially() {
+        for asynchronous in [false, true] {
+            let runtime = Runtime::new().unwrap();
+            let context = Context::full(&runtime).unwrap();
+            let source = if asynchronous {
+                "var seen=0; async function workload(n,s) { if(arguments.length!==2 || n!==2000 || s!==0) throw Error('arguments'); const prior=seen; await Promise.resolve(); if(seen!==prior) throw Error('concurrent call'); return ++seen; }"
+            } else {
+                "var seen=0; function workload(n,s) { if(arguments.length!==2 || n!==2000 || s!==0) throw Error('arguments'); return ++seen; }"
+            };
+            context.with(|ctx| {
+                ctx.eval::<(), _>(source).unwrap();
+                ctx.eval::<(), _>(BATCH_DRIVER).unwrap();
+            });
+            let (_, checksum) = timed_batch(&context).unwrap();
+            let expected = (1..=10)
+                .map(|n| format!("number:{:016x}", (n as f64).to_bits()))
+                .collect::<Vec<_>>()
+                .join("|");
+            assert_eq!(checksum, expected);
+            assert!(!runtime.is_job_pending());
+        }
+    }
+
+    #[test]
     fn validation_rejects_cross_tier_and_impossible_counters() {
         let mut r = WorkerResult {
             elapsed_ns: 1,
@@ -1077,6 +1225,7 @@ mod tests {
             active_ir_bytes: 0,
             automatic_ready: false,
             phases: PhaseTiming::default(),
+            protocol: Default::default(),
         };
         assert!(validate_sample("tier1", &r, true).is_err());
         assert!(validate_sample("tier1", &r, false).is_ok());
@@ -1193,7 +1342,13 @@ mod tests {
         {
             return;
         }
-        for script in ["scalar-loop.js", "numeric.js", "quickjs-fibonacci.js"] {
+        for script in [
+            "scalar-loop.js",
+            "numeric.js",
+            "quickjs-fibonacci.js",
+            "mixed-quotes.js",
+            "exceptions-promises-async.js",
+        ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
                 .join(script);
@@ -1203,6 +1358,18 @@ mod tests {
             assert!(sample.native_entries.is_none() && sample.native_exits.is_none());
             assert!(sample.tier1_entries.is_none() && sample.tier2_entries.is_none());
             assert!(!sample.checksum.is_empty());
+            let runtime = Runtime::new().unwrap();
+            let context = Context::full(&runtime).unwrap();
+            context.with(|ctx| {
+                ctx.eval::<(), _>(fs::read(&path).unwrap()).unwrap();
+                ctx.eval::<(), _>(BATCH_DRIVER).unwrap();
+            });
+            let (_, checksum) = timed_batch(&context).unwrap();
+            assert_eq!(
+                checksum, sample.checksum,
+                "{script} differs between engines"
+            );
+            assert!(!runtime.is_job_pending());
         }
     }
     #[test]
