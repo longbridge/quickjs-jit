@@ -1,0 +1,244 @@
+{
+  "validated_samples": 120,
+  "checksum": "38:d7ab2dde1d51d17cf64c46a07f13cbbd785d6aefff9994ad254af5fbb5255663",
+  "comparisons": [
+    {
+      "comparison": "new/old JIT",
+      "metric": "steady_state_ns",
+      "baseline_ms": 0.136251,
+      "candidate_ms": 0.1950645,
+      "speed": 0.6997589759537465,
+      "ci95": [
+        0.6937433162373369,
+        0.7067457203984872
+      ]
+    },
+    {
+      "comparison": "new/old JIT",
+      "metric": "p99_script_render_ns",
+      "baseline_ms": 0.153517,
+      "candidate_ms": 0.199984,
+      "speed": 0.7515624438903448,
+      "ci95": [
+        0.7249729051248006,
+        0.7709806820779653
+      ]
+    },
+    {
+      "comparison": "new/old JIT",
+      "metric": "first_window_ns",
+      "baseline_ms": 5.0058725,
+      "candidate_ms": 4.859288,
+      "speed": 1.0274509192026209,
+      "ci95": [
+        1.0179452234535713,
+        1.0359951293026457
+      ]
+    },
+    {
+      "comparison": "new/old JIT",
+      "metric": "hot_reload_ns",
+      "baseline_ms": 0.3571895,
+      "candidate_ms": 0.305627,
+      "speed": 1.1671410740505765,
+      "ci95": [
+        1.1589995044810457,
+        1.1750428397287906
+      ]
+    },
+    {
+      "comparison": "new/old interpreter",
+      "metric": "steady_state_ns",
+      "baseline_ms": 0.3187335,
+      "candidate_ms": 0.265009,
+      "speed": 1.203089758916414,
+      "ci95": [
+        1.2016660962116823,
+        1.2044838901647568
+      ]
+    },
+    {
+      "comparison": "new/old interpreter",
+      "metric": "p99_script_render_ns",
+      "baseline_ms": 0.345362,
+      "candidate_ms": 0.272607,
+      "speed": 1.2618720077406342,
+      "ci95": [
+        1.2539361017177322,
+        1.2696132722929552
+      ]
+    },
+    {
+      "comparison": "new/old interpreter",
+      "metric": "first_window_ns",
+      "baseline_ms": 4.8926305,
+      "candidate_ms": 4.857829,
+      "speed": 1.007990189349168,
+      "ci95": [
+        1.0021190611175759,
+        1.01414329400668
+      ]
+    },
+    {
+      "comparison": "new/old interpreter",
+      "metric": "hot_reload_ns",
+      "baseline_ms": 0.3523605,
+      "candidate_ms": 0.303015,
+      "speed": 1.1635772845608867,
+      "ci95": [
+        1.155377335717133,
+        1.1714084869302752
+      ]
+    },
+    {
+      "comparison": "new JIT/interpreter",
+      "metric": "steady_state_ns",
+      "baseline_ms": 0.265009,
+      "candidate_ms": 0.1950645,
+      "speed": 1.3653812934051368,
+      "ci95": [
+        1.3562591037503189,
+        1.3762914902835828
+      ]
+    },
+    {
+      "comparison": "new JIT/interpreter",
+      "metric": "p99_script_render_ns",
+      "baseline_ms": 0.272607,
+      "candidate_ms": 0.199984,
+      "speed": 1.35047802902663,
+      "ci95": [
+        1.3017834074101042,
+        1.3840887688145393
+      ]
+    },
+    {
+      "comparison": "new JIT/interpreter",
+      "metric": "first_window_ns",
+      "baseline_ms": 4.857829,
+      "candidate_ms": 4.859288,
+      "speed": 0.9930822848535291,
+      "ci95": [
+        0.9841720136142381,
+        1.0009079742892264
+      ]
+    },
+    {
+      "comparison": "new JIT/interpreter",
+      "metric": "hot_reload_ns",
+      "baseline_ms": 0.303015,
+      "candidate_ms": 0.305627,
+      "speed": 0.9877618967366546,
+      "ci95": [
+        0.982598586840065,
+        0.9924437769981147
+      ]
+    }
+  ],
+  "counters": {
+    "baseline/interpreter": {
+      "native_entries": [
+        0,
+        0
+      ],
+      "installed": [
+        0,
+        0
+      ],
+      "compile_failures": [
+        0,
+        0
+      ],
+      "invalid_artifacts": [
+        0,
+        0
+      ],
+      "deopts": [
+        0,
+        0
+      ],
+      "fallback_count": [
+        0,
+        0
+      ]
+    },
+    "baseline/automatic": {
+      "native_entries": [
+        24237,
+        24574
+      ],
+      "installed": [
+        3,
+        3
+      ],
+      "compile_failures": [
+        13,
+        13
+      ],
+      "invalid_artifacts": [
+        4,
+        4
+      ],
+      "deopts": [
+        0,
+        0
+      ],
+      "fallback_count": [
+        0,
+        0
+      ]
+    },
+    "candidate/interpreter": {
+      "native_entries": [
+        0,
+        0
+      ],
+      "installed": [
+        0,
+        0
+      ],
+      "compile_failures": [
+        0,
+        0
+      ],
+      "invalid_artifacts": [
+        0,
+        0
+      ],
+      "deopts": [
+        0,
+        0
+      ],
+      "fallback_count": [
+        0,
+        0
+      ]
+    },
+    "candidate/automatic": {
+      "native_entries": [
+        164781,
+        175449
+      ],
+      "installed": [
+        4,
+        4
+      ],
+      "compile_failures": [
+        9,
+        9
+      ],
+      "invalid_artifacts": [
+        0,
+        0
+      ],
+      "deopts": [
+        0,
+        0
+      ],
+      "fallback_count": [
+        0,
+        0
+      ]
+    }
+  }
+}
