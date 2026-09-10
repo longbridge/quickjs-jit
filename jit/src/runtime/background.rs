@@ -133,7 +133,7 @@ impl BackgroundCompiler {
                 .spawn(move || loop {
                     let request = { receiver.lock().unwrap_or_else(|p| p.into_inner()).recv() };
                     let Ok(request) = request else { break };
-                    let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
+                    let snapshot_bytes = request.snapshot_bytes();
                     let ir_bytes = snapshot_bytes.saturating_mul(32);
                     let _usage = UsageGuard {
                         usage: Arc::clone(&usage),
@@ -202,7 +202,7 @@ impl BackgroundCompiler {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             Some(coordinator.completion_sender());
-        let Some(request) = coordinator.begin_next() else {
+        let Some(mut request) = coordinator.begin_next() else {
             return Ok(false);
         };
         if let Err(error) = self.start_workers() {
@@ -213,21 +213,27 @@ impl BackgroundCompiler {
             .sender
             .as_ref()
             .ok_or(BackgroundCompilerError::Shutdown)?;
-        let snapshot_bytes = request.snapshot().snapshot().owned_bytes();
-        let ir_bytes = snapshot_bytes.saturating_mul(32);
-        if self
-            .usage
-            .snapshots
-            .load(Ordering::Acquire)
-            .saturating_add(snapshot_bytes)
-            > self.max_snapshot_bytes
-            || self
-                .usage
-                .ir
+        let within_limits = |snapshot_bytes: usize| {
+            self.usage
+                .snapshots
                 .load(Ordering::Acquire)
-                .saturating_add(ir_bytes)
-                > self.max_ir_bytes
-        {
+                .saturating_add(snapshot_bytes)
+                <= self.max_snapshot_bytes
+                && self
+                    .usage
+                    .ir
+                    .load(Ordering::Acquire)
+                    .saturating_add(snapshot_bytes.saturating_mul(32))
+                    <= self.max_ir_bytes
+        };
+        if !within_limits(request.snapshot_bytes()) {
+            // Inlining is optional. Retain ordinary direct-call publications
+            // while releasing bodies before rejecting an affordable caller.
+            request.discard_inline_snapshots();
+        }
+        let snapshot_bytes = request.snapshot_bytes();
+        let ir_bytes = snapshot_bytes.saturating_mul(32);
+        if !within_limits(snapshot_bytes) {
             coordinator.rollback_resource_limit(request);
             coordinator.record_resource_limit_rejection();
             return Ok(false);

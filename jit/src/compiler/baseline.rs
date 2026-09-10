@@ -1058,6 +1058,7 @@ pub(crate) fn artifact_from_relocatable(
         charged_frame_states,
         Vec::new(),
     )
+    .with_inline_snapshot(request.snapshot())
     .with_unwind_metadata(code.unwind_metadata.clone())
     .with_relocatable(code)
 }

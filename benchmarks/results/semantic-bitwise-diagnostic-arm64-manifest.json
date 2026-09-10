@@ -1,0 +1,373 @@
+{
+  "status": "focused diagnostic only; full matrix pending; no-regression gate unproven",
+  "metadata": {
+    "cpu": null,
+    "status": "complete",
+    "pairs": 10,
+    "discarded_processes": 5,
+    "binary_sha256": {
+      "baseline": "6abcdc635c0e8d83dc10a86aca380debb6e302a62b6f0210d7d656a481bdb53a",
+      "candidate": "081879eab797ed3c5ce3ce7482777b97eedbed3522a69ac4df09027ac71eb00e",
+      "previous_guards": "3037ea008289f62679f93ae803f6ea3a70bb74b6fa93c8bb6a7a54d2ee72d27b"
+    },
+    "binaries": {
+      "baseline": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/jit-bench-baseline",
+      "candidate": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/jit-bench-candidate",
+      "previous_guards": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/jit-bench-previous_guards"
+    },
+    "configs": [
+      [
+        "baseline",
+        "automatic"
+      ],
+      [
+        "candidate",
+        "automatic"
+      ],
+      [
+        "previous_guards",
+        "automatic"
+      ],
+      [
+        "baseline",
+        "interpreter"
+      ],
+      [
+        "baseline",
+        "bun"
+      ],
+      [
+        "candidate",
+        "interpreter"
+      ]
+    ],
+    "scripts": {
+      "host-compute": "a09e06b167f1e823de480ea0f9d9d93236ed2565b998e81ac037b6438863bb7a",
+      "numeric": "71fccfc372ce1abc5229e79e390dec06a17b42f6a9f9f7a6747222f2df525f50",
+      "scalar-loop": "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45",
+      "fibonacci-iterative": "7f7c397e968bd4d88a70cd4eaad43e861f456f996bd93a2eecb3d583d31b39f4",
+      "scalar-expressions": "248825299f0b5dedddd7f844ca74fbb5f779e08ba95a36b48d776c24c20be7dc",
+      "scalar-control-flow": "cd2a2d54c8be8fd1aab6f6b81a4b12a15d027bb05befae472561504e45fb787d"
+    },
+    "command": [
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/source/benchmarks/paired.py",
+      "--binaries",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/binaries.json",
+      "--scripts",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/source/benchmarks/scripts",
+      "--workloads",
+      "host-compute,numeric,scalar-loop,fibonacci-iterative,scalar-expressions,scalar-control-flow",
+      "--pairs",
+      "10",
+      "--output",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/diagnostic"
+    ],
+    "collector_sha256": "554e376384982cf8c338187c51e52398cacc4747160cd3b022648cd0ccc5b37e",
+    "cpu_description": "Apple M3",
+    "governor": "not recorded",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "bun_path": "/Users/jason/.bun/bin/bun",
+    "bun_version": "1.4.0",
+    "bun_sha256": "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf",
+    "bun_flags": [],
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "protocol": "shared-js-fixed-warmup-v2",
+    "throughput_windows": 0,
+    "note": "Latency-only paired candidate diagnostic. Fixed 10-call window; counters include shared driver. Readiness diagnostic is separately conditioned."
+  },
+  "sources": {
+    "runtime_base": "023a2206d20d3cc8aa1646f3ab7fa0ad34fb220d",
+    "candidate": "semantic scalar arithmetic, comparisons, updates and binary bitwise operations",
+    "source_diff_sha256": "d28b0412094e85211266716f0a7521bd531e53393000879ac132f2380d2aa692",
+    "source_files": {
+      "Cargo.lock": "9039743c8aad1496ca735c946c9a3c7a9750a16cba13bdae0a8bd61406c8cccf",
+      "Cargo.toml": "94f3c78cd8df524070f5c2e8266056f67e09cb2394334603ed46912a248d0aea",
+      "benchmarks/Cargo.toml": "b10862a6792f64184d1c9b01ba30633b6e06cd6400c6db3e173d725e007f92c0",
+      "benchmarks/paired.py": "554e376384982cf8c338187c51e52398cacc4747160cd3b022648cd0ccc5b37e",
+      "benchmarks/run.rs": "fd92910abea39b266a5ccb4b7659f15e9bf3e7459b7a82f406d9f07ec0ac8505",
+      "benchmarks/scripts/adversarial.js": "aba1b49b0439f72eacefdaeff63793256c9e9765b7deb202bc25191c4b5b5095",
+      "benchmarks/scripts/arrays-typed.js": "a19284a8c4e7613bfdee18131871f5865f62f05e893d188511209426a5b7687b",
+      "benchmarks/scripts/call-heavy.js": "a6cc40c5fb963f376a4fd35469a59a23b37420c564756319bc6d9c19b35f8fb0",
+      "benchmarks/scripts/calls-closures.js": "2b72055e0638c572fa69f75622c9308c1e7e220a0bf1b1a772e21e6af68b5b15",
+      "benchmarks/scripts/calls-recursion-closures.js": "e2c2f192b5915b77c20f852feb6e21b15dbf879507ee851f4da514f9c9300757",
+      "benchmarks/scripts/collections.js": "5a28d974119bfa1c1200d4e28daef3c228bb7792e0055ed9f0b164c9a74712c6",
+      "benchmarks/scripts/exceptions-promises-async.js": "78236c5910b41a1e4d57aea88a78fd3941236b999793d605de8976a9cc6f99a1",
+      "benchmarks/scripts/fibonacci-iterative.js": "7f7c397e968bd4d88a70cd4eaad43e861f456f996bd93a2eecb3d583d31b39f4",
+      "benchmarks/scripts/fibonacci-recursive.js": "19af48c9602fd18c911d1d19daf48a3608209712f1205e7959680a0bf5fde3a0",
+      "benchmarks/scripts/float64-dense.js": "35220498f859305ab3444f165af3e004136cc69c71bfb19683bbdce24db0163b",
+      "benchmarks/scripts/generic-call-entry.js": "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40",
+      "benchmarks/scripts/generic-call-fallback.js": "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596",
+      "benchmarks/scripts/host-compute.js": "a09e06b167f1e823de480ea0f9d9d93236ed2565b998e81ac037b6438863bb7a",
+      "benchmarks/scripts/json-codec.js": "36526695061ee1fa90c7bfee357064af6d28c11af1a00145bf28fe1712e268e3",
+      "benchmarks/scripts/map-set-bigint.js": "2ec0a33414b8c230cfd5028cf1a5aa769b3033da4f797fbb421ea63e1e66b954",
+      "benchmarks/scripts/mixed-quotes.js": "1d670a5575e2f01ddf6c583ee0afb1e54e6f39743f4e6592a2dce43a4c04dc44",
+      "benchmarks/scripts/numeric.js": "71fccfc372ce1abc5229e79e390dec06a17b42f6a9f9f7a6747222f2df525f50",
+      "benchmarks/scripts/objects-polymorphic.js": "0b43980bee67f25de8a453d191e113cd427f57b730b7f136435ca6ab4f9bbd69",
+      "benchmarks/scripts/property-heavy.js": "10bf81e6d712b8980df2a404be0d0456de92df5afc22ae30e5c086a33dea30cb",
+      "benchmarks/scripts/quickjs-bitops.js": "382fab47164d9a4e6bc2080140b41b40a797d967ef605345b07a22daad08e5c7",
+      "benchmarks/scripts/quickjs-fibonacci.js": "96ad95758210c1f9b99c5046a2e062a60d1415dceb58fdbf6173a1a28a1381e1",
+      "benchmarks/scripts/quickjs-int-arith.js": "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e",
+      "benchmarks/scripts/scalar-control-flow.js": "cd2a2d54c8be8fd1aab6f6b81a4b12a15d027bb05befae472561504e45fb787d",
+      "benchmarks/scripts/scalar-expressions.js": "248825299f0b5dedddd7f844ca74fbb5f779e08ba95a36b48d776c24c20be7dc",
+      "benchmarks/scripts/scalar-loop.js": "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45",
+      "benchmarks/scripts/strings-json.js": "c4ddcd0f2b34ab1b76e5a6f9b09cc0b590a14097a8457f35d1c9c1de4295231e",
+      "benchmarks/scripts/strings-regexp.js": "709bb01131e108922bf9843d561c74c2097e58ba2fe42988c079bc3683e50889",
+      "benchmarks/summarize_paired.py": "2c1fc249ad4bfb5e34915b966ccea1c142ee73bcd20aa64dc81e7dcf90963215",
+      "jit/Cargo.toml": "261102e87e6b9acc8b77d30889f2913f548749aee4f40161abafa21d7ffb95fe",
+      "jit/src/abi.rs": "eff706f1a4022f4423f6cef5e065f1252d1c8a430536eb85347ec576e9f34d7f",
+      "jit/src/bin/jit-coverage-report.rs": "d85de90b4181762fc535ef989bbc32040922588188ff66c48e0b5bb19a2c3174",
+      "jit/src/bin/jit-quickjs-suite.rs": "34af37c2104fd28ce8b2a087ae38d9e7fc9209fc4ed8707db4a16446ec092424",
+      "jit/src/bin/jit-test262.rs": "11be701c9686c7806979486dbf00788f50d286f8e45e9ac5ece2d18eba3a9c08",
+      "jit/src/bytecode/cfg.rs": "972a97353151ffe095cccf3d057a765a462b1452a17d73b47c9b8faa1f3a3c43",
+      "jit/src/bytecode/decode.rs": "42b675d3075ad81c2283a5310ba5383fbcae2a4df1118bd95d7c9a37d2b87376",
+      "jit/src/bytecode/mod.rs": "18138eeae2b3f99cfef08f6463620112c25b30941dab19c8e7b7e8710bca0491",
+      "jit/src/bytecode/policy.rs": "8eef54e06ec8489f645952a9126ab0eb763a4a6eac599c647864cd5b84692423",
+      "jit/src/bytecode/policy_audit.rs": "8fef1c37fbdcd4f52695a932b23e9eaa19543a54860051425700dc6dd47365fa",
+      "jit/src/bytecode/stack.rs": "c2f4b6b60e4c3220c5afd04b1f99419a93f532832be5c71950df5f69fa5cdaa2",
+      "jit/src/bytecode/verify.rs": "81c9d4c6c1cc6857dd3444639c44ab4ee7d5ebd6a3c41c099687f704f1cc6cf1",
+      "jit/src/code_cache/artifact.rs": "adcf5d4bc6eebc69792f85e30ce92444a4d4ce8d24d8f0b08a9c7b367cae42fa",
+      "jit/src/code_cache/evict.rs": "6e0c772bbb470bca518dc86934101b2edd799dea94ad072e38099e18fad8ecd7",
+      "jit/src/code_cache/mod.rs": "b9a5758b066b01365d70c426d039e8842935e4acb4f8d5fb9c2dbe41437db8a8",
+      "jit/src/compiler/baseline.rs": "96562c2909c6ad2d8bb69f2329440da3f8c7ee5176451ffbc2e89ab0a4257425",
+      "jit/src/compiler/helpers.rs": "ed7e2a745da358efb0382f1d3e2250b8db4bc987eafdf221531b0e71eed7a88f",
+      "jit/src/compiler/mock.rs": "414f0de7f0d482ac3eefe215b0f30c01bfc593d31126fa79b990ad807286e3c5",
+      "jit/src/compiler/mod.rs": "745b2ec8568fd0b8a65b99c608473eb68f277935e2d370d7ed1f34c95be66f54",
+      "jit/src/compiler/optimized.rs": "3811d007cb3b0223a56a36d64ffd712187f05454ce85ca2f2dfa0807fc1af858",
+      "jit/src/config.rs": "ef3e0e9ee6e122a30881ef304cb97210bfd6bae9da5b0a111206e41b1cfe639a",
+      "jit/src/correctness/mod.rs": "25c7d349edebd5ea0f4e1c959c3aa3d0288ec25e44335b1a5fba40448556583c",
+      "jit/src/error.rs": "615ab8477407f0360de3c19797a06ddd7728587d70e078f8e0d5e343ba59003e",
+      "jit/src/ir/baseline.rs": "da40e28f946dc376e3fe3ab60d57edad2134a060d404ab38f451075dbd4502d9",
+      "jit/src/ir/frame_state.rs": "e93915ceba88a5dcf4078da3db530c86f91e557f35a4fcc453e0b6cbdb0b02c5",
+      "jit/src/ir/mod.rs": "24a9900de46de23a89f3f5b2edbb5ef7f967624956b92f8600a123a55a510868",
+      "jit/src/ir/optimized.rs": "e7f459a0c45f531c45afc0fb7d99a976ea0664f3d25c5e8403f1458a8a13b1a4",
+      "jit/src/ir/scalar.rs": "c903878c57cd7445643334f4674b3dbe55e93cf13f99c858e12c02eb295c3744",
+      "jit/src/ir/types.rs": "42c5ab40c8961cb640b31cdb8609786c9161422b97e6f8b0060a9ce496b7a69a",
+      "jit/src/lib.rs": "8f22e8d7a4fe6c16718261234026062529856a700b190e4131524788668c0e0f",
+      "jit/src/metrics.rs": "bfcaec5dc7bffd4b99d11e86f26e4ba8a581ab74ccb28f02453f3aefd29a210b",
+      "jit/src/platform/linux.rs": "6eaa028e41746c9675ef3423496b60bd75000f46fecf4f75f2038b8b1a19efcb",
+      "jit/src/platform/macos.rs": "ec477aec735d8083bf6753f1d60a483bb1ae046d89c502ef5a1827a9eae2ea51",
+      "jit/src/platform/mod.rs": "cac1c3cbb571931d24bfe9da8c540c480cbf50ec089334ebf4a34bfbb6c8c8b0",
+      "jit/src/platform/unsupported.rs": "8590356ade4ce09461a93fde26ccc2ff6dd873a4ea11553fca34e367bc1c9cdb",
+      "jit/src/platform/windows.rs": "9055bff8cb8ab395c17aa463a4c4f1f689a765e8ee7fca138a374f82747f5997",
+      "jit/src/runtime/background.rs": "0281c2789fc39b2d9cbcd0ceea6ba2eeb2558c5ad7bb97d74df893637ae4046c",
+      "jit/src/runtime/coordinator.rs": "417f6b542f445ef0d55ff2107007f5d1d5c27153e58c2553a34c083466553647",
+      "jit/src/runtime/feedback.rs": "c879cc63c42b2d7c387cfb97b6aeb1485fb45375ddff0fe4f26fb675b01aed70",
+      "jit/src/runtime/hotness.rs": "505460cbbd4d40d030dbad7665452262f551bc192c6278630f3f1b497f6e5d7c",
+      "jit/src/runtime/install.rs": "1641f90ed9543e3ba9a5d3c9ff9874bab93d55d8305301fe3981493ca94586ee",
+      "jit/src/runtime/invalidate.rs": "b87dbf2d85afd6062a60fa72058cd85518a9357eff727b018c966807c0922a9d",
+      "jit/src/runtime/mod.rs": "d275d3f1cc267413f507af101ae4b8fa78ec9df294b099c00d4a9ae033076606",
+      "jit/src/runtime/osr.rs": "6109d40164020bae30dfc0039dca163b5b52c6ad6dd228cb9b894219e0484e9a",
+      "jit/src/runtime/shape_feedback.rs": "b32263190306a03474411620f7f1f07ab4af4b6a5ac557dee8bae0aa8fd462c8",
+      "jit/tests/differential.rs": "9f15ef980140ec4d9cc6a0a26357d3102ad1520711798f98b35b75057fea8400",
+      "jit/tests/optimized.rs": "338da6e1e3617ed4b4519a54ef60f127761c59f3a7cfbc64bc1d762682b9bcd2",
+      "jit/tests/platform.rs": "fa1671cfc631a5786d30c7555714e2df4654933c131dcf9d328f3c68b2af03f6"
+    },
+    "binary_sha256": {
+      "baseline": "6abcdc635c0e8d83dc10a86aca380debb6e302a62b6f0210d7d656a481bdb53a",
+      "candidate": "081879eab797ed3c5ce3ce7482777b97eedbed3522a69ac4df09027ac71eb00e",
+      "previous_guards": "3037ea008289f62679f93ae803f6ea3a70bb74b6fa93c8bb6a7a54d2ee72d27b"
+    },
+    "test_command": "cargo test -p quickjs-jit-runtime --features compiler,test-support --release --quiet",
+    "test_results": {
+      "passed": 554,
+      "failed": 0,
+      "ignored": 1
+    },
+    "clippy_command": "cargo clippy -p quickjs-jit-runtime --features compiler,test-support --all-targets -- -D warnings",
+    "clippy_exit": 0,
+    "build_command": "cargo build -p rquickjs-jit-benchmarks --bin jit-bench --release",
+    "benchmark_gate": "pending"
+  },
+  "comparisons": [
+    {
+      "workload": "host-compute",
+      "baseline": {
+        "speed": 1.013981382520042,
+        "ci95": [
+          0.7360895245567809,
+          1.4356903541585
+        ]
+      },
+      "previous_guards": {
+        "speed": 0.9479616016765894,
+        "ci95": [
+          0.7276265709220547,
+          1.2069662217942798
+        ]
+      },
+      "QuickJS": {
+        "speed": 17.547494827620742,
+        "ci95": [
+          13.853605650042583,
+          20.587821942021925
+        ]
+      },
+      "Bun": {
+        "speed": 3.66214120005018,
+        "ci95": [
+          2.686145193504771,
+          4.80570915715442
+        ]
+      }
+    },
+    {
+      "workload": "numeric",
+      "baseline": {
+        "speed": 1.0038871147627997,
+        "ci95": [
+          0.9802293832838381,
+          1.0325474859107984
+        ]
+      },
+      "previous_guards": {
+        "speed": 1.0045103552689327,
+        "ci95": [
+          0.9729685401390034,
+          1.0481416646506925
+        ]
+      },
+      "QuickJS": {
+        "speed": 16.47501265565439,
+        "ci95": [
+          16.19196267311791,
+          16.760498710373167
+        ]
+      },
+      "Bun": {
+        "speed": 4.6507981277769135,
+        "ci95": [
+          4.544723877965385,
+          4.761620289524747
+        ]
+      }
+    },
+    {
+      "workload": "scalar-loop",
+      "baseline": {
+        "speed": 1.016016408507657,
+        "ci95": [
+          0.9810411271390586,
+          1.0563544348892182
+        ]
+      },
+      "previous_guards": {
+        "speed": 1.0110055148738977,
+        "ci95": [
+          0.9850800728480986,
+          1.0386974751449018
+        ]
+      },
+      "QuickJS": {
+        "speed": 16.556944254134024,
+        "ci95": [
+          16.098241495531454,
+          16.95700071699281
+        ]
+      },
+      "Bun": {
+        "speed": 5.258939981035827,
+        "ci95": [
+          4.80883517129479,
+          6.080697927044718
+        ]
+      }
+    },
+    {
+      "workload": "fibonacci-iterative",
+      "baseline": {
+        "speed": 0.8933542519947717,
+        "ci95": [
+          0.6694781028354798,
+          1.0475632980835545
+        ]
+      },
+      "previous_guards": {
+        "speed": 0.8673768133668915,
+        "ci95": [
+          0.6497522586849154,
+          1.0196851478247457
+        ]
+      },
+      "QuickJS": {
+        "speed": 21.111811541393372,
+        "ci95": [
+          16.197925066137667,
+          24.42022068618812
+        ]
+      },
+      "Bun": {
+        "speed": 1.0675436223429366,
+        "ci95": [
+          0.9143161304760792,
+          1.1855140978978795
+        ]
+      }
+    },
+    {
+      "workload": "scalar-expressions",
+      "baseline": {
+        "speed": 1.5712965886956445,
+        "ci95": [
+          1.49254299973238,
+          1.618531924031089
+        ]
+      },
+      "previous_guards": {
+        "speed": 1.1229802447115802,
+        "ci95": [
+          1.0629391150813094,
+          1.1872876650976638
+        ]
+      },
+      "QuickJS": {
+        "speed": 17.968925504827723,
+        "ci95": [
+          17.01230935347168,
+          18.619018558157702
+        ]
+      },
+      "Bun": {
+        "speed": 2.016130395194738,
+        "ci95": [
+          1.852700588317387,
+          2.1986171016344125
+        ]
+      }
+    },
+    {
+      "workload": "scalar-control-flow",
+      "baseline": {
+        "speed": 1.385777841318626,
+        "ci95": [
+          0.9314218810706099,
+          2.301452093779603
+        ]
+      },
+      "previous_guards": {
+        "speed": 1.0420739503807752,
+        "ci95": [
+          0.8745502094822066,
+          1.2178148203793215
+        ]
+      },
+      "QuickJS": {
+        "speed": 26.45569094701001,
+        "ci95": [
+          21.11617464892442,
+          32.774846873727846
+        ]
+      },
+      "Bun": {
+        "speed": 2.5052169201666903,
+        "ci95": [
+          1.7698565323029074,
+          4.384541866727414
+        ]
+      }
+    }
+  ],
+  "process_records": 540,
+  "verified_files": 638,
+  "archive_sha256": "fe63959f971c41d425befaf05112c4e3575173534704f4f9cad38cdca29e98d0",
+  "summary_sha256": "f2f7fd98ebd8774ec3e7c68ae51665076b9fae04089da5d8ba8c549ed363d8e7"
+}

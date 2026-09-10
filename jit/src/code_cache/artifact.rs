@@ -345,6 +345,7 @@ pub struct OptimizedArtifactMetadata {
     boxes_elided: u64,
     cse_eliminated: u64,
     dead_nodes_eliminated: u64,
+    inlined_calls: u64,
     side_path_profile: Option<crate::runtime::SidePathProfile>,
     direct_call_signature: Option<crate::runtime::BoundedSpecializationSignature>,
 }
@@ -364,9 +365,18 @@ impl OptimizedArtifactMetadata {
             boxes_elided,
             cse_eliminated,
             dead_nodes_eliminated,
+            inlined_calls: 0,
             side_path_profile: None,
             direct_call_signature: None,
         }
+    }
+    /// Number of statically expanded call sites, not runtime call executions.
+    pub const fn inlined_calls(&self) -> u64 {
+        self.inlined_calls
+    }
+    pub fn with_inlined_calls(mut self, calls: u64) -> Self {
+        self.inlined_calls = calls;
+        self
     }
     pub const fn feedback_epoch(&self) -> u64 {
         self.feedback_epoch
@@ -470,6 +480,8 @@ pub struct CompiledArtifact {
     direct_call_published: Option<crate::compiler::baseline::PublishedBaselineCode>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     direct_call_dependencies: Box<[crate::compiler::baseline::PublishedBaselineCode]>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    inline_snapshot: Option<crate::bytecode::CompileSnapshot>,
     #[cfg(any(test, feature = "test-support"))]
     fake: bool,
 }
@@ -515,6 +527,8 @@ impl CompiledArtifact {
             direct_call_published: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_dependencies: Box::new([]),
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            inline_snapshot: None,
             #[cfg(any(test, feature = "test-support"))]
             fake: false,
         }
@@ -579,6 +593,10 @@ impl CompiledArtifact {
         }
 
         let mut total = self.code.bytes().len();
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        if let Some(snapshot) = &self.inline_snapshot {
+            total = total.checked_add(snapshot.retained_bytes())?;
+        }
         total = add_slice::<Relocation>(total, self.relocations.len())?;
         for relocation in &self.relocations {
             if let RelocationTarget::Symbol(symbol) = &relocation.target {
@@ -621,6 +639,34 @@ impl CompiledArtifact {
 
     pub fn metadata_bytes(&self) -> Option<usize> {
         self.charge_bytes()?.checked_sub(self.code_bytes())
+    }
+
+    /// Copied callee bytecode for a future graph-builder inline attempt.
+    /// Retention does not establish inline eligibility or replace target guards.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn inline_snapshot(&self) -> Option<&crate::bytecode::CompileSnapshot> {
+        self.inline_snapshot.as_ref()
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn with_inline_snapshot(
+        mut self,
+        function: &crate::bytecode::VerifiedFunction,
+    ) -> Self {
+        let snapshot = function.snapshot();
+        // Optional retention has independent bounds; large callees keep their
+        // normal executable entry and do not make caller compilation fail.
+        if function.instructions().len() <= 128
+            && snapshot.retained_bytes() <= 16 * 1024
+            && snapshot.exception_map().is_empty()
+            && snapshot.function_id() == self.key.function_id
+            && snapshot.generation() == self.key.generation
+            && snapshot.source_revision() == self.key.source_revision
+            && snapshot.opcode_fingerprint() == self.key.opcode_fingerprint
+        {
+            self.inline_snapshot = Some(snapshot.clone());
+        }
+        self
     }
 
     pub(crate) fn record_benefit(&self, score: u64) {
@@ -716,6 +762,8 @@ impl CompiledArtifact {
             direct_call_published: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_dependencies: Box::new([]),
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            inline_snapshot: None,
             fake: true,
         }
     }
@@ -727,5 +775,72 @@ impl CompiledArtifact {
             self.fake = false;
         }
         self
+    }
+}
+
+#[cfg(all(test, feature = "compiler", not(target_family = "wasm")))]
+mod inline_snapshot_tests {
+    use super::*;
+    use crate::bytecode::{opcode, CompileSnapshot, VerifyLimits};
+
+    fn function(bytes: Vec<u8>) -> crate::bytecode::VerifiedFunction {
+        CompileSnapshot::from_untrusted_bytecode(bytes, 0, 0, 0, 0)
+            .verify(VerifyLimits::default())
+            .unwrap()
+    }
+
+    fn artifact(function: &crate::bytecode::VerifiedFunction) -> CompiledArtifact {
+        let snapshot = function.snapshot();
+        let mut key = CompiledArtifact::fake(Tier::Baseline).key();
+        key.function_id = snapshot.function_id();
+        key.generation = snapshot.generation();
+        key.source_revision = snapshot.source_revision();
+        key.opcode_fingerprint = snapshot.opcode_fingerprint();
+        CompiledArtifact::empty(key)
+    }
+
+    #[test]
+    fn retained_inline_body_is_charged_and_survives_its_artifact() {
+        let function = function(vec![opcode::RETURN_UNDEF]);
+        let bytes = function.snapshot().retained_bytes();
+        let artifact = artifact(&function).with_inline_snapshot(&function);
+        assert_eq!(artifact.metadata_bytes(), Some(bytes));
+        let retained = artifact.inline_snapshot().unwrap().clone();
+        drop(artifact);
+        drop(function);
+        assert_eq!(retained.bytecode(), &[opcode::RETURN_UNDEF]);
+        assert!(retained.verify(VerifyLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn inline_retention_declines_large_bodies_and_spare_capacity() {
+        let mut long = vec![opcode::NOP; 128];
+        long.push(opcode::RETURN_UNDEF);
+        let mut spare = Vec::with_capacity(32 * 1024);
+        spare.push(opcode::RETURN_UNDEF);
+        for bytes in [long, spare] {
+            let function = function(bytes);
+            let artifact = artifact(&function).with_inline_snapshot(&function);
+            assert!(artifact.inline_snapshot().is_none());
+            assert_eq!(artifact.metadata_bytes(), Some(0));
+        }
+    }
+
+    #[test]
+    fn inline_retention_requires_exact_source_identity() {
+        let function = function(vec![opcode::RETURN_UNDEF]);
+        for field in 0..4 {
+            let mut artifact = artifact(&function);
+            match field {
+                0 => artifact.key.function_id ^= 1,
+                1 => artifact.key.generation ^= 1,
+                2 => artifact.key.source_revision ^= 1,
+                _ => artifact.key.opcode_fingerprint ^= 1,
+            }
+            assert!(artifact
+                .with_inline_snapshot(&function)
+                .inline_snapshot()
+                .is_none());
+        }
     }
 }
