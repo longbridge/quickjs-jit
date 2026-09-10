@@ -64,7 +64,7 @@ fn run_until_native(source: &str, expression: &str) -> (String, rquickjs_jit::Ji
 }
 
 #[test]
-fn generic_call_entry_benchmark_keeps_the_generic_native_boundary() {
+fn local_state_call_keeps_the_generic_native_boundary() {
     let runtime = Runtime::new().unwrap();
     let jit = Jit::attach(
         &runtime,
@@ -78,9 +78,11 @@ fn generic_call_entry_benchmark_keeps_the_generic_native_boundary() {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| {
-        ctx.eval::<(), _>(include_str!(
-            "../../benchmarks/scripts/generic-call-entry.js"
-        ))
+        ctx.eval::<(), _>(
+            "function incrementIf(value,enabled){let incremented=value+1;if(enabled)return incremented;return value;}\n\
+             globalThis.workloadArgument=incrementIf;\n\
+             function workload(iterations,seed,target){let value=seed;for(let i=0;i<iterations;i++){value=target(value,true);}return value;}"
+        )
         .unwrap();
     });
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -111,7 +113,7 @@ fn generic_call_entry_benchmark_keeps_the_generic_native_boundary() {
         assert_eq!(
             helper_count(rt, rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL) - calls,
             1000,
-            "the benchmark must not silently become a specialized direct call"
+            "a leaf with local state must retain the generic boundary"
         );
     });
     let after = jit.metrics();
@@ -452,4 +454,57 @@ fn baseline_property_cache_accepts_bounded_polymorphic_shapes_under_stress_gc() 
             22
         );
     }
+}
+
+#[test]
+fn automatic_generic_call_entry_admits_the_bool_callee_to_tagged_tier2() {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(1)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function incrementIf(value,enabled){let incremented=value+1;if(enabled)return incremented;return value;}\n\
+                 globalThis.workloadArgument=incrementIf;\n\
+                 function workload(iterations,seed,target){let value=seed;for(let i=0;i<iterations;i++){value=target(value,true);}return value;}"
+            )
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        context.with(|ctx| {
+            assert_eq!(
+                ctx.eval::<i32, _>("workload(1000,7,workloadArgument)")
+                    .unwrap(),
+                1007
+            )
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries >= 1000 && jit.metrics().pending_worker_jobs == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{:?}", jit.metrics());
+        std::thread::sleep(Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    context.with(|ctx| {
+        assert_eq!(
+            ctx.eval::<i32, _>("workload(1000,7,workloadArgument)")
+                .unwrap(),
+            1007
+        )
+    });
+    let after = jit.metrics();
+    assert!(after.tier2_entries - before.tier2_entries >= 1000,
+        "each Bool callee still enters via the generic frame ABI: before={before:?}, after={after:?}");
+    assert_eq!(after.native_entries, after.native_exits);
+    assert_eq!(after.deopts, before.deopts);
 }

@@ -5215,7 +5215,10 @@ fn lower_call(
             let tag = match representation {
                 FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
                 FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::Bool => qjs::JS_TAG_BOOL,
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are numeric-only")
+                }
             };
             let typed = builder
                 .ins()
@@ -5230,15 +5233,19 @@ fn lower_call(
         let scalar = match direct.call.result() {
             FeedbackRepresentation::Int32 => types::I32,
             FeedbackRepresentation::Float64 => types::F64,
-            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls are numeric-only")
+            }
         };
         let mut signature = Signature::new(builder.func.signature.call_conv);
         signature.params.push(AbiParam::new(helpers.pointer_type));
         for representation in direct.call.arguments() {
             signature.params.push(AbiParam::new(match representation {
-                FeedbackRepresentation::Int32 => types::I32,
+                FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => types::I32,
                 FeedbackRepresentation::Float64 => types::F64,
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are numeric-only")
+                }
             }));
         }
         signature.returns.push(AbiParam::new(types::I32));
@@ -5259,7 +5266,7 @@ fn lower_call(
         for (index, representation) in direct.call.arguments().iter().enumerate() {
             let argument = use_pair(builder, helpers.stack[argv_index + index]);
             params.push(match representation {
-                FeedbackRepresentation::Int32 => {
+                FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => {
                     builder.ins().ireduce(types::I32, argument.payload)
                 }
                 FeedbackRepresentation::Float64 => {
@@ -5267,7 +5274,9 @@ fn lower_call(
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), argument.payload)
                 }
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are numeric-only")
+                }
             });
         }
         let call = emit_external_call(
@@ -5298,7 +5307,9 @@ fn lower_call(
                     .ins()
                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
             },
-            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls are numeric-only")
+            }
         };
         define_pair(builder, helpers.stack[output_index], result);
         let hit = builder.ins().iconst(types::I8, 1);

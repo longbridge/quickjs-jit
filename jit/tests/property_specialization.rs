@@ -150,6 +150,30 @@ fn production_bounded_polymorphic_property_hits_each_layout_without_deopt() {
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
+    unsafe extern "C" {
+        fn JS_JitGetHelperCount(
+            rt: *mut rquickjs_core::qjs::JSRuntime,
+            helper: u32,
+            count: *mut u64,
+        ) -> i32;
+    }
+    let rt =
+        context.with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
+    let shape_calls = || {
+        let mut count = 0;
+        assert_eq!(
+            unsafe {
+                JS_JitGetHelperCount(
+                    rt,
+                    rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD,
+                    &mut count,
+                )
+            },
+            0
+        );
+        count
+    };
+    let before_shape_calls = shape_calls();
     let before = jit.metrics();
     assert!(before.tier2_entries > 0, "{before:?}");
     for index in 0..1_024 {
@@ -163,6 +187,11 @@ fn production_bounded_polymorphic_property_hits_each_layout_without_deopt() {
         });
         jit.poll();
     }
+    assert_eq!(
+        shape_calls(),
+        before_shape_calls,
+        "native property hits must not cross the shape helper"
+    );
     let after = jit.metrics();
     assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
     assert_eq!(after.deopts, before.deopts, "{before:?} -> {after:?}");
@@ -195,11 +224,14 @@ fn guarded_own_primitive_property_lowers_with_owned_deopt_bridge() {
     let clif = Tier2Compiler::host(1)
         .lower_with_feedback_for_test(&verified, key, &feedback)
         .expect("owned property bridge");
-    assert!(clif.contains("call_indirect"), "{clif}");
+    // Rooted values remain in SSA on the native guard path. Frame state is
+    // published only when a miss needs the owning deopt bridge.
+    let before_guard = clif.split("call_indirect").next().unwrap();
+    assert_eq!(before_guard.matches("store.i64").count(), 0, "{clif}");
 }
 
 #[test]
-fn bounded_polymorphic_property_emits_one_shape_guard_per_layout() {
+fn bounded_polymorphic_property_guards_do_not_add_helper_calls() {
     let fixture = SnapshotFixture::compile("(function(o){return o.answer})");
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let pc = verified
@@ -234,18 +266,13 @@ fn bounded_polymorphic_property_emits_one_shape_guard_per_layout() {
     };
     let monomorphic = compile(&[(0x1000, 1)]);
     let polymorphic = compile(&[(0x1000, 1), (0x2000, 3), (0x3000, 2)]);
-    let call_width = if cfg!(rquickjs_memory_sanitizer) {
-        4
-    } else {
-        1
-    };
     assert_eq!(
         polymorphic.matches("call_indirect").count(),
-        monomorphic.matches("call_indirect").count() + 2 * call_width,
+        monomorphic.matches("call_indirect").count(),
         "{polymorphic}"
     );
-    assert!(polymorphic.contains("iconst.i32 8192"), "{polymorphic}");
-    assert!(polymorphic.contains("iconst.i32 0x3000"), "{polymorphic}");
+    assert!(polymorphic.contains(", 8192"), "{polymorphic}");
+    assert!(polymorphic.contains(", 0x3000"), "{polymorphic}");
 }
 
 #[test]
@@ -280,7 +307,7 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
             &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
         )
         .expect("bounded primitive store PIC");
-    // Two SHAPE_GUARD calls; the two owner materializations run only on deopt.
+    // Shape checks are native; only the two deopt ownership calls remain.
     let call_width = if cfg!(rquickjs_memory_sanitizer) {
         4
     } else {
@@ -288,11 +315,11 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
     };
     assert_eq!(
         clif.matches("call_indirect").count(),
-        4 * call_width,
+        2 * call_width,
         "{clif}"
     );
     assert!(clif.matches("store.i64").count() >= 4, "{clif}");
-    assert!(clif.contains("iconst.i32 8192"), "{clif}");
+    assert!(clif.contains(", 8192"), "{clif}");
 }
 
 #[test]
@@ -524,4 +551,69 @@ fn temporary_receivers_keep_shared_shape_guards_stable_across_gc() {
         .unwrap();
     runtime.run_gc();
     assert_eq!(runtime.memory_usage().obj_count, objects_before);
+}
+
+#[test]
+fn borrowed_comparator_second_read_deopt_preserves_live_primitive() {
+    use rquickjs::{Context, Function, Object, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "globalThis.left={score:17};globalThis.right={score:42};
+             function compare(left,right){return right.score-left.score}",
+        )
+        .unwrap();
+    });
+    for _ in 0..10_000 {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("compare").unwrap();
+            let left: Object = ctx.globals().get("left").unwrap();
+            let right: Object = ctx.globals().get("right").unwrap();
+            assert_eq!(f.call::<_, i32>((left, right)).unwrap(), 25);
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries > 0, "{before:?}");
+    runtime.run_gc();
+    let objects_before = runtime.memory_usage().obj_count;
+    for _ in 0..128 {
+        context.with(|ctx| {
+            ctx.eval::<(), _>("if(compare({score:17},{score:42})!==25)throw Error('compare')")
+                .unwrap();
+        });
+    }
+    runtime.run_gc();
+    assert_eq!(runtime.memory_usage().obj_count, objects_before);
+    let hits = jit.metrics();
+    assert!(hits.tier2_entries > before.tier2_entries, "{hits:?}");
+    assert_eq!(hits.deopts, before.deopts, "{before:?} -> {hits:?}");
+    // Preserve the shape but fail the second property's primitive tag guard.
+    // Exact resumption needs the first result (42) and the left receiver;
+    // valueOf exercises interpreter coercion after the exact resumption.
+    context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "left.score={valueOf(){return 19}};
+             if(compare(left,right)!==23)throw Error('second read deopt')",
+        )
+        .unwrap();
+    });
+    assert!(jit.metrics().deopts > hits.deopts, "{:?}", jit.metrics());
+    runtime.run_gc();
 }

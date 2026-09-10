@@ -317,3 +317,88 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
         jit.metrics()
     );
 }
+
+fn assert_automatic_mixed_array_trial(mutation: &str) {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(2)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.eval::<(), _>(include_str!("../../benchmarks/scripts/arrays-typed.js"))
+            .unwrap();
+        ctx.eval::<(), _>(
+            "globalThis.ints=new Int32Array(16);globalThis.floats=new Float64Array(16);
+             for(let i=0;i<16;i++)ints[i]=i*17;",
+        )
+        .unwrap();
+    });
+    // Background compilation under sanitizers can outlast a fixed number of
+    // quick interpreter calls. Allow the same bounded deadline as the array
+    // workload test above, while continuing to execute and poll for Tier2.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        context.with(|ctx| {
+            assert_eq!(
+                ctx.globals()
+                    .get::<_, Function>("convertAndSum")
+                    .unwrap()
+                    .call::<_, f64>((
+                        ctx.globals().get::<_, rquickjs::Object>("ints").unwrap(),
+                        ctx.globals().get::<_, rquickjs::Object>("floats").unwrap()
+                    ))
+                    .unwrap(),
+                518.0
+            );
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = jit.metrics();
+    assert!(
+        before.tier2_entries > 0,
+        "automatic mixed numeric array trial: {before:?}"
+    );
+    context.with(|ctx| ctx.eval::<(), _>(mutation).unwrap());
+    let after = jit.metrics();
+    assert!(after.deopts > before.deopts, "{before:?} -> {after:?}");
+    runtime.run_gc();
+}
+
+#[test]
+fn automatic_mixed_array_trial_deopts_wrong_receiver_class() {
+    assert_automatic_mixed_array_trial(
+        "if(convertAndSum(new Uint8Array([1,2]),new Float64Array(2))!==1.75)
+             throw Error('wrong class resumption');",
+    );
+}
+
+#[test]
+fn automatic_mixed_array_trial_deopts_non_numeric_element_once() {
+    assert_automatic_mixed_array_trial(
+        "let conversions=0;
+         if(convertAndSum([1,{valueOf(){conversions++;return 2}}],new Float64Array(2))!==1.75)
+             throw Error('element resumption');
+         if(conversions!==1)throw Error('replayed coercion');",
+    );
+}
+
+#[test]
+fn automatic_mixed_array_trial_deopts_short_output_with_exact_prior_stores() {
+    assert_automatic_mixed_array_trial(
+        "let shortOutput=new Float64Array(1);
+         if(!Number.isNaN(convertAndSum(new Int32Array([1,2]),shortOutput)))
+             throw Error('short output resumption');
+         if(shortOutput[0]!==0.75)throw Error('lost prior store');",
+    );
+}

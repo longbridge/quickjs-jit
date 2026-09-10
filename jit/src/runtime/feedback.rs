@@ -31,6 +31,8 @@ pub enum FeedbackRepresentation {
     /// A tagged QuickJS heap reference. Tier 2 keeps the tagged payload and
     /// guards the object tag at entry; element-specific class guards follow.
     HeapRef,
+    /// A Bool argument in a tagged frame or guarded primitive direct-call entry.
+    Bool,
 }
 
 /// Prevent feedback instability from creating an unbounded signature key.
@@ -124,6 +126,7 @@ const fn representation_tag(representation: FeedbackRepresentation) -> u64 {
         FeedbackRepresentation::Int32 => 1,
         FeedbackRepresentation::Float64 => 2,
         FeedbackRepresentation::HeapRef => 3,
+        FeedbackRepresentation::Bool => 4,
     }
 }
 
@@ -480,7 +483,7 @@ impl FeedbackSnapshot {
             .iter()
             .map(|observations| {
                 (observations.len() == 1)
-                    .then(|| observed_scalar_representation(observations[0]))
+                    .then(|| observed_direct_argument_representation(observations[0]))
                     .flatten()
             })
             .collect::<Option<Vec<_>>>()?;
@@ -547,8 +550,10 @@ impl FeedbackSnapshot {
     }
 
     /// Builds the immutable, bounded key consumed by Tier 2 compilation.
-    /// Every call slot, return site, and binary observation must agree on one
-    /// currently supported numeric representation.
+    /// Arguments may carry supported tagged representations, including Bool;
+    /// return and arithmetic feedback must prove a numeric representation.
+    /// Bool admission prevents stable numeric callees from waiting forever for
+    /// an all-numeric signature; eligible pure leaves can also publish a direct entry.
     pub fn bounded_specialization(
         &self,
         function: FunctionKey,
@@ -604,7 +609,7 @@ impl FeedbackSnapshot {
             let expected = match representation {
                 FeedbackRepresentation::Int32 => ObservedType::Int32,
                 FeedbackRepresentation::Float64 => ObservedType::Float64,
-                FeedbackRepresentation::HeapRef => return None,
+                FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => return None,
             };
             if binary.state == FeedbackState::Monomorphic
                 && binary.lhs.as_ref() == [expected]
@@ -632,7 +637,18 @@ const fn observed_representation(observed: ObservedType) -> Option<FeedbackRepre
         ObservedType::Int32 => Some(FeedbackRepresentation::Int32),
         ObservedType::Float64 => Some(FeedbackRepresentation::Float64),
         ObservedType::Object => Some(FeedbackRepresentation::HeapRef),
+        ObservedType::Bool => Some(FeedbackRepresentation::Bool),
         _ => None,
+    }
+}
+
+// The direct ABI supports primitive Bool arguments, while results remain numeric.
+const fn observed_direct_argument_representation(
+    observed: ObservedType,
+) -> Option<FeedbackRepresentation> {
+    match observed {
+        ObservedType::Bool => Some(FeedbackRepresentation::Bool),
+        _ => observed_scalar_representation(observed),
     }
 }
 

@@ -1,22 +1,29 @@
 # 下一阶段性能目标：以 Bun 为差距参照
 
-更新：2026-09-09。下一阶段以 **quickjs-jit automatic 相对 Bun 默认配置的性能差距**选择优化点和定义阶段目标。旧版 JIT 是回归基线，QuickJS 解释器是判断原生执行是否有收益的基线；二者都不能代替 Bun 这一目标参照。
+更新：2026-09-10。下一阶段以 **quickjs-jit automatic 相对 Bun 默认配置的性能差距**选择优化点和定义阶段目标。旧版 JIT 是回归基线，QuickJS 解释器是判断原生执行是否有收益的基线；二者都不能代替 Bun 这一目标参照。
 
-当前源码为 `main 07535b1`。最近完整的 Bun 矩阵仍是 2026-09-06 的
+以下优先级最初以运行时 `07535b1` 制定。本轮调用/属性/数组实现与验证见
+[边界优化记录](BUN_BOUNDARIES_20260909.md)。历史完整矩阵是 2026-09-06 的
 [`47aeb11` 五模式、22 场景比较](../benchmarks/results/main-47aeb11-engines.md)，
 早于 #24，且存在预热和计时边界差异。以下旧数据只用于选择优先调查的场景，
 **不是当前版本的 Bun 成绩，也不是引擎峰值差距**。本轮本机 Bun 为 1.4.0。
 
+当前 candidate4 的完整 24 场景比较已列入 [README](../README.md#experimental-jit-performance)。
+三项重点场景相对旧 JIT 获益，但真正非直调和部分 fallback 场景仍慢于解释器；
+最终 compute 宿主热重载也未通过 0.95x 预算，PR 保持草稿。下一步应优先隔离
+这个宿主退步，再推进通用调用效率和数组循环检查消除，不把局部收益当作 M2 完成。
+
 ## 先统一协议，再给当前版本设数字目标
 
-核对当前 `benchmarks/run.rs` 后，旧报告的限制仍然存在：Bun worker 默认
+制定本目标时，旧 `benchmarks/run.rs` 和报告存在这些限制：Bun worker 默认
 加 `--smol`、进程内只预热一次；QuickJS 使用 readiness/settling，计时内还
 执行 Rust 侧 workload 查找、调用、checksum 转换与 polling，而 Bun 在
 计时后生成 checksum。直接再跑一次原命令无法消除这些偏差。
 
-下一步首先完成相同工作量的 JS 批量 driver、结果消费和计时边界，并在
-当前 main 上重建 QuickJS / automatic / Bun 默认配置的基线。Tier1 和
-Tier2 保留为诊断模式，不用 forced Tier2 的最好成绩代表自动策略。
+本轮已加入共享 JS 批量 driver、固定等量预热和计时外 checksum，并移除
+默认 `--smol`。新结果按 v2 协议单独记录；Tier1 和 Tier2 保留为诊断模式，
+不用 forced Tier2 的最好成绩代表自动策略。固定预热矩阵不等于以下完整
+长期协议目标全部完成：
 
 - 分开新进程首次调用、固定等量预热、稳定热态。各引擎都记录连续批次趋势，
   同时给出固定预热结果和达到稳定条件后的结果；不能只让一个引擎充分预热。
@@ -99,5 +106,8 @@ main 相对旧 `0.12.6` JIT 为 0.700x 速度，增加约 0.059 ms/次。新采�
 既有 compute 5x、指定 kernel 10x、startup/热重载/P99 与 gpui-shell
 门槛仍单独报告。冷路径首阶段相对同协议 main 速度下界 ≥1.25x 的目标
 及最终速度下界 1/1.05 的约束也保留；不能用 Bun 差距缩小代替这些门槛。
-当前缺少新协议的 main/Bun 完整基线，下一步是补齐它，再按上表确定首个
-可独立验证的优化候选。本轮未修改 benchmark 或运行新的 Bun 矩阵。
+本轮优先验证 `generic-call-entry`、`arrays-typed`、`property-heavy`，
+并更新 README 的完整三引擎矩阵；实际成绩和未完成门槛以
+[边界优化记录](BUN_BOUNDARIES_20260909.md) 为准。bitops 的 shift/XOR 已有
+native lowering，不能把与 Bun 的差距直接归因于缺 `>>>`；wrapping
+Fibonacci 与 bounded iterative Fibonacci 也不能仅凭倍数差认定为入口成本。

@@ -4130,3 +4130,162 @@ fn signature_completes_when_the_first_invocation_returns_natively() {
     }
     assert!(saw_tier2, "{:?}", jit.metrics());
 }
+
+#[test]
+fn bool_argument_compiles_a_tagged_tier2_artifact_without_direct_entry() {
+    use rquickjs_jit::compiler::Compiler;
+    let fixture = SnapshotFixture::compile(
+        "(function incrementIf(value,enabled){let result=value+1;if(enabled)return result;return value;})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let mut feedback = FeedbackTable::new(32, 2);
+    feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Bool]);
+    for instruction in verified.instructions() {
+        match instruction.opcode().name() {
+            "add" => {
+                feedback.observe_binary(
+                    key,
+                    instruction.pc(),
+                    ObservedType::Int32,
+                    ObservedType::Int32,
+                    ObservedType::Int32,
+                    Default::default(),
+                );
+            }
+            "return" => {
+                feedback.observe_return(key, instruction.pc(), ObservedType::Int32);
+            }
+            _ => {}
+        }
+    }
+    let frozen = feedback.snapshot(77);
+    assert!(frozen.bounded_specialization(key).is_some());
+    let compiler = Tier2Compiler::host(77);
+    assert!(
+        compiler
+            .lower_direct_call_with_feedback_for_test(&verified, key, &frozen)
+            .is_err(),
+        "local state remains outside the pure branch-leaf direct ABI"
+    );
+    let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+    coordinator
+        .queue(key, Tier::Baseline, verified.clone())
+        .unwrap();
+    let baseline = coordinator.begin_next().unwrap();
+    coordinator.complete(CompileCompletion {
+        key,
+        requested_tier: Tier::Baseline,
+        artifact_key: baseline.artifact_key(),
+        attempt_id: baseline.attempt_id(),
+        result: Ok(CompiledArtifact::empty(baseline.artifact_key())),
+    });
+    coordinator
+        .queue_with_feedback(key, Tier::Optimizing, verified, frozen)
+        .unwrap();
+    let artifact = compiler.compile(coordinator.begin_next().unwrap()).unwrap();
+    assert!(
+        artifact
+            .optimized_metadata()
+            .unwrap()
+            .direct_call_signature()
+            .is_none(),
+        "failed secondary compilation must leave the ordinary optimized artifact intact"
+    );
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn bool_argument_tagged_tier2_preserves_branches_and_type_change_deopt() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(1)
+            .loop_threshold(1)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function incrementIf(value,enabled){if(enabled)return value+1;return value;}",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while jit.metrics().tier2_entries == 0 {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("incrementIf").unwrap();
+            assert_eq!(function.call::<_, i32>((41, true)).unwrap(), 42);
+            assert_eq!(function.call::<_, i32>((41, false)).unwrap(), 41);
+        });
+        jit.poll();
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    let before = jit.metrics();
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("incrementIf").unwrap();
+        assert_eq!(function.call::<_, i32>((41, true)).unwrap(), 42);
+        assert_eq!(function.call::<_, i32>((41, false)).unwrap(), 41);
+    });
+    let after = jit.metrics();
+    assert_eq!(after.tier2_entries - before.tier2_entries, 2);
+    assert_eq!(after.deopts, before.deopts);
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("incrementIf").unwrap();
+        // QuickJS Bool truthiness reads only the low 32 bits of the value
+        // union. Exercise the newly specialized Bool entry with dirty padding,
+        // not just the general tagged truthiness lowerer.
+        for (payload, expected) in [(0x1234_5678_0000_0000, 41), (0x1234_5678_0000_0001, 42)] {
+            let raw = rquickjs::qjs::JSValue {
+                u: rquickjs::qjs::JSValueUnion {
+                    float64: f64::from_bits(payload),
+                },
+                tag: i64::from(rquickjs::qjs::JS_TAG_BOOL),
+            };
+            // SAFETY: this is an immediate Bool with a canonical low-32-bit
+            // payload; its unused upper bits own no allocation or reference.
+            let enabled = unsafe { rquickjs::Value::from_raw(ctx.clone(), raw) };
+            assert_eq!(function.call::<_, i32>((41, enabled)).unwrap(), expected);
+        }
+    });
+    let padded = jit.metrics();
+    assert_eq!(
+        padded.tier2_entries - after.tier2_entries,
+        2,
+        "both padded Bool calls must execute the specialized Tier2 entry"
+    );
+    assert_eq!(padded.deopts, after.deopts);
+    assert_eq!(padded.native_fallbacks, after.native_fallbacks);
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("incrementIf").unwrap();
+        assert_eq!(function.call::<_, i32>((41, 0)).unwrap(), 41);
+    });
+    assert!(
+        jit.metrics().deopts > after.deopts,
+        "a numeric false value must fail the Bool tag guard, not alias Bool as Int32"
+    );
+    context.with(|ctx| {
+        let function: Function = ctx.globals().get("incrementIf").unwrap();
+        assert_eq!(function.call::<_, f64>((i32::MAX, true)).unwrap(), 2147483648.0);
+        assert_eq!(ctx.eval::<String, _>(
+            "[incrementIf(41,0),incrementIf(41,1),incrementIf(41,null),incrementIf(41,''),incrementIf(41,'yes'),incrementIf(41,{})].join(',')"
+        ).unwrap(), "41,42,41,41,42,42");
+    });
+    assert!(jit.metrics().deopts > after.deopts);
+    assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+}

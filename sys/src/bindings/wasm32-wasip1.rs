@@ -87,7 +87,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 20;
+pub const QJSJIT_ABI_MINOR: u32 = 21;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -3401,6 +3401,27 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct JSJitPropertyLayout {
+    pub struct_size: u32,
+    pub object_shape_offset: u32,
+    pub object_properties_offset: u32,
+    pub shape_generation_offset: u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitPropertyLayout"][::core::mem::size_of::<JSJitPropertyLayout>() - 16usize];
+    ["Alignment of JSJitPropertyLayout"][::core::mem::align_of::<JSJitPropertyLayout>() - 4usize];
+    ["Offset of field: JSJitPropertyLayout::struct_size"]
+        [::core::mem::offset_of!(JSJitPropertyLayout, struct_size) - 0usize];
+    ["Offset of field: JSJitPropertyLayout::object_shape_offset"]
+        [::core::mem::offset_of!(JSJitPropertyLayout, object_shape_offset) - 4usize];
+    ["Offset of field: JSJitPropertyLayout::object_properties_offset"]
+        [::core::mem::offset_of!(JSJitPropertyLayout, object_properties_offset) - 8usize];
+    ["Offset of field: JSJitPropertyLayout::shape_generation_offset"]
+        [::core::mem::offset_of!(JSJitPropertyLayout, shape_generation_offset) - 12usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct JSJitABIInfo {
     pub struct_size: u32,
     pub major: u16,
@@ -3425,10 +3446,12 @@ pub struct JSJitABIInfo {
     pub helper_table_fingerprint: u64,
     pub element_layout_fingerprint: u64,
     pub element_layout: JSJitElementLayout,
+    pub property_layout_fingerprint: u64,
+    pub property_layout: JSJitPropertyLayout,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 232usize];
+    ["Size of JSJitABIInfo"][::core::mem::size_of::<JSJitABIInfo>() - 256usize];
     ["Alignment of JSJitABIInfo"][::core::mem::align_of::<JSJitABIInfo>() - 8usize];
     ["Offset of field: JSJitABIInfo::struct_size"]
         [::core::mem::offset_of!(JSJitABIInfo, struct_size) - 0usize];
@@ -3474,6 +3497,10 @@ const _: () = {
         [::core::mem::offset_of!(JSJitABIInfo, element_layout_fingerprint) - 136usize];
     ["Offset of field: JSJitABIInfo::element_layout"]
         [::core::mem::offset_of!(JSJitABIInfo, element_layout) - 144usize];
+    ["Offset of field: JSJitABIInfo::property_layout_fingerprint"]
+        [::core::mem::offset_of!(JSJitABIInfo, property_layout_fingerprint) - 232usize];
+    ["Offset of field: JSJitABIInfo::property_layout"]
+        [::core::mem::offset_of!(JSJitABIInfo, property_layout) - 240usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

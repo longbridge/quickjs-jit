@@ -272,6 +272,7 @@ struct GuardedElementSource {
 enum EntryRepresentation {
     #[default]
     Any,
+    Bool,
     Numeric,
     Int32,
     Float64,
@@ -375,6 +376,7 @@ impl NumericSpecialization {
                         ObservedType::Int32 => EntryRepresentation::Int32,
                         ObservedType::Float64 => EntryRepresentation::Float64,
                         ObservedType::Object => EntryRepresentation::HeapRef,
+                        ObservedType::Bool => EntryRepresentation::Bool,
                         _ => EntryRepresentation::Any,
                     })
                     .collect::<Vec<_>>()
@@ -416,7 +418,7 @@ impl NumericSpecialization {
         let observed = match representation {
             FeedbackRepresentation::Int32 => ObservedType::Int32,
             FeedbackRepresentation::Float64 => ObservedType::Float64,
-            FeedbackRepresentation::HeapRef => {
+            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
                 return Self {
                     int_pcs,
                     calls,
@@ -451,7 +453,9 @@ impl NumericSpecialization {
                 match representation {
                     FeedbackRepresentation::Int32 => EntryRepresentation::Int32,
                     FeedbackRepresentation::Float64 => EntryRepresentation::Float64,
-                    FeedbackRepresentation::HeapRef => EntryRepresentation::Any,
+                    FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+                        EntryRepresentation::Any
+                    }
                 }
             } else {
                 EntryRepresentation::Any
@@ -463,6 +467,7 @@ impl NumericSpecialization {
                     FeedbackRepresentation::Int32 => EntryRepresentation::Int32,
                     FeedbackRepresentation::Float64 => EntryRepresentation::Float64,
                     FeedbackRepresentation::HeapRef => EntryRepresentation::HeapRef,
+                    FeedbackRepresentation::Bool => EntryRepresentation::Bool,
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -2016,8 +2021,8 @@ fn lower_optimized_machine(
 }
 
 /// Builds the secondary, scalar-only entry used by monomorphic native call
-/// edges. Its ABI is `(unboxed arguments...) -> (status:i32, unboxed result)`;
-/// status zero is success and a non-zero status asks the caller to deopt at
+/// edges. Its ABI is `(output:*scalar, unboxed arguments...) -> status:i32`;
+/// status zero stores the numeric result, and non-zero asks the caller to retry at
 /// the CALL bytecode.  The entry deliberately has no `JSValue`, frame, or
 /// helper parameters, so neither arguments nor the result can be boxed on the
 /// compiled-to-compiled fast path.
@@ -2038,6 +2043,12 @@ pub(crate) fn lower_direct_call_machine(
     {
         return Err(CompileFailure::InvalidArtifact);
     }
+    if signature
+        .arguments()
+        .contains(&FeedbackRepresentation::Bool)
+    {
+        return lower_direct_bool_leaf(isa, function, signature, control);
+    }
     let representation = signature.result();
     if signature
         .arguments()
@@ -2049,7 +2060,9 @@ pub(crate) fn lower_direct_call_machine(
     let scalar = match representation {
         FeedbackRepresentation::Int32 => types::I32,
         FeedbackRepresentation::Float64 => types::F64,
-        FeedbackRepresentation::HeapRef => return Err(CompileFailure::InvalidArtifact),
+        FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+            return Err(CompileFailure::InvalidArtifact)
+        }
     };
     let mut abi = Signature::new(isa.default_call_conv());
     abi.params.push(AbiParam::new(isa.pointer_type()));
@@ -2076,7 +2089,7 @@ pub(crate) fn lower_direct_call_machine(
                     stack.push(match representation {
                         FeedbackRepresentation::Int32 => builder.ins().iconst(types::I32, value),
                         FeedbackRepresentation::Float64 => builder.ins().f64const(value as f64),
-                        FeedbackRepresentation::HeapRef => {
+                        FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
                             unreachable!("direct calls are scalar-only")
                         }
                     });
@@ -2145,7 +2158,7 @@ pub(crate) fn lower_direct_call_machine(
                             builder.switch_to_block(ok);
                             builder.block_params(ok)[0]
                         }
-                        FeedbackRepresentation::HeapRef => {
+                        FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
                             unreachable!("direct calls are scalar-only")
                         }
                     };
@@ -2173,7 +2186,7 @@ pub(crate) fn lower_direct_call_machine(
                             builder.switch_to_block(ok);
                             builder.ins().ineg(value)
                         }
-                        FeedbackRepresentation::HeapRef => {
+                        FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
                             unreachable!("direct calls are scalar-only")
                         }
                     };
@@ -2215,6 +2228,187 @@ pub(crate) fn lower_direct_call_machine(
                     builder.ins().return_(&[status]);
                 }
                 _ => return Err(CompileFailure::UnsupportedOpcode),
+            }
+        }
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+    super::baseline::finalize_optimized_machine(isa, clif, control, false)
+}
+
+/// A deliberately small, effect-free leaf ABI. Bool is accepted only as a
+/// branch condition; numeric operations and returns require Int32. Every CFG
+/// edge is forward and carries an empty operand stack, so no frame, ownership
+/// merge, safepoint, or nested deoptimization state is needed. A failed checked
+/// operation returns before storing output and the caller retries the CALL.
+fn lower_direct_bool_leaf(
+    isa: &cranelift_codegen::isa::OwnedTargetIsa,
+    function: &VerifiedFunction,
+    signature: &crate::runtime::BoundedSpecializationSignature,
+    control: Option<&CompileControl>,
+) -> Result<super::baseline::RelocatableCode, CompileFailure> {
+    use crate::runtime::FeedbackRepresentation::{Bool, Int32};
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, MemFlags, Signature};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    if signature.result() != Int32
+        || signature
+            .arguments()
+            .iter()
+            .any(|arg| !matches!(arg, Int32 | Bool))
+        || !function.snapshot().exception_map().is_empty()
+    {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    let cfg = function.control_flow_graph();
+    if cfg
+        .blocks()
+        .iter()
+        .any(|block| block.successors().iter().any(|pc| *pc <= block.start_pc()))
+    {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    let mut abi = Signature::new(isa.default_call_conv());
+    abi.params.push(AbiParam::new(isa.pointer_type()));
+    abi.params.extend(
+        signature
+            .arguments()
+            .iter()
+            .map(|_| AbiParam::new(types::I32)),
+    );
+    abi.returns.push(AbiParam::new(types::I32));
+    let mut clif = Function::with_name_signature(Default::default(), abi);
+    let mut context = FunctionBuilderContext::new();
+    {
+        let mut builder = FunctionBuilder::new(&mut clif, &mut context);
+        let blocks = cfg
+            .blocks()
+            .iter()
+            .map(|block| (block.start_pc(), builder.create_block()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
+        builder.append_block_params_for_function_params(entry);
+        let output = builder.block_params(entry)[0];
+        let arguments = builder.block_params(entry)[1..].to_vec();
+        for block in cfg.blocks() {
+            builder.switch_to_block(blocks[&block.start_pc()]);
+            let mut stack = Vec::new();
+            let mut terminated = false;
+            for instruction in &function.instructions()[block.instruction_range()] {
+                if terminated {
+                    return Err(CompileFailure::InvalidArtifact);
+                }
+                let name = instruction.opcode().name();
+                let bytes = instruction.bytes();
+                let constant = match name {
+                    "push_minus1" => Some(-1),
+                    "push_i8" => Some(i64::from(bytes[1] as i8)),
+                    "push_i16" => Some(i64::from(i16::from_le_bytes([bytes[1], bytes[2]]))),
+                    "push_i32" => Some(i64::from(i32::from_le_bytes(
+                        bytes[1..5]
+                            .try_into()
+                            .map_err(|_| CompileFailure::InvalidArtifact)?,
+                    ))),
+                    "push_0" | "push_1" | "push_2" | "push_3" | "push_4" | "push_5" | "push_6"
+                    | "push_7" => Some(i64::from(name.as_bytes()[5] - b'0')),
+                    _ => None,
+                };
+                if let Some(value) = constant {
+                    stack.push((builder.ins().iconst(types::I32, value), Int32));
+                    continue;
+                }
+                match name {
+                    "nop" => {}
+                    n if opt_index(n, bytes, "get_arg")?.is_some() => {
+                        let index = opt_index(n, bytes, "get_arg")?.unwrap();
+                        stack.push((
+                            *arguments
+                                .get(index)
+                                .ok_or(CompileFailure::InvalidArtifact)?,
+                            signature.arguments()[index],
+                        ));
+                    }
+                    "add" | "sub" => {
+                        let (rhs, rhs_type) = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                        let (lhs, lhs_type) = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                        if lhs_type != Int32 || rhs_type != Int32 {
+                            return Err(CompileFailure::UnsupportedOpcode);
+                        }
+                        let (result, overflow) = if name == "add" {
+                            builder.ins().sadd_overflow(lhs, rhs)
+                        } else {
+                            builder.ins().ssub_overflow(lhs, rhs)
+                        };
+                        let ok = builder.create_block();
+                        let fail = builder.create_block();
+                        builder.ins().brif(overflow, fail, &[], ok, &[]);
+                        builder.switch_to_block(fail);
+                        let status = builder.ins().iconst(types::I32, 1);
+                        builder.ins().return_(&[status]);
+                        builder.switch_to_block(ok);
+                        stack.push((result, Int32));
+                    }
+                    "if_false8" | "if_true8" | "if_false" | "if_true" => {
+                        let (condition, kind) =
+                            stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                        if kind != Bool || !stack.is_empty() {
+                            return Err(CompileFailure::UnsupportedOpcode);
+                        }
+                        let target_pc = u32::try_from(
+                            instruction
+                                .branch_target()
+                                .ok_or(CompileFailure::InvalidArtifact)?,
+                        )
+                        .map_err(|_| CompileFailure::InvalidArtifact)?;
+                        let target = *blocks
+                            .get(&target_pc)
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let fallthrough = *blocks
+                            .get(&block.end_pc())
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let truth = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
+                        if name.starts_with("if_false") {
+                            builder.ins().brif(truth, fallthrough, &[], target, &[]);
+                        } else {
+                            builder.ins().brif(truth, target, &[], fallthrough, &[]);
+                        }
+                        terminated = true;
+                    }
+                    "goto" | "goto8" | "goto16" => {
+                        if !stack.is_empty() {
+                            return Err(CompileFailure::UnsupportedOpcode);
+                        }
+                        let target_pc = u32::try_from(
+                            instruction
+                                .branch_target()
+                                .ok_or(CompileFailure::InvalidArtifact)?,
+                        )
+                        .map_err(|_| CompileFailure::InvalidArtifact)?;
+                        let target = *blocks
+                            .get(&target_pc)
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        builder.ins().jump(target, &[]);
+                        terminated = true;
+                    }
+                    "return" => {
+                        let (result, kind) = stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                        if kind != Int32 || !stack.is_empty() {
+                            return Err(CompileFailure::UnsupportedOpcode);
+                        }
+                        builder.ins().store(MemFlags::new(), result, output, 0);
+                        let status = builder.ins().iconst(types::I32, 0);
+                        builder.ins().return_(&[status]);
+                        terminated = true;
+                    }
+                    _ => return Err(CompileFailure::UnsupportedOpcode),
+                }
+            }
+            if !terminated {
+                if !stack.is_empty() || block.successors().len() != 1 {
+                    return Err(CompileFailure::UnsupportedOpcode);
+                }
+                builder.ins().jump(blocks[&block.successors()[0]], &[]);
             }
         }
         builder.seal_all_blocks();
@@ -4031,30 +4225,27 @@ fn emit_opt_guarded_property(
     } else {
         None
     };
-    for (index, vars) in arguments.iter().enumerate() {
-        let v = opt_use(builder, *vars);
-        opt_store(builder, arg_buf, index, v);
-    }
-    for (index, vars) in locals.iter().enumerate() {
-        let v = opt_use(builder, *vars);
-        opt_store(builder, var_buf, index, v);
-    }
-    for (index, vars) in stack.iter().take(depth).enumerate() {
-        let v = opt_use(builder, *vars);
-        opt_store(builder, stack_base, index, v);
-    }
-    let bytecode = builder
-        .ins()
-        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
-    let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
-    builder
-        .ins()
-        .store(MemFlags::new(), current_pc, frame, layout.pc);
-    if borrowed_slot.is_some() {
-        // The stack contains SSA scratch aliases, not reference-counted owners.
-        // Exception cleanup must see only the rooted argument/local buffers.
-        opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
-    } else {
+    if borrowed_slot.is_none() {
+        for (index, vars) in arguments.iter().enumerate() {
+            let v = opt_use(builder, *vars);
+            opt_store(builder, arg_buf, index, v);
+        }
+        for (index, vars) in locals.iter().enumerate() {
+            let v = opt_use(builder, *vars);
+            opt_store(builder, var_buf, index, v);
+        }
+        for (index, vars) in stack.iter().take(depth).enumerate() {
+            let v = opt_use(builder, *vars);
+            opt_store(builder, stack_base, index, v);
+        }
+        let bytecode =
+            builder
+                .ins()
+                .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+        let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
+        builder
+            .ins()
+            .store(MemFlags::new(), current_pc, frame, layout.pc);
         opt_own_stack_for_exit(
             builder,
             frame,
@@ -4080,15 +4271,22 @@ fn emit_opt_guarded_property(
         })
         .and_then(|slot| u32::try_from(slot).ok())
         .ok_or(CompileFailure::ResourceLimit)?;
-    let api = builder
-        .ins()
-        .load(pointer_type, MemFlags::new(), frame, layout.runtime_api);
-    let helper = builder.ins().load(
-        pointer_type,
-        MemFlags::new(),
-        api,
-        layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize],
-    );
+    let property_layout = crate::abi::AbiInfo::linked()
+        .map_err(|_| CompileFailure::InvalidArtifact)?
+        .property_layout();
+    let helper = if borrowed_slot.is_none() {
+        let api = builder
+            .ins()
+            .load(pointer_type, MemFlags::new(), frame, layout.runtime_api);
+        Some(builder.ins().load(
+            pointer_type,
+            MemFlags::new(),
+            api,
+            layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize],
+        ))
+    } else {
+        None
+    };
     let deopt = builder.create_block();
     let exception = builder.create_block();
     let continuation = builder.create_block();
@@ -4099,56 +4297,92 @@ fn emit_opt_guarded_property(
     for (index, property) in properties.iter().copied().enumerate() {
         let id = property.shape().identity();
         let generation = property.shape().generation();
-        let params = [
-            frame,
-            builder.ins().iconst(types::I32, 0),
-            builder.ins().iconst(types::I32, i64::from(flat)),
-            builder.ins().iconst(types::I32, i64::from(id as u32)),
-            builder
-                .ins()
-                .iconst(types::I32, i64::from((id >> 32) as u32)),
-            builder
-                .ins()
-                .iconst(types::I32, i64::from(generation as u32)),
-            builder
-                .ins()
-                .iconst(types::I32, i64::from((generation >> 32) as u32)),
-        ];
-        let call = super::emit_external_call(
-            builder,
-            signature,
-            helper,
-            &params,
-            pointer_type,
-            Some(frame),
-            None,
-        );
-        let status = builder.inst_results(call)[0];
-        let ok = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
         let access = builder.create_block();
-        let miss_or_exception = builder.create_block();
-        builder.ins().brif(ok, access, &[], miss_or_exception, &[]);
-        builder.switch_to_block(miss_or_exception);
-        let miss = builder.ins().icmp_imm(
-            IntCC::Equal,
-            status,
-            i64::from(qjs::JS_JIT_HELPER_GUARD_MISS),
-        );
         let next = if index + 1 == properties.len() {
             deopt
         } else {
             builder.create_block()
         };
-        builder.ins().brif(miss, next, &[], exception, &[]);
+        if borrowed_slot.is_some() {
+            if generation == 0 {
+                return Err(CompileFailure::InvalidArtifact);
+            }
+            let object = opt_use(builder, stack[object_index]);
+            let is_object =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
+            let check_shape = builder.create_block();
+            builder.ins().brif(is_object, check_shape, &[], deopt, &[]);
+            builder.switch_to_block(check_shape);
+            // Read only the live receiver's shape. The feedback pointer is an
+            // integer identity, never a pointer we dereference or retain.
+            let shape = builder.ins().load(
+                pointer_type,
+                MemFlags::new(),
+                object.payload,
+                property_layout.object_shape_offset,
+            );
+            let same_shape = builder.ins().icmp_imm(IntCC::Equal, shape, id as i64);
+            let live_generation = builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                shape,
+                property_layout.shape_generation_offset,
+            );
+            let same_generation =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, live_generation, generation as i64);
+            let matches = builder.ins().band(same_shape, same_generation);
+            builder.ins().brif(matches, access, &[], next, &[]);
+        } else {
+            let params = [
+                frame,
+                builder.ins().iconst(types::I32, 0),
+                builder.ins().iconst(types::I32, i64::from(flat)),
+                builder.ins().iconst(types::I32, i64::from(id as u32)),
+                builder
+                    .ins()
+                    .iconst(types::I32, i64::from((id >> 32) as u32)),
+                builder
+                    .ins()
+                    .iconst(types::I32, i64::from(generation as u32)),
+                builder
+                    .ins()
+                    .iconst(types::I32, i64::from((generation >> 32) as u32)),
+            ];
+            let call = super::emit_external_call(
+                builder,
+                signature,
+                helper.unwrap(),
+                &params,
+                pointer_type,
+                Some(frame),
+                None,
+            );
+            let status = builder.inst_results(call)[0];
+            let ok = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
+            let miss_or_exception = builder.create_block();
+            builder.ins().brif(ok, access, &[], miss_or_exception, &[]);
+            builder.switch_to_block(miss_or_exception);
+            let miss = builder.ins().icmp_imm(
+                IntCC::Equal,
+                status,
+                i64::from(qjs::JS_JIT_HELPER_GUARD_MISS),
+            );
+            builder.ins().brif(miss, next, &[], exception, &[]);
+        }
         builder.switch_to_block(access);
         let object = opt_use(builder, stack[object_index]);
-        // JSObject's 64-bit layout is: 24-byte GC/header+flags prefix,
-        // `shape` at +24, then the JSProperty array pointer at +32.
-        let props = builder
-            .ins()
-            .load(pointer_type, MemFlags::new(), object.payload, 32);
+        let props = builder.ins().load(
+            pointer_type,
+            MemFlags::new(),
+            object.payload,
+            property_layout.object_properties_offset,
+        );
         let offset = i32::try_from(
             usize::try_from(property.offset())
                 .map_err(|_| CompileFailure::ResourceLimit)?
@@ -4210,6 +4444,32 @@ fn emit_opt_guarded_property(
     );
     builder.switch_to_block(deopt);
     if borrowed_slot.is_some() {
+        // No state publication or helper crossing occurs on the native hit.
+        // Rebuild exactly the frame the ownership bridge expects on a miss.
+        for (index, vars) in arguments.iter().enumerate() {
+            let value = opt_use(builder, *vars);
+            opt_store(builder, arg_buf, index, value);
+        }
+        for (index, vars) in locals.iter().enumerate() {
+            let value = opt_use(builder, *vars);
+            opt_store(builder, var_buf, index, value);
+        }
+        let bytecode =
+            builder
+                .ins()
+                .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+        let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
+        builder
+            .ins()
+            .store(MemFlags::new(), current_pc, frame, layout.pc);
+        opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
+        // The leaf guard sees only argument/local roots. Materialize the exact
+        // pre-op stack now, including primitive results from earlier accesses,
+        // before the owner bridge publishes it to the interpreter.
+        for (index, vars) in stack.iter().take(depth).enumerate() {
+            let v = opt_use(builder, *vars);
+            opt_store(builder, stack_base, index, v);
+        }
         opt_own_stack_for_exit(
             builder,
             frame,
@@ -4240,21 +4500,22 @@ fn emit_opt_guarded_property(
     );
     builder.switch_to_block(continuation);
     if borrowed_slot.is_some() {
-        // Keep scratch aliases outside the owning stack even when the primitive
-        // result below advances stack_top. Their values remain live in SSA.
+        // Publish only the surviving stack prefix. Borrowed aliases remain in
+        // SSA and get non-owning placeholders; primitives retain their values.
+        // The consumed receiver/value never needs a stack store on a hit.
         let undefined = OptPair {
             payload: builder.ins().iconst(types::I64, 0),
             tag: builder
                 .ins()
                 .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
         };
-        for (index, provenance) in stack_provenance.iter().take(depth).enumerate() {
-            if matches!(
-                provenance,
-                OptProvenance::Argument(_) | OptProvenance::Local(_)
-            ) {
-                opt_store(builder, stack_base, index, undefined);
-            }
+        for (index, provenance) in stack_provenance.iter().take(object_index).enumerate() {
+            let value = if matches!(provenance, OptProvenance::ImmediatePrimitive) {
+                opt_use(builder, stack[index])
+            } else {
+                undefined
+            };
+            opt_store(builder, stack_base, index, value);
         }
         opt_set_stack_top(
             builder,
@@ -4574,7 +4835,10 @@ fn emit_opt_specialized_call(
             let tag = match representation {
                 FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
                 FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::Bool => qjs::JS_TAG_BOOL,
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are scalar-only")
+                }
             };
             let typed = builder
                 .ins()
@@ -4627,15 +4891,19 @@ fn emit_opt_specialized_call(
         let scalar = match direct.call.result() {
             FeedbackRepresentation::Int32 => types::I32,
             FeedbackRepresentation::Float64 => types::F64,
-            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls are scalar-only")
+            }
         };
         let mut signature = Signature::new(builder.func.signature.call_conv);
         signature.params.push(AbiParam::new(pointer_type));
         for argument in direct.call.arguments() {
             signature.params.push(AbiParam::new(match argument {
-                FeedbackRepresentation::Int32 => types::I32,
+                FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => types::I32,
                 FeedbackRepresentation::Float64 => types::F64,
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are scalar-only")
+                }
             }));
         }
         signature.returns.push(AbiParam::new(types::I32));
@@ -4652,13 +4920,17 @@ fn emit_opt_specialized_call(
         for (index, representation) in direct.call.arguments().iter().enumerate() {
             let value = opt_use(builder, stack[argv_index + index]);
             params.push(match representation {
-                FeedbackRepresentation::Int32 => builder.ins().ireduce(types::I32, value.payload),
+                FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => {
+                    builder.ins().ireduce(types::I32, value.payload)
+                }
                 FeedbackRepresentation::Float64 => {
                     builder
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), value.payload)
                 }
-                FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+                FeedbackRepresentation::HeapRef => {
+                    unreachable!("direct calls are scalar-only")
+                }
             });
         }
         let call = super::emit_external_call(
@@ -4692,7 +4964,9 @@ fn emit_opt_specialized_call(
                     .ins()
                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
             },
-            FeedbackRepresentation::HeapRef => unreachable!("direct calls are scalar-only"),
+            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls are scalar-only")
+            }
         };
         opt_define(builder, stack[base], result);
         stack_provenance[base] = OptProvenance::ImmediatePrimitive;
@@ -5142,7 +5416,8 @@ fn opt_alias_store(
             .unwrap_or(specialization.entry)
     };
     let classify = |representation: EntryRepresentation| match representation {
-        EntryRepresentation::Numeric
+        EntryRepresentation::Bool
+        | EntryRepresentation::Numeric
         | EntryRepresentation::Int32
         | EntryRepresentation::Float64 => AliasStore::Safe,
         EntryRepresentation::Any => AliasStore::GuardHeap,
@@ -5536,6 +5811,11 @@ fn emit_opt_numeric_guard(
                 builder.ins().bor(numeric, unset)
             }
             EntryRepresentation::Numeric => builder.ins().bor(int, float),
+            EntryRepresentation::Bool => builder.ins().icmp_imm(
+                IntCC::Equal,
+                pair.tag,
+                i64::from(rquickjs_core::qjs::JS_TAG_BOOL),
+            ),
             EntryRepresentation::Int32 => int,
             EntryRepresentation::Float64 => float,
             EntryRepresentation::HeapRef => builder.ins().icmp_imm(

@@ -1224,23 +1224,60 @@ fn poll_id_zero_remains_compatible_and_interrupts_native_infinite_work() {
 
 #[test]
 fn helper_pc_validation_preserves_boundaries_across_forward_and_backward_queries() {
+    check_helper_pc_boundaries(
+        "globalThis.target = function target(o) { let n = 123456; if (o) n += 234567; return n + o.marker }",
+        false,
+    );
+}
+
+#[test]
+fn helper_pc_validation_checks_cached_prefix_and_uncached_tail_after_invalidation() {
+    // Constant-width instructions place starts and operand bytes throughout
+    // the packed cache's byte-offset domain and beyond its 256-byte prefix.
+    let body = "if (o) n += 234567;".repeat(64);
+    let source = format!(
+        "globalThis.target = function target(o) {{ let n = 123456; {body} return n + o.marker }}"
+    );
+    check_helper_pc_boundaries(&source, true);
+}
+
+fn check_helper_pc_boundaries(source: &str, invalidate: bool) {
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
-    let snapshot = context.with(|ctx| {
-        ctx.eval::<(), _>(
-            "globalThis.target = function target(o) { let n = 123456; if (o) n += 234567; return n + o.marker }",
-        ).unwrap();
+    let original_snapshot = context.with(|ctx| {
+        ctx.eval::<(), _>(source).unwrap();
         let function: Function<'_> = ctx.globals().get("target").unwrap();
         snapshot(&ctx, &function)
     });
     let mut boundaries = vec![0];
-    for instruction in decode_raw(snapshot.bytecode()).unwrap() {
+    for instruction in decode_raw(original_snapshot.bytecode()).unwrap() {
         boundaries.push(boundaries.last().unwrap() + instruction.bytes().len());
     }
-    let length = snapshot.bytecode().len();
+    let length = original_snapshot.bytecode().len();
     assert_eq!(boundaries.last(), Some(&length));
+    if invalidate {
+        assert!(length > 256, "test must exercise the uncached tail");
+    }
     assert!((0..length).any(|offset| !boundaries.contains(&offset)));
-    let mut valid = boundaries.clone();
+    let mut valid = Vec::new();
+    if invalidate {
+        let cached: Vec<_> = boundaries
+            .iter()
+            .copied()
+            .filter(|offset| (1..256).contains(offset))
+            .take(9)
+            .collect();
+        assert_eq!(cached.len(), 9);
+        // Fill the eight FIFO entries with distinct nonzero starts. Repeated
+        // hits must remain valid, and introducing a ninth start evicts the
+        // oldest; visiting it again must succeed through the ordinary walk.
+        valid.extend_from_slice(&cached[..8]);
+        valid.extend_from_slice(&cached[..8]);
+        valid.extend([cached[8], cached[0]]);
+        // Repeated PC zero is valid even while unused cache bytes are zero.
+        valid.extend([0, 0]);
+    }
+    valid.extend(boundaries.iter().copied());
     valid.extend(boundaries.iter().rev().copied());
     valid.extend(boundaries.iter().flat_map(|offset| [*offset, *offset]));
     // Exercise every operand byte after populating the cursor at many valid PCs.
@@ -1248,11 +1285,28 @@ fn helper_pc_validation_preserves_boundaries_across_forward_and_backward_queries
         .filter(|offset| !boundaries.contains(offset))
         .map(Some)
         .chain([Some(usize::MAX), None]);
-    for invalid in invalid {
+    for (index, invalid) in invalid.enumerate() {
+        let current_snapshot = context.with(|ctx| {
+            let function: Function<'_> = ctx.globals().get("target").unwrap();
+            if invalidate && index == 1 {
+                // The first invocation populated the cache. Invalidate that
+                // same bytecode object before checking its new generation.
+                assert_eq!(
+                    unsafe {
+                        qjs::JS_JitInvalidateFunction(
+                            ctx.as_raw().as_ptr(),
+                            function.as_value().as_raw(),
+                        )
+                    },
+                    qjs::JS_JIT_BACKEND_OK
+                );
+            }
+            snapshot(&ctx, &function)
+        });
         let verified = Arc::new(AtomicBool::new(false));
         let (_guard, entries) = install(
             &runtime,
-            &snapshot,
+            &current_snapshot,
             Operation::ValidatePcs {
                 valid: valid.clone(),
                 invalid,
