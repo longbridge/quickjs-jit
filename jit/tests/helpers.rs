@@ -1298,7 +1298,7 @@ fn check_helper_pc_boundaries(source: &str, invalidate: bool) {
                             function.as_value().as_raw(),
                         )
                     },
-                    qjs::JS_JIT_BACKEND_OK as i32
+                    qjs::JS_JIT_BACKEND_OK
                 );
             }
             snapshot(&ctx, &function)
