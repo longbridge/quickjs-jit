@@ -8,6 +8,32 @@ use static_assertions::{assert_impl_all, assert_not_impl_any};
 assert_impl_all!(CompileSnapshot: Send, Sync);
 assert_not_impl_any!(RuntimeConstants: Send, Sync);
 
+#[test]
+fn retained_snapshot_accounting_includes_capacity_and_verifier_metadata() {
+    let mut bytes = Vec::with_capacity(4096);
+    bytes.push(opcode::RETURN_UNDEF);
+    let snapshot = CompileSnapshot::from_untrusted_bytecode(bytes, 0, 0, 0, 0);
+    assert!(snapshot.retained_bytes() >= 4096);
+    let before = snapshot.retained_bytes();
+    let metadata = VerifierMetadata::new(
+        vec![rquickjs_jit::bytecode::OsrPoint::new(
+            0,
+            vec![SlotKind::Float64; 64],
+        )],
+        vec![DeoptPoint::new(
+            0,
+            vec![SlotKind::Float64; 64],
+            vec![SlotKind::Float64; 64],
+        )],
+    );
+    let with_metadata = snapshot.with_metadata(metadata);
+    assert!(with_metadata.retained_bytes() >= before + 192);
+    assert_eq!(
+        with_metadata.clone().retained_bytes(),
+        with_metadata.retained_bytes()
+    );
+}
+
 struct SnapshotFixture {
     runtime: Runtime,
     _context: Context,

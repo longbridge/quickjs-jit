@@ -288,6 +288,7 @@ struct NumericSpecialization {
     calls: std::collections::BTreeMap<u32, crate::runtime::CallSpecializationKey>,
     properties: std::collections::BTreeMap<u32, Box<[crate::runtime::ShapeObservation]>>,
     direct_calls: std::collections::BTreeMap<u32, DirectCallSite>,
+    inline_callees: std::collections::BTreeMap<u32, crate::ir::InlineCallee>,
     numeric_constants: std::collections::BTreeMap<u32, crate::ir::TaggedValue>,
 }
 
@@ -298,6 +299,64 @@ struct DirectCallSite {
 }
 
 impl NumericSpecialization {
+    fn retain_inline_callees(&mut self, request: &CompileRequest) {
+        if request.side_path_profile().is_some() {
+            return;
+        }
+        for target in request.direct_call_targets() {
+            if let Some(body) = target.inline_snapshot().and_then(|snapshot| {
+                snapshot
+                    .verify(crate::bytecode::VerifyLimits::default())
+                    .ok()
+            }) {
+                self.inline_callees.insert(
+                    target.pc(),
+                    crate::ir::InlineCallee {
+                        artifact: target.artifact_key(),
+                        call: target.call().clone(),
+                        body,
+                    },
+                );
+            }
+        }
+    }
+
+    fn translate(
+        &self,
+        function: &VerifiedFunction,
+        epoch: u64,
+    ) -> Result<OptimizedIr, CompileFailure> {
+        use crate::ir::ScalarNumericMode;
+        let mut modes = self
+            .int_pcs
+            .iter()
+            .map(|&pc| (pc, ScalarNumericMode::Int32))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        modes.extend(
+            self.float_pcs
+                .iter()
+                .map(|&pc| (pc, ScalarNumericMode::Float64)),
+        );
+        let cfg = function.control_flow_graph();
+        if matches!(self.entry, EntryRepresentation::Int32)
+            && self.calls.is_empty()
+            && cfg
+                .blocks()
+                .iter()
+                .any(|block| cfg.is_loop_header(block.start_pc()))
+        {
+            for instruction in function.instructions() {
+                if matches!(
+                    instruction.opcode().name(),
+                    "inc" | "dec" | "post_inc" | "post_dec" | "inc_loc" | "dec_loc"
+                ) {
+                    modes.insert(instruction.pc(), ScalarNumericMode::Int32);
+                }
+            }
+        }
+        OptimizedIr::translate_with_inline_callees(function, epoch, &modes, &self.inline_callees)
+    }
+
     fn from_feedback(
         function: &VerifiedFunction,
         key: crate::runtime::FunctionKey,
@@ -476,6 +535,7 @@ impl NumericSpecialization {
             calls,
             properties,
             direct_calls: Default::default(),
+            inline_callees: Default::default(),
             numeric_constants,
         }
     }
@@ -508,6 +568,32 @@ fn lower_optimized_machine(
     let int32_loop = matches!(specialization.entry, EntryRepresentation::Int32)
         && specialization.calls.is_empty()
         && ir.blocks().iter().any(|block| block.is_loop_header());
+    let scalar_numeric = if side_path.is_none() {
+        ir.scalar_graph().proven_numeric_values(
+            ir.nodes(),
+            |index| {
+                usize::from(index) < usize::from(shape.arguments())
+                    && matches!(
+                        specialization
+                            .arguments
+                            .get(usize::from(index))
+                            .copied()
+                            .unwrap_or(specialization.entry),
+                        EntryRepresentation::Int32
+                    )
+            },
+            int32_loop,
+            ir.scalar_graph().values().len().saturating_mul(128),
+        )
+    } else {
+        Vec::new()
+    };
+    let amortized_poll = int32_loop
+        || (side_path.is_none()
+            && ir
+                .scalar_graph()
+                .permits_amortized_poll(ir.nodes(), &scalar_numeric));
+
     let mut signature = Signature::new(isa.default_call_conv());
     signature.params.push(AbiParam::special(
         pointer_type,
@@ -564,9 +650,28 @@ fn lower_optimized_machine(
             .checked_add(crate::ir::MAX_HELPER_SCRATCH_SLOTS)
             .ok_or(CompileFailure::ResourceLimit)?;
         let stack = (0..stack_slots).map(|_| alloc()).collect::<Vec<_>>();
+        let phi_vars = ir
+            .blocks()
+            .iter()
+            .flat_map(|block| {
+                ir.scalar_graph()
+                    .inputs_for_block(block.start_pc())
+                    .iter()
+                    .map(|&(_, value)| value)
+            })
+            .map(|value| (value, alloc()))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
         let mut guarded_element_source: Option<GuardedElementSource> = None;
         let owned_locals = owned_local_targets(ir, specialization)?;
+        // The scalar-region proof excludes heap effects and requires every
+        // local definition to be primitive (or a lexical sentinel). No local
+        // owns a heap value, so poll/deopt boundaries can publish SSA locals
+        // instead of storing them on every iteration. Arguments stay rooted
+        // in their existing buffers and retain immediate writes.
+        let defer_scalar_locals =
+            amortized_poll && !int32_loop && !owned_locals.iter().any(|&owned| owned);
+
         let bounded_increments = provably_bounded_increments(ir);
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         let env = OptEnv {
@@ -584,7 +689,12 @@ fn lower_optimized_machine(
             stack: &stack,
             helper_signatures: &helper_signatures,
         };
-        for vars in arguments.iter().chain(&locals).chain(&stack) {
+        for vars in arguments
+            .iter()
+            .chain(&locals)
+            .chain(&stack)
+            .chain(phi_vars.values())
+        {
             builder.declare_var(vars.payload, payload_type);
             builder.declare_var(vars.tag, types::I64);
         }
@@ -635,6 +745,30 @@ fn lower_optimized_machine(
                     .push(block.start_pc());
             }
         }
+        for &(_, value) in ir.scalar_graph().inputs_for_block(0) {
+            let initial = match &ir.scalar_graph().values()[value.index()] {
+                crate::ir::ScalarValue::Phi { inputs, .. } => {
+                    inputs
+                        .iter()
+                        .find(|input| input.predecessor.is_none())
+                        .ok_or(CompileFailure::InvalidArtifact)?
+                        .value
+                }
+                _ => value,
+            };
+            let crate::ir::ScalarValue::Input { block_pc: 0, slot } =
+                ir.scalar_graph().values()[initial.index()]
+            else {
+                return Err(CompileFailure::InvalidArtifact);
+            };
+            let variables = match slot {
+                crate::ir::FrameSlot::Argument(index) => arguments[usize::from(index)],
+                crate::ir::FrameSlot::Local(index) => locals[usize::from(index)],
+                crate::ir::FrameSlot::Stack(_) => return Err(CompileFailure::InvalidArtifact),
+            };
+            let pair = opt_use(&mut builder, variables);
+            opt_define(&mut builder, phi_vars[&value], pair);
+        }
         let entry = *blocks.get(&0).ok_or(CompileFailure::InvalidArtifact)?;
         emit_opt_numeric_guard(
             &mut builder,
@@ -664,7 +798,39 @@ fn lower_optimized_machine(
             let mut depth = usize::from(block.stack_depth());
             let mut terminated = false;
             let mut reusable_values = std::collections::BTreeMap::<u32, OptPair>::new();
+            let mut scalar_values = std::collections::BTreeMap::new();
+            for &(slot, value) in ir.scalar_graph().inputs_for_block(block.start_pc()) {
+                let variables = match slot {
+                    crate::ir::FrameSlot::Argument(index) => arguments[usize::from(index)],
+                    crate::ir::FrameSlot::Local(index) => locals[usize::from(index)],
+                    crate::ir::FrameSlot::Stack(index) => stack[usize::from(index)],
+                };
+                let mut pair = opt_use(&mut builder, phi_vars[&value]);
+                if scalar_numeric.get(value.index()).copied().flatten()
+                    == Some(crate::ir::ScalarNumericMode::Int32)
+                {
+                    // This proof includes every loop entry and backedge. The
+                    // entry guard still checks the original argument tags.
+                    pair.tag = builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT));
+                }
+                opt_define(&mut builder, variables, pair);
+                scalar_values.insert(value, pair);
+            }
+            let mut previous_node = None;
             for node_id in block.nodes() {
+                // Register the preceding node at the next instruction boundary;
+                // specialized lowering may finish a node with `continue`.
+                if let Some(previous) = previous_node {
+                    opt_bind_scalar_node(
+                        &mut builder,
+                        ir,
+                        previous,
+                        depth,
+                        &env,
+                        &mut scalar_values,
+                    )?;
+                }
+                previous_node = Some(*node_id);
                 let node = ir
                     .nodes()
                     .get(*node_id as usize)
@@ -684,9 +850,14 @@ fn lower_optimized_machine(
                         .ok_or(CompileFailure::InvalidArtifact)?;
                     continue;
                 }
+                if matches!(node.kind(), crate::ir::OptimizedNodeKind::Bytecode { opcode }
+                    if matches!(opcode.as_ref(), "if_false8" | "if_true8" | "if_false" | "if_true" | "goto" | "goto8" | "goto16"))
+                {
+                    opt_define_scalar_edges(&mut builder, ir, block, &scalar_values, &phi_vars)?;
+                }
                 match node.kind() {
                     crate::ir::OptimizedNodeKind::GuardNumeric { guard, mid_loop } => {
-                        if *mid_loop && int32_loop {
+                        if *mid_loop && amortized_poll {
                             emit_opt_amortized_poll(
                                 &mut builder,
                                 frame,
@@ -696,6 +867,36 @@ fn lower_optimized_machine(
                                 layout,
                                 node.pc(),
                                 poll_budget,
+                                !int32_loop,
+                                |builder| {
+                                    if defer_scalar_locals {
+                                        for (index, vars) in locals.iter().enumerate() {
+                                            let value = opt_use(builder, *vars);
+                                            opt_store(builder, var_buf, index, value);
+                                        }
+                                    }
+                                },
+                                |builder| {
+                                    if !int32_loop {
+                                        let pass = builder.create_block();
+                                        emit_opt_numeric_guard(
+                                            builder,
+                                            frame,
+                                            sret,
+                                            &arguments,
+                                            &locals,
+                                            pointer_type,
+                                            layout,
+                                            *guard,
+                                            node.pc(),
+                                            pass,
+                                            None,
+                                            EntryRepresentation::Numeric,
+                                            &specialization.arguments,
+                                        );
+                                        builder.switch_to_block(pass);
+                                    }
+                                },
                             );
                         } else if *mid_loop {
                             emit_opt_poll(
@@ -727,6 +928,9 @@ fn lower_optimized_machine(
                         }
                     }
                     crate::ir::OptimizedNodeKind::Reuse { source } => {
+                        depth = depth
+                            .checked_sub(usize::from(node.pops()))
+                            .ok_or(CompileFailure::InvalidArtifact)?;
                         let pair = *reusable_values
                             .get(source)
                             .ok_or(CompileFailure::InvalidArtifact)?;
@@ -748,7 +952,7 @@ fn lower_optimized_machine(
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
                                 }
                                 opt_define(&mut builder, locals[index], undefined);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, undefined);
                                 }
                             }
@@ -900,7 +1104,7 @@ fn lower_optimized_machine(
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
                                 }
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1115,21 +1319,58 @@ fn lower_optimized_machine(
                                 if call.is_none() && int32_loop {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
-                                let argc = if name == "call" || name == "call_method" {
-                                    opt_u16(node.bytes())?
-                                } else {
-                                    usize::from(
-                                        *name
-                                            .as_bytes()
-                                            .last()
-                                            .ok_or(CompileFailure::InvalidArtifact)?
-                                            - b'0',
-                                    )
-                                };
+                                let semantic_call = ir
+                                    .scalar_graph()
+                                    .call(node.id())
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let argc = semantic_call.arguments.len();
+                                let has_this = semantic_call.receiver.is_some();
+                                opt_restore_scalar_frame(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth,
+                                    &env,
+                                    &scalar_values,
+                                )?;
+                                let state = ir
+                                    .scalar_graph()
+                                    .frame_state_for_node(node.id())
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let pop = argc + 1 + usize::from(has_this);
+                                let base = depth
+                                    .checked_sub(pop)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                let target = base + usize::from(has_this);
+                                if semantic_call.frame_state_node != node.id()
+                                    || usize::from(node.pops()) != pop
+                                    || state.stack[target] != semantic_call.target
+                                    || state.stack[target + 1..] != *semantic_call.arguments
+                                    || semantic_call
+                                        .receiver
+                                        .is_some_and(|receiver| state.stack[base] != receiver)
+                                {
+                                    return Err(CompileFailure::InvalidArtifact);
+                                }
                                 if call.is_some_and(|call| argc != call.arguments().len()) {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
-                                let has_this = name == "call_method";
+                                if semantic_call.inline.is_some() {
+                                    let result = emit_opt_inlined_call(
+                                        &mut builder,
+                                        ir,
+                                        node,
+                                        depth,
+                                        &env,
+                                        &stack_provenance,
+                                        &scalar_values,
+                                        &scalar_numeric,
+                                    )?;
+                                    opt_define(&mut builder, stack[base], result);
+                                    stack_provenance[base] = OptProvenance::ImmediatePrimitive;
+                                    depth = base + 1;
+                                    continue;
+                                }
                                 depth = emit_opt_specialized_call(
                                     &mut builder,
                                     frame,
@@ -1157,9 +1398,23 @@ fn lower_optimized_machine(
                                 depth = depth
                                     .checked_sub(2)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                let lhs = opt_use(&mut builder, stack[depth]);
-                                let rhs = opt_use(&mut builder, stack[depth + 1]);
-                                if specialization.float_pcs.contains(&node.pc()) {
+                                let (lhs, rhs) = opt_prepare_scalar_operation(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth + 2,
+                                    &env,
+                                    &stack_provenance,
+                                    &scalar_values,
+                                    &scalar_numeric,
+                                )?;
+                                let rhs = rhs.ok_or(CompileFailure::InvalidArtifact)?;
+                                let (operation, mode) = ir
+                                    .scalar_graph()
+                                    .binary_operation(*node_id)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                use crate::ir::{ScalarBinaryOp, ScalarNumericMode};
+                                if mode == ScalarNumericMode::Float64 {
                                     let lhs = builder.ins().bitcast(
                                         types::F64,
                                         MemFlags::new(),
@@ -1170,10 +1425,10 @@ fn lower_optimized_machine(
                                         MemFlags::new(),
                                         rhs.payload,
                                     );
-                                    let result = match name {
-                                        "add" => builder.ins().fadd(lhs, rhs),
-                                        "sub" => builder.ins().fsub(lhs, rhs),
-                                        "mul" => builder.ins().fmul(lhs, rhs),
+                                    let result = match operation {
+                                        ScalarBinaryOp::Add => builder.ins().fadd(lhs, rhs),
+                                        ScalarBinaryOp::Sub => builder.ins().fsub(lhs, rhs),
+                                        ScalarBinaryOp::Mul => builder.ins().fmul(lhs, rhs),
                                         _ => builder.ins().fdiv(lhs, rhs),
                                     };
                                     let pair = OptPair {
@@ -1192,25 +1447,8 @@ fn lower_optimized_machine(
                                     depth += 1;
                                     continue;
                                 }
-                                if specialization.int_pcs.contains(&node.pc()) {
+                                if mode == ScalarNumericMode::Int32 {
                                     let deopt = builder.create_block();
-                                    if !int32_loop {
-                                        use cranelift_codegen::ir::condcodes::IntCC;
-                                        let lhs_int = builder.ins().icmp_imm(
-                                            IntCC::Equal,
-                                            lhs.tag,
-                                            i64::from(qjs::JS_TAG_INT),
-                                        );
-                                        let rhs_int = builder.ins().icmp_imm(
-                                            IntCC::Equal,
-                                            rhs.tag,
-                                            i64::from(qjs::JS_TAG_INT),
-                                        );
-                                        let both_int = builder.ins().band(lhs_int, rhs_int);
-                                        let arithmetic = builder.create_block();
-                                        builder.ins().brif(both_int, arithmetic, &[], deopt, &[]);
-                                        builder.switch_to_block(arithmetic);
-                                    }
                                     let li = if int32_loop {
                                         lhs.payload
                                     } else {
@@ -1223,7 +1461,7 @@ fn lower_optimized_machine(
                                     };
                                     let pass = builder.create_block();
                                     builder.append_block_param(pass, types::I32);
-                                    if name == "div" {
+                                    if operation == ScalarBinaryOp::Div {
                                         use cranelift_codegen::ir::condcodes::IntCC;
                                         let zero = builder.ins().icmp_imm(IntCC::Equal, ri, 0);
                                         let min = builder.ins().icmp_imm(
@@ -1254,12 +1492,16 @@ fn lower_optimized_machine(
                                         let result = builder.ins().sdiv(li, ri);
                                         builder.ins().jump(pass, &[result]);
                                     } else {
-                                        let (result, mut failure) = match name {
-                                            "add" => builder.ins().sadd_overflow(li, ri),
-                                            "sub" => builder.ins().ssub_overflow(li, ri),
+                                        let (result, mut failure) = match operation {
+                                            ScalarBinaryOp::Add => {
+                                                builder.ins().sadd_overflow(li, ri)
+                                            }
+                                            ScalarBinaryOp::Sub => {
+                                                builder.ins().ssub_overflow(li, ri)
+                                            }
                                             _ => builder.ins().smul_overflow(li, ri),
                                         };
-                                        if name == "mul" {
+                                        if operation == ScalarBinaryOp::Mul {
                                             use cranelift_codegen::ir::condcodes::IntCC;
                                             let lhs_zero =
                                                 builder.ins().icmp_imm(IntCC::Equal, li, 0);
@@ -1339,33 +1581,12 @@ fn lower_optimized_machine(
                                     depth += 1;
                                     continue;
                                 }
-                                // Without stable feedback the Float64 path
-                                // still requires two numbers; string
-                                // concatenation and object coercion deopt.
-                                let lhs_int = opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_INT);
-                                let rhs_int = opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_INT);
-                                let lhs_float =
-                                    opt_tag_is(&mut builder, lhs.tag, qjs::JS_TAG_FLOAT64);
-                                let rhs_float =
-                                    opt_tag_is(&mut builder, rhs.tag, qjs::JS_TAG_FLOAT64);
-                                let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
-                                let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
-                                let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
-                                emit_opt_guard_branch(
-                                    &mut builder,
-                                    &env,
-                                    &stack_provenance,
-                                    depth + 2,
-                                    node.pc(),
-                                    node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
-                                    numeric,
-                                )?;
                                 let lf = opt_f64(&mut builder, lhs);
                                 let rf = opt_f64(&mut builder, rhs);
-                                let result = match name {
-                                    "add" => builder.ins().fadd(lf, rf),
-                                    "sub" => builder.ins().fsub(lf, rf),
-                                    "mul" => builder.ins().fmul(lf, rf),
+                                let result = match operation {
+                                    ScalarBinaryOp::Add => builder.ins().fadd(lf, rf),
+                                    ScalarBinaryOp::Sub => builder.ins().fsub(lf, rf),
+                                    ScalarBinaryOp::Mul => builder.ins().fmul(lf, rf),
                                     _ => builder.ins().fdiv(lf, rf),
                                 };
                                 let float_payload =
@@ -1373,7 +1594,7 @@ fn lower_optimized_machine(
                                 let float_tag = builder
                                     .ins()
                                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64));
-                                let pair = if name == "add" {
+                                let pair = if operation == ScalarBinaryOp::Add {
                                     use cranelift_codegen::ir::condcodes::IntCC;
                                     let lhs_int = builder.ins().icmp_imm(
                                         IntCC::Equal,
@@ -1415,12 +1636,29 @@ fn lower_optimized_machine(
                                 depth += 1;
                             }
                             "or" | "and" | "xor" | "shl" | "sar" | "shr" => {
+                                let (lhs, rhs) = opt_prepare_scalar_operation(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth,
+                                    &env,
+                                    &stack_provenance,
+                                    &scalar_values,
+                                    &scalar_numeric,
+                                )?;
+                                let rhs = rhs.ok_or(CompileFailure::InvalidArtifact)?;
+                                let (operation, _, _) = ir
+                                    .scalar_graph()
+                                    .bitwise_operation(node.id())
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
                                 depth = emit_opt_guarded_int_binary(
                                     &mut builder,
                                     &env,
                                     &mut stack_provenance,
                                     depth,
-                                    name,
+                                    operation,
+                                    lhs,
+                                    rhs,
                                     node.pc(),
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 )?;
@@ -1479,19 +1717,33 @@ fn lower_optimized_machine(
                             "inc_loc" | "dec_loc" => {
                                 guarded_element_source = None;
                                 let index = opt_u8(node.bytes())?;
-                                let old = opt_use(&mut builder, locals[index]);
+                                let (old, _) = opt_prepare_scalar_operation(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth,
+                                    &env,
+                                    &stack_provenance,
+                                    &scalar_values,
+                                    &scalar_numeric,
+                                )?;
+                                let (mode, _, delta) = ir
+                                    .scalar_graph()
+                                    .update_operation(*node_id)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                if int32_loop && mode != crate::ir::ScalarNumericMode::Int32 {
+                                    return Err(CompileFailure::InvalidArtifact);
+                                }
                                 let delta = OptPair {
-                                    payload: builder.ins().iconst(
-                                        payload_type,
-                                        if name == "inc_loc" { 1 } else { -1 },
-                                    ),
+                                    payload: builder.ins().iconst(payload_type, i64::from(delta)),
                                     tag: builder
                                         .ins()
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
-                                let pair = emit_opt_checked_add(
+                                let pair = emit_opt_checked_update(
                                     &mut builder,
                                     &env,
+                                    mode,
                                     &stack_provenance,
                                     depth,
                                     old,
@@ -1500,7 +1752,7 @@ fn lower_optimized_machine(
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 )?;
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1528,7 +1780,7 @@ fn lower_optimized_machine(
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 )?;
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 depth = rhs_index;
@@ -1660,7 +1912,7 @@ fn lower_optimized_machine(
                                 )?;
                                 let pair = opt_use(&mut builder, stack[top]);
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1702,53 +1954,49 @@ fn lower_optimized_machine(
                                 depth = depth
                                     .checked_sub(2)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                let lhs_pair = opt_use(&mut builder, stack[depth]);
-                                let rhs_pair = opt_use(&mut builder, stack[depth + 1]);
-                                // Only numbers compare natively; strings,
-                                // objects and nullish operands coerce in the
-                                // interpreter.
-                                // The raw-i32 loop shape admits only unboxed
-                                // Int32 values (entry and header guards), so
-                                // its operands need no per-iteration tag check.
-                                if !int32_loop {
-                                    let lhs_int =
-                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_INT);
-                                    let rhs_int =
-                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_INT);
-                                    let lhs_float =
-                                        opt_tag_is(&mut builder, lhs_pair.tag, qjs::JS_TAG_FLOAT64);
-                                    let rhs_float =
-                                        opt_tag_is(&mut builder, rhs_pair.tag, qjs::JS_TAG_FLOAT64);
-                                    let lhs_numeric = builder.ins().bor(lhs_int, lhs_float);
-                                    let rhs_numeric = builder.ins().bor(rhs_int, rhs_float);
-                                    let numeric = builder.ins().band(lhs_numeric, rhs_numeric);
-                                    emit_opt_guard_branch(
-                                        &mut builder,
-                                        &env,
-                                        &stack_provenance,
-                                        depth + 2,
-                                        node.pc(),
-                                        node.deopt_guard()
-                                            .ok_or(CompileFailure::InvalidArtifact)?,
-                                        numeric,
-                                    )?;
-                                }
-                                let value = if int32_loop {
-                                    let cc = match name {
-                                        "lt" => IntCC::SignedLessThan,
-                                        "lte" => IntCC::SignedLessThanOrEqual,
-                                        "gt" => IntCC::SignedGreaterThan,
-                                        _ => IntCC::SignedGreaterThanOrEqual,
+                                let (lhs_pair, rhs_pair) = opt_prepare_scalar_operation(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth + 2,
+                                    &env,
+                                    &stack_provenance,
+                                    &scalar_values,
+                                    &scalar_numeric,
+                                )?;
+                                let rhs_pair = rhs_pair.ok_or(CompileFailure::InvalidArtifact)?;
+                                let (operation, lhs, rhs) = ir
+                                    .scalar_graph()
+                                    .comparison(*node_id)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                use crate::ir::ScalarCompareOp;
+                                let integer_compare = int32_loop
+                                    || [lhs, rhs].iter().all(|value| {
+                                        scalar_numeric.get(value.index()).copied().flatten()
+                                            == Some(crate::ir::ScalarNumericMode::Int32)
+                                    });
+                                let value = if integer_compare {
+                                    let cc = match operation {
+                                        ScalarCompareOp::LessThan => IntCC::SignedLessThan,
+                                        ScalarCompareOp::LessEqual => IntCC::SignedLessThanOrEqual,
+                                        ScalarCompareOp::GreaterThan => IntCC::SignedGreaterThan,
+                                        ScalarCompareOp::GreaterEqual => {
+                                            IntCC::SignedGreaterThanOrEqual
+                                        }
                                     };
-                                    builder.ins().icmp(cc, lhs_pair.payload, rhs_pair.payload)
+                                    let lhs = opt_i32(&mut builder, &env, lhs_pair);
+                                    let rhs = opt_i32(&mut builder, &env, rhs_pair);
+                                    builder.ins().icmp(cc, lhs, rhs)
                                 } else {
                                     let lhs = opt_f64(&mut builder, lhs_pair);
                                     let rhs = opt_f64(&mut builder, rhs_pair);
-                                    let cc = match name {
-                                        "lt" => FloatCC::LessThan,
-                                        "lte" => FloatCC::LessThanOrEqual,
-                                        "gt" => FloatCC::GreaterThan,
-                                        _ => FloatCC::GreaterThanOrEqual,
+                                    let cc = match operation {
+                                        ScalarCompareOp::LessThan => FloatCC::LessThan,
+                                        ScalarCompareOp::LessEqual => FloatCC::LessThanOrEqual,
+                                        ScalarCompareOp::GreaterThan => FloatCC::GreaterThan,
+                                        ScalarCompareOp::GreaterEqual => {
+                                            FloatCC::GreaterThanOrEqual
+                                        }
                                     };
                                     builder.ins().fcmp(cc, lhs, rhs)
                                 };
@@ -1762,18 +2010,32 @@ fn lower_optimized_machine(
                                 let index = depth
                                     .checked_sub(1)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                let old = opt_use(&mut builder, stack[index]);
+                                let (old, _) = opt_prepare_scalar_operation(
+                                    &mut builder,
+                                    ir,
+                                    node,
+                                    depth,
+                                    &env,
+                                    &stack_provenance,
+                                    &scalar_values,
+                                    &scalar_numeric,
+                                )?;
+                                let (mode, _, delta) = ir
+                                    .scalar_graph()
+                                    .update_operation(*node_id)
+                                    .ok_or(CompileFailure::InvalidArtifact)?;
+                                if int32_loop && mode != crate::ir::ScalarNumericMode::Int32 {
+                                    return Err(CompileFailure::InvalidArtifact);
+                                }
+                                let increment = delta == 1;
                                 let delta = OptPair {
-                                    payload: builder.ins().iconst(
-                                        payload_type,
-                                        if name.ends_with("inc") { 1 } else { -1 },
-                                    ),
+                                    payload: builder.ins().iconst(payload_type, i64::from(delta)),
                                     tag: builder
                                         .ins()
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
                                 let pair = if int32_loop
-                                    && name.ends_with("inc")
+                                    && increment
                                     && bounded_increments.contains(&node.pc())
                                 {
                                     // Proven `k < X` at the loop header with no
@@ -1781,9 +2043,10 @@ fn lower_optimized_machine(
                                     let sum = builder.ins().iadd(old.payload, delta.payload);
                                     opt_int_pair(&mut builder, &env, sum)
                                 } else {
-                                    emit_opt_checked_add(
+                                    emit_opt_checked_update(
                                         &mut builder,
                                         &env,
+                                        mode,
                                         &stack_provenance,
                                         depth,
                                         old,
@@ -2002,6 +2265,17 @@ fn lower_optimized_machine(
                 }
             }
             if !terminated {
+                if let Some(previous) = previous_node {
+                    opt_bind_scalar_node(
+                        &mut builder,
+                        ir,
+                        previous,
+                        depth,
+                        &env,
+                        &mut scalar_values,
+                    )?;
+                }
+                opt_define_scalar_edges(&mut builder, ir, block, &scalar_values, &phi_vars)?;
                 let next = next_block_pc(ir, block.start_pc())?;
                 builder.ins().jump(blocks[&next], &[]);
             }
@@ -2018,6 +2292,353 @@ fn lower_optimized_machine(
             .any(|inst| clif.dfg.insts[inst].opcode().is_call())
     });
     super::baseline::finalize_optimized_machine(isa, clif, control, calls_helpers)
+}
+
+/// Emit an admitted effect-free region. Every failure reconstructs the
+/// original caller before CALL; no callee effect may precede that recovery.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_inlined_call(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    ir: &OptimizedIr,
+    node: &crate::ir::OptimizedNode,
+    depth: usize,
+    env: &OptEnv<'_>,
+    provenance: &[OptProvenance],
+    values: &std::collections::BTreeMap<crate::ir::ScalarValueId, OptPair>,
+    proven: &[Option<crate::ir::ScalarNumericMode>],
+) -> Result<OptPair, CompileFailure> {
+    use crate::ir::{ScalarBinaryOp, ScalarNumericMode, ScalarValue};
+    use crate::runtime::FeedbackRepresentation;
+    use cranelift_codegen::ir::{types, InstBuilder};
+    use rquickjs_core::qjs;
+    let graph = ir.scalar_graph();
+    let call = graph
+        .call(node.id())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let region = call
+        .inline
+        .as_ref()
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let base = depth
+        .checked_sub(call.arguments.len() + 1)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    if call.receiver.is_some()
+        || !matches!(
+            provenance[base],
+            OptProvenance::Argument(_) | OptProvenance::Local(_)
+        )
+        || region.arguments.len() != call.arguments.len()
+    {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let target = *values
+        .get(&call.target)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let parameters = builder.create_block();
+    let deopt = builder.create_block();
+    builder.set_cold_block(deopt);
+    super::emit_guarded_direct_callee_identity(
+        builder,
+        target.tag,
+        target.payload,
+        super::DirectCalleeIdentity {
+            object: region.object_identity,
+            bytecode: region.bytecode_identity,
+        },
+        env.pointer_type,
+        parameters,
+        deopt,
+    );
+    builder.switch_to_block(parameters);
+    let mut condition = None;
+    for (&value, &representation) in call.arguments.iter().zip(region.arguments.iter()) {
+        let known = match representation {
+            FeedbackRepresentation::Int32 => {
+                proven.get(value.index()).copied().flatten() == Some(ScalarNumericMode::Int32)
+            }
+            FeedbackRepresentation::Bool => {
+                matches!(graph.values()[value.index()], ScalarValue::Bool(_))
+            }
+            _ => return Err(CompileFailure::InvalidArtifact),
+        };
+        if known {
+            continue;
+        }
+        let pair = *values.get(&value).ok_or(CompileFailure::InvalidArtifact)?;
+        let tag = if representation == FeedbackRepresentation::Bool {
+            qjs::JS_TAG_BOOL
+        } else {
+            qjs::JS_TAG_INT
+        };
+        let valid = opt_tag_is(builder, pair.tag, tag);
+        condition = Some(match condition {
+            Some(previous) => builder.ins().band(previous, valid),
+            None => valid,
+        });
+    }
+    if let Some(condition) = condition {
+        let invoke = builder.create_block();
+        builder.ins().brif(condition, invoke, &[], deopt, &[]);
+        builder.switch_to_block(invoke);
+    }
+    let mut produced = std::collections::BTreeMap::new();
+    for step in region.steps.iter() {
+        let pair = match graph.values()[step.value.index()] {
+            ScalarValue::Int32(value) => {
+                let value = builder.ins().iconst(types::I32, i64::from(value));
+                opt_int_pair(builder, env, value)
+            }
+            ScalarValue::Bool(value) => {
+                let value = builder.ins().iconst(types::I8, i64::from(value));
+                opt_bool_pair(builder, env, value)
+            }
+            ScalarValue::Binary {
+                mode: ScalarNumericMode::Int32,
+                op,
+                lhs,
+                rhs,
+            } => {
+                let state = step.frame.as_ref().ok_or(CompileFailure::InvalidArtifact)?;
+                if state.parent != Some(node.id())
+                    || state.arguments != call.arguments
+                    || state.stack.len() < 2
+                    || state.stack[state.stack.len() - 2..] != [lhs, rhs]
+                {
+                    return Err(CompileFailure::InvalidArtifact);
+                }
+                let lhs = *produced
+                    .get(&lhs)
+                    .or_else(|| values.get(&lhs))
+                    .ok_or(CompileFailure::InvalidArtifact)?;
+                let rhs = *produced
+                    .get(&rhs)
+                    .or_else(|| values.get(&rhs))
+                    .ok_or(CompileFailure::InvalidArtifact)?;
+                let lhs = opt_i32(builder, env, lhs);
+                let rhs = opt_i32(builder, env, rhs);
+                let (value, failure) = match op {
+                    ScalarBinaryOp::Add => builder.ins().sadd_overflow(lhs, rhs),
+                    ScalarBinaryOp::Sub => builder.ins().ssub_overflow(lhs, rhs),
+                    _ => return Err(CompileFailure::InvalidArtifact),
+                };
+                let pass = builder.create_block();
+                builder.ins().brif(failure, deopt, &[], pass, &[]);
+                builder.switch_to_block(pass);
+                opt_int_pair(builder, env, value)
+            }
+            _ => return Err(CompileFailure::InvalidArtifact),
+        };
+        produced.insert(step.value, pair);
+    }
+    let result = *produced
+        .get(&region.result)
+        .or_else(|| values.get(&region.result))
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let done = builder.create_block();
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(deopt);
+    emit_opt_deopt(
+        builder,
+        env,
+        provenance,
+        depth,
+        node.pc(),
+        node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+    )?;
+    builder.switch_to_block(done);
+    Ok(result)
+}
+
+/// Restore compiler bindings from semantic SSA without writing interpreter memory.
+fn opt_restore_scalar_frame(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    ir: &OptimizedIr,
+    node: &crate::ir::OptimizedNode,
+    depth: usize,
+    env: &OptEnv<'_>,
+    values: &std::collections::BTreeMap<crate::ir::ScalarValueId, OptPair>,
+) -> Result<(), CompileFailure> {
+    let graph = ir.scalar_graph();
+    let state = graph
+        .frame_state_for_node(node.id())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    if state.pc != node.pc()
+        || state.stack.len() != depth
+        || state.arguments.len() != env.arguments.len()
+        || state.locals.len() != env.locals.len()
+        || depth > env.stack.len()
+    {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    for (ids, variables) in [
+        (state.arguments.as_ref(), env.arguments),
+        (state.locals.as_ref(), env.locals),
+        (state.stack.as_ref(), &env.stack[..depth]),
+    ] {
+        for (&id, &vars) in ids.iter().zip(variables) {
+            opt_define(
+                builder,
+                vars,
+                *values.get(&id).ok_or(CompileFailure::InvalidArtifact)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Restore compiler-variable bindings from the pre-effect state and consume
+/// the graph's remaining type checks. Actual frame stores stay on cold exits.
+#[allow(clippy::too_many_arguments)]
+fn opt_prepare_scalar_operation(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    ir: &OptimizedIr,
+    node: &crate::ir::OptimizedNode,
+    depth: usize,
+    env: &OptEnv<'_>,
+    provenance: &[OptProvenance],
+    values: &std::collections::BTreeMap<crate::ir::ScalarValueId, OptPair>,
+    proven_numeric: &[Option<crate::ir::ScalarNumericMode>],
+) -> Result<(OptPair, Option<OptPair>), CompileFailure> {
+    use crate::ir::ScalarNumericMode;
+    use cranelift_codegen::ir::InstBuilder;
+    use rquickjs_core::qjs;
+    let graph = ir.scalar_graph();
+    opt_restore_scalar_frame(builder, ir, node, depth, env, values)?;
+    let (mode, lhs, rhs) = if let Some((mode, input, _)) = graph.update_operation(node.id()) {
+        (mode, input, None)
+    } else if let Some((_, lhs, rhs)) = graph.bitwise_operation(node.id()) {
+        (ScalarNumericMode::Int32, lhs, Some(rhs))
+    } else if let Some((_, mode)) = graph.binary_operation(node.id()) {
+        let (lhs, rhs) = graph
+            .binary_operands(node.id())
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        (mode, lhs, Some(rhs))
+    } else {
+        let (_, lhs, rhs) = graph
+            .comparison(node.id())
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        (ScalarNumericMode::Number, lhs, Some(rhs))
+    };
+    let checks = graph.checks_for_node(node.id());
+    if checks.len() != 1 + usize::from(rhs.is_some()) {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let mut passed = None;
+    for (check, operand) in checks.iter().zip([Some(lhs), rhs].into_iter().flatten()) {
+        if check.frame_state_node != node.id() || check.mode != mode || check.value != operand {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+        // Representation analysis includes every CFG entry and backedge and
+        // uses each argument's actual entry guard; poll aliases additionally
+        // require the register-preserving raw loop path.
+        // Skip the branch itself: folding tag comparisons to true still leaves
+        // constant branches and cold materialization blocks in machine code.
+        if check.eliminated
+            || proven_numeric
+                .get(check.value.index())
+                .copied()
+                .flatten()
+                .is_some_and(|proven| {
+                    check.mode == proven || check.mode == ScalarNumericMode::Number
+                })
+        {
+            continue;
+        }
+        let pair = *values
+            .get(&check.value)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let condition = match check.mode {
+            ScalarNumericMode::Int32 => opt_tag_is(builder, pair.tag, qjs::JS_TAG_INT),
+            ScalarNumericMode::Float64 => opt_tag_is(builder, pair.tag, qjs::JS_TAG_FLOAT64),
+            ScalarNumericMode::Number => {
+                let int = opt_tag_is(builder, pair.tag, qjs::JS_TAG_INT);
+                let float = opt_tag_is(builder, pair.tag, qjs::JS_TAG_FLOAT64);
+                builder.ins().bor(int, float)
+            }
+        };
+        passed = Some(match passed {
+            Some(previous) => builder.ins().band(previous, condition),
+            None => condition,
+        });
+    }
+    if let Some(passed) = passed {
+        emit_opt_guard_branch(
+            builder,
+            env,
+            provenance,
+            depth,
+            node.pc(),
+            node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
+            passed,
+        )?;
+    }
+    Ok((
+        *values.get(&lhs).ok_or(CompileFailure::InvalidArtifact)?,
+        rhs.map(|rhs| {
+            values
+                .get(&rhs)
+                .copied()
+                .ok_or(CompileFailure::InvalidArtifact)
+        })
+        .transpose()?,
+    ))
+}
+
+/// Bind a completed bridge operation to its graph definitions. Numeric
+/// operations and CFG edges subsequently read those definitions by ValueId.
+fn opt_bind_scalar_node(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    ir: &OptimizedIr,
+    node: u32,
+    depth: usize,
+    env: &OptEnv<'_>,
+    values: &mut std::collections::BTreeMap<crate::ir::ScalarValueId, OptPair>,
+) -> Result<(), CompileFailure> {
+    let outputs = ir.scalar_graph().outputs_for_node(node);
+    let base = depth
+        .checked_sub(outputs.len())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    for (index, &value) in outputs.iter().enumerate() {
+        values.insert(value, opt_use(builder, env.stack[base + index]));
+    }
+    for &(slot, value) in ir.scalar_graph().frame_definitions_for_node(node) {
+        let variables = match slot {
+            crate::ir::FrameSlot::Argument(index) => env.arguments[usize::from(index)],
+            crate::ir::FrameSlot::Local(index) => env.locals[usize::from(index)],
+            crate::ir::FrameSlot::Stack(_) => return Err(CompileFailure::InvalidArtifact),
+        };
+        values.insert(value, opt_use(builder, variables));
+    }
+    Ok(())
+}
+
+/// Each target has distinct SSA variables. Defining both successors before a
+/// conditional branch is safe: only the taken edge reaches that target's use.
+/// Cranelift merges these definitions according to the actual machine CFG.
+fn opt_define_scalar_edges(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    ir: &OptimizedIr,
+    block: &crate::ir::OptimizedBlock,
+    values: &std::collections::BTreeMap<crate::ir::ScalarValueId, OptPair>,
+    variables: &std::collections::BTreeMap<crate::ir::ScalarValueId, OptVars>,
+) -> Result<(), CompileFailure> {
+    for &successor in block.successors() {
+        for &(_, target) in ir.scalar_graph().inputs_for_block(successor) {
+            let crate::ir::ScalarValue::Phi { inputs, .. } =
+                &ir.scalar_graph().values()[target.index()]
+            else {
+                return Err(CompileFailure::InvalidArtifact);
+            };
+            let source = inputs
+                .iter()
+                .find(|input| input.predecessor == Some(block.start_pc()))
+                .ok_or(CompileFailure::InvalidArtifact)?
+                .value;
+            let pair = *values.get(&source).ok_or(CompileFailure::InvalidArtifact)?;
+            opt_define(builder, variables[&target], pair);
+        }
+    }
+    Ok(())
 }
 
 /// Builds the secondary, scalar-only entry used by monomorphic native call
@@ -2732,27 +3353,7 @@ fn opt_u8(bytes: &[u8]) -> Result<usize, CompileFailure> {
 /// QuickJS stack shuffles as (values consumed, sources of the values pushed
 /// back), identical to the interpreter and the Tier 1 lowering.
 fn opt_stack_permutation(name: &str) -> Option<(usize, &'static [usize])> {
-    Some(match name {
-        "nip" => (2, &[1]),
-        "nip1" => (3, &[1, 2]),
-        "dup" => (1, &[0, 0]),
-        "dup1" => (2, &[0, 0, 1]),
-        "dup2" => (2, &[0, 1, 0, 1]),
-        "dup3" => (3, &[0, 1, 2, 0, 1, 2]),
-        "insert2" => (2, &[1, 0, 1]),
-        "insert3" => (3, &[2, 0, 1, 2]),
-        "insert4" => (4, &[3, 0, 1, 2, 3]),
-        "perm3" => (3, &[1, 0, 2]),
-        "perm4" => (4, &[2, 0, 1, 3]),
-        "perm5" => (5, &[3, 0, 1, 2, 4]),
-        "swap" => (2, &[1, 0]),
-        "swap2" => (4, &[2, 3, 0, 1]),
-        "rot3l" => (3, &[1, 2, 0]),
-        "rot3r" => (3, &[2, 0, 1]),
-        "rot4l" => (4, &[1, 2, 3, 0]),
-        "rot5l" => (5, &[1, 2, 3, 4, 0]),
-        _ => return None,
-    })
+    crate::ir::stack_permutation(name)
 }
 
 /// `lhs + rhs` with exact JavaScript numeric semantics for two operands whose
@@ -2760,6 +3361,30 @@ fn opt_stack_permutation(name: &str) -> Option<(usize, &'static [usize])> {
 /// Float64, any other numeric mix is a Float64 add, and non-numeric operands
 /// deoptimize before any effect. In the raw-i32 loop shape a Float64 result
 /// cannot be represented, so overflow deoptimizes instead.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_checked_update(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    mode: crate::ir::ScalarNumericMode,
+    provenance: &[OptProvenance],
+    depth: usize,
+    lhs: OptPair,
+    rhs: OptPair,
+    pc: u32,
+    guard: u32,
+) -> Result<OptPair, CompileFailure> {
+    use cranelift_codegen::ir::InstBuilder;
+    if env.int32_loop || mode != crate::ir::ScalarNumericMode::Int32 {
+        return emit_opt_checked_add(builder, env, provenance, depth, lhs, rhs, pc, guard);
+    }
+    let lhs = opt_i32(builder, env, lhs);
+    let rhs = opt_i32(builder, env, rhs);
+    let (sum, overflow) = builder.ins().sadd_overflow(lhs, rhs);
+    let valid = builder.ins().bxor_imm(overflow, 1);
+    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, valid)?;
+    Ok(opt_int_pair(builder, env, sum))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_opt_checked_add(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
@@ -3161,15 +3786,19 @@ fn emit_opt_guarded_propkey(
 /// `>>>` renormalizes results at or above 2^31 to Float64 (or deoptimizes in
 /// the raw-i32 loop shape, which cannot hold a Float64). Non-Int32 operands
 /// deoptimize so the interpreter performs ToInt32/ToNumeric with effects.
+#[allow(clippy::too_many_arguments)]
 fn emit_opt_guarded_int_binary(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     env: &OptEnv<'_>,
     provenance: &mut [OptProvenance],
     depth: usize,
-    operation: &str,
+    operation: crate::ir::ScalarBitwiseOp,
+    lhs: OptPair,
+    rhs: OptPair,
     pc: u32,
     guard: u32,
 ) -> Result<usize, CompileFailure> {
+    use crate::ir::ScalarBitwiseOp;
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
     use rquickjs_core::qjs;
@@ -3177,36 +3806,27 @@ fn emit_opt_guarded_int_binary(
     let output = depth
         .checked_sub(2)
         .ok_or(CompileFailure::InvalidArtifact)?;
-    let lhs = opt_use(builder, env.stack[output]);
-    let rhs = opt_use(builder, env.stack[output + 1]);
-    let lhs_int = opt_tag_is(builder, lhs.tag, qjs::JS_TAG_INT);
-    let rhs_int = opt_tag_is(builder, rhs.tag, qjs::JS_TAG_INT);
-    let both_int = builder.ins().band(lhs_int, rhs_int);
-    let deopt = emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, both_int)?;
     let li = opt_i32(builder, env, lhs);
     let ri = opt_i32(builder, env, rhs);
     let value = match operation {
-        "or" => builder.ins().bor(li, ri),
-        "and" => builder.ins().band(li, ri),
-        "xor" => builder.ins().bxor(li, ri),
-        "shl" | "sar" | "shr" => {
+        ScalarBitwiseOp::Or => builder.ins().bor(li, ri),
+        ScalarBitwiseOp::And => builder.ins().band(li, ri),
+        ScalarBitwiseOp::Xor => builder.ins().bxor(li, ri),
+        ScalarBitwiseOp::Shl | ScalarBitwiseOp::Sar | ScalarBitwiseOp::Shr => {
             let count = builder.ins().band_imm(ri, 31);
             match operation {
-                "shl" => builder.ins().ishl(li, count),
-                "sar" => builder.ins().sshr(li, count),
+                ScalarBitwiseOp::Shl => builder.ins().ishl(li, count),
+                ScalarBitwiseOp::Sar => builder.ins().sshr(li, count),
                 _ => builder.ins().ushr(li, count),
             }
         }
-        _ => return Err(CompileFailure::UnsupportedOpcode),
     };
-    let result = if operation == "shr" {
+    let result = if operation == ScalarBitwiseOp::Shr {
         let fits_int32 = builder
             .ins()
             .icmp_imm(IntCC::SignedGreaterThanOrEqual, value, 0);
         if env.int32_loop {
-            let int_block = builder.create_block();
-            builder.ins().brif(fits_int32, int_block, &[], deopt, &[]);
-            builder.switch_to_block(int_block);
+            emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, fits_int32)?;
             opt_int_pair(builder, env, value)
         } else {
             let int_payload = builder.ins().sextend(types::I64, value);
@@ -5935,6 +6555,9 @@ fn emit_opt_amortized_poll(
     layout: super::helpers::FrameLayout,
     pc: u32,
     budget: cranelift_frontend::Variable,
+    cold_poll: bool,
+    before_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>),
+    after_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>),
 ) {
     use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
     let remaining = builder.use_var(budget);
@@ -5942,10 +6565,17 @@ fn emit_opt_amortized_poll(
     builder.def_var(budget, remaining);
     let due = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
     let poll = builder.create_block();
+    // Preserve the established raw-i32 loop layout. The new mixed scalar
+    // path outlines both polling and its frame revalidation together.
+    if cold_poll {
+        builder.set_cold_block(poll);
+    }
     let continuation = builder.create_block();
     builder.ins().brif(due, poll, &[], continuation, &[]);
     builder.switch_to_block(poll);
+    before_poll(builder);
     emit_opt_poll(builder, frame, sret, signature, pointer_type, layout, pc);
+    after_poll(builder);
     let reset = builder.ins().iconst(types::I64, 64);
     builder.def_var(budget, reset);
     builder.ins().jump(continuation, &[]);
@@ -6019,10 +6649,23 @@ impl Tier2Compiler {
         key: crate::runtime::FunctionKey,
         feedback: &crate::runtime::FeedbackSnapshot,
     ) -> Result<String, CompileFailure> {
-        let ir = OptimizedIr::translate(function, feedback.epoch())?;
         let specialization = NumericSpecialization::from_feedback(function, key, feedback);
+        let ir = specialization.translate(function, feedback.epoch())?;
         lower_optimized_machine(&self.isa, &ir, None, None, &specialization)
             .map(|code| code.clif().to_owned())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn machine_with_feedback_for_test(
+        &self,
+        function: &VerifiedFunction,
+        key: crate::runtime::FunctionKey,
+        feedback: &crate::runtime::FeedbackSnapshot,
+    ) -> Result<String, CompileFailure> {
+        let specialization = NumericSpecialization::from_feedback(function, key, feedback);
+        let ir = specialization.translate(function, feedback.epoch())?;
+        lower_optimized_machine(&self.isa, &ir, None, None, &specialization)
+            .map(|code| code.machine_disassembly().to_owned())
     }
 
     #[cfg(feature = "test-support")]
@@ -6040,6 +6683,22 @@ impl Tier2Compiler {
     }
 
     #[cfg(feature = "test-support")]
+    pub fn lower_with_inline_callee_for_test(
+        &self,
+        function: &VerifiedFunction,
+        key: crate::runtime::FunctionKey,
+        feedback: &crate::runtime::FeedbackSnapshot,
+        call_pc: u32,
+        callee: crate::ir::InlineCallee,
+    ) -> Result<(OptimizedIr, String), CompileFailure> {
+        let mut specialization = NumericSpecialization::from_feedback(function, key, feedback);
+        specialization.inline_callees.insert(call_pc, callee);
+        let ir = specialization.translate(function, feedback.epoch())?;
+        let code = lower_optimized_machine(&self.isa, &ir, None, None, &specialization)?;
+        Ok((ir, code.clif().to_owned()))
+    }
+
+    #[cfg(feature = "test-support")]
     pub fn lower_with_direct_target_for_test(
         &self,
         function: &VerifiedFunction,
@@ -6048,8 +6707,8 @@ impl Tier2Compiler {
         call_pc: u32,
         entry: usize,
     ) -> Result<String, CompileFailure> {
-        let ir = OptimizedIr::translate(function, feedback.epoch())?;
         let mut specialization = NumericSpecialization::from_feedback(function, key, feedback);
+        let ir = specialization.translate(function, feedback.epoch())?;
         let call = feedback
             .call_specialization_at(key, call_pc)
             .ok_or(CompileFailure::InvalidArtifact)?;
@@ -6125,19 +6784,24 @@ impl Tier2Compiler {
         feedback_epoch: u64,
     ) -> Result<OptimizedArtifactMetadata, CompileFailure> {
         let ir = OptimizedIr::translate(function, feedback_epoch)?;
+        Ok(Self::metadata_from_ir(&ir))
+    }
+
+    fn metadata_from_ir(ir: &OptimizedIr) -> OptimizedArtifactMetadata {
         let sites = ir
             .guard_maps()
             .iter()
             .map(|site| (site.shape(), site.map().clone()))
             .collect();
         let metrics = ir.metrics();
-        Ok(OptimizedArtifactMetadata::new(
-            feedback_epoch,
+        OptimizedArtifactMetadata::new(
+            ir.feedback_epoch(),
             sites,
             metrics.boxes_elided,
             metrics.cse_eliminated,
             metrics.dead_nodes_eliminated,
-        ))
+        )
+        .with_inlined_calls(ir.scalar_graph().inlined_calls())
     }
 }
 
@@ -6222,20 +6886,20 @@ impl Compiler for Tier2Compiler {
         {
             return Err(CompileFailure::InvalidArtifact);
         }
-        let metadata = Self::plan(
-            request.snapshot(),
-            request.feedback_epoch().max(self.feedback_epoch),
-        )?;
-        let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
-        let profile = request.side_path_profile();
-        if let Some(profile) = profile {
-            validate_side_path_profile(&request, profile)?;
-        }
+        let epoch = request.feedback_epoch().max(self.feedback_epoch);
         let mut specialization = NumericSpecialization::from_feedback(
             request.snapshot(),
             request.key(),
             request.feedback(),
         );
+        specialization.retain_inline_callees(&request);
+        let ir = specialization.translate(request.snapshot(), epoch)?;
+        specialization.inline_callees.clear();
+        let metadata = Self::metadata_from_ir(&ir);
+        let profile = request.side_path_profile();
+        if let Some(profile) = profile {
+            validate_side_path_profile(&request, profile)?;
+        }
         let mut direct_dependencies = Vec::new();
         for instruction in request.snapshot().instructions() {
             if let Some(target) = request.direct_call_target(instruction.pc()) {
@@ -6300,26 +6964,49 @@ impl Compiler for Tier2Compiler {
         {
             return Err(CompileFailure::InvalidArtifact);
         }
-        let metadata = Self::plan(
-            request.snapshot(),
-            request.feedback_epoch().max(self.feedback_epoch),
-        )?;
-        control.check_ir_bytes(
-            metadata
-                .deopt_sites()
-                .len()
-                .saturating_mul(core::mem::size_of::<DeoptMap>()),
-        )?;
-        let ir = OptimizedIr::translate(request.snapshot(), metadata.feedback_epoch())?;
-        let profile = request.side_path_profile();
-        if let Some(profile) = profile {
-            validate_side_path_profile(&request, profile)?;
-        }
+        let epoch = request.feedback_epoch().max(self.feedback_epoch);
         let mut specialization = NumericSpecialization::from_feedback(
             request.snapshot(),
             request.key(),
             request.feedback(),
         );
+        specialization.retain_inline_callees(&request);
+        let mut ir = specialization.translate(request.snapshot(), epoch)?;
+        specialization.inline_callees.clear();
+        let mut metadata = Self::metadata_from_ir(&ir);
+        let check_budget = |ir: &OptimizedIr, metadata: &OptimizedArtifactMetadata| {
+            control.check_ir_bytes(
+                ir.scalar_graph()
+                    .allocated_bytes()
+                    .saturating_add(ir.scalar_graph().values().len().saturating_mul(
+                        core::mem::size_of::<u8>()
+                            + core::mem::size_of::<Option<crate::ir::ScalarNumericMode>>(),
+                    ))
+                    .saturating_add(
+                        metadata
+                            .deopt_sites()
+                            .len()
+                            .saturating_mul(core::mem::size_of::<DeoptMap>()),
+                    ),
+            )
+        };
+        match check_budget(&ir, &metadata) {
+            Err(CompileFailure::ResourceLimit) if ir.scalar_graph().inlined_calls() != 0 => {
+                // Inlining is optional: retry within the same cancellation and
+                // deadline contract after releasing its graph storage.
+                drop(ir);
+                drop(metadata);
+                control.check()?;
+                ir = specialization.translate(request.snapshot(), epoch)?;
+                metadata = Self::metadata_from_ir(&ir);
+                check_budget(&ir, &metadata)?;
+            }
+            result => result?,
+        }
+        let profile = request.side_path_profile();
+        if let Some(profile) = profile {
+            validate_side_path_profile(&request, profile)?;
+        }
         let mut direct_dependencies = Vec::new();
         for instruction in request.snapshot().instructions() {
             if let Some(target) = request.direct_call_target(instruction.pc()) {
@@ -6333,8 +7020,24 @@ impl Compiler for Tier2Compiler {
                 );
             }
         }
-        let code =
-            lower_optimized_machine(&self.isa, &ir, Some(control), profile, &specialization)?;
+        let code = match lower_optimized_machine(
+            &self.isa,
+            &ir,
+            Some(control),
+            profile,
+            &specialization,
+        ) {
+            Err(CompileFailure::ResourceLimit) if ir.scalar_graph().inlined_calls() != 0 => {
+                drop(ir);
+                drop(metadata);
+                control.check()?;
+                ir = specialization.translate(request.snapshot(), epoch)?;
+                metadata = Self::metadata_from_ir(&ir);
+                check_budget(&ir, &metadata)?;
+                lower_optimized_machine(&self.isa, &ir, Some(control), profile, &specialization)?
+            }
+            result => result?,
+        };
         let direct_signature = (profile.is_none())
             .then(|| request.feedback().bounded_specialization(request.key()))
             .flatten();

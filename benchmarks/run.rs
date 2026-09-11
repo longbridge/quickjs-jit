@@ -41,6 +41,27 @@ struct Workload {
 }
 const WORKLOADS: &[Workload] = &[
     Workload {
+        name: "scalar-control-flow",
+        suite: "rquickjs-jit semantic values",
+        group: "compute",
+        designated: false,
+        file: "scalar-control-flow.js",
+    },
+    Workload {
+        name: "scalar-expressions",
+        suite: "rquickjs-jit semantic values",
+        group: "compute",
+        designated: false,
+        file: "scalar-expressions.js",
+    },
+    Workload {
+        name: "host-compute",
+        suite: "gpui-shell pure JS kernel",
+        group: "compute",
+        designated: false,
+        file: "host-compute.js",
+    },
+    Workload {
         name: "mixed-quotes",
         suite: "rquickjs-jit matrix",
         group: "mixed-quotes",
@@ -1333,6 +1354,25 @@ mod tests {
     }
 
     #[test]
+    fn host_compute_matches_the_archived_render_result() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(include_str!("scripts/host-compute.js"))
+                .unwrap();
+            let result: String = ctx.eval("workload(2000, 0)").unwrap();
+            assert_eq!(result, "layout:165580141");
+            // A zero-batch call must retain the seed; the render itself uses
+            // 100 batches, each restarting the same Fibonacci sequence.
+            assert_eq!(ctx.eval::<i32, _>("layoutKernel(0, 17)").unwrap(), 17);
+            assert_eq!(
+                ctx.eval::<i32, _>("layoutKernel(1, 17)").unwrap(),
+                165580141
+            );
+        });
+    }
+
+    #[test]
     fn bun_external_samples_use_null_native_counters_and_matching_checksums() {
         let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
         if !Command::new(&bun)
@@ -1347,6 +1387,9 @@ mod tests {
             "numeric.js",
             "quickjs-fibonacci.js",
             "mixed-quotes.js",
+            "host-compute.js",
+            "scalar-expressions.js",
+            "scalar-control-flow.js",
             "exceptions-promises-async.js",
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))

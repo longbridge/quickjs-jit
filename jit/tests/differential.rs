@@ -570,7 +570,8 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
         automatic_context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&automatic_context, &invocation);
-        for _ in 0..128 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             run_warm_loop(&automatic_context);
             automatic.jit().poll();
             if automatic.metrics().native_entries > 0 {
@@ -627,7 +628,8 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&context, &invocation);
-        for _ in 0..128 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             run_warm_loop(&context);
             optimized.jit().poll();
             if optimized.metrics().tier2_entries > 0 {

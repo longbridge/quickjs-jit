@@ -1,0 +1,181 @@
+{
+  "runtime_base": "023a2206d20d3cc8aa1646f3ab7fa0ad34fb220d",
+  "candidate_source": "archived source.diff and source/ tree",
+  "candidate_binary_sha256": "1e7ab9858303c1e4258e2774acef72d6eeddcdc12074dcc6f72c1e666ad18aee",
+  "quickjs": "0.15.1, same candidate runtime with JIT detached",
+  "metadata": {
+    "cpu": null,
+    "status": "complete",
+    "pairs": 10,
+    "discarded_processes": 5,
+    "binary_sha256": {
+      "baseline": "6abcdc635c0e8d83dc10a86aca380debb6e302a62b6f0210d7d656a481bdb53a",
+      "candidate": "1e7ab9858303c1e4258e2774acef72d6eeddcdc12074dcc6f72c1e666ad18aee",
+      "previous_inline": "30dd7e0ce72e05d2017f6f32335b0b17d8ee9c80715e40198d50e7856dce3682"
+    },
+    "binaries": {
+      "baseline": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/jit-bench-baseline",
+      "candidate": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/jit-bench-candidate",
+      "previous_inline": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/jit-bench-previous_inline"
+    },
+    "configs": [
+      [
+        "baseline",
+        "automatic"
+      ],
+      [
+        "candidate",
+        "automatic"
+      ],
+      [
+        "previous_inline",
+        "automatic"
+      ],
+      [
+        "baseline",
+        "interpreter"
+      ],
+      [
+        "baseline",
+        "bun"
+      ],
+      [
+        "candidate",
+        "interpreter"
+      ]
+    ],
+    "scripts": {
+      "scalar-control-flow": "cd2a2d54c8be8fd1aab6f6b81a4b12a15d027bb05befae472561504e45fb787d",
+      "scalar-expressions": "248825299f0b5dedddd7f844ca74fbb5f779e08ba95a36b48d776c24c20be7dc",
+      "host-compute": "a09e06b167f1e823de480ea0f9d9d93236ed2565b998e81ac037b6438863bb7a",
+      "mixed-quotes": "1d670a5575e2f01ddf6c583ee0afb1e54e6f39743f4e6592a2dce43a4c04dc44",
+      "quickjs-int-arith": "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e",
+      "quickjs-bitops": "382fab47164d9a4e6bc2080140b41b40a797d967ef605345b07a22daad08e5c7",
+      "quickjs-fibonacci": "96ad95758210c1f9b99c5046a2e062a60d1415dceb58fdbf6173a1a28a1381e1",
+      "numeric": "71fccfc372ce1abc5229e79e390dec06a17b42f6a9f9f7a6747222f2df525f50",
+      "scalar-loop": "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45",
+      "call-heavy": "a6cc40c5fb963f376a4fd35469a59a23b37420c564756319bc6d9c19b35f8fb0",
+      "generic-call-entry": "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40",
+      "generic-call-fallback": "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596",
+      "property-heavy": "10bf81e6d712b8980df2a404be0d0456de92df5afc22ae30e5c086a33dea30cb",
+      "fibonacci-iterative": "7f7c397e968bd4d88a70cd4eaad43e861f456f996bd93a2eecb3d583d31b39f4",
+      "fibonacci-recursive": "19af48c9602fd18c911d1d19daf48a3608209712f1205e7959680a0bf5fde3a0",
+      "collections": "5a28d974119bfa1c1200d4e28daef3c228bb7792e0055ed9f0b164c9a74712c6",
+      "strings-json": "c4ddcd0f2b34ab1b76e5a6f9b09cc0b590a14097a8457f35d1c9c1de4295231e",
+      "calls-closures": "2b72055e0638c572fa69f75622c9308c1e7e220a0bf1b1a772e21e6af68b5b15",
+      "adversarial": "aba1b49b0439f72eacefdaeff63793256c9e9765b7deb202bc25191c4b5b5095",
+      "float64-dense": "35220498f859305ab3444f165af3e004136cc69c71bfb19683bbdce24db0163b",
+      "strings-regexp": "709bb01131e108922bf9843d561c74c2097e58ba2fe42988c079bc3683e50889",
+      "arrays-typed": "a19284a8c4e7613bfdee18131871f5865f62f05e893d188511209426a5b7687b",
+      "objects-polymorphic": "0b43980bee67f25de8a453d191e113cd427f57b730b7f136435ca6ab4f9bbd69",
+      "calls-recursion-closures": "e2c2f192b5915b77c20f852feb6e21b15dbf879507ee851f4da514f9c9300757",
+      "json-codec": "36526695061ee1fa90c7bfee357064af6d28c11af1a00145bf28fe1712e268e3",
+      "map-set-bigint": "2ec0a33414b8c230cfd5028cf1a5aa769b3033da4f797fbb421ea63e1e66b954",
+      "exceptions-promises-async": "78236c5910b41a1e4d57aea88a78fd3941236b999793d605de8976a9cc6f99a1"
+    },
+    "command": [
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/source/benchmarks/paired.py",
+      "--binaries",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/binaries.json",
+      "--scripts",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/source/benchmarks/scripts",
+      "--workloads",
+      "scalar-control-flow,scalar-expressions,host-compute,mixed-quotes,quickjs-int-arith,quickjs-bitops,quickjs-fibonacci,numeric,scalar-loop,call-heavy,generic-call-entry,generic-call-fallback,property-heavy,fibonacci-iterative,fibonacci-recursive,collections,strings-json,calls-closures,adversarial,float64-dense,strings-regexp,arrays-typed,objects-polymorphic,calls-recursion-closures,json-codec,map-set-bigint,exceptions-promises-async",
+      "--pairs",
+      "10",
+      "--output",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-inline-induction-kxi2r1m7/paired"
+    ],
+    "collector_sha256": "554e376384982cf8c338187c51e52398cacc4747160cd3b022648cd0ccc5b37e",
+    "cpu_description": "Apple M3",
+    "governor": "not recorded",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "bun_path": "/Users/jason/.bun/bin/bun",
+    "bun_version": "1.4.0",
+    "bun_sha256": "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf",
+    "bun_flags": [],
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "protocol": "shared-js-fixed-warmup-v2",
+    "throughput_windows": 0,
+    "note": "Latency-only paired candidate diagnostic. Fixed 10-call window; counters include shared driver. Readiness diagnostic is separately conditioned.",
+    "collection_dates": "2026-09-10 through 2026-09-11 Asia/Singapore",
+    "resumption": {
+      "reason": "Frozen source files with preserved old mtimes disappeared in temporary directory; restored byte-identically and verified all frozen source/binary hashes. Last three scenarios restarted from all five discarded processes.",
+      "completed_first_segment_scenarios": 24,
+      "restarted_scenarios": [
+        "json-codec",
+        "map-set-bigint",
+        "exceptions-promises-async"
+      ],
+      "second_metadata": "remaining/metadata.json",
+      "interrupted_evidence": "interrupted/"
+    }
+  },
+  "archive": "benchmarks/results/semantic-inline-induction-paired-arm64.tar.gz",
+  "archive_sha256": "8a04e71a13a16788367e94c50be1167044b8d2befdaddc5da87f3597f6392636",
+  "summary_sha256": "cbeb09ff9f0a550f0178c33972fac1d5665fc507af402dec209462f0872327fe",
+  "verified_archived_files": 2919,
+  "process_records": 2430,
+  "validation": {
+    "passed": 570,
+    "failed": 0,
+    "ignored": 1
+  },
+  "statistically_significant_automatic_regressions": [
+    {
+      "workload": "collections",
+      "comparison": {
+        "speed": 0.9884378939085157,
+        "ci95": [
+          0.9780476256653434,
+          0.9981404919628719
+        ]
+      },
+      "candidate_interpreter_vs_baseline_interpreter": {
+        "speed": 1.0044638050343253,
+        "ci95": [
+          0.9966351303759925,
+          1.0119746714034923
+        ]
+      },
+      "native_entry_range": [
+        0,
+        0
+      ]
+    },
+    {
+      "workload": "arrays-typed",
+      "comparison": {
+        "speed": 0.964143204026693,
+        "ci95": [
+          0.95477143686,
+          0.9755006434267384
+        ]
+      },
+      "candidate_interpreter_vs_baseline_interpreter": {
+        "speed": 0.9959432489944198,
+        "ci95": [
+          0.9771497264974438,
+          1.0128458634170456
+        ]
+      },
+      "native_entry_range": [
+        20,
+        20
+      ]
+    }
+  ],
+  "previous_inline_regressions": [
+    {
+      "workload": "arrays-typed",
+      "comparison": {
+        "speed": 0.9771094768227886,
+        "ci95": [
+          0.9680834473531569,
+          0.9862362961365424
+        ]
+      }
+    }
+  ],
+  "architecture_gate": "incomplete; effect-free inline replay only; general inline recovery, loop shape and Bun gates pending"
+}

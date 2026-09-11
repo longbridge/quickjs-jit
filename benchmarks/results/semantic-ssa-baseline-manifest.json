@@ -1,0 +1,80 @@
+{
+  "runtime_revision": "023a2206d20d3cc8aa1646f3ab7fa0ad34fb220d",
+  "status": "Phase A incomplete; historical Linux host regression unresolved",
+  "historical_archive_sha256": "81943810572ff1ed7df8058d1fba79a57dcb04fe892e852d38d212981edd97f8",
+  "historical_focused_metadata_member": "experiments/final-candidate4/metadata.json",
+  "historical_binary_sha256": {
+    "baseline": "874748d78956fcf71e96224cdc8a2ae8dea3a5dcc0c78a84721d0b3eb5bfb294",
+    "candidate": "b758218bdd1d746083f34693a78d42607bc663086fa3e64e2d2f98384d17c2a3"
+  },
+  "historical_script_sha256_verified": {
+    "generic-call-entry": "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40",
+    "generic-call-fallback": "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596",
+    "arrays-typed": "a19284a8c4e7613bfdee18131871f5865f62f05e893d188511209426a5b7687b",
+    "property-heavy": "10bf81e6d712b8980df2a404be0d0456de92df5afc22ae30e5c086a33dea30cb",
+    "mixed-quotes": "1d670a5575e2f01ddf6c583ee0afb1e54e6f39743f4e6592a2dce43a4c04dc44",
+    "scalar-loop": "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45",
+    "call-heavy": "a6cc40c5fb963f376a4fd35469a59a23b37420c564756319bc6d9c19b35f8fb0"
+  },
+  "new_probe": {
+    "raw_file": "semantic-ssa-baseline-host-compute-arm64.json",
+    "raw_sha256": "f8c1e2164101c5d531a772418d027ca45d2e684bd9d508afcc45af565f25036a",
+    "binary_sha256": "6abcdc635c0e8d83dc10a86aca380debb6e302a62b6f0210d7d656a481bdb53a",
+    "harness_sha256": "1bc9accdba54e5619db545849d8a40c235e23f9b6edf0bdcf575675957ed5799",
+    "script_sha256": "a09e06b167f1e823de480ea0f9d9d93236ed2565b998e81ac037b6438863bb7a",
+    "driver_sha256": "60408ad6d28c58e7f20161c17a5db11fc142685fdd07ec7dbf35d7bb02a8f7c5",
+    "cargo_lock_sha256": "9039743c8aad1496ca735c946c9a3c7a9750a16cba13bdae0a8bd61406c8cccf",
+    "cpu": "Apple M3",
+    "power_policy_observed_after_run": "Battery Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             0\n hibernatefile        /var/vm/sleepimage\n displaysleep         3\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           0\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 1\n networkoversleep     0\n sleep                1\n tcpkeepalive         1\n disksleep            0\n",
+    "cpu_pinning": "none; shared host",
+    "bun_flags": [],
+    "unit": "ms per ten calls",
+    "median_ms": {
+      "automatic": 0.0596665,
+      "bun": 0.190771,
+      "interpreter": 1.1820415,
+      "tier1": 0.573104,
+      "tier2": 0.0597705
+    },
+    "automatic_speed_relative_to": {
+      "interpreter": {
+        "speed": 19.242657066399815,
+        "ci95": [
+          18.42648173117651,
+          19.801827927600222
+        ]
+      },
+      "bun": {
+        "speed": 3.116614565351473,
+        "ci95": [
+          2.970490919597754,
+          3.2275062568673385
+        ]
+      }
+    },
+    "bootstrap": {
+      "resamples": 10000,
+      "seed": 20260910,
+      "method": "paired percentile; sorted indices 250 and 9749; random.choices log speed ratios"
+    },
+    "limitations": [
+      "Diagnostic throughput window set to 1 ms; no throughput claim.",
+      "Five discarded warmup processes per mode are not serialized by existing harness.",
+      "Forced tiers are diagnostics.",
+      "No new previous-revision comparison; no host regression acceptance.",
+      "Two earlier invocations failed before writing evidence: missing required forced modes, then missing size probes. Final invocation completed after building all bins."
+    ]
+  },
+  "paired_baseline": {
+    "archive": "semantic-ssa-baseline-paired-arm64.tar.gz",
+    "archive_sha256": "387081ce7de4ebdd151cc5903ffc45339aacce747d5e71b07698d59b12c60ca4",
+    "summary": "semantic-ssa-baseline-paired-arm64.json",
+    "summary_sha256": "48eb7ca3e8f8ccbd9f8dd7c1401acf5c688aca89a2347d5f68d9196245875954",
+    "old_runtime_revision": "928a8f2f88c3f5d4a8d9ec77d833cb743f1f8032",
+    "current_runtime_revision": "023a2206d20d3cc8aa1646f3ab7fa0ad34fb220d",
+    "processes": 1400,
+    "retained_processes": 1200,
+    "discarded_processes": 200,
+    "scope": "Eight focused pure-JS workloads on Apple M3; native Linux host regression remains unresolved"
+  }
+}

@@ -297,6 +297,37 @@ impl CompileSnapshot {
             )
     }
 
+    /// Storage kept alive by a snapshot clone, including spare vector capacity
+    /// and verifier metadata. Shared storage is charged conservatively to each
+    /// retaining artifact/request; allocator bookkeeping is excluded.
+    pub fn retained_bytes(&self) -> usize {
+        fn vector_bytes<T>(values: &Vec<T>) -> usize {
+            values.capacity().saturating_mul(core::mem::size_of::<T>())
+        }
+        let data = &self.data;
+        let mut bytes =
+            core::mem::size_of::<SnapshotData>().saturating_add(2 * core::mem::size_of::<usize>());
+        for size in [
+            vector_bytes(&data.bytecode),
+            vector_bytes(&data.constants),
+            vector_bytes(&data.exception_map),
+            vector_bytes(&data.source_map),
+            vector_bytes(&data.metadata.osr_points),
+            vector_bytes(&data.metadata.deopt_points),
+        ] {
+            bytes = bytes.saturating_add(size);
+        }
+        for point in &data.metadata.osr_points {
+            bytes = bytes.saturating_add(vector_bytes(&point.live_slots));
+        }
+        for point in &data.metadata.deopt_points {
+            bytes = bytes
+                .saturating_add(vector_bytes(&point.before))
+                .saturating_add(vector_bytes(&point.after));
+        }
+        bytes
+    }
+
     pub fn decode(&self) -> Result<Vec<Instruction>, DecodeError> {
         decode_raw(self.bytecode())
     }

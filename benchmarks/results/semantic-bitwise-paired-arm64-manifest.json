@@ -1,0 +1,172 @@
+{
+  "runtime_base": "023a2206d20d3cc8aa1646f3ab7fa0ad34fb220d",
+  "candidate_source": "archived source.diff and source/ tree",
+  "candidate_binary_sha256": "081879eab797ed3c5ce3ce7482777b97eedbed3522a69ac4df09027ac71eb00e",
+  "quickjs": "0.15.1, same candidate runtime with JIT detached",
+  "metadata": {
+    "cpu": null,
+    "status": "complete",
+    "pairs": 30,
+    "discarded_processes": 5,
+    "binary_sha256": {
+      "baseline": "6abcdc635c0e8d83dc10a86aca380debb6e302a62b6f0210d7d656a481bdb53a",
+      "candidate": "081879eab797ed3c5ce3ce7482777b97eedbed3522a69ac4df09027ac71eb00e"
+    },
+    "binaries": {
+      "baseline": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/jit-bench-baseline",
+      "candidate": "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/jit-bench-candidate"
+    },
+    "configs": [
+      [
+        "baseline",
+        "automatic"
+      ],
+      [
+        "candidate",
+        "automatic"
+      ],
+      [
+        "baseline",
+        "interpreter"
+      ],
+      [
+        "baseline",
+        "bun"
+      ],
+      [
+        "candidate",
+        "interpreter"
+      ]
+    ],
+    "scripts": {
+      "scalar-control-flow": "cd2a2d54c8be8fd1aab6f6b81a4b12a15d027bb05befae472561504e45fb787d",
+      "scalar-expressions": "248825299f0b5dedddd7f844ca74fbb5f779e08ba95a36b48d776c24c20be7dc",
+      "host-compute": "a09e06b167f1e823de480ea0f9d9d93236ed2565b998e81ac037b6438863bb7a",
+      "mixed-quotes": "1d670a5575e2f01ddf6c583ee0afb1e54e6f39743f4e6592a2dce43a4c04dc44",
+      "quickjs-int-arith": "483eb8091ff83632c1c58c91554a07dc180d95e5b9374b67002f83cc10632d2e",
+      "quickjs-bitops": "382fab47164d9a4e6bc2080140b41b40a797d967ef605345b07a22daad08e5c7",
+      "quickjs-fibonacci": "96ad95758210c1f9b99c5046a2e062a60d1415dceb58fdbf6173a1a28a1381e1",
+      "numeric": "71fccfc372ce1abc5229e79e390dec06a17b42f6a9f9f7a6747222f2df525f50",
+      "scalar-loop": "db9037d16bf51a21a033ddc5901eac1a70a80c51628a5a5a937327faf0ed8a45",
+      "call-heavy": "a6cc40c5fb963f376a4fd35469a59a23b37420c564756319bc6d9c19b35f8fb0",
+      "generic-call-entry": "1eb475e3de0557bda01a5166e4d782d826f227370c6d4f72e1cb92e330a2cc40",
+      "generic-call-fallback": "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596",
+      "property-heavy": "10bf81e6d712b8980df2a404be0d0456de92df5afc22ae30e5c086a33dea30cb",
+      "fibonacci-iterative": "7f7c397e968bd4d88a70cd4eaad43e861f456f996bd93a2eecb3d583d31b39f4",
+      "fibonacci-recursive": "19af48c9602fd18c911d1d19daf48a3608209712f1205e7959680a0bf5fde3a0",
+      "collections": "5a28d974119bfa1c1200d4e28daef3c228bb7792e0055ed9f0b164c9a74712c6",
+      "strings-json": "c4ddcd0f2b34ab1b76e5a6f9b09cc0b590a14097a8457f35d1c9c1de4295231e",
+      "calls-closures": "2b72055e0638c572fa69f75622c9308c1e7e220a0bf1b1a772e21e6af68b5b15",
+      "adversarial": "aba1b49b0439f72eacefdaeff63793256c9e9765b7deb202bc25191c4b5b5095",
+      "float64-dense": "35220498f859305ab3444f165af3e004136cc69c71bfb19683bbdce24db0163b",
+      "strings-regexp": "709bb01131e108922bf9843d561c74c2097e58ba2fe42988c079bc3683e50889",
+      "arrays-typed": "a19284a8c4e7613bfdee18131871f5865f62f05e893d188511209426a5b7687b",
+      "objects-polymorphic": "0b43980bee67f25de8a453d191e113cd427f57b730b7f136435ca6ab4f9bbd69",
+      "calls-recursion-closures": "e2c2f192b5915b77c20f852feb6e21b15dbf879507ee851f4da514f9c9300757",
+      "json-codec": "36526695061ee1fa90c7bfee357064af6d28c11af1a00145bf28fe1712e268e3",
+      "map-set-bigint": "2ec0a33414b8c230cfd5028cf1a5aa769b3033da4f797fbb421ea63e1e66b954",
+      "exceptions-promises-async": "78236c5910b41a1e4d57aea88a78fd3941236b999793d605de8976a9cc6f99a1"
+    },
+    "command": [
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/source/benchmarks/paired.py",
+      "--binaries",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/full-binaries.json",
+      "--scripts",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/source/benchmarks/scripts",
+      "--workloads",
+      "scalar-control-flow,scalar-expressions,host-compute,mixed-quotes,quickjs-int-arith,quickjs-bitops,quickjs-fibonacci,numeric,scalar-loop,call-heavy,generic-call-entry,generic-call-fallback,property-heavy,fibonacci-iterative,fibonacci-recursive,collections,strings-json,calls-closures,adversarial,float64-dense,strings-regexp,arrays-typed,objects-polymorphic,calls-recursion-closures,json-codec,map-set-bigint,exceptions-promises-async",
+      "--pairs",
+      "30",
+      "--output",
+      "/var/folders/qb/nbp63bpn7lg80gr25zzk9s1c0000gp/T/quickjs-semantic-bitwise-odlio_le/paired"
+    ],
+    "collector_sha256": "554e376384982cf8c338187c51e52398cacc4747160cd3b022648cd0ccc5b37e",
+    "cpu_description": "Apple M3",
+    "governor": "not recorded",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "bun_path": "/Users/jason/.bun/bin/bun",
+    "bun_version": "1.4.0",
+    "bun_sha256": "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf",
+    "bun_flags": [],
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "protocol": "shared-js-fixed-warmup-v2",
+    "throughput_windows": 0,
+    "note": "Latency-only paired candidate diagnostic. Fixed 10-call window; counters include shared driver. Readiness diagnostic is separately conditioned."
+  },
+  "archive": "benchmarks/results/semantic-bitwise-paired-arm64.tar.gz",
+  "archive_sha256": "d4d1bf974b5f8a94904c8c355acff3f85ee9ea9b720b31cf5104d1c583abf804",
+  "summary_sha256": "00301b9cb3eb99ac473baf8b5ea8af8639a3be2f2fe4a75c2ef9d6bba1c6044b",
+  "verified_archived_files": 4822,
+  "process_records": 4725,
+  "validation": {
+    "passed": 554,
+    "failed": 0,
+    "ignored": 1
+  },
+  "statistically_significant_automatic_regressions": [
+    {
+      "workload": "call-heavy",
+      "comparison": {
+        "speed": 0.962091015540121,
+        "ci95": [
+          0.9413711704159551,
+          0.9877153653161713
+        ]
+      },
+      "candidate_interpreter_vs_baseline_interpreter": {
+        "speed": 1.018829646931702,
+        "ci95": [
+          0.9699455988162408,
+          1.0855328723856636
+        ]
+      },
+      "native_entry_range": [
+        10,
+        10
+      ]
+    },
+    {
+      "workload": "generic-call-fallback",
+      "comparison": {
+        "speed": 0.9818439468181228,
+        "ci95": [
+          0.9631195633640326,
+          0.9988253858419931
+        ]
+      },
+      "candidate_interpreter_vs_baseline_interpreter": {
+        "speed": 1.0150616831856483,
+        "ci95": [
+          0.9783995159447572,
+          1.0655609288185524
+        ]
+      },
+      "native_entry_range": [
+        20000,
+        20000
+      ]
+    },
+    {
+      "workload": "adversarial",
+      "comparison": {
+        "speed": 0.8438667694898025,
+        "ci95": [
+          0.7290383796302279,
+          0.9713866731885011
+        ]
+      },
+      "candidate_interpreter_vs_baseline_interpreter": {
+        "speed": 0.9975033072424347,
+        "ci95": [
+          0.8423312299791065,
+          1.1742317706265573
+        ]
+      },
+      "native_entry_range": [
+        0,
+        0
+      ]
+    }
+  ],
+  "architecture_gate": "incomplete; numeric SSA candidate only"
+}

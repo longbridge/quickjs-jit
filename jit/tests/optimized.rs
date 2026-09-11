@@ -1167,8 +1167,127 @@ fn production_cse_keys_exact_ssa_operands_and_respects_frame_writes() {
     );
 }
 
+#[test]
+fn semantic_values_eliminate_repeated_nested_numeric_operations() {
+    let fixture =
+        SnapshotFixture::compile("(function(a,b,c,d){return ((a+b)*(c+d))+((a+b)*(c+d))})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let clif = Tier2Compiler::host(103)
+        .lower_for_test(&verified, 103)
+        .unwrap();
+    assert_eq!(clif.matches("fmul").count(), 1, "{clif}");
+    let ir = OptimizedIr::translate(&verified, 103).unwrap();
+    let graph = ir.scalar_graph();
+    assert!(graph.values().iter().any(|value| matches!(
+        value,
+        rquickjs_jit::ir::ScalarValue::Binary {
+            op: rquickjs_jit::ir::ScalarBinaryOp::Mul, lhs, rhs, ..
+        } if matches!(graph.values()[lhs.index()], rquickjs_jit::ir::ScalarValue::Binary { .. })
+            && matches!(graph.values()[rhs.index()], rquickjs_jit::ir::ScalarValue::Binary { .. })
+    )));
+}
+
+#[test]
+fn semantic_values_preserve_operand_order_and_effect_boundaries() {
+    for source in [
+        "(function(a,b,c,d){return ((a-b)*(c-d))+((b-a)*(d-c))})",
+        "(function(a,b,c,d){let first=(a+b)*(c+d);a=b;return first+(a+b)*(c+d)})",
+        "(function(a,b,c,d,other){return ((a+b)*(c+d))+other()+((a+b)*(c+d))})",
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 104).unwrap();
+        assert_eq!(
+            ir.nodes()
+                .iter()
+                .filter(|node| matches!(
+                    node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul"
+                ))
+                .count(),
+            2,
+            "{source}: {:#?}",
+            ir.nodes()
+        );
+    }
+}
+
+#[test]
+fn semantic_values_share_exact_integer_constants_in_expression_trees() {
+    let fixture = SnapshotFixture::compile("(function(a,b){return ((a+1)*(b+2))+((a+1)*(b+2))})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let clif = Tier2Compiler::host(105)
+        .lower_for_test(&verified, 105)
+        .unwrap();
+    assert_eq!(clif.matches("fmul").count(), 1);
+}
+
 #[cfg(all(
-    target_os = "linux",
+    target_os = "macos",
+    target_endian = "little",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
+#[test]
+fn semantic_values_execute_on_macos_and_deopt_before_object_coercion() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    for (expression, expected, must_deopt) in [
+        ("String(target(2147483647,1,1,0))", "4294967296", false),
+        ("String(Object.is(target(-0,-0,1,0), -0))", "true", false),
+        ("String(Number.isNaN(target(NaN,1,1,0)))", "true", false),
+        (
+            "let hits=0; let a={valueOf(){hits++;return 1}}; target(a,2,3,4)+':'+hits",
+            "42:2",
+            true,
+        ),
+    ] {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .call_threshold(2)
+                .force_optimized_for_test(true)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context
+            .with(|ctx| {
+                ctx.eval::<(), _>("function target(a,b,c,d){return ((a+b)*(c+d))+((a+b)*(c+d))}")
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+            assert_eq!(
+                context
+                    .with(|ctx| ctx.eval::<i32, _>("target(1,2,3,4)"))
+                    .unwrap(),
+                42
+            );
+            jit.poll();
+        }
+        let before = jit.metrics();
+        assert!(before.tier2_entries >= 10, "{before:?}");
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<String, _>(expression))
+                .unwrap(),
+            expected,
+            "{expression}"
+        );
+        let after = jit.metrics();
+        assert!(
+            after.tier2_entries > before.tier2_entries,
+            "{expression}: {after:?}"
+        );
+        if must_deopt {
+            assert!(after.deopts > before.deopts, "{expression}: {after:?}");
+        }
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1418,7 +1537,7 @@ fn production_tier2_truthiness_preserves_negative_zero_and_nan_without_fallback(
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1495,7 +1614,7 @@ fn production_feedback_installs_and_executes_the_int32_add_specialization() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1592,7 +1711,7 @@ fn production_tier2_caller_executes_a_monomorphic_compiled_callee() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1668,7 +1787,7 @@ fn production_tier2_waits_for_and_calls_a_direct_callee() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1725,7 +1844,7 @@ fn production_tier2_direct_call_checks_object_before_payload() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1832,7 +1951,7 @@ fn production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch()
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1900,7 +2019,7 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1968,7 +2087,7 @@ fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -2029,7 +2148,7 @@ fn iterative_fibonacci_enters_tier2_with_multi_local_loop_phis() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -2087,7 +2206,7 @@ fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -2168,7 +2287,7 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -2251,7 +2370,7 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -2729,7 +2848,8 @@ fn comparisons_lower_to_native_compares_without_helper_calls() {
         0,
         0,
     );
-    assert!(lte_immediate.contains("fcmp"), "{lte_immediate}");
+    assert!(lte_immediate.contains("icmp"), "{lte_immediate}");
+    assert!(!lte_immediate.contains("fcmp"), "{lte_immediate}");
     assert!(
         !lte_immediate.contains("call_indirect"),
         "`<=` must not call CompareSlow: {lte_immediate}"
@@ -3856,7 +3976,7 @@ fn int_arith_kernel_inner_loop_is_an_unboxed_int32_loop_around_native_calls() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -4022,6 +4142,14 @@ fn storing_an_unproven_alias_into_a_local_guards_the_tag_before_the_spill() {
 // Counted-loop increments whose overflow exit is provably unnecessary.
 
 fn int32_loop_clif(source: &str) -> String {
+    int32_loop_code(source, false)
+}
+
+fn int32_loop_code(source: &str, machine: bool) -> String {
+    scalar_code_with_arguments(source, machine, &[ObservedType::Int32, ObservedType::Int32])
+}
+
+fn scalar_code_with_arguments(source: &str, machine: bool, arguments: &[ObservedType]) -> String {
     let fixture = SnapshotFixture::compile(source);
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let key = FunctionKey::new(
@@ -4036,7 +4164,7 @@ fn int32_loop_clif(source: &str) -> String {
         .pc();
     let mut feedback = FeedbackTable::new(64, 2);
     for _ in 0..32 {
-        feedback.observe_call(key, &[ObservedType::Int32, ObservedType::Int32]);
+        feedback.observe_call(key, arguments);
         for instruction in verified.instructions().iter().filter(|instruction| {
             matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
         }) {
@@ -4051,9 +4179,109 @@ fn int32_loop_clif(source: &str) -> String {
         }
         feedback.observe_return(key, return_pc, ObservedType::Int32);
     }
-    Tier2Compiler::host(181)
-        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(181))
-        .unwrap()
+    let compiler = Tier2Compiler::host(181);
+    if machine {
+        compiler
+            .machine_with_feedback_for_test(&verified, key, &feedback.snapshot(181))
+            .unwrap()
+    } else {
+        compiler
+            .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(181))
+            .unwrap()
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn mixed_entry_facts_remove_numeric_operand_checks() {
+    let machine = scalar_code_with_arguments(
+        "(function(a,b,object){return a+b})",
+        true,
+        &[
+            ObservedType::Int32,
+            ObservedType::Int32,
+            ObservedType::Object,
+        ],
+    );
+    assert!(
+        machine
+            .lines()
+            .filter(|line| line.trim().starts_with("cbnz "))
+            .count()
+            <= 2,
+        "mixed entry guards already prove both numeric operands: {machine}"
+    );
+    assert!(
+        machine.contains("adds "),
+        "overflow must still be checked: {machine}"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn int32_entry_facts_remove_repeated_leaf_operand_checks() {
+    let machine = int32_loop_code("(function(a,b){return a+b})", true);
+    assert!(
+        machine
+            .lines()
+            .filter(|line| line.trim().starts_with("subs xzr,"))
+            .count()
+            <= 2,
+        "the entry guard already checks both argument tags: {machine}"
+    );
+    assert!(
+        machine
+            .lines()
+            .filter(|line| line.trim().starts_with("cbnz "))
+            .count()
+            <= 2,
+        "only the entry and overflow branches are needed: {machine}"
+    );
+    assert!(
+        machine.contains("adds "),
+        "overflow checking remains: {machine}"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn cyclic_int32_phi_facts_remove_number_tag_tests_from_machine_loop() {
+    for source in [
+        "(function(n,z){let s=z;for(let i=z;i<n;i=i+1)s=s+i;return s})",
+        "(function(n,z){let s=z;for(let i=z;i<n;i++)s=s+i;return s})",
+        "(function(n,z){let s=z;for(let i=n;i>z;i--)s=s+i;return s})",
+        "(function(n,z){let s=z;for(let i=z;i<n;i++)s=(s+(i&1023))|0;return s})",
+    ] {
+        let machine = int32_loop_code(source, true);
+        assert!(!machine.is_empty());
+        assert!(
+            !machine.lines().collect::<Vec<_>>().windows(3).any(|lines| {
+                lines[0].trim().starts_with("movz w")
+                    && lines[0].ends_with(", #1")
+                    && lines[1].trim().starts_with("uxtb w")
+                    && lines[2].trim().starts_with("cbnz x")
+            }),
+            "proven numeric guards must not leave constant-true branches: {machine}"
+        );
+        assert!(
+            machine
+                .lines()
+                .filter(|line| line.trim().starts_with("subs xzr,"))
+                .count()
+                <= 3,
+            "only the two entry tags and the poll budget need 64-bit comparisons: {machine}"
+        );
+        assert!(
+            !machine
+                .lines()
+                .any(|line| line.trim().starts_with("subs ") && line.ends_with(", #8")),
+            "an Int32-only sum loop must not test for JS_TAG_FLOAT64: {machine}"
+        );
+        assert!(
+            machine.contains("adds "),
+            "checked integer arithmetic must remain: {machine}"
+        );
+    }
 }
 
 #[test]
@@ -4198,7 +4426,7 @@ fn bool_argument_compiles_a_tagged_tier2_artifact_without_direct_entry() {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -4288,4 +4516,1573 @@ fn bool_argument_tagged_tier2_preserves_branches_and_type_change_deopt() {
     });
     assert!(jit.metrics().deopts > after.deopts);
     assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+}
+
+#[test]
+fn semantic_values_merge_frame_assignments_at_a_diamond() {
+    use rquickjs_jit::ir::{FrameSlot, ScalarValue};
+    let fixture =
+        SnapshotFixture::compile("(function(flag,a,b){let x;if(flag)x=a+1;else x=b+2;return x*3})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 201).unwrap();
+    let graph = ir.scalar_graph();
+    assert!(
+        graph.values().iter().any(|value| {
+            let ScalarValue::Phi {
+                slot: FrameSlot::Local(_),
+                inputs,
+                ..
+            } = value
+            else {
+                return false;
+            };
+            inputs.len() == 2
+                && inputs.iter().all(|input| {
+                    matches!(
+                        graph.values()[input.value.index()],
+                        ScalarValue::Binary { .. }
+                    )
+                })
+        }),
+        "{:#?}",
+        graph.values()
+    );
+}
+
+#[test]
+fn semantic_values_link_stack_joins_to_predecessor_results() {
+    use rquickjs_jit::ir::{FrameSlot, ScalarValue};
+    let fixture = SnapshotFixture::compile("(function(flag,a,b){return (flag ? a+1 : b+2)*3})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 202).unwrap();
+    let graph = ir.scalar_graph();
+    assert!(graph.values().iter().any(|value| matches!(value,
+        ScalarValue::Phi { slot: FrameSlot::Stack(0), inputs, .. } if inputs.len() == 2
+            && inputs.iter().all(|input| matches!(graph.values()[input.value.index()], ScalarValue::Binary { .. }))
+    )), "{:#?}", graph.values());
+}
+
+#[test]
+fn semantic_values_preserve_the_initial_entry_of_a_loop_at_pc_zero() {
+    use rquickjs_jit::ir::{FrameSlot, ScalarValue};
+    let fixture = SnapshotFixture::compile("(function(n){while(n>0)n=n-1;return n})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 203).unwrap();
+    assert!(ir
+        .blocks()
+        .iter()
+        .any(|block| block.start_pc() == 0 && block.is_loop_header()));
+    let graph = ir.scalar_graph();
+    assert!(graph.values().iter().any(|value| matches!(value,
+        ScalarValue::Phi { block_pc: 0, slot: FrameSlot::Argument(0), inputs }
+            if inputs.iter().any(|input| input.predecessor.is_none())
+                && inputs.iter().any(|input| input.predecessor.is_some()
+                    && matches!(graph.values()[input.value.index()], ScalarValue::Binary { .. }))
+    )), "{:#?}", graph.values());
+}
+
+#[test]
+fn semantic_values_capture_exact_pre_effect_stack_and_frame_assignments() {
+    use rquickjs_jit::ir::ScalarValue;
+    let fixture = SnapshotFixture::compile("(function(a,b){let x=a+1;return x*b})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 204).unwrap();
+    let node = ir
+        .nodes()
+        .iter()
+        .find(|node| {
+            matches!(node.kind(),
+        OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul")
+        })
+        .unwrap();
+    let graph = ir.scalar_graph();
+    let state = graph.frame_state_for_node(node.id()).unwrap();
+    assert_eq!(state.pc, node.pc());
+    assert_eq!(state.arguments.len(), 2);
+    assert_eq!(state.stack.len(), 2);
+    assert!(
+        matches!(
+            graph.values()[state.stack[0].index()],
+            ScalarValue::Binary { .. }
+        ),
+        "{state:#?}\n{:#?}\n{:#?}",
+        graph.values(),
+        ir.nodes()
+    );
+    assert!(state.locals.contains(&state.stack[0]));
+    assert_eq!(state.stack[1], state.arguments[1]);
+    assert_eq!(
+        graph.binary_operands(node.id()),
+        Some((state.stack[0], state.stack[1]))
+    );
+}
+
+#[test]
+fn semantic_frame_states_distinguish_entry_assignment_and_call_effects() {
+    use rquickjs_jit::ir::{FrameSlot, ScalarValue};
+    for (source, check) in [
+        ("(function(n){while(n>0)n=n-1;return n})", 0),
+        ("(function(a,b){return (a=b)+a})", 1),
+        ("(function(a,f){return a+f()})", 2),
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 205).unwrap();
+        let graph = ir.scalar_graph();
+        if check == 0 {
+            let state = graph.frame_state_for_node(ir.nodes()[0].id()).unwrap();
+            assert!(matches!(
+                graph.values()[state.arguments[0].index()],
+                ScalarValue::Input {
+                    block_pc: 0,
+                    slot: FrameSlot::Argument(0)
+                }
+            ));
+            assert!(state.stack.is_empty());
+            continue;
+        }
+        let add = ir
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(node.kind(),
+            OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "add")
+            })
+            .unwrap();
+        let state = graph.frame_state_for_node(add.id()).unwrap();
+        assert_eq!(state.stack.len(), 2);
+        if check == 1 {
+            assert_eq!(state.arguments[0], state.arguments[1]);
+            assert_eq!(state.stack.as_ref(), &[state.arguments[1]; 2]);
+        } else {
+            // A value already on the operand stack survives a call, while
+            // frame slots are reloaded after its possible reentrant effects.
+            assert!(matches!(
+                graph.values()[state.stack[0].index()],
+                ScalarValue::Input {
+                    slot: FrameSlot::Argument(0),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                graph.values()[state.arguments[0].index()],
+                ScalarValue::FrameRead {
+                    slot: FrameSlot::Argument(0),
+                    ..
+                }
+            ));
+            assert_ne!(state.stack[0], state.arguments[0]);
+        }
+    }
+}
+
+#[test]
+fn semantic_calls_have_explicit_operands_and_recovery_state() {
+    use rquickjs_jit::ir::ScalarValue;
+    for (source, argc, method) in [
+        ("(function(f){return f()})", 0, false),
+        ("(function(f,a){return f(a)})", 1, false),
+        ("(function(f,a,b){return f(a,b)})", 2, false),
+        ("(function(f,a,b,c){return f(a,b,c)})", 3, false),
+        ("(function(f,a,b,c,d){return f(a,b,c,d)})", 4, false),
+        ("(function(o,a,b){return o.method(a,b)})", 2, true),
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 205).unwrap();
+        let graph = ir.scalar_graph();
+        let call = ir
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(node.kind(),
+            OptimizedNodeKind::Bytecode { opcode } if opcode.starts_with("call"))
+            })
+            .unwrap();
+        let result = graph.value_for_node(call.id()).unwrap();
+        assert!(
+            !matches!(graph.values()[result.index()], ScalarValue::Opaque),
+            "call operands must be modeled in SSA: {source}"
+        );
+        let state = graph.frame_state_for_node(call.id()).unwrap();
+        let operands = graph.call(call.id()).unwrap();
+        assert_eq!(operands.frame_state_node, call.id());
+        assert_eq!(operands.arguments.len(), argc);
+        assert_eq!(operands.receiver.is_some(), method);
+        assert_eq!(state.stack.len(), argc + 1 + usize::from(method));
+        assert_eq!(state.stack[usize::from(method)], operands.target);
+        assert_eq!(
+            &state.stack[1 + usize::from(method)..],
+            operands.arguments.as_ref()
+        );
+        assert_eq!(operands.arguments.as_ref(), &state.arguments[1..]);
+        if method {
+            assert_eq!(operands.receiver, Some(state.stack[0]));
+        } else {
+            assert_eq!(operands.target, state.arguments[0]);
+        }
+        assert!(
+            !state.stack.contains(&result),
+            "a call produces a fresh value"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn semantic_frame_state_deopt_preserves_phi_and_parameter_assignment() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function target(a,b,flag){let x;if(flag)x=a;else x=b;return x*(a=b)+a}",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("target(2,3,1)"))
+                .unwrap(),
+            9
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10, "{before:?}");
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("target(2147483647,2,1)"))
+            .unwrap(),
+        4294967296.0
+    );
+    let overflow = jit.metrics();
+    // Argument tags still match the warm calls. Overflow must exit from
+    // arithmetic after the Phi and assignment, not an entry type guard.
+    assert!(
+        overflow.tier2_entries > before.tier2_entries,
+        "{overflow:?}"
+    );
+    assert!(overflow.deopts > before.deopts, "{overflow:?}");
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<String, _>(
+                "let hits=0;let value={valueOf(){hits++;return 3}};target(7,value,1)+':'+hits"
+            ))
+            .unwrap(),
+        "24:2"
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert!(after.deopts > before.deopts, "{after:?}");
+}
+
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    target_endian = "little",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
+#[test]
+fn semantic_values_execute_both_phi_edges_and_loop_entry_natively() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    for (source, warm, expected_warm, probe, expected_probe) in [
+        (
+            "function target(flag,a,b){let x;if(flag)x=a+1;else x=b+2;return x*3}",
+            "target(1,2,4)",
+            9,
+            "target(0,2,4)",
+            18,
+        ),
+        (
+            "function target(flag,a,b){return (flag?a+1:b+2)*3}",
+            "target(1,2,4)",
+            9,
+            "target(0,2,4)",
+            18,
+        ),
+        (
+            "function target(n){while(n>0)n=n-1;return n}",
+            "target(10)",
+            0,
+            "target(-7)",
+            -7,
+        ),
+        (
+            "function target(n,a,b){while(n>0){let t=a;a=b;b=t;n--}return a*10+b}",
+            "target(4,2,7)",
+            27,
+            "target(3,2,7)",
+            72,
+        ),
+        (
+            "function target(a,b){return (a=b)+a}",
+            "target(2,7)",
+            14,
+            "target(9,3)",
+            6,
+        ),
+        (
+            "function target(a,b){let x=a;return x++ + x*b}",
+            "target(2,7)",
+            23,
+            "target(9,3)",
+            39,
+        ),
+        (
+            "function target(a,b){let x;return (x=(a=b))+x+a}",
+            "target(2,7)",
+            21,
+            "target(9,3)",
+            9,
+        ),
+    ] {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .call_threshold(2)
+                .force_optimized_for_test(true)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+            assert_eq!(
+                context.with(|ctx| ctx.eval::<i32, _>(warm)).unwrap(),
+                expected_warm
+            );
+            jit.poll();
+        }
+        let before = jit.metrics();
+        assert!(before.tier2_entries >= 10, "{source}: {before:?}");
+        assert_eq!(
+            context.with(|ctx| ctx.eval::<i32, _>(probe)).unwrap(),
+            expected_probe
+        );
+        let after = jit.metrics();
+        assert!(
+            after.tier2_entries > before.tier2_entries,
+            "{source}: {after:?}"
+        );
+        assert_eq!(after.deopts, before.deopts, "{source}: {after:?}");
+    }
+}
+
+#[test]
+fn semantic_numeric_modes_are_selected_before_value_numbering() {
+    use rquickjs_jit::ir::{ScalarBinaryOp, ScalarNumericMode, ScalarValue};
+    let fixture = SnapshotFixture::compile("(function(a,b){return (a*b)+(a*b)+(a*b)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let pcs = verified
+        .instructions()
+        .iter()
+        .filter(|instruction| instruction.opcode().name() == "mul")
+        .map(|instruction| instruction.pc())
+        .collect::<Vec<_>>();
+    assert_eq!(pcs.len(), 3);
+    let modes = [
+        ScalarNumericMode::Int32,
+        ScalarNumericMode::Float64,
+        ScalarNumericMode::Number,
+    ];
+    let feedback = pcs.iter().copied().zip(modes).collect();
+    let ir = OptimizedIr::translate_with_numeric_modes(&verified, 206, &feedback).unwrap();
+    let products = ir
+        .scalar_graph()
+        .values()
+        .iter()
+        .filter_map(|value| match value {
+            ScalarValue::Binary {
+                op: ScalarBinaryOp::Mul,
+                mode,
+                lhs,
+                rhs,
+            } => Some((*mode, *lhs, *rhs)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        products.len(),
+        3,
+        "distinct checked contracts cannot share a producer"
+    );
+    assert_eq!(
+        products.iter().map(|product| product.0).collect::<Vec<_>>(),
+        modes
+    );
+    for product in &products[1..] {
+        assert_eq!((product.1, product.2), (products[0].1, products[0].2));
+    }
+    for (pc, mode) in pcs.into_iter().zip(modes) {
+        let node = ir.nodes().iter().find(|node| node.pc() == pc).unwrap();
+        assert_eq!(
+            ir.scalar_graph().binary_operation(node.id()),
+            Some((ScalarBinaryOp::Mul, mode))
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn semantic_float_mode_checks_a_phi_with_an_unobserved_integer_edge() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>("function target(flag,a,b){let x;if(flag)x=a;else x=1;return x+b}")
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<f64, _>("target(1,1.25,2.5)"))
+                .unwrap(),
+            3.75
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10, "{before:?}");
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("target(0,1.25,2.5)"))
+            .unwrap(),
+        3.5
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert!(after.deopts > before.deopts, "{after:?}");
+}
+
+#[test]
+fn semantic_checks_eliminate_repeated_value_checks_but_not_frame_reloads() {
+    use rquickjs_jit::ir::ScalarNumericMode;
+    for mode in [
+        ScalarNumericMode::Number,
+        ScalarNumericMode::Int32,
+        ScalarNumericMode::Float64,
+    ] {
+        let fixture = SnapshotFixture::compile("(function(a,b){return (a+b)*(a-b)})");
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let modes = verified
+            .instructions()
+            .iter()
+            .map(|instruction| (instruction.pc(), mode))
+            .collect();
+        let ir = OptimizedIr::translate_with_numeric_modes(&verified, 207, &modes).unwrap();
+        let checks = ir
+            .nodes()
+            .iter()
+            .flat_map(|node| ir.scalar_graph().checks_for_node(node.id()))
+            .collect::<Vec<_>>();
+        assert_eq!(checks.len(), 6);
+        assert_eq!(checks.iter().filter(|check| !check.eliminated).count(), 2);
+        assert_eq!(ir.scalar_graph().eliminated_type_checks(), 4);
+        for check in checks {
+            assert!(ir
+                .scalar_graph()
+                .frame_state_for_node(check.frame_state_node)
+                .is_some());
+            assert_eq!(check.mode, mode);
+        }
+    }
+    let fixture = SnapshotFixture::compile("(function(a,f){let x=a+1;f();return a*2+x})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 208).unwrap();
+    let mul = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul")).unwrap();
+    let checks = ir.scalar_graph().checks_for_node(mul.id());
+    assert_eq!(checks.len(), 2);
+    assert!(
+        !checks[0].eliminated,
+        "the call's frame reload requires a fresh check"
+    );
+    assert!(checks[1].eliminated, "the constant 2 is already Int32");
+}
+
+#[test]
+fn semantic_checks_keep_stronger_contracts_and_unproven_cfg_inputs() {
+    use rquickjs_jit::ir::ScalarNumericMode;
+    let fixture = SnapshotFixture::compile("(function(a,b){return (a+b)*(a-b)})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let sub_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "sub")
+        .unwrap()
+        .pc();
+    let modes = [(sub_pc, ScalarNumericMode::Float64)].into_iter().collect();
+    let ir = OptimizedIr::translate_with_numeric_modes(&verified, 209, &modes).unwrap();
+    let sub = ir.nodes().iter().find(|node| node.pc() == sub_pc).unwrap();
+    assert!(
+        ir.scalar_graph()
+            .checks_for_node(sub.id())
+            .iter()
+            .all(|check| !check.eliminated),
+        "Number observations do not prove Float64 payloads"
+    );
+
+    let fixture = SnapshotFixture::compile(
+        "(function(flag,a,b){let x;if(flag)x=a+b;else x=a-b;return a*b+x})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 210).unwrap();
+    let mul = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul")).unwrap();
+    let checks = ir.scalar_graph().checks_for_node(mul.id());
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|check| check.eliminated),
+        "both predecessor exits prove Number for each argument"
+    );
+}
+
+#[test]
+fn semantic_cfg_facts_require_all_edges_and_preserve_initial_loop_inputs() {
+    for source in [
+        "(function(flag,a,b){let x;if(flag)x=a+b;else x=1;return a*b+x})",
+        "(function(flag,a,b,f){let x;if(flag){x=a+b;f()}else x=a-b;return a*b+x})",
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 211).unwrap();
+        let mul = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul")).unwrap();
+        let checks = ir.scalar_graph().checks_for_node(mul.id());
+        assert_eq!(checks.len(), 2);
+        assert!(
+            checks.iter().all(|check| !check.eliminated),
+            "{source}: {checks:?}"
+        );
+    }
+    let fixture = SnapshotFixture::compile("(function(n){while(n>0)n=n-1;return n})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 212).unwrap();
+    let sub = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "sub")).unwrap();
+    let checks = ir.scalar_graph().checks_for_node(sub.id());
+    assert!(
+        checks.iter().all(|check| check.eliminated),
+        "the successful loop comparison already proves Number operands"
+    );
+    let compare = ir
+        .nodes()
+        .iter()
+        .find(|node| ir.scalar_graph().comparison(node.id()).is_some())
+        .unwrap();
+    let checks = ir.scalar_graph().checks_for_node(compare.id());
+    assert!(
+        !checks[0].eliminated,
+        "the loop comparison must check the initial input"
+    );
+    assert!(checks[1].eliminated);
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn semantic_cfg_facts_deopt_on_an_unchecked_float_phi_edge() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>("function target(flag,a,b){let x;if(flag)x=a+1;else x=b;return x*2}")
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("target(1,2,3.5)"))
+                .unwrap(),
+            6
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10, "{before:?}");
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("target(0,2,3.5)"))
+            .unwrap(),
+        7.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert!(after.deopts > before.deopts, "{after:?}");
+}
+
+#[test]
+fn semantic_cfg_fact_budget_restores_block_local_checks() {
+    let fixture = SnapshotFixture::compile(
+        "(function(flag,a,b){let x;if(flag)x=a+b;else x=a-b;return a*b+x})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let mut ir = OptimizedIr::translate(&verified, 213).unwrap();
+    let mul = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "mul")).unwrap().id();
+    assert!(ir
+        .scalar_graph()
+        .checks_for_node(mul)
+        .iter()
+        .all(|check| check.eliminated));
+    ir.recompute_numeric_checks_for_test(1).unwrap();
+    let checks = ir.scalar_graph().checks_for_node(mul);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|check| !check.eliminated),
+        "fallback must undo existing cross-block eliminations"
+    );
+    ir.recompute_numeric_checks_for_test(usize::MAX).unwrap();
+    assert!(ir
+        .scalar_graph()
+        .checks_for_node(mul)
+        .iter()
+        .all(|check| check.eliminated));
+}
+
+#[test]
+fn semantic_comparisons_use_explicit_operands_without_numeric_bool_facts() {
+    use rquickjs_jit::ir::{ScalarCompareOp, ScalarValue};
+    for (operator, expected) in [
+        ("<", ScalarCompareOp::LessThan),
+        ("<=", ScalarCompareOp::LessEqual),
+        (">", ScalarCompareOp::GreaterThan),
+        (">=", ScalarCompareOp::GreaterEqual),
+    ] {
+        let fixture = SnapshotFixture::compile(&format!(
+            "(function(a,b,c,d){{return (a+b){operator}(c+d)}})"
+        ));
+        let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 214).unwrap();
+        let graph = ir.scalar_graph();
+        let node = ir
+            .nodes()
+            .iter()
+            .find(|node| graph.comparison(node.id()).is_some())
+            .unwrap();
+        let (op, lhs, rhs) = graph.comparison(node.id()).unwrap();
+        assert_eq!(op, expected);
+        assert!(matches!(
+            graph.values()[lhs.index()],
+            ScalarValue::Binary { .. }
+        ));
+        assert!(matches!(
+            graph.values()[rhs.index()],
+            ScalarValue::Binary { .. }
+        ));
+        assert_eq!(
+            graph
+                .frame_state_for_node(node.id())
+                .unwrap()
+                .stack
+                .as_ref(),
+            &[lhs, rhs]
+        );
+        let checks = graph.checks_for_node(node.id());
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| check.eliminated));
+    }
+    let fixture = SnapshotFixture::compile("(function(a,b){return (a<b)+1})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let ir = OptimizedIr::translate(&verified, 215).unwrap();
+    let add = ir.nodes().iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "add")).unwrap();
+    assert!(
+        !ir.scalar_graph().checks_for_node(add.id())[0].eliminated,
+        "a comparison produces Bool, which requires arithmetic coercion"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn semantic_comparisons_preserve_nan_and_negative_zero_natively() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    for (operator, warm, zero) in [
+        ("<", true, false),
+        ("<=", true, true),
+        (">", false, false),
+        (">=", false, true),
+    ] {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .call_threshold(2)
+                .force_optimized_for_test(true)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context
+            .with(|ctx| ctx.eval::<(), _>(format!("function target(a,b){{return a{operator}b}}")))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+            assert_eq!(
+                context
+                    .with(|ctx| ctx.eval::<bool, _>("target(1.25,2.5)"))
+                    .unwrap(),
+                warm
+            );
+            jit.poll();
+        }
+        let before = jit.metrics();
+        assert!(before.tier2_entries >= 10, "{operator}: {before:?}");
+        for (probe, expected) in [
+            ("target(NaN,2.5)", false),
+            ("target(1.25,NaN)", false),
+            ("target(-0,-0)", zero),
+        ] {
+            assert_eq!(
+                context.with(|ctx| ctx.eval::<bool, _>(probe)).unwrap(),
+                expected,
+                "{operator}: {probe}"
+            );
+        }
+        let after = jit.metrics();
+        assert_eq!(
+            after.tier2_entries - before.tier2_entries,
+            3,
+            "{operator}: {after:?}"
+        );
+        assert_eq!(after.deopts, before.deopts, "{operator}: {after:?}");
+    }
+}
+
+#[test]
+fn semantic_updates_link_postfix_outputs_and_local_writes() {
+    use rquickjs_jit::ir::{ScalarNumericMode, ScalarValue};
+    let mut seen = std::collections::BTreeSet::new();
+    let mut snapshots = [
+        "(function(x){return x++ + x})",
+        "(function(x){return x-- + x})",
+        "(function(x){return ++x})",
+        "(function(x){return --x})",
+        "(function(x){var y=x;y++;return y})",
+        "(function(x){var y=x;y--;return y})",
+    ]
+    .into_iter()
+    .map(|source| SnapshotFixture::compile(source).snapshot().clone())
+    .collect::<Vec<_>>();
+    let opcode = |name| {
+        rquickjs_jit::bytecode::linked_opcode_table()
+            .find(|opcode| opcode.name() == name)
+            .unwrap()
+            .id()
+    };
+    for name in ["inc_loc", "dec_loc"] {
+        snapshots.push(CompileSnapshot::from_untrusted_bytecode(
+            vec![
+                opcode("get_arg0"),
+                opcode("put_loc0"),
+                opcode(name),
+                0,
+                opcode("get_loc0"),
+                opcode("return"),
+            ],
+            1,
+            1,
+            0,
+            0,
+        ));
+    }
+    for snapshot in snapshots {
+        let verified = snapshot.verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&verified, 300).unwrap();
+        let graph = ir.scalar_graph();
+        for node in ir.nodes() {
+            let rquickjs_jit::ir::OptimizedNodeKind::Bytecode { opcode } = node.kind() else {
+                continue;
+            };
+            if !matches!(
+                opcode.as_ref(),
+                "inc" | "dec" | "post_inc" | "post_dec" | "inc_loc" | "dec_loc"
+            ) {
+                continue;
+            }
+            let Some((mode, input, delta)) = graph.update_operation(node.id()) else {
+                panic!("update bytecode has no semantic update: {opcode}");
+            };
+            assert_eq!(mode, ScalarNumericMode::Number);
+            seen.insert(opcode.to_string());
+            assert_eq!(delta, if opcode.contains("inc") { 1 } else { -1 });
+            let result = graph.value_for_node(node.id()).unwrap();
+            assert!(matches!(
+                graph.values()[result.index()],
+                ScalarValue::Update { .. }
+            ));
+            assert_eq!(graph.checks_for_node(node.id()).len(), 1);
+            assert_eq!(graph.checks_for_node(node.id())[0].value, input);
+            assert!(graph.frame_state_for_node(node.id()).is_some());
+            if opcode.starts_with("post_") {
+                assert_eq!(graph.outputs_for_node(node.id()), [input, result]);
+            } else if opcode.ends_with("_loc") {
+                assert!(graph.outputs_for_node(node.id()).is_empty());
+                assert_eq!(graph.frame_definitions_for_node(node.id())[0].1, result);
+            } else {
+                assert_eq!(graph.outputs_for_node(node.id()), [result]);
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        ["inc", "dec", "post_inc", "post_dec", "inc_loc", "dec_loc"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn semantic_postfix_overflow_restores_pre_update_state() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function target(n,x){let last=x;for(let i=0;i<n;i++){last=x++;}return last+x}",
+            )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("target(2,3)"))
+                .unwrap(),
+            9
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10, "{before:?}");
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("target(1,2147483647)"))
+            .unwrap(),
+        4294967295.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries, "{after:?}");
+    assert!(after.deopts > before.deopts, "{after:?}");
+    assert_eq!(after.native_entries, after.native_exits);
+}
+
+#[test]
+fn caller_request_retains_versioned_callee_snapshot_and_budget_after_retirement() {
+    use rquickjs_jit::compiler::{baseline::BaselineCompiler, Compiler};
+    for constrained in [false, true] {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let ((callee_snapshot, callee_constants), (caller_snapshot, caller_constants)) = context
+            .with(|ctx| {
+                let callee: rquickjs::Value = ctx.eval("(function(a){return a+1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20})").unwrap();
+                let caller: rquickjs::Value = ctx.eval("(function(f,a){return f(a)})").unwrap();
+                unsafe {
+                    (
+                        CompileSnapshot::capture_with_runtime_constants(
+                            &runtime,
+                            ctx.as_raw().as_ptr(),
+                            callee.as_raw(),
+                        )
+                        .unwrap(),
+                        CompileSnapshot::capture_with_runtime_constants(
+                            &runtime,
+                            ctx.as_raw().as_ptr(),
+                            caller.as_raw(),
+                        )
+                        .unwrap(),
+                    )
+                }
+            });
+        let callee_body = callee_snapshot.verify(VerifyLimits::default()).unwrap();
+        let caller_body = caller_snapshot.verify(VerifyLimits::default()).unwrap();
+        let callee = FunctionKey::new(
+            callee_body.snapshot().function_id(),
+            callee_body.snapshot().generation(),
+        );
+        let caller = FunctionKey::new(
+            caller_body.snapshot().function_id(),
+            caller_body.snapshot().generation(),
+        );
+        assert_ne!(caller, callee);
+        let return_pc = callee_body
+            .instructions()
+            .iter()
+            .find(|i| i.opcode().name() == "return")
+            .unwrap()
+            .pc();
+        let call_pc = caller_body
+            .instructions()
+            .iter()
+            .find(|i| {
+                i.opcode().name().starts_with("call") || i.opcode().name().starts_with("tail_call")
+            })
+            .unwrap()
+            .pc();
+        let mut feedback = FeedbackTable::new(64, 2);
+        for _ in 0..32 {
+            feedback.observe_call(
+                caller,
+                &[ObservedType::Function(callee), ObservedType::Int32],
+            );
+            feedback.observe_call(callee, &[ObservedType::Int32]);
+            feedback.observe_return(callee, return_pc, ObservedType::Int32);
+            for instruction in callee_body
+                .instructions()
+                .iter()
+                .filter(|i| i.opcode().name() == "add")
+            {
+                feedback.observe_binary(
+                    callee,
+                    instruction.pc(),
+                    ObservedType::Int32,
+                    ObservedType::Int32,
+                    ObservedType::Int32,
+                    Default::default(),
+                );
+            }
+
+            feedback.observe_call_signature_with_identity(
+                caller,
+                call_pc,
+                callee,
+                0x12345678,
+                0x22345678,
+                &[ObservedType::Int32],
+                ObservedType::Int32,
+            );
+        }
+        assert!(
+            feedback
+                .snapshot(301)
+                .bounded_specialization(callee)
+                .is_some(),
+            "missing feedback signature"
+        );
+        Tier2Compiler::host(301)
+            .lower_direct_call_with_feedback_for_test(&callee_body, callee, &feedback.snapshot(301))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "direct leaf: {error:?}; opcodes {:?}",
+                    callee_body
+                        .instructions()
+                        .iter()
+                        .map(|i| i.opcode().name())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        coordinator
+            .queue_with_feedback(
+                callee,
+                Tier::Baseline,
+                callee_body.clone(),
+                feedback.snapshot(301),
+            )
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        let key = request.artifact_key();
+        let attempt = request.attempt_id();
+        let artifact = Compiler::compile(&BaselineCompiler::host(), request).unwrap();
+        assert!(artifact.inline_snapshot().is_some());
+        assert!(
+            artifact
+                .optimized_metadata()
+                .and_then(|m| m.direct_call_signature())
+                .is_some(),
+            "no direct signature"
+        );
+        coordinator.complete(CompileCompletion {
+            key: callee,
+            requested_tier: Tier::Baseline,
+            artifact_key: key,
+            attempt_id: attempt,
+            result: Ok(artifact),
+        });
+        assert_eq!(
+            coordinator.state(callee),
+            rquickjs_jit::runtime::CompileState::Installed(Tier::Baseline)
+        );
+        let caller_bytes = caller_body.snapshot().owned_bytes();
+        let callee_bytes = callee_body.snapshot().retained_bytes();
+        coordinator
+            .queue_with_feedback(caller, Tier::Baseline, caller_body, feedback.snapshot(301))
+            .unwrap();
+        if constrained {
+            use rquickjs_jit::{compiler::mock::FakeCompiler, runtime::BackgroundCompiler};
+            let (compiler, control) = FakeCompiler::new(1);
+            let mut workers = BackgroundCompiler::new_with_resource_limits(
+                std::sync::Arc::new(compiler),
+                1,
+                1,
+                std::time::Duration::from_secs(30),
+                caller_bytes,
+                caller_bytes * 32,
+            )
+            .unwrap();
+            assert!(
+                workers.dispatch_next(&mut coordinator).unwrap(),
+                "optional callee retention must not reject an otherwise affordable compilation"
+            );
+            let request = control
+                .request_within(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(request.snapshot_bytes(), caller_bytes);
+            let target = request.direct_call_target(call_pc).unwrap();
+            assert!(target.inline_snapshot().is_none());
+            assert!(!target.entry().is_null());
+            assert_eq!(workers.live_usage(), (1, caller_bytes, caller_bytes * 32));
+            control.complete(CompiledArtifact::fake(Tier::Baseline));
+            workers.shutdown(&mut coordinator);
+            assert_eq!(workers.live_usage(), (0, 0, 0));
+            continue;
+        }
+        let request = coordinator.begin_next().unwrap();
+        assert_eq!(request.snapshot_bytes(), caller_bytes + callee_bytes);
+        let target = request.direct_call_target(call_pc).unwrap();
+        assert_eq!(target.artifact_key(), key);
+        let retained = target.inline_snapshot().unwrap().clone();
+        assert_eq!(retained.bytecode(), callee_body.snapshot().bytecode());
+        let caller_body = request.snapshot().clone();
+        let caller_artifact =
+            Compiler::compile(&BaselineCompiler::host(), request.clone()).unwrap();
+        coordinator.complete(CompileCompletion {
+            key: caller,
+            requested_tier: Tier::Baseline,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
+            result: Ok(caller_artifact),
+        });
+        coordinator
+            .queue_with_feedback(
+                caller,
+                Tier::Optimizing,
+                caller_body,
+                feedback.snapshot(301),
+            )
+            .unwrap();
+        let optimizing = coordinator.begin_next().unwrap();
+        let artifact = Compiler::compile(&Tier2Compiler::host(301), optimizing.clone()).unwrap();
+        assert_eq!(
+            artifact.optimized_metadata().unwrap().inlined_calls(),
+            1,
+            "production compilation must consume retained callee bytecode"
+        );
+        // Optional inlining must not prevent compilation when only the
+        // ordinary caller graph fits the worker's retained-IR budget.
+        let compile_with_limit = |limit| {
+            let control = rquickjs_jit::compiler::CompileControl::with_ir_limit(
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::time::Duration::from_secs(30),
+                limit,
+            );
+            Compiler::compile_controlled(&Tier2Compiler::host(301), optimizing.clone(), &control)
+        };
+        let (mut low, mut high) = (0, 1 << 20);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match compile_with_limit(middle) {
+                Ok(_) => high = middle,
+                Err(rquickjs_jit::compiler::CompileFailure::ResourceLimit) => low = middle + 1,
+                Err(error) => panic!("unexpected controlled compilation failure: {error:?}"),
+            }
+        }
+        let affordable = compile_with_limit(low).unwrap();
+        assert_eq!(
+            affordable.optimized_metadata().unwrap().inlined_calls(),
+            0,
+            "the smallest affordable compilation must retain ordinary calls"
+        );
+        coordinator.retire(callee);
+        drop(coordinator);
+        drop(callee_body);
+        drop(callee_constants);
+        drop(caller_constants);
+        drop(context);
+        drop(runtime);
+        assert!(retained.verify(VerifyLimits::default()).is_ok());
+        assert_eq!(
+            request
+                .direct_call_target(call_pc)
+                .unwrap()
+                .inline_snapshot()
+                .unwrap()
+                .bytecode(),
+            retained.bytecode()
+        );
+    }
+}
+
+#[test]
+fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
+    use rquickjs_jit::ir::{InlineCallee, ScalarValue};
+    for (source, callee_source, representations, expected) in [
+        (
+            "(function(f,a,b){return f(a,b)})",
+            "(function(a,b){return a+b})",
+            vec![ObservedType::Int32, ObservedType::Int32],
+            1,
+        ),
+        (
+            "(function(f,a){return f(a,true)})",
+            "(function(a,enabled){if(enabled)return a+1;return a})",
+            vec![ObservedType::Int32, ObservedType::Bool],
+            1,
+        ),
+        (
+            "(function(f,a){let value=a;for(let i=0;i<1000;i++){value=f(value,true)}return value})",
+            "(function(a,enabled){if(enabled)return a+1;return a})",
+            vec![ObservedType::Int32, ObservedType::Bool],
+            1,
+        ),
+        (
+            "(function(f,a,b){return f(a,b)})",
+            "(function(a,enabled){if(enabled)return a+1;return a})",
+            vec![ObservedType::Int32, ObservedType::Bool],
+            0,
+        ),
+        (
+            "(function(f,a,b){return f(a,b)})",
+            "(function(a,b){globalThis.hits++;return a+b})",
+            vec![ObservedType::Int32, ObservedType::Int32],
+            0,
+        ),
+    ] {
+        let caller_fixture = SnapshotFixture::compile(source);
+        let caller_body = caller_fixture
+            .snapshot()
+            .verify(VerifyLimits::default())
+            .unwrap();
+        let callee_fixture = SnapshotFixture::compile(callee_source);
+        let body = callee_fixture
+            .snapshot()
+            .verify(VerifyLimits::default())
+            .unwrap();
+        let caller = FunctionKey::new(
+            caller_body.snapshot().function_id(),
+            caller_body.snapshot().generation(),
+        );
+        let callee = FunctionKey::new(body.snapshot().function_id(), body.snapshot().generation());
+        let call_pc = caller_body
+            .instructions()
+            .iter()
+            .find(|i| i.opcode().name().contains("call"))
+            .unwrap()
+            .pc();
+        let mut feedback = FeedbackTable::new(64, 2);
+        let mut caller_types = vec![ObservedType::Function(callee)];
+        caller_types.extend(
+            representations
+                .iter()
+                .copied()
+                .take(usize::from(caller_body.snapshot().arg_count()) - 1),
+        );
+        for _ in 0..32 {
+            feedback.observe_call(caller, &caller_types);
+            feedback.observe_call_signature_with_identity(
+                caller,
+                call_pc,
+                callee,
+                0x12345678,
+                0x22345678,
+                &representations,
+                ObservedType::Int32,
+            );
+        }
+        let feedback = feedback.snapshot(302);
+        let mut artifact = CompiledArtifact::fake(Tier::Baseline).key();
+        artifact.function_id = callee.id;
+        artifact.generation = callee.generation;
+        artifact.source_revision = body.snapshot().source_revision();
+        artifact.opcode_fingerprint = body.snapshot().opcode_fingerprint();
+        let candidate = InlineCallee {
+            artifact,
+            call: feedback.call_specialization_at(caller, call_pc).unwrap(),
+            body,
+        };
+        let (ir, clif) = Tier2Compiler::host(302)
+            .lower_with_inline_callee_for_test(&caller_body, caller, &feedback, call_pc, candidate)
+            .unwrap();
+        let graph = ir.scalar_graph();
+        assert_eq!(
+            graph.inlined_calls(),
+            expected,
+            "{source} -> {callee_source}"
+        );
+        let node = ir
+            .nodes()
+            .iter()
+            .find(|node| graph.call(node.id()).is_some())
+            .unwrap();
+        let call = graph.call(node.id()).unwrap();
+        if expected == 0 {
+            assert_eq!(node.effect(), OptimizedEffect::Reentrant);
+            assert!(call.inline.is_none());
+            continue;
+        }
+        assert_eq!(node.effect(), OptimizedEffect::Control);
+        let region = call.inline.as_ref().unwrap();
+        assert_eq!(region.artifact, artifact);
+        let ScalarValue::Binary { lhs, .. } = graph.values()[region.result.index()] else {
+            panic!("missing inline add");
+        };
+        assert_eq!(lhs, call.arguments[0]);
+        for step in region.steps.iter().filter(|step| step.frame.is_some()) {
+            let frame = step.frame.as_ref().unwrap();
+            assert_eq!(frame.parent, Some(node.id()));
+            assert_eq!(frame.arguments, call.arguments);
+        }
+        assert!(clif.contains("sadd_overflow"), "{clif}");
+        // Recovery may call ownership helpers. Walk every non-cold path from
+        // entry rather than mistaking cold recovery blocks for the hot region.
+        let mut blocks = std::collections::BTreeMap::<u32, (bool, Vec<&str>)>::new();
+        let mut current = None;
+        for line in clif.lines().map(str::trim) {
+            if let Some(label) = line.strip_prefix("block") {
+                let id = label
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .unwrap();
+                blocks.insert(id, (line.contains(" cold:"), Vec::new()));
+                current = Some(id);
+            } else if let Some(id) = current {
+                blocks.get_mut(&id).unwrap().1.push(line);
+            }
+        }
+        let successors = |id: u32| {
+            blocks[&id]
+                .1
+                .iter()
+                .filter(|line| line.starts_with("brif ") || line.starts_with("jump "))
+                .flat_map(|line| {
+                    line.split("block").skip(1).map(|label| {
+                        label
+                            .chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect::<String>()
+                            .parse::<u32>()
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let loop_blocks = blocks
+            .keys()
+            .copied()
+            .filter(|&start| {
+                let mut pending = successors(start);
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(id) = pending.pop() {
+                    if blocks[&id].0 || !seen.insert(id) {
+                        continue;
+                    }
+                    if id == start {
+                        return true;
+                    }
+                    pending.extend(successors(id));
+                }
+                false
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut pending = vec![0];
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let (cold, lines) = &blocks[&id];
+            if *cold {
+                continue;
+            }
+            for line in lines {
+                if loop_blocks.contains(&id) {
+                    assert!(
+                        !line.starts_with("store "),
+                        "hot scalar loop writes interpreter frame: {clif}"
+                    );
+                    assert!(
+                        !line.contains("fcvt_from_sint") && !line.contains("fadd"),
+                        "integer induction uses floating arithmetic: {clif}"
+                    );
+                }
+                assert!(
+                    !line.contains("call_indirect"),
+                    "hot inline path calls runtime: {clif}"
+                );
+                if line.starts_with("brif ") || line.starts_with("jump ") {
+                    for label in line.split("block").skip(1) {
+                        pending.push(
+                            label
+                                .chars()
+                                .take_while(char::is_ascii_digit)
+                                .collect::<String>()
+                                .parse::<u32>()
+                                .unwrap(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn heap_operations_and_unknown_calls_keep_original_poll_frequency() {
+    use rquickjs_jit::ir::ScalarNumericMode;
+    for source in [
+        "(function(a){return a.length})",
+        "(function(a){return a[0]})",
+        "(function(a){a.x=1;return 1})",
+        "(function(a){a[0]=1;return 1})",
+        "(function(f){return f()})",
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let body = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&body, 303).unwrap();
+        let graph = ir.scalar_graph();
+        // Even perfect numeric proofs cannot erase heap/call effects.
+        assert!(
+            !graph.permits_amortized_poll(
+                ir.nodes(),
+                &vec![Some(ScalarNumericMode::Int32); graph.values().len()],
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn mixed_scalar_loops_amortize_polls_and_remain_interruptible() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    unsafe extern "C" {
+        fn JS_JitGetHelperCount(
+            rt: *mut rquickjs_core::qjs::JSRuntime,
+            helper: u32,
+            count: *mut u64,
+        ) -> i32;
+    }
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+        "function scalarPoll(n,a,enabled){for(let i=0;i<n;i++){a=enabled?a+1:a-1;}return a}"
+    )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("scalarPoll(4,1,true)"))
+                .unwrap(),
+            5
+        );
+        jit.poll();
+    }
+    assert!(jit.metrics().tier2_entries >= 10);
+    let count = || {
+        context.with(|ctx| {
+            let mut count = 0;
+            assert_eq!(
+                unsafe {
+                    JS_JitGetHelperCount(
+                        rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()),
+                        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL,
+                        &mut count,
+                    )
+                },
+                0
+            );
+            count
+        })
+    };
+    let before = count();
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("scalarPoll(4096,1,true)"))
+            .unwrap(),
+        4097
+    );
+    let polls = count() - before;
+    assert!(
+        (64..=80).contains(&polls),
+        "expected bounded poll batches, got {polls}"
+    );
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("scalarPoll(128,0,false)"))
+            .unwrap(),
+        -128
+    );
+    let interrupts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&interrupts);
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        seen.fetch_add(1, Ordering::SeqCst) >= 2
+    })));
+    let before = jit.metrics();
+    assert!(context
+        .with(|ctx| ctx.eval::<i32, _>("scalarPoll(1000000000,1,true)"))
+        .is_err());
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(interrupts.load(Ordering::SeqCst) >= 3);
+    assert_eq!(after.native_entries, after.native_exits);
+    runtime.set_interrupt_handler(None);
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn deferred_scalar_locals_restore_dirty_values_after_poll_and_overflow() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(
+        "function dirtyLocals(n,a,enabled){let value=a,last=0;for(let i=0;i<n;i++){last=value;value=enabled?value+1:value-1;}return value+last}"
+    )).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("dirtyLocals(2,3,true)"))
+                .unwrap(),
+            9
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10);
+    // The overflow occurs after a poll boundary; the last/value/i locals
+    // have changed again since that publication and must be reconstructed.
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("dirtyLocals(128,2147483547,true)"))
+            .unwrap(),
+        4294967349.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(after.deopts > before.deopts);
+    assert_eq!(after.native_entries, after.native_exits);
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn mixed_integer_update_overflow_recovers_without_wrapping() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(
+        "function updateOverflow(n,enabled){let x=2147483646;for(let i=0;i<n;i++){x++}return enabled?x:0}"
+    )).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("updateOverflow(1,true)"))
+                .unwrap(),
+            2147483647
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10);
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("updateOverflow(3,true)"))
+            .unwrap(),
+        2147483649.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(after.deopts > before.deopts);
+    assert_eq!(after.native_entries, after.native_exits);
 }

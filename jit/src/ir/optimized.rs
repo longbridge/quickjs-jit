@@ -44,6 +44,12 @@ pub struct OptimizedNode {
 }
 
 impl OptimizedNode {
+    pub(super) fn reuse_value(&mut self, source: u32) {
+        self.kind = OptimizedNodeKind::Reuse { source };
+    }
+    pub(super) fn mark_effect_free_inline(&mut self) {
+        self.effect = OptimizedEffect::Control;
+    }
     pub const fn id(&self) -> u32 {
         self.id
     }
@@ -136,6 +142,7 @@ impl GuardSite {
 /// bytecode and never accepts or contains the baseline IR.
 #[derive(Clone, Debug)]
 pub struct OptimizedIr {
+    scalar_graph: super::ScalarGraph,
     blocks: Box<[OptimizedBlock]>,
     nodes: Box<[OptimizedNode]>,
     machine_plan: Box<[OptimizedNode]>,
@@ -149,6 +156,56 @@ impl OptimizedIr {
     pub fn translate(
         function: &VerifiedFunction,
         feedback_epoch: u64,
+    ) -> Result<Self, CompileFailure> {
+        Self::translate_with_numeric_modes(function, feedback_epoch, &Default::default())
+    }
+
+    /// Build arithmetic semantics before value numbering. Modes are guarded
+    /// speculation contracts, not permission to omit runtime validation.
+    pub fn translate_with_numeric_modes(
+        function: &VerifiedFunction,
+        feedback_epoch: u64,
+        numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
+    ) -> Result<Self, CompileFailure> {
+        Self::translate_with_inline_callees(
+            function,
+            feedback_epoch,
+            numeric_modes,
+            &Default::default(),
+        )
+    }
+
+    pub fn translate_with_inline_callees(
+        function: &VerifiedFunction,
+        feedback_epoch: u64,
+        numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
+        inline_callees: &std::collections::BTreeMap<u32, super::InlineCallee>,
+    ) -> Result<Self, CompileFailure> {
+        match Self::translate_with_inline_callees_impl(
+            function,
+            feedback_epoch,
+            numeric_modes,
+            inline_callees,
+        ) {
+            Err(CompileFailure::ResourceLimit) if !inline_callees.is_empty() => {
+                // Expansion may exhaust a graph quota needed by later caller
+                // instructions. The ordinary caller remains a valid candidate.
+                Self::translate_with_inline_callees_impl(
+                    function,
+                    feedback_epoch,
+                    numeric_modes,
+                    &Default::default(),
+                )
+            }
+            result => result,
+        }
+    }
+
+    fn translate_with_inline_callees_impl(
+        function: &VerifiedFunction,
+        feedback_epoch: u64,
+        numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
+        inline_callees: &std::collections::BTreeMap<u32, super::InlineCallee>,
     ) -> Result<Self, CompileFailure> {
         if feedback_epoch == 0 {
             return Err(CompileFailure::InvalidArtifact);
@@ -339,20 +396,24 @@ impl OptimizedIr {
                 nodes: block_nodes.into(),
             });
         }
-        let (cse_eliminated, dead_nodes_eliminated) = rewrite_pure_expressions(&mut nodes, &blocks);
+        let (cse_eliminated, dead_nodes_eliminated) =
+            rewrite_pure_expressions(&mut nodes, &blocks, numeric_modes);
+        let (scalar_graph, scalar_cse) =
+            super::ScalarGraph::rewrite(&mut nodes, &blocks, shape, numeric_modes, inline_callees)?;
         let machine_plan = nodes
             .iter()
             .filter(|node| !node.eliminated)
             .cloned()
             .collect::<Vec<_>>();
         Ok(Self {
+            scalar_graph,
             blocks: blocks.into(),
             nodes: nodes.into(),
             machine_plan: machine_plan.into(),
             guards: guards.into(),
             metrics: OptimizedMetrics {
                 boxes_elided,
-                cse_eliminated,
+                cse_eliminated: cse_eliminated.saturating_add(scalar_cse),
                 dead_nodes_eliminated,
             },
             feedback_epoch,
@@ -361,6 +422,15 @@ impl OptimizedIr {
     }
     pub fn blocks(&self) -> &[OptimizedBlock] {
         &self.blocks
+    }
+    #[cfg(feature = "test-support")]
+    pub fn recompute_numeric_checks_for_test(&mut self, work: usize) -> Result<(), CompileFailure> {
+        self.scalar_graph
+            .build_numeric_checks_with_budget(&self.nodes, &self.blocks, work)
+    }
+
+    pub fn scalar_graph(&self) -> &super::ScalarGraph {
+        &self.scalar_graph
     }
     pub fn nodes(&self) -> &[OptimizedNode] {
         &self.nodes
@@ -504,7 +574,11 @@ fn identity_deopt_map(
     Ok(map)
 }
 
-fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBlock]) -> (u64, u64) {
+fn rewrite_pure_expressions(
+    nodes: &mut [OptimizedNode],
+    blocks: &[OptimizedBlock],
+    numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
+) -> (u64, u64) {
     use std::collections::BTreeMap;
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct ExpressionKey {
@@ -512,6 +586,7 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
         lhs: (u8, u16, u64),
         rhs: (u8, u16, u64),
         representation: u8,
+        numeric_mode: super::ScalarNumericMode,
         effect_epoch: u64,
     }
     let mut cse = 0u64;
@@ -566,6 +641,10 @@ fn rewrite_pure_expressions(nodes: &mut [OptimizedNode], blocks: &[OptimizedBloc
                         lhs,
                         rhs,
                         representation,
+                        numeric_mode: numeric_modes
+                            .get(&nodes[triple[2] as usize].pc())
+                            .copied()
+                            .unwrap_or_default(),
                         effect_epoch,
                     };
                     if let Some(source) = expressions.get(&key).copied() {
@@ -630,7 +709,7 @@ const FRAME_SLOT_LOCAL: u8 = 1;
 
 /// The single argument or local slot a frame-writing node redefines, so the
 /// value-numbering pass retires only the loads that alias it.
-fn frame_write_slot(node: &OptimizedNode) -> Option<(u8, u16)> {
+pub(super) fn frame_write_slot(node: &OptimizedNode) -> Option<(u8, u16)> {
     let name = opcode_name(node)?;
     let kind = if name.starts_with("put_loc")
         || name.starts_with("set_loc")
@@ -645,7 +724,7 @@ fn frame_write_slot(node: &OptimizedNode) -> Option<(u8, u16)> {
     Some((kind, indexed_node_operand(name, node.bytes())?))
 }
 
-fn indexed_node_operand(name: &str, bytes: &[u8]) -> Option<u16> {
+pub(super) fn indexed_node_operand(name: &str, bytes: &[u8]) -> Option<u16> {
     for (suffix, index) in [("0", 0), ("1", 1), ("2", 2), ("3", 3)] {
         if name.ends_with(suffix) {
             return Some(index);
@@ -665,7 +744,7 @@ fn opcode_name(node: &OptimizedNode) -> Option<&str> {
     }
 }
 
-fn is_pure_load(name: &str) -> bool {
+pub(super) fn is_pure_load(name: &str) -> bool {
     matches!(
         name,
         "get_arg"

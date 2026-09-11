@@ -32,10 +32,25 @@ fn unique_runtime_owner() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+// Quotas charge mapped pages, whose size differs across supported hosts.
+fn page_size() -> usize {
+    #[cfg(unix)]
+    let size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+    #[cfg(windows)]
+    let size = {
+        use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+        let mut info = SYSTEM_INFO::default();
+        unsafe { GetSystemInfo(&mut info) };
+        info.dwPageSize as usize
+    };
+    assert!(size > 0);
+    size
+}
+
 #[test]
 fn publish_is_one_way_and_code_executes() {
     let allocator = CodeAllocator::for_host().unwrap();
-    let mut writable = allocator.allocate(4096).unwrap();
+    let mut writable = allocator.allocate(page_size()).unwrap();
     host_asm::write_return_42(&mut writable).unwrap();
     let executable = writable.publish().unwrap();
     let result = unsafe { executable.call0_i32() };
@@ -45,8 +60,8 @@ fn publish_is_one_way_and_code_executes() {
 
 #[test]
 fn quota_is_enforced_before_mapping() {
-    let allocator = CodeAllocator::with_limit(4096).unwrap();
-    let _first = allocator.allocate(4096).unwrap();
+    let allocator = CodeAllocator::with_limit(page_size()).unwrap();
+    let _first = allocator.allocate(page_size()).unwrap();
     assert!(matches!(
         allocator.allocate(1),
         Err(CodeMemoryError::LimitExceeded)
@@ -155,14 +170,14 @@ fn entry_acquisition_rejects_undeclared_and_misaligned_offsets() {
 
 #[test]
 fn executable_clones_pin_the_mapping_and_quota() {
-    let allocator = CodeAllocator::with_limit(4096).unwrap();
+    let allocator = CodeAllocator::with_limit(page_size()).unwrap();
     let mut writable = allocator.allocate(32).unwrap();
     host_asm::write_return_42(&mut writable).unwrap();
     let executable = writable.publish().unwrap();
     let pin = executable.clone();
     drop(executable);
 
-    assert_eq!(allocator.reserved_bytes(), 4096);
+    assert_eq!(allocator.reserved_bytes(), page_size());
     assert_eq!(unsafe { pin.call0_i32() }, 42);
     drop(pin);
     assert_eq!(allocator.reserved_bytes(), 0);
@@ -178,7 +193,7 @@ fn platform_faults_disable_native_code_without_breaking_interpretation() {
         FaultInjection::CfgRegistration,
         FaultInjection::MacWriteProtection,
     ] {
-        let allocator = CodeAllocator::with_fault_injection(4096, fault).unwrap();
+        let allocator = CodeAllocator::with_fault_injection(page_size(), fault).unwrap();
         let result = match allocator.allocate(32) {
             Ok(mut writable) => {
                 host_asm::write_return_42(&mut writable).unwrap();
@@ -233,31 +248,31 @@ fn runtime_owners_have_explicit_mac_policy_and_independent_quotas() {
     let second_owner = unique_runtime_owner();
     let first = CodeAllocator::for_runtime_with_mac_policy(
         first_owner,
-        4096,
+        page_size(),
         MacJitPolicy::ThreadWriteProtect,
     )
     .unwrap();
-    let second = CodeAllocator::for_runtime(second_owner, 4096).unwrap();
+    let second = CodeAllocator::for_runtime(second_owner, page_size()).unwrap();
     assert_eq!(first.owner_id(), first_owner);
     assert_eq!(second.owner_id(), second_owner);
-    let _first_mapping = first.allocate(4096).unwrap();
-    let _second_mapping = second.allocate(4096).unwrap();
+    let _first_mapping = first.allocate(page_size()).unwrap();
+    let _second_mapping = second.allocate(page_size()).unwrap();
 }
 
 #[test]
 fn duplicate_runtime_allocators_share_quota_and_configuration() {
     let owner = unique_runtime_owner();
-    let first = CodeAllocator::for_runtime(owner, 4096).unwrap();
-    let second = CodeAllocator::for_runtime(owner, 4096).unwrap();
-    let _mapping = first.allocate(4096).unwrap();
+    let first = CodeAllocator::for_runtime(owner, page_size()).unwrap();
+    let second = CodeAllocator::for_runtime(owner, page_size()).unwrap();
+    let _mapping = first.allocate(page_size()).unwrap();
 
-    assert_eq!(second.reserved_bytes(), 4096);
+    assert_eq!(second.reserved_bytes(), page_size());
     assert!(matches!(
         second.allocate(1),
         Err(CodeMemoryError::LimitExceeded)
     ));
     assert!(matches!(
-        CodeAllocator::for_runtime(owner, 8192),
+        CodeAllocator::for_runtime(owner, page_size() * 2),
         Err(CodeMemoryError::OwnerConfigurationMismatch { owner_id }) if owner_id == owner
     ));
 }
@@ -267,13 +282,13 @@ fn disabling_failure_rejects_writable_code_from_the_previous_epoch() {
     let owner = unique_runtime_owner();
     let first = CodeAllocator::for_runtime_with_fault_injection(
         owner,
-        4096 * 2,
+        page_size() * 2,
         FaultInjection::Protection,
     )
     .unwrap();
     let second = CodeAllocator::for_runtime_with_fault_injection(
         owner,
-        4096 * 2,
+        page_size() * 2,
         FaultInjection::Protection,
     )
     .unwrap();
@@ -300,7 +315,7 @@ fn disabling_failure_wins_against_a_concurrent_publish() {
     let owner = unique_runtime_owner();
     let allocator = CodeAllocator::for_runtime_with_fault_injection(
         owner,
-        4096 * 2,
+        page_size() * 2,
         FaultInjection::Protection,
     )
     .unwrap();

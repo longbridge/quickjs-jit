@@ -97,10 +97,18 @@ pub struct DirectCallTarget {
     call: CallSpecializationKey,
     signature: BoundedSpecializationSignature,
     published: crate::compiler::baseline::PublishedBaselineCode,
+    artifact_key: ArtifactKey,
+    inline_snapshot: Option<crate::bytecode::CompileSnapshot>,
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 impl DirectCallTarget {
+    pub const fn artifact_key(&self) -> ArtifactKey {
+        self.artifact_key
+    }
+    pub fn inline_snapshot(&self) -> Option<&crate::bytecode::CompileSnapshot> {
+        self.inline_snapshot.as_ref()
+    }
     pub const fn pc(&self) -> u32 {
         self.pc
     }
@@ -301,6 +309,36 @@ pub struct CompileRequest {
 }
 
 impl CompileRequest {
+    pub(super) fn discard_inline_snapshots(&mut self) {
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        if self
+            .direct_call_targets
+            .iter()
+            .any(|target| target.inline_snapshot.is_some())
+        {
+            for target in Arc::make_mut(&mut self.direct_call_targets) {
+                target.inline_snapshot = None;
+            }
+        }
+    }
+
+    /// Budget charge for the caller snapshot and every retained callee body.
+    /// Shared callee storage is conservatively charged once per call site.
+    pub fn snapshot_bytes(&self) -> usize {
+        let bytes = self.snapshot.snapshot().owned_bytes();
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let bytes = self
+            .direct_call_targets
+            .iter()
+            .fold(bytes, |total, target| {
+                total.saturating_add(
+                    target
+                        .inline_snapshot()
+                        .map_or(0, crate::bytecode::CompileSnapshot::retained_bytes),
+                )
+            });
+        bytes
+    }
     pub const fn key(&self) -> FunctionKey {
         self.key
     }
@@ -972,6 +1010,9 @@ impl Coordinator {
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         let direct_call_targets =
             if matches!(tier, Tier::Baseline | Tier::Optimizing) && side_path_profile.is_none() {
+                // This also bounds snapshot retention while requests wait in
+                // the coordinator's count-bounded foreground queue.
+                let mut inline_bytes_left = 64 * 1024usize;
                 snapshot
                     .instructions()
                     .iter()
@@ -992,11 +1033,18 @@ impl Coordinator {
                             return None;
                         }
                         let published = artifact.direct_call_published()?.clone();
+                        let inline_snapshot = artifact.inline_snapshot().and_then(|body| {
+                            let remaining = inline_bytes_left.checked_sub(body.retained_bytes())?;
+                            inline_bytes_left = remaining;
+                            Some(body.clone())
+                        });
                         Some(DirectCallTarget {
                             pc: instruction.pc(),
                             call,
                             signature,
                             published,
+                            artifact_key: artifact.key(),
+                            inline_snapshot,
                         })
                     })
                     .collect::<Vec<_>>()
