@@ -588,6 +588,12 @@ fn lower_optimized_machine(
     } else {
         Vec::new()
     };
+    let amortized_poll = int32_loop
+        || (side_path.is_none()
+            && ir
+                .scalar_graph()
+                .permits_amortized_poll(ir.nodes(), &scalar_numeric));
+
     let mut signature = Signature::new(isa.default_call_conv());
     signature.params.push(AbiParam::special(
         pointer_type,
@@ -658,6 +664,14 @@ fn lower_optimized_machine(
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
         let mut guarded_element_source: Option<GuardedElementSource> = None;
         let owned_locals = owned_local_targets(ir, specialization)?;
+        // The scalar-region proof excludes heap effects and requires every
+        // local definition to be primitive (or a lexical sentinel). No local
+        // owns a heap value, so poll/deopt boundaries can publish SSA locals
+        // instead of storing them on every iteration. Arguments stay rooted
+        // in their existing buffers and retain immediate writes.
+        let defer_scalar_locals =
+            amortized_poll && !int32_loop && !owned_locals.iter().any(|&owned| owned);
+
         let bounded_increments = provably_bounded_increments(ir);
         let payload_type = if int32_loop { types::I32 } else { types::I64 };
         let env = OptEnv {
@@ -843,7 +857,7 @@ fn lower_optimized_machine(
                 }
                 match node.kind() {
                     crate::ir::OptimizedNodeKind::GuardNumeric { guard, mid_loop } => {
-                        if *mid_loop && int32_loop {
+                        if *mid_loop && amortized_poll {
                             emit_opt_amortized_poll(
                                 &mut builder,
                                 frame,
@@ -853,6 +867,36 @@ fn lower_optimized_machine(
                                 layout,
                                 node.pc(),
                                 poll_budget,
+                                !int32_loop,
+                                |builder| {
+                                    if defer_scalar_locals {
+                                        for (index, vars) in locals.iter().enumerate() {
+                                            let value = opt_use(builder, *vars);
+                                            opt_store(builder, var_buf, index, value);
+                                        }
+                                    }
+                                },
+                                |builder| {
+                                    if !int32_loop {
+                                        let pass = builder.create_block();
+                                        emit_opt_numeric_guard(
+                                            builder,
+                                            frame,
+                                            sret,
+                                            &arguments,
+                                            &locals,
+                                            pointer_type,
+                                            layout,
+                                            *guard,
+                                            node.pc(),
+                                            pass,
+                                            None,
+                                            EntryRepresentation::Numeric,
+                                            &specialization.arguments,
+                                        );
+                                        builder.switch_to_block(pass);
+                                    }
+                                },
                             );
                         } else if *mid_loop {
                             emit_opt_poll(
@@ -908,7 +952,7 @@ fn lower_optimized_machine(
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
                                 }
                                 opt_define(&mut builder, locals[index], undefined);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, undefined);
                                 }
                             }
@@ -1060,7 +1104,7 @@ fn lower_optimized_machine(
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
                                 }
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1687,7 +1731,7 @@ fn lower_optimized_machine(
                                     .scalar_graph()
                                     .update_operation(*node_id)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                if (mode == crate::ir::ScalarNumericMode::Int32) != int32_loop {
+                                if int32_loop && mode != crate::ir::ScalarNumericMode::Int32 {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
                                 let delta = OptPair {
@@ -1696,9 +1740,10 @@ fn lower_optimized_machine(
                                         .ins()
                                         .iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
                                 };
-                                let pair = emit_opt_checked_add(
+                                let pair = emit_opt_checked_update(
                                     &mut builder,
                                     &env,
+                                    mode,
                                     &stack_provenance,
                                     depth,
                                     old,
@@ -1707,7 +1752,7 @@ fn lower_optimized_machine(
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 )?;
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1735,7 +1780,7 @@ fn lower_optimized_machine(
                                     node.deopt_guard().ok_or(CompileFailure::InvalidArtifact)?,
                                 )?;
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 depth = rhs_index;
@@ -1867,7 +1912,7 @@ fn lower_optimized_machine(
                                 )?;
                                 let pair = opt_use(&mut builder, stack[top]);
                                 opt_define(&mut builder, locals[index], pair);
-                                if !int32_loop {
+                                if !int32_loop && !defer_scalar_locals {
                                     opt_store(&mut builder, var_buf, index, pair);
                                 }
                                 opt_invalidate_provenance(
@@ -1920,12 +1965,17 @@ fn lower_optimized_machine(
                                     &scalar_numeric,
                                 )?;
                                 let rhs_pair = rhs_pair.ok_or(CompileFailure::InvalidArtifact)?;
-                                let (operation, _, _) = ir
+                                let (operation, lhs, rhs) = ir
                                     .scalar_graph()
                                     .comparison(*node_id)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                                 use crate::ir::ScalarCompareOp;
-                                let value = if int32_loop {
+                                let integer_compare = int32_loop
+                                    || [lhs, rhs].iter().all(|value| {
+                                        scalar_numeric.get(value.index()).copied().flatten()
+                                            == Some(crate::ir::ScalarNumericMode::Int32)
+                                    });
+                                let value = if integer_compare {
                                     let cc = match operation {
                                         ScalarCompareOp::LessThan => IntCC::SignedLessThan,
                                         ScalarCompareOp::LessEqual => IntCC::SignedLessThanOrEqual,
@@ -1934,7 +1984,9 @@ fn lower_optimized_machine(
                                             IntCC::SignedGreaterThanOrEqual
                                         }
                                     };
-                                    builder.ins().icmp(cc, lhs_pair.payload, rhs_pair.payload)
+                                    let lhs = opt_i32(&mut builder, &env, lhs_pair);
+                                    let rhs = opt_i32(&mut builder, &env, rhs_pair);
+                                    builder.ins().icmp(cc, lhs, rhs)
                                 } else {
                                     let lhs = opt_f64(&mut builder, lhs_pair);
                                     let rhs = opt_f64(&mut builder, rhs_pair);
@@ -1972,7 +2024,7 @@ fn lower_optimized_machine(
                                     .scalar_graph()
                                     .update_operation(*node_id)
                                     .ok_or(CompileFailure::InvalidArtifact)?;
-                                if (mode == crate::ir::ScalarNumericMode::Int32) != int32_loop {
+                                if int32_loop && mode != crate::ir::ScalarNumericMode::Int32 {
                                     return Err(CompileFailure::InvalidArtifact);
                                 }
                                 let increment = delta == 1;
@@ -1991,9 +2043,10 @@ fn lower_optimized_machine(
                                     let sum = builder.ins().iadd(old.payload, delta.payload);
                                     opt_int_pair(&mut builder, &env, sum)
                                 } else {
-                                    emit_opt_checked_add(
+                                    emit_opt_checked_update(
                                         &mut builder,
                                         &env,
+                                        mode,
                                         &stack_provenance,
                                         depth,
                                         old,
@@ -3308,6 +3361,30 @@ fn opt_stack_permutation(name: &str) -> Option<(usize, &'static [usize])> {
 /// Float64, any other numeric mix is a Float64 add, and non-numeric operands
 /// deoptimize before any effect. In the raw-i32 loop shape a Float64 result
 /// cannot be represented, so overflow deoptimizes instead.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_checked_update(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    mode: crate::ir::ScalarNumericMode,
+    provenance: &[OptProvenance],
+    depth: usize,
+    lhs: OptPair,
+    rhs: OptPair,
+    pc: u32,
+    guard: u32,
+) -> Result<OptPair, CompileFailure> {
+    use cranelift_codegen::ir::InstBuilder;
+    if env.int32_loop || mode != crate::ir::ScalarNumericMode::Int32 {
+        return emit_opt_checked_add(builder, env, provenance, depth, lhs, rhs, pc, guard);
+    }
+    let lhs = opt_i32(builder, env, lhs);
+    let rhs = opt_i32(builder, env, rhs);
+    let (sum, overflow) = builder.ins().sadd_overflow(lhs, rhs);
+    let valid = builder.ins().bxor_imm(overflow, 1);
+    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, valid)?;
+    Ok(opt_int_pair(builder, env, sum))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_opt_checked_add(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
@@ -6478,6 +6555,9 @@ fn emit_opt_amortized_poll(
     layout: super::helpers::FrameLayout,
     pc: u32,
     budget: cranelift_frontend::Variable,
+    cold_poll: bool,
+    before_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>),
+    after_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>),
 ) {
     use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
     let remaining = builder.use_var(budget);
@@ -6485,10 +6565,17 @@ fn emit_opt_amortized_poll(
     builder.def_var(budget, remaining);
     let due = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
     let poll = builder.create_block();
+    // Preserve the established raw-i32 loop layout. The new mixed scalar
+    // path outlines both polling and its frame revalidation together.
+    if cold_poll {
+        builder.set_cold_block(poll);
+    }
     let continuation = builder.create_block();
     builder.ins().brif(due, poll, &[], continuation, &[]);
     builder.switch_to_block(poll);
+    before_poll(builder);
     emit_opt_poll(builder, frame, sret, signature, pointer_type, layout, pc);
+    after_poll(builder);
     let reset = builder.ins().iconst(types::I64, 64);
     builder.def_var(budget, reset);
     builder.ins().jump(continuation, &[]);

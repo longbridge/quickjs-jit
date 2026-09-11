@@ -2848,7 +2848,8 @@ fn comparisons_lower_to_native_compares_without_helper_calls() {
         0,
         0,
     );
-    assert!(lte_immediate.contains("fcmp"), "{lte_immediate}");
+    assert!(lte_immediate.contains("icmp"), "{lte_immediate}");
+    assert!(!lte_immediate.contains("fcmp"), "{lte_immediate}");
     assert!(
         !lte_immediate.contains("call_indirect"),
         "`<=` must not call CompareSlow: {lte_immediate}"
@@ -5678,6 +5679,12 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
             1,
         ),
         (
+            "(function(f,a){let value=a;for(let i=0;i<1000;i++){value=f(value,true)}return value})",
+            "(function(a,enabled){if(enabled)return a+1;return a})",
+            vec![ObservedType::Int32, ObservedType::Bool],
+            1,
+        ),
+        (
             "(function(f,a,b){return f(a,b)})",
             "(function(a,enabled){if(enabled)return a+1;return a})",
             vec![ObservedType::Int32, ObservedType::Bool],
@@ -5793,6 +5800,41 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
                 blocks.get_mut(&id).unwrap().1.push(line);
             }
         }
+        let successors = |id: u32| {
+            blocks[&id]
+                .1
+                .iter()
+                .filter(|line| line.starts_with("brif ") || line.starts_with("jump "))
+                .flat_map(|line| {
+                    line.split("block").skip(1).map(|label| {
+                        label
+                            .chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect::<String>()
+                            .parse::<u32>()
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let loop_blocks = blocks
+            .keys()
+            .copied()
+            .filter(|&start| {
+                let mut pending = successors(start);
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(id) = pending.pop() {
+                    if blocks[&id].0 || !seen.insert(id) {
+                        continue;
+                    }
+                    if id == start {
+                        return true;
+                    }
+                    pending.extend(successors(id));
+                }
+                false
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         let mut pending = vec![0];
         let mut visited = std::collections::BTreeSet::new();
         while let Some(id) = pending.pop() {
@@ -5804,6 +5846,16 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
                 continue;
             }
             for line in lines {
+                if loop_blocks.contains(&id) {
+                    assert!(
+                        !line.starts_with("store "),
+                        "hot scalar loop writes interpreter frame: {clif}"
+                    );
+                    assert!(
+                        !line.contains("fcvt_from_sint") && !line.contains("fadd"),
+                        "integer induction uses floating arithmetic: {clif}"
+                    );
+                }
                 assert!(
                     !line.contains("call_indirect"),
                     "hot inline path calls runtime: {clif}"
@@ -5823,4 +5875,214 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
             }
         }
     }
+}
+
+#[test]
+fn heap_operations_and_unknown_calls_keep_original_poll_frequency() {
+    use rquickjs_jit::ir::ScalarNumericMode;
+    for source in [
+        "(function(a){return a.length})",
+        "(function(a){return a[0]})",
+        "(function(a){a.x=1;return 1})",
+        "(function(a){a[0]=1;return 1})",
+        "(function(f){return f()})",
+    ] {
+        let fixture = SnapshotFixture::compile(source);
+        let body = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+        let ir = OptimizedIr::translate(&body, 303).unwrap();
+        let graph = ir.scalar_graph();
+        // Even perfect numeric proofs cannot erase heap/call effects.
+        assert!(
+            !graph.permits_amortized_poll(
+                ir.nodes(),
+                &vec![Some(ScalarNumericMode::Int32); graph.values().len()],
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn mixed_scalar_loops_amortize_polls_and_remain_interruptible() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    unsafe extern "C" {
+        fn JS_JitGetHelperCount(
+            rt: *mut rquickjs_core::qjs::JSRuntime,
+            helper: u32,
+            count: *mut u64,
+        ) -> i32;
+    }
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+        "function scalarPoll(n,a,enabled){for(let i=0;i<n;i++){a=enabled?a+1:a-1;}return a}"
+    )
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("scalarPoll(4,1,true)"))
+                .unwrap(),
+            5
+        );
+        jit.poll();
+    }
+    assert!(jit.metrics().tier2_entries >= 10);
+    let count = || {
+        context.with(|ctx| {
+            let mut count = 0;
+            assert_eq!(
+                unsafe {
+                    JS_JitGetHelperCount(
+                        rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()),
+                        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_POLL,
+                        &mut count,
+                    )
+                },
+                0
+            );
+            count
+        })
+    };
+    let before = count();
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("scalarPoll(4096,1,true)"))
+            .unwrap(),
+        4097
+    );
+    let polls = count() - before;
+    assert!(
+        (64..=80).contains(&polls),
+        "expected bounded poll batches, got {polls}"
+    );
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<i32, _>("scalarPoll(128,0,false)"))
+            .unwrap(),
+        -128
+    );
+    let interrupts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&interrupts);
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        seen.fetch_add(1, Ordering::SeqCst) >= 2
+    })));
+    let before = jit.metrics();
+    assert!(context
+        .with(|ctx| ctx.eval::<i32, _>("scalarPoll(1000000000,1,true)"))
+        .is_err());
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(interrupts.load(Ordering::SeqCst) >= 3);
+    assert_eq!(after.native_entries, after.native_exits);
+    runtime.set_interrupt_handler(None);
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn deferred_scalar_locals_restore_dirty_values_after_poll_and_overflow() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(
+        "function dirtyLocals(n,a,enabled){let value=a,last=0;for(let i=0;i<n;i++){last=value;value=enabled?value+1:value-1;}return value+last}"
+    )).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("dirtyLocals(2,3,true)"))
+                .unwrap(),
+            9
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10);
+    // The overflow occurs after a poll boundary; the last/value/i locals
+    // have changed again since that publication and must be reconstructed.
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("dirtyLocals(128,2147483547,true)"))
+            .unwrap(),
+        4294967349.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(after.deopts > before.deopts);
+    assert_eq!(after.native_entries, after.native_exits);
+}
+
+#[cfg(all(target_os = "macos", target_endian = "little"))]
+#[test]
+fn mixed_integer_update_overflow_recovers_without_wrapping() {
+    use rquickjs::{Context, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(
+        "function updateOverflow(n,enabled){let x=2147483646;for(let i=0;i<n;i++){x++}return enabled?x:0}"
+    )).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>("updateOverflow(1,true)"))
+                .unwrap(),
+            2147483647
+        );
+        jit.poll();
+    }
+    let before = jit.metrics();
+    assert!(before.tier2_entries >= 10);
+    assert_eq!(
+        context
+            .with(|ctx| ctx.eval::<f64, _>("updateOverflow(3,true)"))
+            .unwrap(),
+        2147483649.0
+    );
+    let after = jit.metrics();
+    assert!(after.tier2_entries > before.tier2_entries);
+    assert!(after.deopts > before.deopts);
+    assert_eq!(after.native_entries, after.native_exits);
 }

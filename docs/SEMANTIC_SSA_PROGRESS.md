@@ -892,3 +892,97 @@ Numeric and scalar-loop have 19/30 and 22/30 compilation-quiet samples; all
 samples remain included. All other candidate configurations are quiet in
 30/30 samples. General inline recovery, target-guard LICM, lazy frame state,
 generic-call profitability and property/array architecture remain unfinished.
+
+### Scalar-region poll amortization (working candidate after 432afdf)
+
+SSA admission now permits amortized polling only when the region moves borrowed
+values or computes checked scalars, with primitive-proven frame writes. Unknown
+calls, heap operations and unproven stores keep their original poll frequency.
+Legacy FrameWrite also represents heap-induced frame invalidation; admission
+explicitly requires a frame slot write, so those invalidations cannot masquerade
+as scalar stores. Lexical sentinel initialization remains non-numeric and is
+handled separately. No general heap/clobber analysis is claimed by this predicate.
+
+Admitted mixed-representation loops reuse the existing 64-loop-header polling
+budget. Numeric frame revalidation runs after an actual poll, not every iteration.
+All interpreter-frame stores remain in place. This increases maximum interrupt
+latency to 64 loop-header visits for newly admitted regions. Independent static
+review found no concrete issue; negative admission tests caught and hardened the
+legacy FrameWrite distinction.
+
+Validation: 567 runtime tests passed, zero failed, one existing ignored; Clippy
+with warnings denied and the release benchmark build passed. Tests cover an
+inlined loop's successful path, heap/unknown-call exclusion, bounded helper-count
+reduction over 4,096 iterations, both boolean branches, pressure GC and native
+interrupt exit. Performance evidence is pending. The primary README matrix
+continues to describe the frozen 432afdf inline-region candidate, not this work.
+
+### Poll diagnostic: all six scenarios
+
+540 process records, six configurations, five discarded and ten retained pairs.
+Median ms per ten calls; paired geometric speeds with 95% bootstrap CIs.
+
+| Scenario | Previous inline ms | QuickJS ms | Bun ms | Candidate ms | Previous speed | QuickJS speed | Bun speed |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| call-heavy | 0.279166 | 0.964916 | 0.012604 | 0.108167 | 2.5741x [2.5234, 2.6123] | 8.8566x [8.6810, 8.9900] | 0.1165x [0.1137, 0.1192] |
+| generic-call-entry | 0.209541 | 0.800687 | 0.005916 | 0.106916 | 1.9569x [1.9371, 1.9754] | 7.4887x [7.4373, 7.5424] | 0.0550x [0.0544, 0.0556] |
+| host-compute | 0.058729 | 1.197125 | 0.191333 | 0.058937 | 1.0238x [0.9849, 1.0871]; statistically tied (1.51% slower to 8.71% faster) | 20.3573x [19.8924, 20.9211] | 3.3778x [3.1960, 3.6093] |
+| numeric | 0.023104 | 0.378937 | 0.108458 | 0.023354 | 0.9820x [0.9408, 1.0189]; statistically tied (5.92% slower to 1.89% faster) | 16.1115x [15.5645, 16.5162] | 4.7326x [4.4086, 5.2200] |
+| scalar-loop | 0.023146 | 0.382937 | 0.106833 | 0.023292 | 0.9497x [0.8725, 0.9953] | 15.8401x [14.5409, 16.6319] | 4.4152x [4.0662, 4.6225] |
+| arrays-typed | 2.151021 | 3.719709 | 0.157521 | 2.161792 | 0.9785x [0.9483, 0.9974] | 1.6996x [1.6474, 1.7322] | 0.0708x [0.0674, 0.0745] |
+
+All candidate samples were compilation-quiet. Call-heavy and generic-call-entry
+improve, but scalar-loop and arrays-typed are slower than the previous inline
+candidate. This is not acceptance or a substitute for the full 27-scenario
+README matrix. Evidence: `benchmarks/results/semantic-inline-poll-diagnostic-arm64.tar.gz` and matching JSON/manifest.
+
+### Scalar local publication and checked induction (2026-09-10–11)
+
+The final candidate for this step also defers primitive local stores in admitted
+mixed scalar regions without owned locals. Actual polls publish current SSA
+locals before the helper; every deopt still reconstructs arguments, locals and
+stack. Argument stores remain immediate. This relies on current function-entry
+undefined locals; future optimized OSR must establish its own ownership premise.
+Raw Int32 loops retain their previous block layout, including non-cold poll blocks.
+
+A bounded monotone SSA proof selects checked Int32 updates in functions containing
+loops when every incoming edge has a real Int32 seed. Seedless cycles, unknown
+incoming edges, explicit Float64 contracts and exhausted proof budgets do not
+narrow. Mixed frames keep their 64-bit payload ABI but lower these updates and
+proven integer comparisons with integer operations. Overflow still deoptimizes.
+The generated-code test checks that the admitted inline loop has no hot helper
+calls, local stores, floating additions or signed-to-float conversions.
+
+Validation: 570 runtime tests passed, zero failed, one existing ignored. Clippy
+all targets with warnings denied, release benchmark build, formatting and diff
+checks passed. Tests cover proof boundaries, dirty local reconstruction after
+poll/overflow, exact mixed-loop overflow recovery, heap/call exclusion, stress GC
+and interrupt exit. Independent review caught bitwise rather than logical
+inversion of an overflow flag; it was fixed with XOR 1. The full regression suite
+also caught the wrong overflow value before the fix.
+
+Final frozen binary:
+`1e7ab9858303c1e4258e2774acef72d6eeddcdc12074dcc6f72c1e666ad18aee`,
+source snapshot based on `432afdf883c77d325f3a5d6a3275d1f893ccadad`.
+Full 27-scenario comparison: six configurations, five discarded and ten retained
+paired processes per scenario, 2,430 records. Temporary source-file loss after
+24 complete scenarios interrupted collection. All frozen source/binary hashes
+were restored and verified; the last three scenarios restarted from discarded
+warmup. Both segment metadata and aborted records are retained. This run spans
+September 10–11; no uninterrupted-session claim is made.
+
+Relative to 432afdf: five scenarios faster, 21 statistically tied, one slower.
+Call-heavy: 4.8207x speed [4.7066, 4.9227]; generic-call-entry: 5.3358x
+[5.2688, 5.4095]. Their speeds relative to default Bun are 0.2148x and
+0.1519x respectively. Numeric is statistically tied (0.69% slower to 1.36%
+faster); scalar-loop is statistically tied (3.33% slower to 3.41% faster).
+Arrays-typed remains slower at 0.9771x [0.9681, 0.9862], between 1.38% and
+3.19% slower. Relative to the original 023a220, arrays-typed and collections
+have intervals entirely below parity. No-regression and 0.5x Bun gates are not
+met. General target-guard LICM, inline-frame recovery and heap/array phases remain
+pending; this is measured progress, not completion of the architecture objective.
+
+The root README contains every scenario with absolute times, confidence intervals,
+native coverage and interpreter controls. Raw evidence and reproducible inputs:
+`benchmarks/results/semantic-inline-induction-paired-arm64.tar.gz`, with matching
+JSON summary and manifest. All archived file hashes were verified.

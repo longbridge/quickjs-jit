@@ -72,6 +72,59 @@ mod representation_tests {
     }
 
     #[test]
+    fn integer_update_selection_requires_seed_and_every_incoming_edge() {
+        let update = || ScalarValue::Update {
+            mode: ScalarNumericMode::Number,
+            input: ScalarValueId(1),
+            delta: 1,
+        };
+        let make = |seed| {
+            let mut graph = cyclic_graph(seed);
+            graph.values[2] = update();
+            graph
+        };
+        let mut graph = make(ScalarValue::Int32(0));
+        assert_eq!(graph.specialize_integer_updates(100), 1);
+        assert!(matches!(
+            graph.values[2],
+            ScalarValue::Update {
+                mode: ScalarNumericMode::Int32,
+                ..
+            }
+        ));
+        for seed in [ScalarValue::Opaque, update()] {
+            let mut graph = make(seed);
+            assert_eq!(graph.specialize_integer_updates(100), 0);
+        }
+        let mut graph = make(ScalarValue::Int32(0));
+        assert_eq!(graph.specialize_integer_updates(1), 0);
+        assert!(matches!(
+            graph.values[2],
+            ScalarValue::Update {
+                mode: ScalarNumericMode::Number,
+                ..
+            }
+        ));
+        graph.values.push(ScalarValue::Opaque);
+        if let ScalarValue::Phi { inputs, .. } = &mut graph.values[1] {
+            let mut edges = inputs.to_vec();
+            edges.push(ScalarPhiInput {
+                predecessor: Some(2),
+                value: ScalarValueId(3),
+            });
+            *inputs = edges.into();
+        }
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+        let mut graph = make(ScalarValue::Int32(0));
+        graph.values[2] = ScalarValue::Update {
+            mode: ScalarNumericMode::Float64,
+            input: ScalarValueId(1),
+            delta: 1,
+        };
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+    }
+
+    #[test]
     fn numeric_phi_preserves_wider_representation_without_proving_int32() {
         for mode in [ScalarNumericMode::Float64, ScalarNumericMode::Number] {
             let mut graph = cyclic_graph(ScalarValue::Update {
@@ -540,6 +593,138 @@ impl ScalarGraph {
             .get(node as usize)
             .map(Box::as_ref)
             .unwrap_or(&[])
+    }
+
+    /// Select checked Int32 updates for cycles whose incoming values are all
+    /// Int32. Zero means no evidence, not Int32: seedless cycles and any unknown
+    /// predecessor must not bootstrap their own proof. Overflow still exits.
+    fn specialize_integer_updates(&mut self, mut work: usize) -> usize {
+        const INT: u8 = 1;
+        const OTHER: u8 = 2;
+        let mut facts = vec![0u8; self.values.len()];
+        loop {
+            let mut changed = false;
+            for (index, value) in self.values.iter().enumerate() {
+                let cost = match value {
+                    ScalarValue::Phi { inputs, .. } => inputs.len().max(1),
+                    _ => 1,
+                };
+                let Some(remaining) = work.checked_sub(cost) else {
+                    return 0;
+                };
+                work = remaining;
+                let next = match value {
+                    ScalarValue::Int32(_) => INT,
+                    ScalarValue::Binary {
+                        mode: ScalarNumericMode::Int32,
+                        ..
+                    }
+                    | ScalarValue::Update {
+                        mode: ScalarNumericMode::Int32,
+                        ..
+                    } => INT,
+                    ScalarValue::Update {
+                        mode: ScalarNumericMode::Number,
+                        input,
+                        ..
+                    } => facts[input.index()],
+                    ScalarValue::Call(call) if call.inline.is_some() => {
+                        facts[call.inline.as_ref().unwrap().result.index()]
+                    }
+                    ScalarValue::Phi { inputs, .. } => inputs
+                        .iter()
+                        .fold(0, |set, input| set | facts[input.value.index()]),
+                    _ => OTHER,
+                };
+                if next != facts[index] {
+                    facts[index] = next;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut selected = 0;
+        for value in &mut self.values {
+            if let ScalarValue::Update { mode, input, .. } = value {
+                if *mode == ScalarNumericMode::Number && facts[input.index()] == INT {
+                    *mode = ScalarNumericMode::Int32;
+                    selected += 1;
+                }
+            }
+        }
+        selected
+    }
+
+    /// Whether execution between loop polls can only move borrowed values or
+    /// compute checked scalars. Heap operations and unknown calls must retain
+    /// their original safepoint frequency. Frame writes require primitive SSA
+    /// proofs, so delaying a poll cannot hide newly owned heap references.
+    pub fn permits_amortized_poll(
+        &self,
+        nodes: &[OptimizedNode],
+        numeric: &[Option<ScalarNumericMode>],
+    ) -> bool {
+        nodes.iter().all(|node| match node.effect() {
+            OptimizedEffect::Pure => true,
+            OptimizedEffect::Control => match node.kind() {
+                OptimizedNodeKind::GuardNumeric { .. } | OptimizedNodeKind::Reuse { .. } => true,
+                OptimizedNodeKind::Bytecode { opcode } => {
+                    if opcode.starts_with("call") {
+                        self.call(node.id())
+                            .is_some_and(|call| call.inline.is_some())
+                    } else {
+                        matches!(
+                            opcode.as_ref(),
+                            "if_false"
+                                | "if_true"
+                                | "if_false8"
+                                | "if_true8"
+                                | "goto"
+                                | "goto8"
+                                | "goto16"
+                                | "return"
+                                | "return_undef"
+                                | "lt"
+                                | "lte"
+                                | "gt"
+                                | "gte"
+                                | "eq"
+                                | "neq"
+                                | "strict_eq"
+                                | "strict_neq"
+                                | "nop"
+                        )
+                    }
+                }
+            },
+            OptimizedEffect::FrameWrite => {
+                // Lexical initialization writes a non-owning sentinel. It is
+                // intentionally not a numeric value or an alias of the old local.
+                if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                    if opcode.as_ref() == "set_loc_uninitialized")
+                {
+                    return true;
+                }
+                // Legacy FrameWrite also classifies property/element helpers.
+                // Their frame invalidation definitions are not scalar stores.
+                if super::optimized::frame_write_slot(node).is_none() {
+                    return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                        if opcode.as_ref() == "drop");
+                }
+                let definitions = self.frame_definitions_for_node(node.id());
+                if definitions.is_empty() {
+                    return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                        if opcode.as_ref() == "drop");
+                }
+                definitions.iter().all(|(_, value)| {
+                    numeric.get(value.index()).copied().flatten().is_some()
+                        || matches!(self.values[value.index()], ScalarValue::Bool(_))
+                })
+            }
+            OptimizedEffect::Poll | OptimizedEffect::Reentrant => false,
+        })
     }
 
     pub fn frame_definitions_for_node(&self, node: u32) -> &[(FrameSlot, ScalarValueId)] {
@@ -1380,6 +1565,9 @@ impl ScalarGraph {
             )
         }) {
             graph.capture_frame(entry.id(), entry.pc(), &initial, &[], shape)?;
+        }
+        if blocks.iter().any(|block| block.is_loop_header()) {
+            graph.specialize_integer_updates(graph.values.len().saturating_mul(128));
         }
         graph.build_numeric_checks(nodes, blocks)?;
         Ok((graph, eliminated))
