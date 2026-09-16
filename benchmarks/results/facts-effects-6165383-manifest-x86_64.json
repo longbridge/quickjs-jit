@@ -87,6 +87,11 @@
       "revision": "12d7ee04bf4a73707c117e47aee8d110f7044671",
       "subject": "test(jit): await settled bounded loop tier",
       "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "9fb438631473656ef883977e9ee8dd8174feafa5",
+      "subject": "fix(jit): keep interpreter-only Tier-2 trials out of timing verdicts",
+      "classification": "runtime tier-down policy; changes the measured binary (interpreter-only functions keep their Tier-2 trial instead of a permanent blacklist); benchmark matrix not re-collected"
     }
   ],
   "artifacts": {
