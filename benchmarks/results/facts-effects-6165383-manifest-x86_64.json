@@ -82,6 +82,11 @@
       "revision": "ee174199fe520b322bf5b495c01263359ac61120",
       "subject": "test(jit): remove transient frame inline probes",
       "classification": "test/CI-only; not included in measured binary"
+    },
+    {
+      "revision": "12d7ee04bf4a73707c117e47aee8d110f7044671",
+      "subject": "test(jit): await settled bounded loop tier",
+      "classification": "test-only; not included in measured binary"
     }
   ],
   "artifacts": {
