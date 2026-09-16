@@ -62,6 +62,11 @@
       "revision": "63243071c1447e83ed6d4af5c8cff6ed2ec7ea71",
       "subject": "fix(ci): configure cross-target JIT metadata builds",
       "classification": "build/CI-only; not included in measured binary"
+    },
+    {
+      "revision": "8b5f6a79bc6563a3efe13cd8488dea7af8e7b3a9",
+      "subject": "test(jit): await the direct edge caller tier",
+      "classification": "test-only; not included in measured binary"
     }
   ],
   "artifacts": {
