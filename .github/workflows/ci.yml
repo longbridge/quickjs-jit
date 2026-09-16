@@ -572,6 +572,7 @@ jobs:
             gcc-14-loongarch64-linux-gnu \
             g++-14-loongarch64-linux-gnu \
             clang \
+            lld \
             qemu-user \
             qemu-system-arm \
             qemu-efi-aarch64 \
@@ -599,7 +600,7 @@ jobs:
           echo "[target.loongarch64-unknown-linux-musl]" >> ~/.cargo/config.toml
           echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=yes", "-C", "linker=loongarch64-unknown-linux-musl-gcc"]' >> ~/.cargo/config.toml
           echo "[target.loongarch64-unknown-linux-gnu]" >> ~/.cargo/config.toml
-          echo 'rustflags = ["-C", "linker=loongarch64-linux-gnu-gcc-14", "-C", "linker-features=+lld"]' >> ~/.cargo/config.toml
+          echo 'rustflags = ["-C", "linker=loongarch64-linux-gnu-gcc-14", "-C", "link-arg=-fuse-ld=lld"]' >> ~/.cargo/config.toml
 
           echo "/musl/bin" >> $GITHUB_PATH
 
