@@ -759,13 +759,39 @@ struct ProductionProfile {
     baseline_ns: u64,
     optimized_executions: u64,
     optimized_ns: u64,
+    /// Fastest optimized invocation observed so far; meaningful only while
+    /// `optimized_executions > 0`.
+    optimized_min_ns: u64,
     tier2_trial_decided: bool,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl ProductionProfile {
+    fn record_baseline(&mut self, elapsed_ns: u64) {
+        self.baseline_executions = self.baseline_executions.saturating_add(1);
+        self.baseline_ns = self.baseline_ns.saturating_add(elapsed_ns);
+    }
+
+    fn record_optimized(&mut self, elapsed_ns: u64) {
+        self.optimized_min_ns = if self.optimized_executions == 0 {
+            elapsed_ns
+        } else {
+            self.optimized_min_ns.min(elapsed_ns)
+        };
+        self.optimized_executions = self.optimized_executions.saturating_add(1);
+        self.optimized_ns = self.optimized_ns.saturating_add(elapsed_ns);
+    }
 }
 
 /// Finish the bounded Tier-2 profitability trial once. Production JITs patch
 /// an IC/tier state after classification; repeating wide average comparisons
 /// on every successful optimized exit would turn policy into hot-path tax.
 /// `Some(true)` requests tier-down, `Some(false)` records a profitable trial.
+///
+/// Tier-2 loses only when even its fastest invocation in the window is 25%
+/// slower than the baseline average. Sub-microsecond callees are timed through
+/// callbacks whose own cost rivals the margin, so one preempted or cold sample
+/// among eight must not decide the trial by itself.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn classify_tier2_trial(profile: &mut ProductionProfile) -> Option<bool> {
     if profile.tier2_trial_decided
@@ -774,12 +800,10 @@ fn classify_tier2_trial(profile: &mut ProductionProfile) -> Option<bool> {
     {
         return None;
     }
-    let loss = u128::from(profile.optimized_ns)
+    let loss = u128::from(profile.optimized_min_ns)
         .saturating_mul(u128::from(profile.baseline_executions))
         .saturating_mul(4)
-        >= u128::from(profile.baseline_ns)
-            .saturating_mul(u128::from(profile.optimized_executions))
-            .saturating_mul(5);
+        >= u128::from(profile.baseline_ns).saturating_mul(5);
     profile.tier2_trial_decided = true;
     Some(loss)
 }
@@ -1454,32 +1478,50 @@ mod production_osr_validation_tests {
 
     #[test]
     fn tier2_profitability_trial_is_classified_exactly_once() {
-        let mut profile = ProductionProfile {
-            baseline_executions: 8,
-            baseline_ns: 800,
-            optimized_executions: 7,
-            optimized_ns: 560,
-            ..ProductionProfile::default()
-        };
+        let mut profile = ProductionProfile::default();
+        for _ in 0..8 {
+            profile.record_baseline(100);
+        }
+        for _ in 0..7 {
+            profile.record_optimized(80);
+        }
         assert_eq!(classify_tier2_trial(&mut profile), None);
-        profile.optimized_executions = 8;
-        profile.optimized_ns = 640;
+        profile.record_optimized(80);
         assert_eq!(classify_tier2_trial(&mut profile), Some(false));
         assert!(profile.tier2_trial_decided);
         // Later samples must not revisit the cross-multiplied decision.
-        profile.optimized_executions = u64::MAX;
-        profile.optimized_ns = u64::MAX;
+        for _ in 0..8 {
+            profile.record_optimized(u64::MAX);
+        }
         assert_eq!(classify_tier2_trial(&mut profile), None);
 
-        let mut slow = ProductionProfile {
-            baseline_executions: 8,
-            baseline_ns: 800,
-            optimized_executions: 8,
-            optimized_ns: 1_001,
-            ..ProductionProfile::default()
-        };
+        let mut slow = ProductionProfile::default();
+        for _ in 0..8 {
+            slow.record_baseline(100);
+        }
+        for _ in 0..8 {
+            slow.record_optimized(125);
+        }
         assert_eq!(classify_tier2_trial(&mut slow), Some(true));
         assert!(slow.tier2_trial_decided);
+    }
+
+    #[test]
+    fn tier2_profitability_trial_ignores_one_scheduling_outlier() {
+        // Sub-microsecond callees are timed through instrumented callbacks
+        // (sanitizers, debug hosts); one preempted sample in the window must
+        // not condemn a Tier-2 version whose steady state is faster.
+        let mut profile = ProductionProfile::default();
+        for _ in 0..8 {
+            profile.record_baseline(600);
+        }
+        for _ in 0..7 {
+            profile.record_optimized(400);
+        }
+        profile.record_optimized(5_000);
+        assert_eq!(profile.optimized_min_ns, 400);
+        assert_eq!(classify_tier2_trial(&mut profile), Some(false));
+        assert!(profile.tier2_trial_decided);
     }
 
     #[test]
@@ -3261,14 +3303,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             let optimized = tier == runtime::Tier::Optimizing;
             let profile = self.execution_profiles.entry(key).or_default();
             if optimized {
-                profile.optimized_executions = profile.optimized_executions.saturating_add(1);
-                profile.optimized_ns = profile.optimized_ns.saturating_add(elapsed);
+                profile.record_optimized(elapsed);
                 // Like V8/JSC tier-down decisions, use a bounded observation
                 // window and a material margin instead of reacting to one
-                // noisy invocation. Cross-multiply cumulative averages so the
-                // decision remains deterministic and division-free: after at
-                // least eight samples, Tier-2 must not be 25% slower than its
-                // measured baseline for the same immutable function identity.
+                // noisy invocation. Cross-multiply so the decision remains
+                // deterministic and division-free: after at least eight
+                // samples, Tier-2's fastest invocation must not be 25% slower
+                // than the measured baseline average for the same immutable
+                // function identity. The coordinator only acts on a loss when
+                // that baseline is still installed to fall back to.
                 measured_tier2_loss = classify_tier2_trial(profile) == Some(true);
                 if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
                     if let Some(baseline_average) =
@@ -3289,8 +3332,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     }
                 }
             } else {
-                profile.baseline_executions = profile.baseline_executions.saturating_add(1);
-                profile.baseline_ns = profile.baseline_ns.saturating_add(elapsed);
+                profile.record_baseline(elapsed);
             }
         }
         if measured_tier2_loss && self.coordinator.demote_unprofitable_optimized(key) {

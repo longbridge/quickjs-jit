@@ -2151,47 +2151,41 @@ impl Coordinator {
     }
 
     /// Unpublishes an optimizing artifact whose bounded production trial was
-    /// measurably slower than the tier below it.
+    /// measurably slower than the installed baseline it falls back to.
     ///
-    /// This mirrors the bounded tier-down/backoff used by production JITs: a
-    /// usable baseline remains the retry target, while a function whose
-    /// baseline was already rejected gets exactly one optimizing trial. Active
-    /// pins remain valid until their invocation returns; new acquisitions see
-    /// the lower tier (or the interpreter) immediately.
+    /// This mirrors the bounded tier-down/backoff used by production JITs: the
+    /// usable baseline remains the retry target while the optimizing tier
+    /// backs off. A function whose baseline was already demoted keeps its
+    /// optimizing version instead: the interpreter is its only fallback, so
+    /// the baseline timing it lost to is not what it would run next, and a
+    /// wall-clock comparison across two separate windows (core migration,
+    /// frequency scaling, a busy compile worker, sanitizer hosts) is too weak
+    /// evidence for a verdict this generation could never revisit. Deopt
+    /// accounting still bounds that trial. Active pins remain valid until
+    /// their invocation returns; new acquisitions see the baseline
+    /// immediately.
     pub fn demote_unprofitable_optimized(&mut self, key: FunctionKey) -> bool {
         self.last_benefit_target = None;
-        if self
-            .installed_keys
-            .remove(&(key, Tier::Optimizing))
-            .is_none()
+        if !self.installed_keys.contains_key(&(key, Tier::Baseline))
+            || self
+                .installed_keys
+                .remove(&(key, Tier::Optimizing))
+                .is_none()
         {
             return false;
         }
 
-        let baseline_available = self.installed_keys.contains_key(&(key, Tier::Baseline));
         let function = self.functions.entry(key).or_default();
-        if baseline_available {
-            function.instability_attempts = function.instability_attempts.saturating_add(1);
-            let attempts = function.instability_attempts;
-            let delay = 1u64
-                .checked_shl(u32::from(attempts.min(20)))
-                .unwrap_or(u64::MAX);
-            function.optimizing.state = CompileState::Backoff {
-                attempts,
-                retry_after: self.clock.saturating_add(delay),
-            };
-            function.published = Some(Tier::Baseline);
-        } else {
-            // Automatic tiering grants a baseline-demoted function one bounded
-            // Tier-2 trial. Repeating a measured losing trial would turn
-            // exponential backoff into periodic latency spikes, so terminate
-            // this generation after that trial loses too.
-            if function.optimizing.state != CompileState::Blacklisted {
-                self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
-            }
-            function.optimizing.state = CompileState::Blacklisted;
-            function.published = None;
-        }
+        function.instability_attempts = function.instability_attempts.saturating_add(1);
+        let attempts = function.instability_attempts;
+        let delay = 1u64
+            .checked_shl(u32::from(attempts.min(20)))
+            .unwrap_or(u64::MAX);
+        function.optimizing.state = CompileState::Backoff {
+            attempts,
+            retry_after: self.clock.saturating_add(delay),
+        };
+        function.published = Some(Tier::Baseline);
         self.metrics.optimized_demotions = self.metrics.optimized_demotions.saturating_add(1);
         true
     }
@@ -2936,6 +2930,52 @@ mod tests {
                 current_generation: Some(2),
             })
         );
+    }
+
+    #[test]
+    fn measured_tier2_loss_only_demotes_onto_an_installed_baseline() {
+        fn install(coordinator: &mut Coordinator, key: FunctionKey, tier: Tier) {
+            coordinator.queue(key, tier, snapshot()).unwrap();
+            let request = coordinator.begin_next().unwrap();
+            coordinator.complete(CompileCompletion {
+                key,
+                requested_tier: tier,
+                artifact_key: request.artifact_key(),
+                attempt_id: request.attempt_id(),
+                result: Ok(CompiledArtifact::fake(tier).bind_fake(request.artifact_key())),
+            });
+        }
+
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        let backed = FunctionKey::new(7, 1);
+        install(&mut coordinator, backed, Tier::Baseline);
+        install(&mut coordinator, backed, Tier::Optimizing);
+        assert!(coordinator.demote_unprofitable_optimized(backed));
+        assert!(coordinator.pin(backed, Tier::Optimizing).is_none());
+        assert!(coordinator.pin(backed, Tier::Baseline).is_some());
+        assert!(matches!(
+            coordinator.tier_state(backed, Tier::Optimizing),
+            CompileState::Backoff { attempts: 1, .. }
+        ));
+        assert_eq!(coordinator.metrics().optimized_demotions, 1);
+        assert_eq!(coordinator.metrics().blacklisted, 0);
+
+        // The interpreter-only function keeps its bounded Tier-2 trial: the
+        // timing it lost to is not the tier it would fall back to.
+        let demoted = FunctionKey::new(8, 1);
+        install(&mut coordinator, demoted, Tier::Baseline);
+        assert!(coordinator.demote_baseline_to_interpreter(demoted));
+        install(&mut coordinator, demoted, Tier::Optimizing);
+        assert!(coordinator.pin(demoted, Tier::Optimizing).is_some());
+        assert!(!coordinator.demote_unprofitable_optimized(demoted));
+        assert!(coordinator.pin(demoted, Tier::Optimizing).is_some());
+        assert_eq!(
+            coordinator.tier_state(demoted, Tier::Optimizing),
+            CompileState::Installed(Tier::Optimizing)
+        );
+        assert_eq!(coordinator.metrics().optimized_demotions, 1);
+        assert_eq!(coordinator.metrics().blacklisted, 1);
+        assert_eq!(coordinator.metrics().interpreter_demotions, 1);
     }
 
     #[test]
