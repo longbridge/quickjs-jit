@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use super::heap::{ScalarHeapEffect, ScalarHeapOperation};
 use super::{
     FrameSlot, OptimizedBlock, OptimizedEffect, OptimizedFrameShape, OptimizedNode,
     OptimizedNodeKind,
@@ -68,6 +69,44 @@ mod representation_tests {
         assert_eq!(
             graph.proven_numeric_values(&[], |_| false, false, 100),
             [None; 3]
+        );
+    }
+
+    #[test]
+    fn known_argument_identity_requires_real_seed_and_agreeing_phi_edges() {
+        use crate::ir::KnownFacts;
+        let mut graph = cyclic_graph(ScalarValue::Input {
+            block_pc: 0,
+            slot: FrameSlot::Argument(2),
+        });
+        let facts = KnownFacts::analyze(&graph, &[], false, 100);
+        assert_eq!(facts.entry_argument(ScalarValueId(1)), Some(2));
+        assert_eq!(facts.entry_argument(ScalarValueId(2)), Some(2));
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 1).entry_argument(ScalarValueId(1)),
+            None,
+        );
+        graph.values[2] = ScalarValue::Input {
+            block_pc: 0,
+            slot: FrameSlot::Argument(3),
+        };
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
+            None,
+        );
+        graph.values[0] = ScalarValue::Phi {
+            block_pc: 0,
+            slot: FrameSlot::Local(0),
+            inputs: vec![ScalarPhiInput {
+                predecessor: Some(1),
+                value: ScalarValueId(1),
+            }]
+            .into(),
+        };
+        graph.values[2] = graph.values[0].clone();
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
+            None,
         );
     }
 
@@ -238,6 +277,170 @@ mod representation_tests {
             [Some(ScalarNumericMode::Int32), None, None, None]
         );
     }
+
+    #[test]
+    fn seeded_phi_cannot_hide_an_independent_seedless_incoming_cycle() {
+        let mut graph = cyclic_graph(ScalarValue::Int32(0));
+        graph.values[2] = ScalarValue::Phi {
+            block_pc: 1,
+            slot: FrameSlot::Local(0),
+            inputs: vec![ScalarPhiInput {
+                predecessor: Some(1),
+                value: ScalarValueId(2),
+            }]
+            .into(),
+        };
+        graph.values.push(ScalarValue::Update {
+            mode: ScalarNumericMode::Number,
+            input: ScalarValueId(1),
+            delta: 1,
+        });
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100)[1],
+            None
+        );
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+    }
+
+    #[cfg(feature = "test-support")]
+    mod guarded_numeric {
+        use super::*;
+        use crate::{bytecode::VerifyLimits, ir::OptimizedIr, test_support::SnapshotFixture};
+
+        fn array_graph(source: &str) -> (ScalarGraph, Vec<OptimizedNode>) {
+            let fixture = SnapshotFixture::compile(source);
+            let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+            let ir = OptimizedIr::translate(&verified, 1).unwrap();
+            (ir.scalar_graph().clone(), ir.nodes().to_vec())
+        }
+
+        fn primitive_array_permission(nodes: &[OptimizedNode], id: u32) -> bool {
+            matches!(nodes[id as usize].kind(), OptimizedNodeKind::Bytecode { opcode }
+                if matches!(opcode.as_ref(), "get_array_el" | "get_length"))
+                || matches!(
+                    nodes[id as usize].kind(),
+                    OptimizedNodeKind::GuardNumeric { .. }
+                )
+        }
+
+        #[test]
+        fn guarded_array_frame_reads_enable_seeded_checked_update_selection() {
+            let (mut graph, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            let update = nodes
+                .iter()
+                .find(|node| graph.update_operation(node.id()).is_some())
+                .unwrap()
+                .id();
+            assert_eq!(
+                graph.update_operation(update).unwrap().0,
+                ScalarNumericMode::Number
+            );
+            assert_eq!(graph.clone().specialize_integer_updates(100_000), 0);
+            assert_eq!(
+                graph.specialize_integer_updates_with_preserved_frame_reads(
+                    &nodes,
+                    |id| primitive_array_permission(&nodes, id),
+                    100_000
+                ),
+                1
+            );
+            assert_eq!(
+                graph.update_operation(update).unwrap().0,
+                ScalarNumericMode::Int32
+            );
+            let checks = graph.checks_for_node(update);
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].mode, ScalarNumericMode::Int32);
+            assert!(!checks[0].eliminated);
+            assert_eq!(checks[0].frame_state_node, update);
+            let facts = graph.proven_numeric_values_with_preserved_frame_reads(
+                &nodes,
+                |_| false,
+                |id| primitive_array_permission(&nodes, id),
+                100_000,
+            );
+            assert_eq!(
+                facts[graph.update_operation(update).unwrap().1.index()],
+                Some(ScalarNumericMode::Int32)
+            );
+        }
+
+        #[test]
+        fn guarded_frame_identity_preserves_only_the_original_numeric_slot() {
+            let (graph, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            let access = nodes.iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "get_array_el")).unwrap().id();
+            let after = |slot| {
+                graph
+                    .frame_definitions_for_node(access)
+                    .iter()
+                    .find(|(candidate, _)| *candidate == slot)
+                    .unwrap()
+                    .1
+            };
+            let numeric = after(FrameSlot::Argument(1));
+            let receiver = after(FrameSlot::Argument(0));
+            let generic =
+                graph.proven_numeric_values(&nodes, |argument| argument == 1, true, 100_000);
+            assert_eq!(generic[numeric.index()], None);
+            let guarded = graph.proven_numeric_values_with_preserved_frame_reads(
+                &nodes,
+                |argument| argument == 1,
+                |id| primitive_array_permission(&nodes, id),
+                100_000,
+            );
+            assert_eq!(guarded[numeric.index()], Some(ScalarNumericMode::Int32));
+            assert_eq!(guarded[receiver.index()], None);
+            assert_eq!(guarded[graph.value_for_node(access).unwrap().index()], None);
+        }
+
+        #[test]
+        fn unknown_reentry_mixed_seeds_and_exhaustion_keep_update_contract() {
+            for source in [
+                "(function(a,n,f){let s=0;for(let i=0;i<n;i++){f();s+=a[i]}return s})",
+                "(function(a,n,f){let s=0;let i=0;if(f)i=0.5;for(;i<n;i++)s+=a[i];return s})",
+                "(function(a,n,f){let s=0;for(let i=f;i<n;i++)s+=a[i];return s})",
+            ] {
+                let (mut graph, nodes) = array_graph(source);
+                let before = graph.values.clone();
+                assert_eq!(
+                    graph.specialize_integer_updates_with_preserved_frame_reads(
+                        &nodes,
+                        |id| primitive_array_permission(&nodes, id),
+                        100_000
+                    ),
+                    0,
+                    "{source}"
+                );
+                assert_eq!(graph.values, before, "{source}");
+            }
+            let (original, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            for work in [0, 1, 64] {
+                let mut graph = original.clone();
+                assert_eq!(
+                    graph.specialize_integer_updates_with_preserved_frame_reads(
+                        &nodes,
+                        |id| primitive_array_permission(&nodes, id),
+                        work
+                    ),
+                    0
+                );
+                assert_eq!(graph.values, original.values);
+                assert_eq!(graph.checks, original.checks);
+                assert!(graph
+                    .proven_numeric_values_with_preserved_frame_reads(
+                        &nodes,
+                        |argument| argument == 1,
+                        |id| primitive_array_permission(&nodes, id),
+                        work
+                    )
+                    .iter()
+                    .all(Option::is_none));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -246,6 +449,11 @@ pub struct ScalarValueId(u32);
 impl ScalarValueId {
     pub const fn index(self) -> usize {
         self.0 as usize
+    }
+
+    #[cfg(test)]
+    pub(super) const fn for_test(index: u32) -> Self {
+        Self(index)
     }
 }
 
@@ -346,6 +554,7 @@ pub struct ScalarCall {
     pub arguments: Box<[ScalarValueId]>,
     pub frame_state_node: u32,
     pub inline: Option<Box<ScalarInlineRegion>>,
+    pub frame_inline: Option<Box<super::ScalarFrameInlineRegion>>,
 }
 
 /// An effect-free callee path expanded in the caller's ValueId namespace.
@@ -426,6 +635,16 @@ pub enum ScalarValue {
         rhs: ScalarValueId,
     },
     Call(ScalarCall),
+    GetProperty {
+        base: ScalarValueId,
+        atom: u32,
+        frame_state_node: u32,
+    },
+    GetElement {
+        base: ScalarValueId,
+        index: ScalarValueId,
+        frame_state_node: u32,
+    },
     /// A producer whose value identity is known, but whose semantics have not
     /// yet been modeled by this pass. Never value-number opaque operations.
     Opaque,
@@ -461,11 +680,37 @@ pub struct ScalarGraph {
     frame_definitions: Vec<FrameBindings>,
     block_inputs: Vec<(u32, FrameBindings)>,
     frame_states: Vec<Option<ScalarFrameState>>,
+    heap_operations: Vec<Option<ScalarHeapOperation>>,
+    heap_effects: Vec<ScalarHeapEffect>,
     state_entries: usize,
     value_limit: usize,
 }
 
 impl ScalarGraph {
+    #[cfg(test)]
+    pub(super) fn for_test(
+        values: Vec<ScalarValue>,
+        frame_states: Vec<Option<ScalarFrameState>>,
+    ) -> Self {
+        Self {
+            values,
+            frame_states,
+            ..Self::default()
+        }
+    }
+
+    pub fn heap_operation(&self, node: u32) -> Option<&ScalarHeapOperation> {
+        self.heap_operations.get(node as usize)?.as_ref()
+    }
+
+    /// Conservative effect before speculative heap guards have been proven.
+    pub fn effect_for_node(&self, node: u32) -> ScalarHeapEffect {
+        self.heap_effects
+            .get(node as usize)
+            .copied()
+            .unwrap_or(ScalarHeapEffect::Reentrant)
+    }
+
     /// Representation facts valid after the caller-supplied entry guards.
     /// Poll aliases are enabled only when lowering preserves register bindings
     /// across its poll; arbitrary reentrant frame reads remain unknown.
@@ -474,6 +719,31 @@ impl ScalarGraph {
         nodes: &[OptimizedNode],
         guarded_argument: impl Fn(u16) -> bool,
         preserve_poll_bindings: bool,
+        work: usize,
+    ) -> Vec<Option<ScalarNumericMode>> {
+        self.proven_numeric_values_with_preserved_frame_reads(
+            nodes,
+            guarded_argument,
+            |node| {
+                preserve_poll_bindings
+                    && nodes.get(node as usize).is_some_and(|node| {
+                        matches!(node.kind(), OptimizedNodeKind::GuardNumeric { .. })
+                    })
+            },
+            work,
+        )
+    }
+
+    /// Numeric facts under exact successful-path frame preservation contracts.
+    /// `preserve(node)` may authorize a guarded primitive heap operation or a
+    /// revalidated poll, but never an arbitrary reentrant slow path. It only
+    /// recovers the pre-operation identity of each frame slot: heap results do
+    /// not become numeric, and arguments still require their own entry guards.
+    pub(crate) fn proven_numeric_values_with_preserved_frame_reads(
+        &self,
+        nodes: &[OptimizedNode],
+        guarded_argument: impl Fn(u16) -> bool,
+        preserve: impl Fn(u32) -> bool,
         mut work: usize,
     ) -> Vec<Option<ScalarNumericMode>> {
         // Zero is not-yet-reached evidence, not an unknown JS type. Union is
@@ -520,23 +790,9 @@ impl ScalarGraph {
                     ScalarValue::Phi { inputs, .. } => inputs
                         .iter()
                         .fold(0, |set, input| set | types[input.value.index()]),
-                    ScalarValue::FrameRead { node, slot }
-                        if preserve_poll_bindings
-                            && matches!(
-                                nodes[*node as usize].kind(),
-                                OptimizedNodeKind::GuardNumeric { .. }
-                            ) =>
-                    {
-                        self.frame_state_for_node(*node)
-                            .and_then(|state| match slot {
-                                FrameSlot::Argument(index) => {
-                                    state.arguments.get(usize::from(*index))
-                                }
-                                FrameSlot::Local(index) => state.locals.get(usize::from(*index)),
-                                FrameSlot::Stack(index) => state.stack.get(usize::from(*index)),
-                            })
-                            .map_or(OTHER, |source| types[source.index()])
-                    }
+                    ScalarValue::FrameRead { node, slot } => self
+                        .preserved_frame_read_source(nodes, *node, *slot, &preserve)
+                        .map_or(OTHER, |source| types[source.index()]),
                     _ => OTHER,
                 };
                 let next = next | types[index];
@@ -544,6 +800,20 @@ impl ScalarGraph {
                 types[index] = next;
             }
             if !changed {
+                // An independently seedless component is an unknown incoming
+                // edge, even if another edge of its consumer Phi is seeded.
+                if types.contains(&0) {
+                    let Some(remaining) = work.checked_sub(types.len()) else {
+                        return vec![None; self.values.len()];
+                    };
+                    work = remaining;
+                    for value in &mut types {
+                        if *value == 0 {
+                            *value = OTHER;
+                        }
+                    }
+                    continue;
+                }
                 return types
                     .into_iter()
                     .map(|set| match set {
@@ -555,6 +825,26 @@ impl ScalarGraph {
                     .collect();
             }
         }
+    }
+
+    fn preserved_frame_read_source(
+        &self,
+        nodes: &[OptimizedNode],
+        node: u32,
+        slot: FrameSlot,
+        preserve: &impl Fn(u32) -> bool,
+    ) -> Option<ScalarValueId> {
+        if nodes.get(node as usize)?.id() != node || !preserve(node) {
+            return None;
+        }
+        let state = self.frame_state_for_node(node)?;
+        let source = match slot {
+            FrameSlot::Argument(index) => state.arguments.get(usize::from(index)),
+            FrameSlot::Local(index) => state.locals.get(usize::from(index)),
+            FrameSlot::Stack(index) => state.stack.get(usize::from(index)),
+        }
+        .copied()?;
+        (source.index() < self.values.len()).then_some(source)
     }
 
     pub fn checks_for_node(&self, node: u32) -> &[ScalarCheck] {
@@ -598,7 +888,23 @@ impl ScalarGraph {
     /// Select checked Int32 updates for cycles whose incoming values are all
     /// Int32. Zero means no evidence, not Int32: seedless cycles and any unknown
     /// predecessor must not bootstrap their own proof. Overflow still exits.
-    fn specialize_integer_updates(&mut self, mut work: usize) -> usize {
+    fn specialize_integer_updates(&mut self, work: usize) -> usize {
+        self.specialize_integer_updates_with_preserved_frame_reads(&[], |_| false, work)
+    }
+
+    /// Select checked Int32 updates through exactly authorized frame reads.
+    /// The caller must emit guards that preserve these pre-operation slot
+    /// identities on every continuing native path. This never trusts a heap
+    /// result, an unguarded argument, or a non-integer incoming edge. Selected
+    /// updates retain their overflow exits and receive conservative Int32
+    /// operand checks, so the returned graph can be lowered without rebuilding
+    /// its check table. Exhaustion leaves both values and checks untouched.
+    pub(crate) fn specialize_integer_updates_with_preserved_frame_reads(
+        &mut self,
+        nodes: &[OptimizedNode],
+        preserve: impl Fn(u32) -> bool,
+        mut work: usize,
+    ) -> usize {
         const INT: u8 = 1;
         const OTHER: u8 = 2;
         let mut facts = vec![0u8; self.values.len()];
@@ -634,16 +940,38 @@ impl ScalarGraph {
                     ScalarValue::Phi { inputs, .. } => inputs
                         .iter()
                         .fold(0, |set, input| set | facts[input.value.index()]),
+                    ScalarValue::FrameRead { node, slot } => self
+                        .preserved_frame_read_source(nodes, *node, *slot, &preserve)
+                        .map_or(OTHER, |source| facts[source.index()]),
                     _ => OTHER,
-                };
+                } | facts[index];
                 if next != facts[index] {
                     facts[index] = next;
                     changed = true;
                 }
             }
             if !changed {
+                if facts.contains(&0) {
+                    let Some(remaining) = work.checked_sub(facts.len()) else {
+                        return 0;
+                    };
+                    work = remaining;
+                    for fact in &mut facts {
+                        if *fact == 0 {
+                            *fact = OTHER;
+                        }
+                    }
+                    continue;
+                }
                 break;
             }
+        }
+        let commit_work = self.checks.iter().fold(
+            self.values.len().saturating_add(self.checks.len()),
+            |work, checks| work.saturating_add(checks.len()),
+        );
+        if work < commit_work {
+            return 0;
         }
         let mut selected = 0;
         for value in &mut self.values {
@@ -651,6 +979,27 @@ impl ScalarGraph {
                 if *mode == ScalarNumericMode::Number && facts[input.index()] == INT {
                     *mode = ScalarNumericMode::Int32;
                     selected += 1;
+                }
+            }
+        }
+        if selected != 0 {
+            for (node, checks) in self.checks.iter_mut().enumerate() {
+                let Some(value) = self.node_values.get(node).copied().flatten() else {
+                    continue;
+                };
+                if matches!(
+                    self.values[value.index()],
+                    ScalarValue::Update {
+                        mode: ScalarNumericMode::Int32,
+                        ..
+                    }
+                ) {
+                    for check in checks {
+                        if check.mode != ScalarNumericMode::Int32 {
+                            check.mode = ScalarNumericMode::Int32;
+                            check.eliminated = false;
+                        }
+                    }
                 }
             }
         }
@@ -666,64 +1015,89 @@ impl ScalarGraph {
         nodes: &[OptimizedNode],
         numeric: &[Option<ScalarNumericMode>],
     ) -> bool {
-        nodes.iter().all(|node| match node.effect() {
-            OptimizedEffect::Pure => true,
-            OptimizedEffect::Control => match node.kind() {
-                OptimizedNodeKind::GuardNumeric { .. } | OptimizedNodeKind::Reuse { .. } => true,
-                OptimizedNodeKind::Bytecode { opcode } => {
-                    if opcode.starts_with("call") {
-                        self.call(node.id())
-                            .is_some_and(|call| call.inline.is_some())
-                    } else {
-                        matches!(
-                            opcode.as_ref(),
-                            "if_false"
-                                | "if_true"
-                                | "if_false8"
-                                | "if_true8"
-                                | "goto"
-                                | "goto8"
-                                | "goto16"
-                                | "return"
-                                | "return_undef"
-                                | "lt"
-                                | "lte"
-                                | "gt"
-                                | "gte"
-                                | "eq"
-                                | "neq"
-                                | "strict_eq"
-                                | "strict_neq"
-                                | "nop"
-                        )
-                    }
-                }
-            },
-            OptimizedEffect::FrameWrite => {
-                // Lexical initialization writes a non-owning sentinel. It is
-                // intentionally not a numeric value or an alias of the old local.
-                if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
-                    if opcode.as_ref() == "set_loc_uninitialized")
-                {
-                    return true;
-                }
-                // Legacy FrameWrite also classifies property/element helpers.
-                // Their frame invalidation definitions are not scalar stores.
-                if super::optimized::frame_write_slot(node).is_none() {
-                    return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
-                        if opcode.as_ref() == "drop");
-                }
-                let definitions = self.frame_definitions_for_node(node.id());
-                if definitions.is_empty() {
-                    return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
-                        if opcode.as_ref() == "drop");
-                }
-                definitions.iter().all(|(_, value)| {
-                    numeric.get(value.index()).copied().flatten().is_some()
-                        || matches!(self.values[value.index()], ScalarValue::Bool(_))
-                })
+        self.permits_amortized_poll_with_guarded_heap(nodes, numeric, |_| false)
+    }
+
+    /// As [`Self::permits_amortized_poll`], additionally accepting heap sites
+    /// whose concrete lowering plan guarantees a guarded leaf-or-exit path.
+    /// The callback must describe a published plan, never feedback alone.
+    pub(crate) fn permits_amortized_poll_with_guarded_heap(
+        &self,
+        nodes: &[OptimizedNode],
+        numeric: &[Option<ScalarNumericMode>],
+        guarded_heap: impl Fn(u32) -> bool,
+    ) -> bool {
+        nodes.iter().all(|node| {
+            // Legacy optimized effects classify several property/element
+            // opcodes as FrameWrite because their result replaces operands.
+            // A concrete guarded leaf-or-exit lowering is nevertheless a
+            // valid non-reentrant capability regardless of that coarse
+            // bucket; feedback alone never reaches this callback.
+            if guarded_heap(node.id()) {
+                return true;
             }
-            OptimizedEffect::Poll | OptimizedEffect::Reentrant => false,
+            match node.effect() {
+                OptimizedEffect::Pure => true,
+                OptimizedEffect::Control => match node.kind() {
+                    OptimizedNodeKind::GuardNumeric { .. } | OptimizedNodeKind::Reuse { .. } => {
+                        true
+                    }
+                    OptimizedNodeKind::Bytecode { opcode } => {
+                        if opcode.starts_with("call") {
+                            self.call(node.id())
+                                .is_some_and(|call| call.inline.is_some())
+                        } else {
+                            matches!(
+                                opcode.as_ref(),
+                                "if_false"
+                                    | "if_true"
+                                    | "if_false8"
+                                    | "if_true8"
+                                    | "goto"
+                                    | "goto8"
+                                    | "goto16"
+                                    | "return"
+                                    | "return_undef"
+                                    | "lt"
+                                    | "lte"
+                                    | "gt"
+                                    | "gte"
+                                    | "eq"
+                                    | "neq"
+                                    | "strict_eq"
+                                    | "strict_neq"
+                                    | "nop"
+                            )
+                        }
+                    }
+                },
+                OptimizedEffect::FrameWrite => {
+                    // Lexical initialization writes a non-owning sentinel. It is
+                    // intentionally not a numeric value or an alias of the old local.
+                    if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                    if opcode.as_ref() == "set_loc_uninitialized")
+                    {
+                        return true;
+                    }
+                    // Legacy FrameWrite also classifies property/element helpers.
+                    // Their frame invalidation definitions are not scalar stores.
+                    if super::optimized::frame_write_slot(node).is_none() {
+                        return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                        if opcode.as_ref() == "drop");
+                    }
+                    let definitions = self.frame_definitions_for_node(node.id());
+                    if definitions.is_empty() {
+                        return matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                        if opcode.as_ref() == "drop");
+                    }
+                    definitions.iter().all(|(_, value)| {
+                        numeric.get(value.index()).copied().flatten().is_some()
+                            || matches!(self.values[value.index()], ScalarValue::Bool(_))
+                    })
+                }
+                OptimizedEffect::Reentrant => false,
+                OptimizedEffect::Poll => false,
+            }
         })
     }
 
@@ -763,6 +1137,20 @@ impl ScalarGraph {
             .iter()
             .filter(|value| matches!(value, ScalarValue::Call(call) if call.inline.is_some()))
             .count() as u64
+    }
+
+    pub fn frame_inlined_calls(&self) -> u64 {
+        self.values
+            .iter()
+            .filter_map(|value| {
+                let ScalarValue::Call(call) = value else {
+                    return None;
+                };
+                call.frame_inline
+                    .as_ref()
+                    .map(|region| region.total_regions() as u64)
+            })
+            .sum()
     }
 
     pub fn call(&self, node: u32) -> Option<&ScalarCall> {
@@ -995,6 +1383,8 @@ impl ScalarGraph {
                 .map(|checks| checks.len() * core::mem::size_of::<ScalarCheck>())
                 .sum::<usize>();
         check_bytes
+            + self.heap_operations.capacity() * core::mem::size_of::<Option<ScalarHeapOperation>>()
+            + self.heap_effects.capacity() * core::mem::size_of::<ScalarHeapEffect>()
             + self.frame_states.capacity() * core::mem::size_of::<Option<ScalarFrameState>>()
             + self.state_entries * core::mem::size_of::<ScalarValueId>()
             + self.node_outputs.capacity() * core::mem::size_of::<Box<[ScalarValueId]>>()
@@ -1029,6 +1419,10 @@ impl ScalarGraph {
                         core::mem::size_of_val(call.arguments.as_ref())
                             + call
                                 .inline
+                                .as_ref()
+                                .map_or(0, |region| region.allocated_bytes())
+                            + call
+                                .frame_inline
                                 .as_ref()
                                 .map_or(0, |region| region.allocated_bytes())
                     }
@@ -1152,7 +1546,10 @@ impl ScalarGraph {
         shape: OptimizedFrameShape,
         numeric_modes: &BTreeMap<u32, ScalarNumericMode>,
         inline_callees: &BTreeMap<u32, super::InlineCallee>,
+        frame_callees: &BTreeMap<u32, super::FrameInlineCallee>,
+        continuation_guard_base: u32,
     ) -> Result<(Self, u64), CompileFailure> {
+        let mut frame_inline_budget = super::inlining::FRAME_INLINE_BUDGET;
         let mut graph = Self {
             values: Vec::new(),
             checks: vec![Box::new([]); nodes.len()],
@@ -1161,6 +1558,8 @@ impl ScalarGraph {
             frame_definitions: vec![Box::new([]); nodes.len()],
             block_inputs: Vec::new(),
             frame_states: vec![None; nodes.len()],
+            heap_operations: vec![None; nodes.len()],
+            heap_effects: vec![ScalarHeapEffect::Reentrant; nodes.len()],
             state_entries: 0,
             // Block-input stacks can otherwise grow quadratically in CFGs
             // with many joins. Bound the pass independently of lowering.
@@ -1241,13 +1640,21 @@ impl ScalarGraph {
                     .checked_sub(usize::from(node.pops()))
                     .ok_or(CompileFailure::InvalidArtifact)?;
                 if node.eliminated() {
+                    graph.heap_effects[id as usize] = ScalarHeapEffect::Pure;
                     stack.truncate(base);
                     for _ in 0..node.pushes() {
                         stack.push(graph.push(ScalarValue::Opaque)?);
                     }
                     continue;
                 }
-                if node.deopt_guard().is_some()
+                let heap_access = matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode }
+                    if matches!(opcode.as_ref(), "get_field" | "get_field2" | "get_length" | "put_field" | "get_array_el" | "put_array_el"));
+                if (node.deopt_guard().is_some()
+                    || heap_access
+                    || matches!(
+                        node.effect(),
+                        OptimizedEffect::Reentrant | OptimizedEffect::Poll
+                    ))
                     && !matches!(node.kind(), OptimizedNodeKind::Reuse { .. })
                 {
                     graph.capture_frame(id, node.pc(), &frame, &stack, shape)?;
@@ -1259,7 +1666,95 @@ impl ScalarGraph {
                             .ok_or(CompileFailure::InvalidArtifact)?,
                     ),
                     OptimizedNodeKind::Bytecode { opcode } => {
-                        if matches!(
+                        if heap_access {
+                            let property = matches!(
+                                opcode.as_ref(),
+                                "get_field" | "get_field2" | "get_length" | "put_field"
+                            );
+                            let store = opcode.starts_with("put_");
+                            let expected_pops = 1 + usize::from(!property) + usize::from(store);
+                            let expected_pushes = if store {
+                                0
+                            } else if opcode.as_ref() == "get_field2" {
+                                2
+                            } else {
+                                1
+                            };
+                            if usize::from(node.pops()) != expected_pops
+                                || node.pushes() != expected_pushes
+                            {
+                                return Err(CompileFailure::InvalidArtifact);
+                            }
+                            let object = stack[base];
+                            let atom = if opcode.as_ref() == "get_length" {
+                                Some(rquickjs_core::qjs::JS_ATOM_length)
+                            } else if property {
+                                Some(u32::from_le_bytes(
+                                    node.bytes()
+                                        .get(1..5)
+                                        .ok_or(CompileFailure::InvalidArtifact)?
+                                        .try_into()
+                                        .map_err(|_| CompileFailure::InvalidArtifact)?,
+                                ))
+                            } else {
+                                None
+                            };
+                            let (operation, result) = match (atom, store) {
+                                (Some(atom), false) => {
+                                    let result = graph.push(ScalarValue::GetProperty {
+                                        base: object,
+                                        atom,
+                                        frame_state_node: id,
+                                    })?;
+                                    (
+                                        ScalarHeapOperation::GetProperty {
+                                            base: object,
+                                            atom,
+                                            result,
+                                            frame_state_node: id,
+                                        },
+                                        Some(result),
+                                    )
+                                }
+                                (Some(atom), true) => (
+                                    ScalarHeapOperation::PutProperty {
+                                        base: object,
+                                        atom,
+                                        value: stack[base + 1],
+                                        frame_state_node: id,
+                                    },
+                                    None,
+                                ),
+                                (None, false) => {
+                                    let index = stack[base + 1];
+                                    let result = graph.push(ScalarValue::GetElement {
+                                        base: object,
+                                        index,
+                                        frame_state_node: id,
+                                    })?;
+                                    (
+                                        ScalarHeapOperation::GetElement {
+                                            base: object,
+                                            index,
+                                            result,
+                                            frame_state_node: id,
+                                        },
+                                        Some(result),
+                                    )
+                                }
+                                (None, true) => (
+                                    ScalarHeapOperation::PutElement {
+                                        base: object,
+                                        index: stack[base + 1],
+                                        value: stack[base + 2],
+                                        frame_state_node: id,
+                                    },
+                                    None,
+                                ),
+                            };
+                            graph.heap_operations[id as usize] = Some(operation);
+                            result
+                        } else if matches!(
                             opcode.as_ref(),
                             "call" | "call0" | "call1" | "call2" | "call3" | "call_method"
                         ) {
@@ -1278,11 +1773,57 @@ impl ScalarGraph {
                                 arguments: stack[target + 1..].into(),
                                 frame_state_node: id,
                                 inline: None,
+                                frame_inline: None,
                             };
                             if let Some(callee) = inline_callees.get(&node.pc()) {
                                 call.inline = graph.expand_inline(&call, callee)?;
                                 if call.inline.is_some() {
                                     node.mark_effect_free_inline();
+                                }
+                            }
+                            if call.inline.is_none() {
+                                if let Some(callee) = frame_callees.get(&node.pc()) {
+                                    let raw_name = node
+                                        .bytes()
+                                        .first()
+                                        .and_then(|&byte| crate::bytecode::Opcode::from_byte(byte))
+                                        .map(|opcode| opcode.name());
+                                    let kind = match raw_name {
+                                        Some("call" | "call0" | "call1" | "call2" | "call3") => {
+                                            Some(super::InlineCallKind::Call)
+                                        }
+                                        Some("call_method") => Some(super::InlineCallKind::Method),
+                                        _ => None,
+                                    };
+                                    if let Some(kind) = kind {
+                                        let continuation = super::InlineContinuation {
+                                            call_node: id,
+                                            call_pc: node.pc(),
+                                            resume_pc: node
+                                                .pc()
+                                                .checked_add(
+                                                    u32::try_from(node.bytes().len()).map_err(
+                                                        |_| CompileFailure::ResourceLimit,
+                                                    )?,
+                                                )
+                                                .ok_or(CompileFailure::ResourceLimit)?,
+                                            guard: continuation_guard_base
+                                                .checked_add(id)
+                                                .filter(|guard| *guard != u32::MAX)
+                                                .ok_or(CompileFailure::ResourceLimit)?,
+                                            shape: OptimizedFrameShape::new(
+                                                shape.arguments(),
+                                                shape.locals(),
+                                                u16::try_from(base + 1)
+                                                    .map_err(|_| CompileFailure::ResourceLimit)?,
+                                            ),
+                                        };
+                                        call.frame_inline = callee.plan(
+                                            kind,
+                                            continuation,
+                                            &mut frame_inline_budget,
+                                        );
+                                    }
                                 }
                             }
                             Some(graph.push(ScalarValue::Call(call))?)
@@ -1393,6 +1934,7 @@ impl ScalarGraph {
                     })
                     .transpose()?;
                 let mut definitions = Vec::new();
+                graph.heap_effects[id as usize] = semantic_heap_effect(node, heap_access);
                 if node.effect() != OptimizedEffect::Pure {
                     expressions.clear();
                     if node.effect() == OptimizedEffect::FrameWrite {
@@ -1438,7 +1980,18 @@ impl ScalarGraph {
                 graph.frame_definitions[id as usize] = definitions.into();
                 stack.truncate(base);
                 for output in 0..node.pushes() {
-                    let value = if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if matches!(opcode.as_ref(), "post_inc" | "post_dec"))
+                    let value = if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "get_field2")
+                    {
+                        if output == 0 {
+                            graph
+                                .heap_operation(id)
+                                .ok_or(CompileFailure::InvalidArtifact)?
+                                .location()
+                                .base
+                        } else {
+                            result.ok_or(CompileFailure::InvalidArtifact)?
+                        }
+                    } else if matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if matches!(opcode.as_ref(), "post_inc" | "post_dec"))
                     {
                         let value = result.ok_or(CompileFailure::InvalidArtifact)?;
                         let ScalarValue::Update { input, .. } = graph.values[value.index()] else {
@@ -1571,6 +2124,47 @@ impl ScalarGraph {
         }
         graph.build_numeric_checks(nodes, blocks)?;
         Ok((graph, eliminated))
+    }
+}
+
+fn semantic_heap_effect(node: &OptimizedNode, heap_access: bool) -> ScalarHeapEffect {
+    if heap_access {
+        return ScalarHeapEffect::Reentrant;
+    }
+    match node.kind() {
+        OptimizedNodeKind::GuardNumeric { mid_loop: true, .. } => ScalarHeapEffect::Safepoint,
+        OptimizedNodeKind::GuardNumeric { .. } | OptimizedNodeKind::Reuse { .. } => {
+            ScalarHeapEffect::Pure
+        }
+        OptimizedNodeKind::Bytecode { opcode } => {
+            if matches!(opcode.as_ref(), "return" | "return_undef") {
+                return ScalarHeapEffect::Exit;
+            }
+            match node.effect() {
+                OptimizedEffect::Poll => ScalarHeapEffect::Safepoint,
+                OptimizedEffect::Reentrant => ScalarHeapEffect::Reentrant,
+                OptimizedEffect::FrameWrite => super::optimized::frame_write_slot(node)
+                    .map(|slot| ScalarHeapEffect::FrameWrite(frame_slot(slot)))
+                    .unwrap_or(ScalarHeapEffect::Reentrant),
+                OptimizedEffect::Pure => {
+                    // These legacy "pure" operations can use coercing generic
+                    // helpers; unlike modeled checked scalar operations, their
+                    // result producer does not establish a non-reentry proof.
+                    if matches!(opcode.as_ref(), "mod" | "plus" | "neg" | "not") {
+                        ScalarHeapEffect::Reentrant
+                    } else {
+                        ScalarHeapEffect::Pure
+                    }
+                }
+                OptimizedEffect::Control => {
+                    if matches!(opcode.as_ref(), "eq" | "neq") {
+                        ScalarHeapEffect::Reentrant
+                    } else {
+                        ScalarHeapEffect::Pure
+                    }
+                }
+            }
+        }
     }
 }
 

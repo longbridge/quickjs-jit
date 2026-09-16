@@ -1,5 +1,6 @@
 //! Runtime-thread tiering coordination.
 
+mod array_feedback;
 mod background;
 mod coordinator;
 mod feedback;
@@ -10,18 +11,23 @@ mod osr;
 mod shape_feedback;
 
 pub use crate::compiler::CompileFailure;
+pub use array_feedback::{
+    ArrayAccess, ArrayFeedbackSnapshot, ArrayFeedbackTable, ArrayHazards, ArrayMode,
+};
 pub use background::{BackgroundCompiler, BackgroundCompilerError};
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-pub use coordinator::DirectCallTarget;
+#[cfg(feature = "test-support")]
+pub use coordinator::CompletionDisposition;
 pub use coordinator::{
     compile_and_send, ArtifactEnvironment, AttemptId, CompileCompletion, CompileRequest,
     CompileState, CompiledCallTarget, CompiledCallTargetError, CompletionDrain,
     CompletionSendError, CompletionSender, Coordinator, FunctionKey, GuardId, QueueError,
     SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub use coordinator::{DirectCallTarget, FrameInlineTarget};
 pub use feedback::{
     BinaryFeedbackFlags, BinaryFeedbackSnapshot, BoundedSpecializationSignature,
-    BranchFeedbackSnapshot, CallFeedbackSnapshot, CallSignatureFeedbackSnapshot,
+    BranchFeedbackSnapshot, CallFeedbackSnapshot, CallLinkStatus, CallSignatureFeedbackSnapshot,
     CallSpecializationKey, ConversionFeedbackSnapshot, FeedbackKind, FeedbackRepresentation,
     FeedbackSnapshot, FeedbackSnapshotEntry, FeedbackState, FeedbackTable, ObservedType,
     MAX_SPECIALIZED_ARGUMENTS,

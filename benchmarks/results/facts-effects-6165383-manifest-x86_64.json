@@ -1,0 +1,143 @@
+{
+  "schema": "quickjs-jit-benchmark-evidence-v1",
+  "measurement": {
+    "candidate_revision": "6165383e01ba971ff99c70b1c4d6949b38a6349c",
+    "previous_revision": "e174b52eeaccefcf5891fe28fa5bbc960742846e",
+    "quickjs_ng_revision": "fd0a0210b7be00957751871e7e01b8291268fc29",
+    "candidate_binary_sha256": "270111876e53e6cf86e1c1f5a3edd92306afb665ec5a2a3814deec9d34c2fc32",
+    "previous_binary_sha256": "f035e77dc25aef2f49c4bcd283186429cc8d8ee2d2f9b6f6099983a66a48ae62",
+    "cargo_lock_sha256": "c025c52c3d35545657afc32cb5e7bde9ba293f8d12adb26fe47ee713754c1588",
+    "collector_sha256": "554e376384982cf8c338187c51e52398cacc4747160cd3b022648cd0ccc5b37e",
+    "driver_sha256": "60408ad6d28c58e7f20161c17a5db11fc142685fdd07ec7dbf35d7bb02a8f7c5",
+    "measured_at": "2026-09-16 Asia/Singapore",
+    "protocol": "shared-js-fixed-warmup-v2",
+    "workloads": 30,
+    "configurations": [
+      "previous/automatic",
+      "candidate/automatic",
+      "previous/interpreter",
+      "previous/bun",
+      "candidate/interpreter"
+    ],
+    "discarded_processes_per_workload_configuration": 5,
+    "retained_processes_per_workload_configuration": 30,
+    "discarded_process_records": 750,
+    "retained_process_records": 4500,
+    "total_process_records": 5250,
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 20260909,
+    "timed_unit": "nanoseconds per ten workload calls",
+    "host": "13th Gen Intel(R) Core(TM) i7-13700KF; Linux-7.2.3-arch1-3-x86_64-with-glibc2.44; CPU 8 pinned; powersave governor",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01); LLVM 22.1.8",
+    "bun": {
+      "version": "1.4.0",
+      "flags": [],
+      "sha256": "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b"
+    },
+    "quickjs_control": "candidate binary with JIT detached (same QuickJS-NG revision and harness)",
+    "bun_control": "default Bun running the same JavaScript inputs, result consumption, warmup policy, and timed boundary"
+  },
+  "post_measurement_commits": [
+    {
+      "revision": "c2ce1b4bbba3440ba3e2b0cec672566303c576e2",
+      "subject": "fix(jit): gate test-only coordinator diagnostics",
+      "classification": "warning/test-only gating; not included in measured binary"
+    },
+    {
+      "revision": "f5dea5ed6f27c3367393b7db9170ac527feba997",
+      "subject": "test(jit): await tier two in alias invalidation coverage",
+      "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "331ee247e4cc799c1b3bf0be1345cea57f9405f2",
+      "subject": "test(jit): keep generic entry probe out of frame inline",
+      "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "10fa1a8c9d3772f250b01d08935ea37b9c6ce4ce",
+      "subject": "test(jit): stabilize frame inline tier coordination",
+      "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "63243071c1447e83ed6d4af5c8cff6ed2ec7ea71",
+      "subject": "fix(ci): configure cross-target JIT metadata builds",
+      "classification": "build/CI-only; not included in measured binary"
+    },
+    {
+      "revision": "8b5f6a79bc6563a3efe13cd8488dea7af8e7b3a9",
+      "subject": "test(jit): await the direct edge caller tier",
+      "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "9032cfe62e6bb9ff31ae4b20659d1e6cc57365a7",
+      "subject": "fix(ci): select lld for nightly LoongArch GNU",
+      "classification": "CI-only; not included in measured binary"
+    },
+    {
+      "revision": "69e1471a23fc2c05f6cac3da84b5429ae87dc9c7",
+      "subject": "fix(ci): preserve LoongArch linker flags",
+      "classification": "CI-only; not included in measured binary"
+    },
+    {
+      "revision": "ee174199fe520b322bf5b495c01263359ac61120",
+      "subject": "test(jit): remove transient frame inline probes",
+      "classification": "test/CI-only; not included in measured binary"
+    },
+    {
+      "revision": "12d7ee04bf4a73707c117e47aee8d110f7044671",
+      "subject": "test(jit): await settled bounded loop tier",
+      "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "9fb438631473656ef883977e9ee8dd8174feafa5",
+      "subject": "fix(jit): keep interpreter-only Tier-2 trials out of timing verdicts",
+      "classification": "runtime tier-down policy; changes the measured binary (interpreter-only functions keep their Tier-2 trial instead of a permanent blacklist); benchmark matrix not re-collected"
+    }
+  ],
+  "artifacts": {
+    "raw_archive": {
+      "path": "benchmarks/results/facts-effects-6165383-paired-x86_64.tar.gz",
+      "sha256": "577d4a0a84777ef98a6114570ee916998ec3ce456ccdf47da269365cbc2c1b85",
+      "regular_files": 5252
+    },
+    "summary": {
+      "path": "benchmarks/results/facts-effects-6165383-paired-x86_64.json",
+      "sha256": "e17186b263c4d95ce8d606a920fc533e1cb2e087a9c2b159278c2aecb96ab082",
+      "rows": 150
+    },
+    "metadata": {
+      "path": "benchmarks/results/facts-effects-6165383-metadata-x86_64.json",
+      "sha256": "6a0796f1fca000bf1bc1fe7e63a68186ae811485fb794c17d04dfb7f3cc5e95f"
+    }
+  },
+  "verification": {
+    "metadata_status": "complete",
+    "json_process_records_parsed": 5250,
+    "archive_regular_files": 5252,
+    "summary_rows": 150,
+    "candidate_automatic_rows": 30,
+    "script_hash_mismatches": [],
+    "expected_record_arithmetic": "30 workloads * 5 configurations * (5 discarded + 30 retained) = 5250",
+    "automatic_vs_previous": {
+      "significantly_faster": 9,
+      "significantly_slower": 12,
+      "statistically_tied": 9
+    },
+    "automatic_vs_same_version_quickjs": {
+      "significantly_faster": 19,
+      "significantly_slower": 6,
+      "statistically_tied": 5
+    },
+    "automatic_vs_bun": {
+      "significantly_faster": 7,
+      "significantly_slower": 22,
+      "statistically_tied": 1
+    }
+  },
+  "notes": [
+    "The raw archive contains metadata.json, summary.json, and all 5250 process records.",
+    "Timing samples were not filtered by native readiness.",
+    "host-compute is an equivalent pure-JavaScript kernel and is not divided into a host-inclusive snapshot measurement.",
+    "Absolute source and binary paths in collection metadata document the original local collection layout; content identities are fixed by revisions and SHA-256 hashes."
+  ]
+}

@@ -57,6 +57,36 @@ pub struct CallSpecializationKey {
     callee_bytecode_identity: u64,
 }
 
+/// One observed call target, independent of argument and result representation.
+/// This fixed-size status neither pins executable code nor proves call kind,
+/// arity, purity, or native-entry readiness. Dispatch must guard its identities.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CallLinkStatus {
+    caller: FunctionKey,
+    pc: u32,
+    callee: FunctionKey,
+    callee_identity: u64,
+    callee_bytecode_identity: u64,
+}
+
+impl CallLinkStatus {
+    pub const fn caller(&self) -> FunctionKey {
+        self.caller
+    }
+    pub const fn pc(&self) -> u32 {
+        self.pc
+    }
+    pub const fn callee(&self) -> FunctionKey {
+        self.callee
+    }
+    pub const fn callee_identity(&self) -> u64 {
+        self.callee_identity
+    }
+    pub const fn callee_bytecode_identity(&self) -> u64 {
+        self.callee_bytecode_identity
+    }
+}
+
 impl CallSpecializationKey {
     pub const fn caller(&self) -> FunctionKey {
         self.caller
@@ -231,6 +261,7 @@ pub struct FeedbackSnapshot {
     branches: Box<[BranchFeedbackSnapshot]>,
     call_signatures: Box<[CallSignatureFeedbackSnapshot]>,
     properties: Box<[(u32, super::ShapeFeedbackSite)]>,
+    arrays: Box<[super::ArrayFeedbackSnapshot]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,6 +269,7 @@ pub struct CallSignatureFeedbackSnapshot {
     caller: FunctionKey,
     pc: u32,
     state: FeedbackState,
+    target_state: FeedbackState,
     targets: Box<[FunctionKey]>,
     stable_arity: Option<usize>,
     arguments: Box<[Box<[ObservedType]>]>,
@@ -249,6 +281,9 @@ pub struct CallSignatureFeedbackSnapshot {
 impl CallSignatureFeedbackSnapshot {
     pub const fn state(&self) -> FeedbackState {
         self.state
+    }
+    pub const fn target_state(&self) -> FeedbackState {
+        self.target_state
     }
     pub fn targets(&self) -> &[FunctionKey] {
         &self.targets
@@ -367,6 +402,7 @@ impl FeedbackSnapshot {
             branches: Box::new([]),
             call_signatures: Box::new([]),
             properties: Box::new([]),
+            arrays: Box::new([]),
         }
     }
     pub const fn epoch(&self) -> u64 {
@@ -385,6 +421,25 @@ impl FeedbackSnapshot {
             .find_map(|(p, site)| (*p == pc).then_some(site))
     }
 
+    pub fn arrays(&self) -> &[super::ArrayFeedbackSnapshot] {
+        &self.arrays
+    }
+
+    pub fn array_at(
+        &self,
+        function: FunctionKey,
+        pc: u32,
+    ) -> Option<&super::ArrayFeedbackSnapshot> {
+        self.arrays
+            .iter()
+            .find(|site| site.function() == function && site.pc() == pc)
+    }
+
+    /// Additional retained snapshot storage for bounded array profiles.
+    pub fn array_feedback_bytes(&self) -> usize {
+        core::mem::size_of_val(self.arrays.as_ref())
+    }
+
     pub fn function(&self) -> Option<FunctionKey> {
         let function = self
             .entries
@@ -394,7 +449,8 @@ impl FeedbackSnapshot {
             .or_else(|| self.binaries.first().map(|entry| entry.function))
             .or_else(|| self.conversions.first().map(|entry| entry.function))
             .or_else(|| self.branches.first().map(|entry| entry.function))
-            .or_else(|| self.call_signatures.first().map(|entry| entry.caller))?;
+            .or_else(|| self.call_signatures.first().map(|entry| entry.caller))
+            .or_else(|| self.arrays.first().map(|entry| entry.function()))?;
         let same = self.entries.iter().all(|entry| entry.function == function)
             && self.calls.iter().all(|entry| entry.function == function)
             && self.binaries.iter().all(|entry| entry.function == function)
@@ -407,7 +463,8 @@ impl FeedbackSnapshot {
             && self
                 .call_signatures
                 .iter()
-                .all(|entry| entry.caller == function);
+                .all(|entry| entry.caller == function)
+            && self.arrays.iter().all(|entry| entry.function() == function);
         same.then_some(function)
     }
 
@@ -501,6 +558,34 @@ impl FeedbackSnapshot {
         })
     }
 
+    /// Select a single exact target without requiring scalar arguments,
+    /// monomorphic results, or a fixed observed arity. The bytecode operation
+    /// and runtime admission checks supply the invocation contract separately.
+    pub fn call_link_at(&self, caller: FunctionKey, pc: u32) -> Option<CallLinkStatus> {
+        if self.epoch == 0 || caller.id == 0 || caller.generation == 0 {
+            return None;
+        }
+        let call = self.call_signature_at(caller, pc)?;
+        if call.target_state != FeedbackState::Monomorphic
+            || call.targets.len() != 1
+            || call.callee_identity == 0
+            || call.callee_bytecode_identity == 0
+        {
+            return None;
+        }
+        let callee = call.targets[0];
+        if callee.id == 0 || callee.generation == 0 {
+            return None;
+        }
+        Some(CallLinkStatus {
+            caller,
+            pc,
+            callee,
+            callee_identity: call.callee_identity,
+            callee_bytecode_identity: call.callee_bytecode_identity,
+        })
+    }
+
     pub fn call_specializations_for(
         &self,
         caller: FunctionKey,
@@ -550,10 +635,9 @@ impl FeedbackSnapshot {
     }
 
     /// Builds the immutable, bounded key consumed by Tier 2 compilation.
-    /// Arguments may carry supported tagged representations, including Bool;
-    /// return and arithmetic feedback must prove a numeric representation.
-    /// Bool admission prevents stable numeric callees from waiting forever for
-    /// an all-numeric signature; eligible pure leaves can also publish a direct entry.
+    /// Arguments and returns may carry supported scalar representations,
+    /// including Bool. Numeric arithmetic feedback must agree with a numeric
+    /// result; each direct-entry lowerer still validates its complete body.
     pub fn bounded_specialization(
         &self,
         function: FunctionKey,
@@ -592,6 +676,7 @@ impl FeedbackSnapshot {
         let representation = match return_type {
             ObservedType::Int32 => FeedbackRepresentation::Int32,
             ObservedType::Float64 => FeedbackRepresentation::Float64,
+            ObservedType::Bool => FeedbackRepresentation::Bool,
             _ => return None,
         };
         let arguments = argument_types
@@ -609,7 +694,11 @@ impl FeedbackSnapshot {
             let expected = match representation {
                 FeedbackRepresentation::Int32 => ObservedType::Int32,
                 FeedbackRepresentation::Float64 => ObservedType::Float64,
-                FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => return None,
+                // Bool-result entries are still admitted by exact argument and
+                // return feedback. Their lowerer validates every operation and
+                // rejects an unsupported body before publication.
+                FeedbackRepresentation::Bool => continue,
+                FeedbackRepresentation::HeapRef => return None,
             };
             if binary.state == FeedbackState::Monomorphic
                 && binary.lhs.as_ref() == [expected]
@@ -619,7 +708,7 @@ impl FeedbackSnapshot {
                 matching_binary_count += 1;
             }
         }
-        if matching_binary_count == 0 {
+        if representation != FeedbackRepresentation::Bool && matching_binary_count == 0 {
             return None;
         }
 
@@ -642,20 +731,19 @@ const fn observed_representation(observed: ObservedType) -> Option<FeedbackRepre
     }
 }
 
-// The direct ABI supports primitive Bool arguments, while results remain numeric.
+// Target-only linked leaves accept guarded object payloads as borrowed HeapRef
+// arguments. Results remain scalar and ownership-free.
 const fn observed_direct_argument_representation(
     observed: ObservedType,
 ) -> Option<FeedbackRepresentation> {
-    match observed {
-        ObservedType::Bool => Some(FeedbackRepresentation::Bool),
-        _ => observed_scalar_representation(observed),
-    }
+    observed_representation(observed)
 }
 
 const fn observed_scalar_representation(observed: ObservedType) -> Option<FeedbackRepresentation> {
     match observed {
         ObservedType::Int32 => Some(FeedbackRepresentation::Int32),
         ObservedType::Float64 => Some(FeedbackRepresentation::Float64),
+        ObservedType::Bool => Some(FeedbackRepresentation::Bool),
         _ => None,
     }
 }
@@ -680,6 +768,7 @@ pub struct FeedbackTable {
     conversions: BTreeMap<(FunctionKey, u32), ConversionFeedbackEntry>,
     branches: BTreeMap<(FunctionKey, u32), BranchFeedbackEntry>,
     call_signatures: BTreeMap<(FunctionKey, u32), CallSignatureFeedbackEntry>,
+    arrays: super::ArrayFeedbackTable,
 }
 
 #[derive(Debug, Default)]
@@ -769,6 +858,16 @@ fn call_signature_state(entry: &CallSignatureFeedbackEntry) -> FeedbackState {
     }
 }
 
+fn call_target_state(entry: &CallSignatureFeedbackEntry) -> FeedbackState {
+    if entry.targets_megamorphic {
+        FeedbackState::Megamorphic
+    } else if entry.targets.len() == 1 {
+        FeedbackState::Monomorphic
+    } else {
+        FeedbackState::Polymorphic
+    }
+}
+
 /// Cheap structural fingerprint of one lattice cell: it changes exactly when
 /// a new observation is admitted or the cell widens to megamorphic.
 fn entry_shape(entry: &Entry) -> (usize, bool) {
@@ -810,12 +909,44 @@ impl FeedbackTable {
             conversions: BTreeMap::new(),
             branches: BTreeMap::new(),
             call_signatures: BTreeMap::new(),
+            arrays: super::ArrayFeedbackTable::new(capacity, diversity_limit),
         }
     }
 
     /// Monotonic change counter; see the field documentation.
     pub const fn version(&self) -> u64 {
         self.version
+    }
+
+    pub fn observe_array(
+        &mut self,
+        function: FunctionKey,
+        pc: u32,
+        access: super::ArrayAccess,
+        mode: super::ArrayMode,
+        hazards: super::ArrayHazards,
+    ) -> FeedbackState {
+        let version = self.arrays.version();
+        let state = self.arrays.observe(function, pc, access, mode, hazards);
+        if self.arrays.version() != version {
+            self.version = self.version.saturating_add(1);
+        }
+        state
+    }
+
+    pub fn observe_array_raw(
+        &mut self,
+        function: FunctionKey,
+        pc: u32,
+        mode: u32,
+        flags: u32,
+    ) -> Option<FeedbackState> {
+        let version = self.arrays.version();
+        let state = self.arrays.observe_raw(function, pc, mode, flags)?;
+        if self.arrays.version() != version {
+            self.version = self.version.saturating_add(1);
+        }
+        Some(state)
     }
 
     pub fn observe_call(&mut self, function: FunctionKey, arguments: &[ObservedType]) {
@@ -1107,6 +1238,7 @@ impl FeedbackTable {
     }
     pub const fn dropped_observations(&self) -> u64 {
         self.dropped
+            .saturating_add(self.arrays.dropped_observations())
     }
 
     pub fn snapshot(&self, epoch: u64) -> FeedbackSnapshot {
@@ -1216,6 +1348,7 @@ impl FeedbackTable {
                 caller: *caller,
                 pc: *pc,
                 state: call_signature_state(entry),
+                target_state: call_target_state(entry),
                 targets: entry.targets.clone().into_boxed_slice(),
                 stable_arity: if entry.arities.len() == 1 {
                     Some(entry.arities[0])
@@ -1243,6 +1376,166 @@ impl FeedbackTable {
             branches,
             call_signatures,
             properties: Box::new([]),
+            arrays: self.arrays.snapshot(),
         }
+    }
+}
+
+#[cfg(test)]
+mod call_link_tests {
+    use super::*;
+
+    const CALLER: FunctionKey = FunctionKey::new(31, 1);
+    const CALLEE: FunctionKey = FunctionKey::new(32, 2);
+    const PC: u32 = 17;
+
+    fn observe(table: &mut FeedbackTable, arguments: &[ObservedType], result: ObservedType) {
+        table.observe_call_signature_with_identity(
+            CALLER, PC, CALLEE, 0x1000, 0x2000, arguments, result,
+        );
+    }
+
+    #[test]
+    fn object_argument_links_the_target_with_a_guarded_heapref_specialization() {
+        let mut table = FeedbackTable::new(16, 2);
+        observe(
+            &mut table,
+            &[
+                ObservedType::Int32,
+                ObservedType::Bool,
+                ObservedType::Object,
+            ],
+            ObservedType::Int32,
+        );
+        let feedback = table.snapshot(1);
+        let link = feedback
+            .call_link_at(CALLER, PC)
+            .expect("object argument must permit target linking");
+        assert_eq!(link.caller(), CALLER);
+        assert_eq!(link.pc(), PC);
+        assert_eq!(link.callee(), CALLEE);
+        assert_eq!(link.callee_identity(), 0x1000);
+        assert_eq!(link.callee_bytecode_identity(), 0x2000);
+        let direct = feedback
+            .call_specialization_at(CALLER, PC)
+            .expect("guarded object argument direct specialization");
+        assert_eq!(
+            direct.arguments(),
+            &[
+                FeedbackRepresentation::Int32,
+                FeedbackRepresentation::Bool,
+                FeedbackRepresentation::HeapRef,
+            ]
+        );
+    }
+
+    #[test]
+    fn monomorphic_bool_result_is_a_bounded_direct_call_specialization() {
+        let mut table = FeedbackTable::new(16, 2);
+        observe(
+            &mut table,
+            &[ObservedType::Object, ObservedType::Bool],
+            ObservedType::Bool,
+        );
+        let direct = table
+            .snapshot(1)
+            .call_specialization_at(CALLER, PC)
+            .expect("guarded Bool result specialization");
+        assert_eq!(
+            direct.arguments(),
+            &[
+                FeedbackRepresentation::HeapRef,
+                FeedbackRepresentation::Bool
+            ]
+        );
+        assert_eq!(direct.result(), FeedbackRepresentation::Bool);
+    }
+
+    #[test]
+    fn argument_result_and_arity_widening_preserve_one_target() {
+        let mut table = FeedbackTable::new(16, 2);
+        observe(&mut table, &[ObservedType::Int32], ObservedType::Int32);
+        let initial = table.snapshot(1).call_link_at(CALLER, PC).unwrap();
+        for (arguments, result) in [
+            (&[ObservedType::Object][..], ObservedType::Object),
+            (
+                &[ObservedType::String, ObservedType::Bool][..],
+                ObservedType::String,
+            ),
+            (&[][..], ObservedType::Undefined),
+        ] {
+            observe(&mut table, arguments, result);
+        }
+        let feedback = table.snapshot(2);
+        let call = feedback.call_signature_at(CALLER, PC).unwrap();
+        assert_eq!(call.state(), FeedbackState::Megamorphic);
+        assert_eq!(call.target_state(), FeedbackState::Monomorphic);
+        assert_eq!(feedback.call_link_at(CALLER, PC), Some(initial));
+        assert!(feedback.call_specialization_at(CALLER, PC).is_none());
+    }
+
+    #[test]
+    fn distinct_closures_sharing_bytecode_permanently_invalidate_the_exact_link() {
+        let mut table = FeedbackTable::new(16, 2);
+        observe(&mut table, &[ObservedType::Int32], ObservedType::Int32);
+        assert!(table.snapshot(1).call_link_at(CALLER, PC).is_some());
+        table.observe_call_signature_with_identity(
+            CALLER,
+            PC,
+            CALLEE,
+            0x3000,
+            0x2000,
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+        observe(&mut table, &[ObservedType::Int32], ObservedType::Int32);
+        let feedback = table.snapshot(2);
+        assert_eq!(
+            feedback
+                .call_signature_at(CALLER, PC)
+                .unwrap()
+                .target_state(),
+            FeedbackState::Megamorphic
+        );
+        assert!(feedback.call_link_at(CALLER, PC).is_none());
+    }
+
+    #[test]
+    fn target_diversity_budget_remains_bounded_and_absorbing() {
+        let mut table = FeedbackTable::new(16, 2);
+        for id in 32..35 {
+            table.observe_call_signature_with_identity(
+                CALLER,
+                PC,
+                FunctionKey::new(id, 2),
+                0x1000,
+                0x2000,
+                &[ObservedType::Int32],
+                ObservedType::Int32,
+            );
+        }
+        observe(&mut table, &[ObservedType::Int32], ObservedType::Int32);
+        let feedback = table.snapshot(2);
+        let call = feedback.call_signature_at(CALLER, PC).unwrap();
+        assert!(call.targets().is_empty());
+        assert_eq!(call.target_state(), FeedbackState::Megamorphic);
+        assert!(feedback.call_link_at(CALLER, PC).is_none());
+    }
+
+    #[test]
+    fn missing_identity_and_invalid_epoch_do_not_produce_links() {
+        let mut table = FeedbackTable::new(16, 2);
+        table.observe_call_signature(
+            CALLER,
+            PC,
+            CALLEE,
+            &[ObservedType::Int32],
+            ObservedType::Int32,
+        );
+        assert!(table.snapshot(1).call_link_at(CALLER, PC).is_none());
+        let mut table = FeedbackTable::new(16, 2);
+        observe(&mut table, &[ObservedType::Int32], ObservedType::Int32);
+        assert!(table.snapshot(0).call_link_at(CALLER, PC).is_none());
+        assert!(table.snapshot(1).call_link_at(CALLER, PC + 1).is_none());
     }
 }

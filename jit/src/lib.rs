@@ -119,10 +119,15 @@ pub struct Jit {
     metrics: Arc<Mutex<JitMetrics>>,
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
+    #[cfg(all(feature = "test-support", feature = "compiler"))]
+    test_runtime_id: u64,
     #[cfg(feature = "test-support")]
     test_environment: Arc<Mutex<Option<runtime::ArtifactEnvironment>>>,
     #[cfg(feature = "test-support")]
     test_last_acquired_key: Arc<Mutex<Option<code_cache::ArtifactKey>>>,
+    #[cfg(feature = "test-support")]
+    test_completion_dispositions:
+        Arc<Mutex<std::collections::HashMap<runtime::FunctionKey, runtime::CompletionDisposition>>>,
 }
 
 impl Jit {
@@ -215,6 +220,28 @@ impl Jit {
             )
         ))]
         let test_last_acquired_key = Arc::clone(&backend.test_last_acquired_key);
+        #[cfg(all(
+            feature = "test-support",
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let test_completion_dispositions = backend.coordinator.test_completion_dispositions();
         #[cfg(not(all(
             feature = "compiler",
             any(
@@ -249,6 +276,8 @@ impl Jit {
             metrics,
             config,
             _guard: guard,
+            #[cfg(all(feature = "test-support", feature = "compiler"))]
+            test_runtime_id: runtime.jit_runtime_id(),
             #[cfg(feature = "test-support")]
             test_environment: {
                 #[cfg(all(
@@ -347,6 +376,55 @@ impl Jit {
                     Arc::new(Mutex::new(None))
                 }
             },
+            #[cfg(feature = "test-support")]
+            test_completion_dispositions: {
+                #[cfg(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                ))]
+                {
+                    test_completion_dispositions
+                }
+                #[cfg(not(all(
+                    feature = "compiler",
+                    any(
+                        all(
+                            target_os = "macos",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "windows",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        ),
+                        all(
+                            target_os = "linux",
+                            target_endian = "little",
+                            any(target_arch = "x86_64", target_arch = "aarch64")
+                        )
+                    )
+                )))]
+                {
+                    Arc::new(Mutex::new(std::collections::HashMap::new()))
+                }
+            },
         })
     }
 
@@ -416,6 +494,52 @@ impl Jit {
             .test_last_acquired_key
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_completion_dispositions(
+        &self,
+    ) -> Vec<(runtime::FunctionKey, runtime::CompletionDisposition)> {
+        let mut dispositions = self
+            .test_completion_dispositions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(key, disposition)| (*key, *disposition))
+            .collect::<Vec<_>>();
+        dispositions.sort_unstable_by_key(|(key, _)| (key.id, key.generation));
+        dispositions
+    }
+
+    #[cfg(all(feature = "test-support", feature = "compiler"))]
+    #[doc(hidden)]
+    pub fn test_tier2_compile_dispositions(
+        &self,
+    ) -> Vec<(
+        runtime::FunctionKey,
+        compiler::optimized::Tier2CompileDisposition,
+    )> {
+        compiler::optimized::test_tier2_compile_dispositions(self.test_runtime_id)
+    }
+
+    #[cfg(all(feature = "test-support", feature = "compiler"))]
+    #[doc(hidden)]
+    pub fn test_tier2_deopt_sites(&self) -> Vec<((runtime::FunctionKey, u32), (u32, u8))> {
+        compiler::optimized::test_tier2_deopt_sites(self.test_runtime_id)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_last_deopt_guards(&self) -> Vec<(runtime::FunctionKey, u32)> {
+        let mut guards = test_deopt_guards()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(key, guard)| (*key, *guard))
+            .collect::<Vec<_>>();
+        guards.sort_unstable_by_key(|(key, _)| (key.id, key.generation));
+        guards
     }
 }
 
@@ -635,6 +759,53 @@ struct ProductionProfile {
     baseline_ns: u64,
     optimized_executions: u64,
     optimized_ns: u64,
+    /// Fastest optimized invocation observed so far; meaningful only while
+    /// `optimized_executions > 0`.
+    optimized_min_ns: u64,
+    tier2_trial_decided: bool,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl ProductionProfile {
+    fn record_baseline(&mut self, elapsed_ns: u64) {
+        self.baseline_executions = self.baseline_executions.saturating_add(1);
+        self.baseline_ns = self.baseline_ns.saturating_add(elapsed_ns);
+    }
+
+    fn record_optimized(&mut self, elapsed_ns: u64) {
+        self.optimized_min_ns = if self.optimized_executions == 0 {
+            elapsed_ns
+        } else {
+            self.optimized_min_ns.min(elapsed_ns)
+        };
+        self.optimized_executions = self.optimized_executions.saturating_add(1);
+        self.optimized_ns = self.optimized_ns.saturating_add(elapsed_ns);
+    }
+}
+
+/// Finish the bounded Tier-2 profitability trial once. Production JITs patch
+/// an IC/tier state after classification; repeating wide average comparisons
+/// on every successful optimized exit would turn policy into hot-path tax.
+/// `Some(true)` requests tier-down, `Some(false)` records a profitable trial.
+///
+/// Tier-2 loses only when even its fastest invocation in the window is 25%
+/// slower than the baseline average. Sub-microsecond callees are timed through
+/// callbacks whose own cost rivals the margin, so one preempted or cold sample
+/// among eight must not decide the trial by itself.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn classify_tier2_trial(profile: &mut ProductionProfile) -> Option<bool> {
+    if profile.tier2_trial_decided
+        || profile.optimized_executions < 8
+        || profile.baseline_executions == 0
+    {
+        return None;
+    }
+    let loss = u128::from(profile.optimized_min_ns)
+        .saturating_mul(u128::from(profile.baseline_executions))
+        .saturating_mul(4)
+        >= u128::from(profile.baseline_ns).saturating_mul(5);
+    profile.tier2_trial_decided = true;
+    Some(loss)
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -646,6 +817,10 @@ struct ProductionEntryPin {
     pc: u32,
     stack_map_count: u32,
     osr: Option<runtime::OsrMap>,
+    /// Immutable argument/local buffer dimensions, computed when the entry is
+    /// acquired. Like V8/JSC entry metadata, this keeps validation metadata
+    /// discovery out of the per-invocation trampoline hot path.
+    frame_counts: Option<(usize, usize)>,
     validation: Arc<OsrValidationMetrics>,
     #[cfg(feature = "test-support")]
     stress_gc: bool,
@@ -682,6 +857,14 @@ struct OsrValidationMetrics {
     native_return: Mutex<Option<PendingNativeReturn>>,
 }
 
+#[cfg(feature = "test-support")]
+fn test_deopt_guards() -> &'static Mutex<std::collections::HashMap<runtime::FunctionKey, u32>> {
+    static GUARDS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<runtime::FunctionKey, u32>>,
+    > = std::sync::OnceLock::new();
+    GUARDS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 impl OsrValidationMetrics {
     fn mark_validation_retry(&self, id: u64, generation: u64, pc: u32) {
@@ -716,6 +899,11 @@ impl OsrValidationMetrics {
         guard: u32,
         observed: Option<runtime::ObservedType>,
     ) {
+        #[cfg(feature = "test-support")]
+        test_deopt_guards()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(runtime::FunctionKey::new(id, generation), guard);
         self.deopt_guards
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -828,6 +1016,208 @@ fn retry_exit() -> rquickjs_core::qjs::JSJitExit {
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn validated_native_deopt(
+    exit: &rquickjs_core::qjs::JSJitExit,
+    bytecode_start: *const u8,
+    deopt_sites: &[(ir::OptimizedFrameShape, ir::DeoptMap)],
+) -> Option<(u32, ir::OptimizedFrameShape)> {
+    let guard = exit.reserved.checked_sub(1)?;
+    let resume_pc = (exit.resume_pc as usize)
+        .checked_sub(bytecode_start as usize)
+        .and_then(|pc| u32::try_from(pc).ok())?;
+    let (shape, map) = deopt_sites.iter().find(|(shape, map)| {
+        map.guard() == guard && map.resume_pc() == resume_pc && map.validate(*shape).is_ok()
+    })?;
+    // Production recipes must alias their own already-published owning slot.
+    // Non-identity recipes need an owning materializer before they can resume.
+    map.validate_identity_materialization(*shape).ok()?;
+    Some((guard, *shape))
+}
+
+/// Validates Tier 1's in-place deoptimization transaction. Unlike Tier 2,
+/// baseline code does not identify a speculative guard: it has already
+/// published the complete interpreter frame and returns the historical zero
+/// identity. Keep this path tier-specific so a missing Tier 2 map can never be
+/// mistaken for a valid baseline exit.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn validated_baseline_deopt(
+    exit: &rquickjs_core::qjs::JSJitExit,
+    frame: &rquickjs_core::qjs::JSJitExecFrame,
+    bytecode_start: *const u8,
+    arg_buf: *mut rquickjs_core::qjs::JSValue,
+    var_buf: *mut rquickjs_core::qjs::JSValue,
+    stack_base: *mut rquickjs_core::qjs::JSValue,
+    stack_capacity: *mut rquickjs_core::qjs::JSValue,
+) -> bool {
+    if exit.reserved != 0
+        || exit.resume_pc.is_null()
+        || !exit.resume_stack_top.is_null()
+        || frame.bytecode_start != bytecode_start
+        || frame.pc != exit.resume_pc
+        || frame.arg_buf != arg_buf
+        || frame.var_buf != var_buf
+        || frame.stack_base != stack_base
+        || frame.stack_capacity != stack_capacity
+    {
+        return false;
+    }
+    let Some(resume_offset) = (exit.resume_pc as usize).checked_sub(bytecode_start as usize) else {
+        return false;
+    };
+    if u32::try_from(resume_offset).is_err() {
+        return false;
+    }
+    let base = stack_base as usize;
+    let top = frame.stack_top as usize;
+    let capacity = stack_capacity as usize;
+    base <= top
+        && top <= capacity
+        && top
+            .saturating_sub(base)
+            .is_multiple_of(core::mem::size_of::<rquickjs_core::qjs::JSValue>())
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Copy)]
+struct TrustedFrameBuffers {
+    arg_buf: *mut rquickjs_core::qjs::JSValue,
+    var_buf: *mut rquickjs_core::qjs::JSValue,
+    stack_base: *mut rquickjs_core::qjs::JSValue,
+    stack_capacity: *mut rquickjs_core::qjs::JSValue,
+    argument_capacity: usize,
+    local_capacity: usize,
+    stack_capacity_slots: usize,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl TrustedFrameBuffers {
+    #[cfg(rquickjs_memory_sanitizer)]
+    fn capture(
+        frame: &rquickjs_core::qjs::JSJitExecFrame,
+        argument_capacity: usize,
+        local_capacity: usize,
+    ) -> Option<Self> {
+        Self::capture_raw(
+            frame.arg_buf,
+            frame.var_buf,
+            frame.stack_base,
+            frame.stack_capacity,
+            argument_capacity,
+            local_capacity,
+        )
+    }
+
+    fn capture_raw(
+        arg_buf: *mut rquickjs_core::qjs::JSValue,
+        var_buf: *mut rquickjs_core::qjs::JSValue,
+        stack_base: *mut rquickjs_core::qjs::JSValue,
+        stack_capacity: *mut rquickjs_core::qjs::JSValue,
+        argument_capacity: usize,
+        local_capacity: usize,
+    ) -> Option<Self> {
+        let value_size = core::mem::size_of::<rquickjs_core::qjs::JSValue>();
+        let stack = stack_base as usize;
+        let capacity = stack_capacity as usize;
+        if arg_buf.is_null()
+            || var_buf.is_null()
+            || stack_base.is_null()
+            || stack_capacity.is_null()
+            || stack > capacity
+        {
+            return None;
+        }
+        let stack_bytes = capacity.checked_sub(stack)?;
+        if stack_bytes % value_size != 0 {
+            return None;
+        }
+        argument_capacity.checked_mul(value_size)?;
+        local_capacity.checked_mul(value_size)?;
+        Some(Self {
+            arg_buf,
+            var_buf,
+            stack_base,
+            stack_capacity,
+            argument_capacity,
+            local_capacity,
+            stack_capacity_slots: stack_bytes / value_size,
+        })
+    }
+
+    fn validates_optimized_shape(
+        self,
+        frame: &rquickjs_core::qjs::JSJitExecFrame,
+        shape: ir::OptimizedFrameShape,
+    ) -> bool {
+        if frame.arg_buf != self.arg_buf
+            || frame.var_buf != self.var_buf
+            || frame.stack_base != self.stack_base
+            || frame.stack_capacity != self.stack_capacity
+            || usize::from(shape.arguments()) != self.argument_capacity
+            || usize::from(shape.locals()) != self.local_capacity
+            || usize::from(shape.stack()) > self.stack_capacity_slots
+        {
+            return false;
+        }
+        let expected_top = (self.stack_base as usize).checked_add(
+            usize::from(shape.stack())
+                .saturating_mul(core::mem::size_of::<rquickjs_core::qjs::JSValue>()),
+        );
+        expected_top == Some(frame.stack_top as usize)
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn precomputed_frame_counts(
+    snapshot_counts: Option<(usize, usize)>,
+    deopt_sites: &[(ir::OptimizedFrameShape, ir::DeoptMap)],
+    osr_counts: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    snapshot_counts
+        .or_else(|| {
+            let (first_shape, _) = deopt_sites.first()?;
+            deopt_sites
+                .iter()
+                .all(|(shape, _)| {
+                    shape.arguments() == first_shape.arguments()
+                        && shape.locals() == first_shape.locals()
+                })
+                .then_some((
+                    usize::from(first_shape.arguments()),
+                    usize::from(first_shape.locals()),
+                ))
+        })
+        .or(osr_counts)
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+unsafe fn reject_native_deopt(
+    validated_ctx: *mut rquickjs_core::qjs::JSContext,
+) -> rquickjs_core::qjs::JSJitExit {
+    use rquickjs_core::qjs;
+
+    // Native code may already have committed visible effects. RETRY would
+    // replay them. Do not inspect rejected frame pointers or release roots:
+    // C owns terminal cleanup of the current published frame/inline chain.
+    unsafe {
+        qjs::JS_ThrowInternalError(
+            validated_ctx,
+            c"invalid native deoptimization metadata".as_ptr(),
+        );
+        let exception = qjs::JS_GetException(validated_ctx);
+        qjs::JS_SetUncatchableError(validated_ctx, exception);
+        qjs::JS_Throw(validated_ctx, exception);
+    }
+    qjs::JSJitExit {
+        // The C INTERRUPT path additionally installs its preallocated
+        // uncatchable sentinel if creating the InternalError failed (OOM).
+        kind: qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT,
+        reserved: 0,
+        resume_pc: core::ptr::null(),
+        resume_stack_top: core::ptr::null_mut(),
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn validate_production_frame(
     frame: &rquickjs_core::qjs::JSJitExecFrame,
     runtime_id: u64,
@@ -933,6 +1323,18 @@ unsafe extern "C" fn production_entry_trampoline(
     }
     #[cfg(feature = "test-support")]
     apply_stress_gc_after_validation(frame, pin.stress_gc, valid);
+    // Capture trusted entry context before native execution can modify the
+    // frame. Rejection must not dereference pointers supplied by a bad exit.
+    let validated_ctx = frame.ctx;
+    let validated_bytecode_start = frame.bytecode_start;
+    let validated_arg_buf = frame.arg_buf;
+    let validated_var_buf = frame.var_buf;
+    let validated_stack_base = frame.stack_base;
+    let validated_stack_capacity = frame.stack_capacity;
+    #[cfg(rquickjs_memory_sanitizer)]
+    let validated_buffers = pin
+        .frame_counts
+        .and_then(|(arguments, locals)| TrustedFrameBuffers::capture(frame, arguments, locals));
     type NativeEntry = unsafe extern "C" fn(*mut qjs::JSJitExecFrame) -> qjs::JSJitExit;
     let native = unsafe { core::mem::transmute::<*const u8, NativeEntry>(pin.native) };
     let mut exit = unsafe { native(frame as *const _ as *mut _) };
@@ -949,21 +1351,19 @@ unsafe extern "C" fn production_entry_trampoline(
             (frame as *mut qjs::JSJitExecFrame).cast(),
             core::mem::size_of::<qjs::JSJitExecFrame>(),
         );
-        let values_start = frame.arg_buf.cast::<u8>();
-        let values_end = frame.stack_capacity.cast::<u8>();
-        if !values_start.is_null() {
-            if let Some(values_size) = (values_end as usize).checked_sub(values_start as usize) {
-                if values_size <= 64 * 1024 * 1024 {
-                    __msan_unpoison(values_start.cast(), values_size);
-                }
+        if let Some(buffers) = validated_buffers {
+            let value_size = core::mem::size_of::<qjs::JSValue>();
+            let argument_bytes = buffers.argument_capacity.saturating_mul(value_size);
+            if argument_bytes <= 64 * 1024 * 1024 {
+                __msan_unpoison(buffers.arg_buf.cast(), argument_bytes);
             }
-        }
-        let locals_start = frame.var_buf.cast::<u8>();
-        if !locals_start.is_null() {
-            if let Some(locals_size) = (values_end as usize).checked_sub(locals_start as usize) {
-                if locals_size <= 64 * 1024 * 1024 {
-                    __msan_unpoison(locals_start.cast(), locals_size);
-                }
+            let local_bytes = buffers.local_capacity.saturating_mul(value_size);
+            if local_bytes <= 64 * 1024 * 1024 {
+                __msan_unpoison(buffers.var_buf.cast(), local_bytes);
+            }
+            let stack_bytes = buffers.stack_capacity_slots.saturating_mul(value_size);
+            if stack_bytes <= 64 * 1024 * 1024 {
+                __msan_unpoison(buffers.stack_base.cast(), stack_bytes);
             }
         }
     }
@@ -982,15 +1382,20 @@ unsafe extern "C" fn production_entry_trampoline(
     if exit.kind != qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT {
         return exit;
     }
-    let Some(guard) = exit.reserved.checked_sub(1) else {
-        return retry_exit();
-    };
-    let Some(resume_pc) = (exit.resume_pc as usize)
-        .checked_sub(frame.bytecode_start as usize)
-        .and_then(|pc| u32::try_from(pc).ok())
-    else {
-        return retry_exit();
-    };
+    if pin.execution.artifact().key().tier == runtime::Tier::Baseline {
+        if validated_baseline_deopt(
+            &exit,
+            frame,
+            validated_bytecode_start,
+            validated_arg_buf,
+            validated_var_buf,
+            validated_stack_base,
+            validated_stack_capacity,
+        ) {
+            return exit;
+        }
+        return unsafe { reject_native_deopt(validated_ctx) };
+    }
     // The pinned artifact outlives this entry, so its deopt table is read in
     // place instead of being copied on every native entry.
     let deopt_sites = pin
@@ -998,19 +1403,28 @@ unsafe extern "C" fn production_entry_trampoline(
         .artifact()
         .optimized_metadata()
         .map_or(&[][..], |metadata| metadata.deopt_sites());
-    let Some((shape, map)) = deopt_sites.iter().find(|(shape, map)| {
-        map.guard() == guard && map.resume_pc() == resume_pc && map.validate(*shape).is_ok()
-    }) else {
-        return retry_exit();
+    let Some((guard, shape)) = validated_native_deopt(&exit, validated_bytecode_start, deopt_sites)
+    else {
+        return unsafe { reject_native_deopt(validated_ctx) };
     };
-    /* Narrow Tier 2 currently emits identity recipes only. Entry exits alias
-     * arguments/locals; instruction exits first synchronize their live
-     * operand stack into frame storage. Validate the complete transaction
-     * before publishing the resume state. Future non-identity recipes fail
-     * closed until they have an owning duplication implementation. */
-    if map.validate_identity_materialization(*shape).is_err() {
-        return retry_exit();
-    }
+    // Materialization is cold. Build the trusted buffer descriptor only after
+    // a DEOPT, from the pointers captured before native code could mutate the
+    // frame. The normal DONE path now pays only scalar pointer snapshots.
+    let validated_buffers = pin.frame_counts.and_then(|(arguments, locals)| {
+        TrustedFrameBuffers::capture_raw(
+            validated_arg_buf,
+            validated_var_buf,
+            validated_stack_base,
+            validated_stack_capacity,
+            arguments,
+            locals,
+        )
+    });
+    let Some(validated_buffers) =
+        validated_buffers.filter(|buffers| buffers.validates_optimized_shape(frame, shape))
+    else {
+        return unsafe { reject_native_deopt(validated_ctx) };
+    };
     pin.validation
         .deopt_materializations
         .fetch_add(1, Ordering::Relaxed);
@@ -1018,7 +1432,7 @@ unsafe extern "C" fn production_entry_trampoline(
         pin.key.id,
         pin.key.generation,
         guard,
-        observed_deopt_type(frame, *shape),
+        observed_deopt_type(validated_buffers, shape),
     );
     /* The one-based identity is internal to the pinned backend artifact. C's
      * stable ABI keeps this field reserved and receives only validated zero. */
@@ -1028,15 +1442,15 @@ unsafe extern "C" fn production_entry_trampoline(
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 fn observed_deopt_type(
-    frame: &rquickjs_core::qjs::JSJitExecFrame,
+    buffers: TrustedFrameBuffers,
     shape: ir::OptimizedFrameShape,
 ) -> Option<runtime::ObservedType> {
     use rquickjs_core::qjs;
     let values = unsafe {
-        core::slice::from_raw_parts(frame.arg_buf, usize::from(shape.arguments()))
+        core::slice::from_raw_parts(buffers.arg_buf, usize::from(shape.arguments()))
             .iter()
             .chain(core::slice::from_raw_parts(
-                frame.var_buf,
+                buffers.var_buf,
                 usize::from(shape.locals()),
             ))
     };
@@ -1061,6 +1475,367 @@ fn observed_deopt_type(
 mod production_osr_validation_tests {
     use super::*;
     use rquickjs_core::qjs;
+
+    #[test]
+    fn tier2_profitability_trial_is_classified_exactly_once() {
+        let mut profile = ProductionProfile::default();
+        for _ in 0..8 {
+            profile.record_baseline(100);
+        }
+        for _ in 0..7 {
+            profile.record_optimized(80);
+        }
+        assert_eq!(classify_tier2_trial(&mut profile), None);
+        profile.record_optimized(80);
+        assert_eq!(classify_tier2_trial(&mut profile), Some(false));
+        assert!(profile.tier2_trial_decided);
+        // Later samples must not revisit the cross-multiplied decision.
+        for _ in 0..8 {
+            profile.record_optimized(u64::MAX);
+        }
+        assert_eq!(classify_tier2_trial(&mut profile), None);
+
+        let mut slow = ProductionProfile::default();
+        for _ in 0..8 {
+            slow.record_baseline(100);
+        }
+        for _ in 0..8 {
+            slow.record_optimized(125);
+        }
+        assert_eq!(classify_tier2_trial(&mut slow), Some(true));
+        assert!(slow.tier2_trial_decided);
+    }
+
+    #[test]
+    fn tier2_profitability_trial_ignores_one_scheduling_outlier() {
+        // Sub-microsecond callees are timed through instrumented callbacks
+        // (sanitizers, debug hosts); one preempted sample in the window must
+        // not condemn a Tier-2 version whose steady state is faster.
+        let mut profile = ProductionProfile::default();
+        for _ in 0..8 {
+            profile.record_baseline(600);
+        }
+        for _ in 0..7 {
+            profile.record_optimized(400);
+        }
+        profile.record_optimized(5_000);
+        assert_eq!(profile.optimized_min_ns, 400);
+        assert_eq!(classify_tier2_trial(&mut profile), Some(false));
+        assert!(profile.tier2_trial_decided);
+    }
+
+    #[test]
+    fn entry_validation_counts_are_precomputed_once_from_immutable_metadata() {
+        let shape = ir::OptimizedFrameShape::new(3, 4, 1);
+        let other_stack_depth = ir::OptimizedFrameShape::new(3, 4, 7);
+        assert_eq!(
+            precomputed_frame_counts(
+                None,
+                &[
+                    (shape, dummy_deopt_map(shape)),
+                    (other_stack_depth, dummy_deopt_map(other_stack_depth))
+                ],
+                None
+            ),
+            Some((3, 4)),
+            "stack depth may vary while the argument/local buffers stay fixed"
+        );
+        let conflicting = ir::OptimizedFrameShape::new(3, 5, 1);
+        assert_eq!(
+            precomputed_frame_counts(
+                None,
+                &[
+                    (shape, dummy_deopt_map(shape)),
+                    (conflicting, dummy_deopt_map(conflicting))
+                ],
+                None
+            ),
+            None,
+            "conflicting immutable metadata must fail closed before native entry"
+        );
+        assert_eq!(
+            precomputed_frame_counts(
+                Some((8, 9)),
+                &[(conflicting, dummy_deopt_map(conflicting))],
+                Some((1, 2))
+            ),
+            Some((8, 9)),
+            "the retained bytecode snapshot is the authoritative entry shape"
+        );
+    }
+
+    fn dummy_deopt_map(shape: ir::OptimizedFrameShape) -> ir::DeoptMap {
+        let slots = (0..shape.arguments())
+            .map(|index| {
+                ir::Materialization::argument(index, ir::MaterializedValue::TaggedSlot(index))
+            })
+            .chain((0..shape.locals()).map(|index| {
+                ir::Materialization::local(
+                    index,
+                    ir::MaterializedValue::TaggedSlot(shape.arguments() + index),
+                )
+            }))
+            .chain((0..shape.stack()).map(|index| {
+                ir::Materialization::stack(
+                    index,
+                    ir::MaterializedValue::TaggedSlot(shape.arguments() + shape.locals() + index),
+                )
+            }))
+            .collect();
+        ir::DeoptMap::new(0, 0, ir::DeoptPhase::BeforeEffect(0), slots)
+    }
+
+    unsafe extern "C" fn native_effect_then_deopt(
+        frame: *mut qjs::JSJitExecFrame,
+    ) -> qjs::JSJitExit {
+        let frame = unsafe { &mut *frame };
+        let case = unsafe { (*frame.arg_buf).u.int32 };
+        unsafe { (*frame.var_buf).u.int32 += 1 };
+        frame.pc = unsafe { frame.bytecode_start.add(2) };
+        match case {
+            6 => frame.arg_buf = core::ptr::NonNull::dangling().as_ptr(),
+            7 => frame.var_buf = core::ptr::NonNull::dangling().as_ptr(),
+            8 => frame.stack_base = core::ptr::NonNull::dangling().as_ptr(),
+            9 => frame.stack_capacity = core::ptr::NonNull::dangling().as_ptr(),
+            10 => frame.stack_top = core::ptr::NonNull::dangling().as_ptr(),
+            _ => {}
+        }
+        qjs::JSJitExit {
+            kind: qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+            reserved: match case {
+                0 => 0,  // Missing one-based guard identity.
+                2 => 99, // Unknown guard identity.
+                _ => 1,
+            },
+            resume_pc: if case == 1 {
+                core::ptr::null()
+            } else {
+                frame.pc
+            },
+            resume_stack_top: frame.stack_top,
+        }
+    }
+
+    #[test]
+    fn invalid_post_native_deopts_are_terminal_without_replaying_effects_or_touching_roots() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            for case in 0..11 {
+                let shape = ir::OptimizedFrameShape::new(1, 1, 1);
+                let slots = if case == 3 {
+                    vec![] // Known guard, malformed complete-frame recipe.
+                } else {
+                    vec![
+                        ir::Materialization::argument(
+                            0,
+                            if case == 4 {
+                                ir::MaterializedValue::Int32(7) // Valid, but not identity.
+                            } else {
+                                ir::MaterializedValue::TaggedSlot(0)
+                            },
+                        ),
+                        ir::Materialization::local(0, ir::MaterializedValue::TaggedSlot(1)),
+                        ir::Materialization::stack(0, ir::MaterializedValue::TaggedSlot(2)),
+                    ]
+                };
+                let artifact_key = code_cache::ArtifactKey {
+                    runtime_id: 11,
+                    function_id: 7,
+                    generation: 3,
+                    tier: runtime::Tier::Optimizing,
+                    target_isa: 0,
+                    cpu_features: 0,
+                    abi_fingerprint: 0,
+                    source_revision: 0,
+                    opcode_fingerprint: 0,
+                    config_fingerprint: 0,
+                    specialization_fingerprint: 0,
+                };
+                let metadata = code_cache::OptimizedArtifactMetadata::new(
+                    0,
+                    vec![(
+                        shape,
+                        ir::DeoptMap::new(0, 2, ir::DeoptPhase::AfterEffect(1), slots),
+                    )],
+                    0,
+                    0,
+                    0,
+                );
+                let mut cache = code_cache::CodeCache::new(1 << 20);
+                cache
+                    .insert(code_cache::CompiledArtifact::empty(
+                        artifact_key.with_tier(runtime::Tier::Baseline),
+                    ))
+                    .unwrap();
+                cache
+                    .insert(
+                        code_cache::CompiledArtifact::empty(artifact_key)
+                            .with_optimized_metadata(metadata),
+                    )
+                    .unwrap();
+                let pin = ProductionEntryPin {
+                    execution: cache.pin(artifact_key).unwrap(),
+                    native: native_effect_then_deopt as *const u8,
+                    runtime_id: 11,
+                    key: runtime::FunctionKey::new(7, 3),
+                    pc: 0,
+                    stack_map_count: 0,
+                    osr: None,
+                    frame_counts: Some((1, 1)),
+                    validation: Arc::new(OsrValidationMetrics::default()),
+                    #[cfg(feature = "test-support")]
+                    stress_gc: false,
+                };
+                let mut bytecode = [0_u8; 8];
+                let mut arguments = [qjs::JS_MKVAL(qjs::JS_TAG_INT, case)];
+                let mut locals = [qjs::JS_MKVAL(qjs::JS_TAG_INT, 0)];
+                let root: rquickjs::Value = ctx.eval("({live: 'published root'})").unwrap();
+                let mut stack = [root.as_raw()];
+                let stack_before = stack[0];
+                let mut frame: qjs::JSJitExecFrame = unsafe { core::mem::zeroed() };
+                frame.struct_size = core::mem::size_of::<qjs::JSJitExecFrame>() as u32;
+                frame.ctx = ctx.as_raw().as_ptr();
+                frame.rt = unsafe { qjs::JS_GetRuntime(frame.ctx) };
+                frame.runtime_id = 11;
+                frame.function_id = 7;
+                frame.generation = 3;
+                frame.frame_cookie = 9;
+                frame.runtime_api = core::ptr::NonNull::dangling().as_ptr();
+                frame.arg_buf = arguments.as_mut_ptr();
+                frame.var_buf = locals.as_mut_ptr();
+                frame.stack_base = stack.as_mut_ptr();
+                frame.stack_top = unsafe { stack.as_mut_ptr().add(1) };
+                frame.stack_capacity = frame.stack_top;
+                frame.bytecode_start = bytecode.as_mut_ptr();
+                frame.pc = bytecode.as_mut_ptr();
+                frame.result = qjs::JS_UNDEFINED;
+                frame.entry.pin = (&pin as *const ProductionEntryPin).cast_mut().cast();
+                frame.entry.helper_abi_version = qjs::QJSJIT_HELPER_ABI_VERSION;
+                // Rejection before entry may still retry: native work has not
+                // run, no exception is installed, and every root is intact.
+                frame.frame_cookie = 0;
+                let rejected_before = bytes(&frame);
+                let rejected = unsafe { production_entry_trampoline(&mut frame) };
+                assert_eq!(
+                    rejected.kind,
+                    qjs::JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER
+                );
+                assert_eq!(unsafe { locals[0].u.int32 }, 0);
+                assert_eq!(bytes(&frame), rejected_before);
+                assert!(!unsafe { qjs::JS_HasException(frame.ctx) });
+                frame.frame_cookie = 9;
+                let mut expected_frame = frame;
+                expected_frame.pc = unsafe { bytecode.as_ptr().add(2) };
+                match case {
+                    6 => expected_frame.arg_buf = core::ptr::NonNull::dangling().as_ptr(),
+                    7 => expected_frame.var_buf = core::ptr::NonNull::dangling().as_ptr(),
+                    8 => expected_frame.stack_base = core::ptr::NonNull::dangling().as_ptr(),
+                    9 => expected_frame.stack_capacity = core::ptr::NonNull::dangling().as_ptr(),
+                    10 => expected_frame.stack_top = core::ptr::NonNull::dangling().as_ptr(),
+                    _ => {}
+                }
+
+                let exit = unsafe { production_entry_trampoline(&mut frame) };
+                assert_eq!(unsafe { locals[0].u.int32 }, 1, "native effect runs once");
+                assert_eq!(
+                    bytes(&frame),
+                    bytes(&expected_frame),
+                    "case {case}: preserve C cleanup roots"
+                );
+                assert_eq!(stack[0].tag, stack_before.tag);
+                assert_eq!(unsafe { stack[0].u.ptr }, unsafe { stack_before.u.ptr });
+                if case == 5 {
+                    assert_eq!(exit.kind, qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT);
+                    assert_eq!(exit.reserved, 0);
+                    assert_eq!(
+                        pin.validation
+                            .deopt_materializations
+                            .load(Ordering::Relaxed),
+                        1
+                    );
+                } else {
+                    assert_eq!(
+                        exit.kind,
+                        qjs::JSJitExitKind_JS_JIT_EXIT_INTERRUPT,
+                        "case {case}: never replay native effects"
+                    );
+                    assert_eq!(exit.reserved, 0);
+                    assert!(exit.resume_pc.is_null());
+                    assert!(exit.resume_stack_top.is_null());
+                    let exception = unsafe { qjs::JS_GetException(frame.ctx) };
+                    let uncatchable = unsafe { qjs::JS_IsUncatchableError(exception) };
+                    unsafe { qjs::JS_FreeValue(frame.ctx, exception) };
+                    assert!(uncatchable, "case {case}: terminal invariant error");
+                    assert_eq!(
+                        pin.validation
+                            .deopt_materializations
+                            .load(Ordering::Relaxed),
+                        0
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn baseline_deopt_accepts_only_the_exact_published_frame_transaction() {
+        let mut bytecode = [0_u8; 8];
+        let mut arguments = [qjs::JS_UNDEFINED];
+        let mut locals = [qjs::JS_UNDEFINED];
+        let mut stack = [qjs::JS_UNDEFINED; 2];
+        let mut frame: qjs::JSJitExecFrame = unsafe { core::mem::zeroed() };
+        frame.arg_buf = arguments.as_mut_ptr();
+        frame.var_buf = locals.as_mut_ptr();
+        frame.stack_base = stack.as_mut_ptr();
+        frame.stack_top = unsafe { stack.as_mut_ptr().add(1) };
+        frame.stack_capacity = unsafe { stack.as_mut_ptr().add(2) };
+        frame.bytecode_start = bytecode.as_mut_ptr();
+        frame.pc = unsafe { bytecode.as_mut_ptr().add(3) };
+        let bytecode_start = bytecode.as_ptr();
+        let arg_buf = arguments.as_mut_ptr();
+        let var_buf = locals.as_mut_ptr();
+        let stack_base = stack.as_mut_ptr();
+        let stack_capacity = unsafe { stack_base.add(2) };
+        let exit = qjs::JSJitExit {
+            kind: qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+            reserved: 0,
+            resume_pc: frame.pc,
+            resume_stack_top: core::ptr::null_mut(),
+        };
+        let valid = |candidate: &qjs::JSJitExit, published: &qjs::JSJitExecFrame| {
+            validated_baseline_deopt(
+                candidate,
+                published,
+                bytecode_start,
+                arg_buf,
+                var_buf,
+                stack_base,
+                stack_capacity,
+            )
+        };
+        assert!(valid(&exit, &frame));
+
+        let mut candidate = exit;
+        candidate.reserved = 1;
+        assert!(!valid(&candidate, &frame));
+        candidate = exit;
+        candidate.resume_pc = core::ptr::null();
+        assert!(!valid(&candidate, &frame));
+        candidate = exit;
+        candidate.resume_stack_top = frame.stack_top;
+        assert!(!valid(&candidate, &frame));
+
+        let mut corrupted = frame;
+        corrupted.pc = bytecode_start.cast_mut();
+        assert!(!valid(&exit, &corrupted));
+        corrupted = frame;
+        corrupted.stack_top = unsafe { stack_capacity.cast::<u8>().add(1).cast() };
+        assert!(!valid(&exit, &corrupted));
+        corrupted = frame;
+        corrupted.stack_capacity = frame.stack_top;
+        assert!(!valid(&exit, &corrupted));
+    }
 
     #[test]
     fn native_return_handoff_preserves_identity_type_and_recursive_exit_order() {
@@ -1504,13 +2279,13 @@ impl ProductionBackend {
                 .feedback
                 .snapshot(self.clock.max(1))
                 .with_properties(self.shape_feedback.snapshot(key));
-            let mut direct_call_candidate = false;
-            let direct_call_pending = snapshot.instructions().iter().any(|instruction| {
+            let mut direct_call_pending = false;
+            for instruction in snapshot.instructions() {
                 let Some(call) = observed.call_specialization_at(key, instruction.pc()) else {
-                    return false;
+                    continue;
                 };
                 if call.callee() == key {
-                    return false;
+                    continue;
                 }
                 let repeated_in_loop = snapshot.instructions().iter().any(|branch| {
                     branch.pc() > instruction.pc()
@@ -1522,11 +2297,23 @@ impl ProductionBackend {
                         })
                 });
                 if !repeated_in_loop {
-                    return false;
+                    continue;
                 }
-                direct_call_candidate = true;
-                !self.coordinator.direct_call_ready(&call)
-            });
+                let direct_ready = self.coordinator.direct_call_ready(&call);
+                let frame_ready = self.coordinator.frame_inline_candidate_ready(
+                    key,
+                    snapshot,
+                    instruction.pc(),
+                    &observed,
+                );
+                let resolved = self.coordinator.call_target_resolved(call.callee());
+                if direct_ready || frame_ready {
+                    continue;
+                }
+                if !resolved {
+                    direct_call_pending = true;
+                }
+            }
             /* A caller queued while its monomorphic callee is still compiling
              * permanently lowers the site through the generic CALL bridge.
              * Keep the caller at its installed baseline until the callee's
@@ -1534,6 +2321,20 @@ impl ProductionBackend {
              * the first Tier2 artifact. Self-recursive and non-specializable
              * calls keep their existing generic lowering. */
             if direct_call_pending {
+                continue;
+            }
+            // A stable call link can fund a bounded optimizing trial before
+            // every property IC in the same function has executed. The Tier-2
+            // property lowering is intentionally typed and fail-closed: it
+            // must not guess a shape or silently substitute an unpriced
+            // helper path. As in V8/JSC, wait for each required property site
+            // to acquire feedback, preserving the trial budget for a snapshot
+            // whose IC dependencies can actually be compiled.
+            let property_feedback_pending = snapshot.instructions().iter().any(|instruction| {
+                matches!(instruction.opcode().name(), "get_field" | "put_field")
+                    && observed.property_at(instruction.pc()).is_none()
+            });
+            if property_feedback_pending {
                 continue;
             }
             /* A native-to-native call through the generic CALL bridge still
@@ -1649,6 +2450,20 @@ impl ProductionBackend {
             let forced = self.config.force_optimized();
             #[cfg(not(feature = "test-support"))]
             let forced = false;
+            // As in V8/JSC, stable IC feedback is itself sufficient to fund
+            // one bounded optimizing trial. Baseline timing cannot model the
+            // compiled call/property/element fast path, so rejecting it here
+            // would make the optimized path permanently unreachable. The
+            // measured Tier-2 window below still demotes a losing artifact.
+            let stable_ic_candidate = snapshot.instructions().iter().any(|instruction| {
+                observed
+                    .call_specialization_at(key, instruction.pc())
+                    .is_some_and(|call| call.callee() != key)
+                    || observed.property_at(instruction.pc()).is_some()
+                    || observed
+                        .array_at(key, instruction.pc())
+                        .is_some_and(|site| site.can_specialize())
+            });
             /* A rejected baseline does not predict Tier2 profitability: the
              * baseline can lose to dispatch/callback overhead while a stable
              * unboxed loop wins by orders of magnitude.  Give such a function
@@ -1660,7 +2475,7 @@ impl ProductionBackend {
              * direct target is ready, admit the caller's existing bounded
              * optimizing trial without spending five misleading baseline
              * profitability retries. */
-            if !forced && !direct_call_candidate && !self.profitability_blacklisted.contains(&key) {
+            if !forced && !stable_ic_candidate && !self.profitability_blacklisted.contains(&key) {
                 let measured = self
                     .execution_profiles
                     .get(&key)
@@ -1706,6 +2521,10 @@ impl ProductionBackend {
                 self.profitability_backoff.remove(&key);
                 self.cold_metrics_dirty = true;
                 self.profitability_approved = self.profitability_approved.saturating_add(1);
+            } else if !forced && stable_ic_candidate {
+                self.cold_metrics_dirty = true;
+                self.profitability_evaluations = self.profitability_evaluations.saturating_add(1);
+                self.profitability_approved = self.profitability_approved.saturating_add(1);
             }
             if let Some(snapshot) = self.optimizing_snapshots.remove(&key) {
                 #[cfg(feature = "test-support")]
@@ -1720,6 +2539,10 @@ impl ProductionBackend {
                         .iter()
                         .any(|i| observed.property_at(i.pc()).is_some());
                     if observed.bounded_specialization(key).is_some()
+                        || snapshot
+                            .instructions()
+                            .iter()
+                            .any(|i| observed.array_at(key, i.pc()).is_some())
                         || has_stable_call
                         || has_property
                     {
@@ -2076,6 +2899,10 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         };
         self.clock = self.clock.saturating_add(1).max(1);
         match event.kind {
+            qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_ARRAY if raw_types.is_empty() => {
+                self.feedback
+                    .observe_array_raw(key, event.pc, event.slot, event.flags);
+            }
             qjs::JSJitFeedbackKind_JS_JIT_FEEDBACK_CALL => {
                 let arguments = &mut self.call_feedback_types;
                 arguments.clear();
@@ -2373,6 +3200,23 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         let entry = published.as_ptr();
         let stack_map_count = published.required_stack_map_count();
         let artifact_key = pin.artifact().key();
+        let artifact = pin.artifact();
+        let snapshot_counts = artifact.inline_snapshot().map(|snapshot| {
+            (
+                usize::from(snapshot.arg_count()),
+                usize::from(snapshot.local_count()),
+            )
+        });
+        let deopt_sites = artifact
+            .optimized_metadata()
+            .map_or(&[][..], |metadata| metadata.deopt_sites());
+        let osr_counts = osr_map.as_ref().map(|map| {
+            (
+                usize::from(map.argument_count()),
+                usize::from(map.local_count()),
+            )
+        });
+        let frame_counts = precomputed_frame_counts(snapshot_counts, deopt_sites, osr_counts);
         let pin = Box::into_raw(Box::new(ProductionEntryPin {
             execution: pin,
             native: entry,
@@ -2381,6 +3225,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             pc,
             stack_map_count,
             osr: osr_map,
+            frame_counts,
             validation: Arc::clone(&self.osr_validation),
             #[cfg(feature = "test-support")]
             stress_gc: self.config.stress_gc(),
@@ -2446,6 +3291,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         }
         // An unmatched callback must not discard a different active timer.
         // Actual C invocations, including recursive and OSR entries, are LIFO.
+        let mut measured_tier2_loss = false;
         if let Some((_, start, tier)) = self
             .execution_starts
             .last()
@@ -2457,8 +3303,16 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             let optimized = tier == runtime::Tier::Optimizing;
             let profile = self.execution_profiles.entry(key).or_default();
             if optimized {
-                profile.optimized_executions = profile.optimized_executions.saturating_add(1);
-                profile.optimized_ns = profile.optimized_ns.saturating_add(elapsed);
+                profile.record_optimized(elapsed);
+                // Like V8/JSC tier-down decisions, use a bounded observation
+                // window and a material margin instead of reacting to one
+                // noisy invocation. Cross-multiply so the decision remains
+                // deterministic and division-free: after at least eight
+                // samples, Tier-2's fastest invocation must not be 25% slower
+                // than the measured baseline average for the same immutable
+                // function identity. The coordinator only acts on a loss when
+                // that baseline is still installed to fall back to.
+                measured_tier2_loss = classify_tier2_trial(profile) == Some(true);
                 if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
                     if let Some(baseline_average) =
                         profile.baseline_ns.checked_div(profile.baseline_executions)
@@ -2478,9 +3332,13 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     }
                 }
             } else {
-                profile.baseline_executions = profile.baseline_executions.saturating_add(1);
-                profile.baseline_ns = profile.baseline_ns.saturating_add(elapsed);
+                profile.record_baseline(elapsed);
             }
+        }
+        if measured_tier2_loss && self.coordinator.demote_unprofitable_optimized(key) {
+            // QuickJS may hold a cached entry handle. Force its next call to
+            // reacquire after the current pinned invocation has completed.
+            self.invalidate_entry_cache();
         }
         self.coordinator
             .record_side_path_entries(self.osr_validation.take_side_path_entries());

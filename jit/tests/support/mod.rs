@@ -1647,7 +1647,7 @@ pub fn duplicate_attachment_is_rejected() -> bool {
     rejected && *events.lock().unwrap() == ["first_detach"]
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AbiMismatchFixture {
     SourceRevision,
     OpcodeFingerprint,
@@ -1665,11 +1665,13 @@ pub enum AbiMismatchFixture {
     RuntimeApiLayout,
     HelperTable,
     ElementLayout,
+    InlineApi,
+    ArrayApi,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -1686,6 +1688,8 @@ impl AbiMismatchFixture {
         Self::RuntimeApiLayout,
         Self::HelperTable,
         Self::ElementLayout,
+        Self::InlineApi,
+        Self::ArrayApi,
         Self::BackendVTableLayout,
     ];
 
@@ -1709,6 +1713,8 @@ impl AbiMismatchFixture {
             Self::RuntimeApiLayout => AbiMismatch::StructureLayout(AbiStructure::RuntimeApi),
             Self::HelperTable => AbiMismatch::StructureLayout(AbiStructure::HelperTable),
             Self::ElementLayout => AbiMismatch::StructureLayout(AbiStructure::ElementLayout),
+            Self::InlineApi => AbiMismatch::StructureLayout(AbiStructure::InlineApi),
+            Self::ArrayApi => AbiMismatch::StructureLayout(AbiStructure::ArrayApi),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }

@@ -39,6 +39,8 @@ include = [
     "quickjs/quickjs.h",
     "src/**/*.rs",
     "tests/jit_patch.rs",
+    "tests/inline_recovery.rs",
+    "tests/typed_array_guard.rs",
 ]
 
 [lib]

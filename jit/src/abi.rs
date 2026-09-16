@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 21;
+pub const ABI_MINOR: u16 = 24;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -28,6 +28,8 @@ pub enum AbiStructure {
     ElementLayout,
     PropertyLayout,
     BackendVTable,
+    InlineApi,
+    ArrayApi,
 }
 
 /// Constructors for the authoritative native-to-interpreter exit contract.
@@ -111,6 +113,8 @@ impl std::error::Error for AbiError {}
 #[derive(Clone, Copy, Debug)]
 pub struct AbiInfo {
     raw: qjs::JSJitABIInfo,
+    inline_api: qjs::JSJitInlineAPI,
+    array_api: qjs::JSJitArrayAPI,
 }
 
 /// Runtime-exported, append-only offsets for element fast paths.  QuickJS
@@ -180,6 +184,20 @@ impl AbiInfo {
         self.raw.build_fingerprint
     }
 
+    /// Native inline operations, copied only after the main ABI and this
+    /// versioned table have been validated. Each operation may allocate,
+    /// throw, finalize and reenter; callers must publish the required roots.
+    pub(crate) const fn inline_api(&self) -> &qjs::JSJitInlineAPI {
+        &self.inline_api
+    }
+
+    /// Read-only, non-allocating typed-array continuing-path guards. Runtime
+    /// feedback chooses candidates; this table revalidates live state.
+    #[cfg(feature = "compiler")]
+    pub(crate) const fn array_api(&self) -> &qjs::JSJitArrayAPI {
+        &self.array_api
+    }
+
     #[cfg(feature = "compiler")]
     pub(crate) fn element_layout(&self) -> ElementLayout {
         let raw = self.raw.element_layout;
@@ -217,13 +235,30 @@ impl AbiInfo {
         raw.struct_size = mem::size_of::<qjs::JSJitABIInfo>() as u32;
         let status = unsafe { qjs::JS_GetJitABIInfo(&mut raw) };
         if status == qjs::JS_JIT_BACKEND_OK {
-            Ok(Self { raw })
+            let mut info = Self {
+                raw,
+                // All fields are integers or nullable function pointers.
+                inline_api: unsafe { mem::zeroed() },
+                array_api: unsafe { mem::zeroed() },
+            };
+            // Do not resolve native inline addresses against a mismatched
+            // main ABI, even when the optional table has a familiar version.
+            info.validate_main()?;
+            info.inline_api = query_inline_api()?;
+            info.array_api = query_array_api()?;
+            Ok(info)
         } else {
             Err(AbiError::QueryFailed(status))
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), AbiError> {
+        self.validate_main()?;
+        validate_inline_api(self.inline_api())?;
+        validate_array_api(&self.array_api)
+    }
+
+    fn validate_main(&self) -> Result<(), AbiError> {
         let raw = &self.raw;
         let mismatch = if raw.struct_size != mem::size_of::<qjs::JSJitABIInfo>() as u32 {
             Some(AbiMismatch::StructSize)
@@ -336,6 +371,8 @@ impl AbiInfo {
             AbiMismatch::StructureLayout(AbiStructure::BackendVTable) => {
                 self.raw.backend_vtable_layout_fingerprint ^= 1
             }
+            AbiMismatch::StructureLayout(AbiStructure::InlineApi) => self.inline_api.version ^= 1,
+            AbiMismatch::StructureLayout(AbiStructure::ArrayApi) => self.array_api.version ^= 1,
             AbiMismatch::BuildFingerprint => self.raw.build_fingerprint ^= 1,
         }
     }
@@ -899,6 +936,229 @@ fn expected_build_fingerprint() -> u64 {
     hash = hash_u64(hash, HELPER_TABLE_FINGERPRINT);
     hash = hash_u64(hash, element_layout_fingerprint());
     hash_u64(hash, property_layout_fingerprint())
+}
+
+fn query_inline_api() -> Result<qjs::JSJitInlineAPI, AbiError> {
+    let pointer = unsafe { qjs::JS_JitGetInlineAPI(qjs::QJSJIT_INLINE_RECOVERY_VERSION) };
+    // The runtime query promises static immutable storage. Inspect only the
+    // header before copying the full table so a truncated table is rejected.
+    if pointer.is_null()
+        || unsafe { core::ptr::addr_of!((*pointer).struct_size).read() }
+            != mem::size_of::<qjs::JSJitInlineAPI>() as u32
+    {
+        return Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::InlineApi,
+        )));
+    }
+    let api = unsafe { pointer.read() };
+    validate_inline_api(&api)?;
+    Ok(api)
+}
+
+fn validate_inline_api(api: &qjs::JSJitInlineAPI) -> Result<(), AbiError> {
+    let effects = qjs::JS_JIT_HELPER_THROWING
+        | qjs::JS_JIT_HELPER_ALLOCATING
+        | qjs::JS_JIT_HELPER_REENTRANT
+        | qjs::JS_JIT_HELPER_FINALIZING;
+    if api.struct_size != mem::size_of::<qjs::JSJitInlineAPI>() as u32
+        || api.version != qjs::QJSJIT_INLINE_RECOVERY_VERSION
+        || api.max_depth != qjs::JS_JIT_INLINE_MAX_DEPTH
+        || api.max_bytes != qjs::JS_JIT_INLINE_MAX_BYTES
+        || api.effects != effects
+        || api.reserved != 0
+        || api.enter.is_none()
+        || api.leave.is_none()
+        || api.resume.is_none()
+        || api.check.is_none()
+    {
+        Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::InlineApi,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn query_array_api() -> Result<qjs::JSJitArrayAPI, AbiError> {
+    let pointer = unsafe { qjs::JS_JitGetArrayAPI(qjs::QJSJIT_ARRAY_API_VERSION) };
+    if pointer.is_null()
+        || unsafe { core::ptr::addr_of!((*pointer).struct_size).read() }
+            != mem::size_of::<qjs::JSJitArrayAPI>() as u32
+    {
+        return Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ArrayApi,
+        )));
+    }
+    let api = unsafe { pointer.read() };
+    validate_array_api(&api)?;
+    Ok(api)
+}
+
+fn validate_array_api(api: &qjs::JSJitArrayAPI) -> Result<(), AbiError> {
+    if api.struct_size != mem::size_of::<qjs::JSJitArrayAPI>() as u32
+        || api.version != qjs::QJSJIT_ARRAY_API_VERSION
+        || api.effects != 0
+        || api.reserved != 0
+        || api.query.is_none()
+    {
+        Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ArrayApi,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod array_api_tests {
+    use super::*;
+
+    fn linked_table() -> qjs::JSJitArrayAPI {
+        let pointer = unsafe { qjs::JS_JitGetArrayAPI(qjs::QJSJIT_ARRAY_API_VERSION) };
+        assert!(!pointer.is_null());
+        unsafe { *pointer }
+    }
+
+    #[test]
+    fn array_api_is_exactly_versioned_effect_free_and_complete() {
+        let valid = linked_table();
+        assert!(validate_array_api(&valid).is_ok());
+        assert!(unsafe { qjs::JS_JitGetArrayAPI(0) }.is_null());
+        for field in 0..5 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.struct_size -= 1,
+                1 => invalid.version += 1,
+                2 => invalid.effects = 1,
+                3 => invalid.reserved = 1,
+                _ => invalid.query = None,
+            }
+            assert!(validate_array_api(&invalid).is_err(), "field {field}");
+        }
+    }
+
+    #[test]
+    fn array_table_validation_is_part_of_the_main_abi_contract() {
+        let mut info = AbiInfo::linked().unwrap();
+        assert!(info.array_api.query.is_some());
+        info.array_api.effects = 1;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::ArrayApi
+            )))
+        );
+    }
+}
+
+#[cfg(test)]
+mod inline_api_tests {
+    use super::*;
+
+    fn linked_table() -> qjs::JSJitInlineAPI {
+        let pointer = unsafe { qjs::JS_JitGetInlineAPI(qjs::QJSJIT_INLINE_RECOVERY_VERSION) };
+        assert!(!pointer.is_null());
+        // SAFETY: The linked runtime returns immutable static storage for the
+        // requested API version, with its size checked before the full read.
+        unsafe {
+            assert_eq!(
+                (*pointer).struct_size as usize,
+                mem::size_of::<qjs::JSJitInlineAPI>()
+            );
+            *pointer
+        }
+    }
+
+    #[test]
+    fn inline_recovery_requires_the_matching_main_abi_minor() {
+        let native = AbiInfo::query_linked().unwrap();
+        assert_eq!(ABI_MINOR, native.minor());
+        assert_eq!(native.minor(), 24);
+        assert!(unsafe { qjs::JS_JitGetInlineAPI(0) }.is_null());
+    }
+
+    #[test]
+    fn inline_api_rejects_incompatible_header_and_limits() {
+        let valid = linked_table();
+        assert!(validate_inline_api(&valid).is_ok());
+        for field in 0..7 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.struct_size -= 1,
+                1 => invalid.struct_size += 1,
+                2 => invalid.version += 1,
+                3 => invalid.reserved = 1,
+                4 => invalid.max_depth = 0,
+                5 => invalid.max_depth += 1,
+                _ => invalid.max_bytes -= 1,
+            }
+            assert!(validate_inline_api(&invalid).is_err(), "field {field}");
+        }
+    }
+
+    #[test]
+    fn inline_api_requires_all_observable_effects_and_no_unknown_effects() {
+        let valid = linked_table();
+        for effect in [
+            qjs::JS_JIT_HELPER_THROWING,
+            qjs::JS_JIT_HELPER_ALLOCATING,
+            qjs::JS_JIT_HELPER_REENTRANT,
+            qjs::JS_JIT_HELPER_FINALIZING,
+        ] {
+            let mut invalid = valid;
+            invalid.effects &= !effect;
+            assert!(validate_inline_api(&invalid).is_err(), "effect {effect}");
+        }
+        let mut invalid = valid;
+        invalid.effects |= 1 << 31;
+        assert!(validate_inline_api(&invalid).is_err());
+    }
+
+    #[test]
+    fn inline_api_requires_every_native_operation() {
+        let valid = linked_table();
+        for field in 0..4 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.enter = None,
+                1 => invalid.leave = None,
+                2 => invalid.resume = None,
+                _ => invalid.check = None,
+            }
+            assert!(validate_inline_api(&invalid).is_err(), "operation {field}");
+        }
+    }
+
+    #[test]
+    fn inline_table_validation_is_part_of_the_main_abi_contract() {
+        let mut info = AbiInfo::linked().unwrap();
+        assert!(info.inline_api().enter.is_some());
+        info.inline_api.resume = None;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::InlineApi
+            )))
+        );
+        // A mismatched main ABI must be rejected before any inline API use.
+        info.raw.major ^= 1;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::Major))
+        );
+    }
+
+    #[test]
+    fn missing_inline_check_is_rejected_by_the_main_abi_validator() {
+        let mut info = AbiInfo::linked().unwrap();
+        info.inline_api.check = None;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::InlineApi
+            )))
+        );
+    }
 }
 
 #[cfg(test)]

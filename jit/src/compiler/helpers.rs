@@ -10,6 +10,7 @@ use super::CompileFailure;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FrameLayout {
     pub flags: i32,
+    pub ctx: i32,
     pub arg_buf: i32,
     pub var_buf: i32,
     pub stack_base: i32,
@@ -42,6 +43,7 @@ impl FrameLayout {
         }
         Ok(Self {
             flags: offset(core::mem::offset_of!(qjs::JSJitExecFrame, flags))?,
+            ctx: offset(core::mem::offset_of!(qjs::JSJitExecFrame, ctx))?,
             arg_buf: offset(core::mem::offset_of!(qjs::JSJitExecFrame, arg_buf))?,
             var_buf: offset(core::mem::offset_of!(qjs::JSJitExecFrame, var_buf))?,
             stack_base: offset(core::mem::offset_of!(qjs::JSJitExecFrame, stack_base))?,

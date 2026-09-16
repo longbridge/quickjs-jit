@@ -37,6 +37,29 @@ removed after regression measurements. Frozen benchmark evidence retains that
 experiment; production uses the prior validated-PC cursor without its extra
 eight bytes per bytecode object.
 
+`0018-inline-frame-recovery.patch` adds the ABI 1.22 versioned inline-recovery
+table. Native callers can enter bounded runtime-owned shadow frames, check the
+callee identity, and either leave normally or resume in the interpreter after
+deoptimization or an exception. Recovery preserves QuickJS ownership and
+stack effects, supports nested inline frames, and caps each runtime at 16
+frames and 1 MiB of shadow-frame storage.
+
+`0019-array-feedback.patch` adds ABI 1.23 pre-effect array-mode observations at
+element loads, element stores and length reads. The existing feedback event
+layout is unchanged: a finite mode occupies `slot`, and access/hazard masks
+occupy `flags`. Observations retain no receiver pointers and do not replace
+native class, buffer, storage, bounds or observable-property guards. Fixed
+views over resizable buffers are detected from the backing buffer even when
+the view does not track its length.
+
+`0020-typed-array-guard.patch` adds the ABI 1.24 versioned typed-array leaf
+guard. Feedback only selects an Int32Array or Float64Array candidate; the leaf
+then revalidates the live receiver, exact built-in `length` lookup, fixed
+non-resizable and non-shared backing, attachment, mutability, byte bounds and
+data pointer before returning `{ data, count, mode }`. The table advertises
+zero effects and the receiver is passed by pointer so generated calls do not
+depend on platform-specific aggregate argument classification.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

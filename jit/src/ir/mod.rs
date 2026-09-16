@@ -1,19 +1,30 @@
 //! A compact, target-independent baseline IR.
 
 mod baseline;
+mod facts;
 mod frame_state;
+mod heap;
 mod inlining;
+mod loops;
 mod optimized;
+mod property;
+mod ranges;
 mod scalar;
-pub use inlining::InlineCallee;
+pub use inlining::{
+    FrameInlineCallee, InlineCallKind, InlineCallee, InlineContinuation, InlineFrameBoundary,
+    ScalarFrameInlineRegion,
+};
 mod types;
 
 #[cfg(feature = "test-support")]
 pub(crate) use baseline::with_execution_trace;
 pub(crate) use baseline::MAX_HELPER_SCRATCH_SLOTS;
 pub use baseline::{BaselineIr, IrBlock, IrInstruction};
+pub(crate) use facts::KnownFacts;
 pub(crate) use frame_state::FrameStateKind;
 pub use frame_state::{FrameSlot, FrameState, FrameStateId, FrameStateTable};
+pub use heap::{HeapKey, HeapLocation, ScalarHeapEffect, ScalarHeapOperation};
+pub(crate) use loops::LoopAnalysis;
 pub use optimized::{
     DeoptMap, DeoptOwnership, DeoptPhase, DeoptSlot, DeoptValidationError, GuardSite,
     Materialization, MaterializedFrame, MaterializedValue, OptimizedBlock, OptimizedEffect,
@@ -21,6 +32,11 @@ pub use optimized::{
     OwnedMaterializeError, OwnedMaterializedFrame, OwnedMaterializedValue,
     OwnershipTransitionError, SsaValueOwnership, ValueRepresentation,
 };
+pub(crate) use property::{
+    eligible_property_observation, PropertyAccessPlan, PropertyBoundary, PropertyCandidate,
+    PropertyPlan,
+};
+pub use ranges::IntegerRangeAnalysis;
 pub use scalar::{
     ScalarBinaryOp, ScalarBitwiseOp, ScalarCall, ScalarCheck, ScalarCompareOp, ScalarFrameState,
     ScalarGraph, ScalarInlineRegion, ScalarInlineStep, ScalarNumericMode, ScalarPhiInput,
