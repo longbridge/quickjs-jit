@@ -67,6 +67,11 @@
       "revision": "8b5f6a79bc6563a3efe13cd8488dea7af8e7b3a9",
       "subject": "test(jit): await the direct edge caller tier",
       "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "9032cfe62e6bb9ff31ae4b20659d1e6cc57365a7",
+      "subject": "fix(ci): select lld for nightly LoongArch GNU",
+      "classification": "CI-only; not included in measured binary"
     }
   ],
   "artifacts": {
