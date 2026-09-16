@@ -2259,7 +2259,7 @@ fn production_tier2_direct_call_checks_object_before_payload() {
         })
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -2420,7 +2420,7 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         function.call::<_, f64>((50_000, 0)).unwrap()
     });
     assert_eq!(first, 1_249_975_000.0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         let last = context.with(|ctx| {
             let function: Function<'_> = ctx.globals().get("f").unwrap();
@@ -2490,19 +2490,27 @@ fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
         })
         .unwrap();
 
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        let metrics = jit.metrics();
+        if metrics.tier2_entries >= 10
+            && metrics.pending_worker_jobs == 0
+            && metrics.pending_snapshot_bytes == 0
+        {
+            break;
+        }
         let result = context.with(|ctx| {
             let function: Function = ctx.globals().get("genericLoop").unwrap();
             function.call::<_, f64>((2_000, 0)).unwrap()
         });
         assert_eq!(result, 1_999_000.0);
         jit.poll();
-        if jit.metrics().tier2_entries > 0 {
-            break;
-        }
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
-    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
+    let settled = jit.metrics();
+    assert!(settled.tier2_entries >= 10, "{settled:?}");
+    assert_eq!(settled.pending_worker_jobs, 0, "{settled:?}");
+    assert_eq!(settled.pending_snapshot_bytes, 0, "{settled:?}");
     assert_ne!(
         jit.test_last_acquired_artifact_key()
             .unwrap()
@@ -2522,10 +2530,7 @@ fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
     }
     let after = jit.metrics();
     assert_eq!(after.deopts, before.deopts, "{after:?}");
-    assert!(
-        after.tier2_entries >= before.tier2_entries + 10,
-        "{after:?}"
-    );
+    assert_eq!(after.tier2_entries - before.tier2_entries, 10, "{after:?}");
 }
 
 #[cfg(all(
