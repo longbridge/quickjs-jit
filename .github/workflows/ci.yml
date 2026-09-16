@@ -651,6 +651,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
           components: rustfmt rust-src
+          # Cargo gives the global RUSTFLAGS exported by this action precedence
+          # over [target.<triple>].rustflags. Keep warnings denied while making
+          # the LoongArch GNU linker selection effective.
+          rustflags: ${{ matrix.target == 'loongarch64-unknown-linux-gnu' && '-D warnings -C link-arg=-fuse-ld=lld' || '-D warnings' }}
       - name: Update deps
         run: cargo update
       - name: Build sys
