@@ -640,7 +640,8 @@ fn loop_backedge_alias_store_invalidates_a_preheader_seed() {
         "globalThis.left={x:0};globalThis.right={x:0};
          function target(a,b,n){a.x=1;let s=0;for(let i=0;i<n;i++){s+=a.x;b.x=2;}return s}",
     );
-    for _ in 0..512 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
         context.with(|ctx| {
             let f: Function = ctx.globals().get("target").unwrap();
             let a: Object = ctx.globals().get("left").unwrap();
@@ -651,6 +652,17 @@ fn loop_backedge_alias_store_invalidates_a_preheader_seed() {
         if jit.metrics().tier2_entries > 0 {
             break;
         }
+        assert_eq!(
+            jit.metrics().blacklisted,
+            0,
+            "kernel compilation was blacklisted: {:?}",
+            jit.metrics()
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Tier2 kernel not ready: {:?}",
+            jit.metrics()
+        );
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
     let before = jit.metrics();
