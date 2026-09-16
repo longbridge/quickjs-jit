@@ -57,6 +57,11 @@
       "revision": "10fa1a8c9d3772f250b01d08935ea37b9c6ce4ce",
       "subject": "test(jit): stabilize frame inline tier coordination",
       "classification": "test-only; not included in measured binary"
+    },
+    {
+      "revision": "63243071c1447e83ed6d4af5c8cff6ed2ec7ea71",
+      "subject": "fix(ci): configure cross-target JIT metadata builds",
+      "classification": "build/CI-only; not included in measured binary"
     }
   ],
   "artifacts": {
