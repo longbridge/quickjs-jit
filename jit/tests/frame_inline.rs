@@ -59,27 +59,18 @@ impl FrameInline {
             if let Ok(input) = input.parse::<i32>() {
                 caller.call((callee, object, input)).unwrap()
             } else {
-                let input: Value = ctx.eval(input).unwrap();
+                let input: Value = globals.get(input).unwrap();
                 caller.call((callee, object, input)).unwrap()
             }
         })
     }
 
-    fn install_probe(&self, expression: &str) {
-        self.context
-            .with(|ctx| {
-                ctx.eval::<(), _>(format!("globalThis.__frameInlineProbe=()=>({expression})"))
-            })
-            .unwrap();
-    }
-
-    fn probe_number(&self) -> f64 {
+    fn function_number(&self, function_name: &str, object_name: &str, input: i32) -> f64 {
         self.context.with(|ctx| {
-            ctx.globals()
-                .get::<_, Function>("__frameInlineProbe")
-                .unwrap()
-                .call::<_, f64>(())
-                .unwrap()
+            let globals = ctx.globals();
+            let function: Function = globals.get(function_name).unwrap();
+            let object: Object = globals.get(object_name).unwrap();
+            function.call((object, input)).unwrap()
         })
     }
 
@@ -121,10 +112,12 @@ impl FrameInline {
         input: &str,
         expected: f64,
     ) {
-        self.install_probe(&format!("caller({callee_name},{object_name},{input})"));
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            assert_eq!(self.probe_number(), expected);
+            assert_eq!(
+                self.caller_number(callee_name, object_name, input),
+                expected
+            );
             self.jit.poll();
             let before = self.jit.metrics();
             let calls = self.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL);
@@ -155,19 +148,21 @@ impl FrameInline {
         input: i32,
         expected: f64,
     ) {
-        self.install_probe(&format!("{function_name}({object_name},{input})"));
         let deadline = Instant::now() + Duration::from_secs(60);
-        let installed = self.jit.metrics().installed;
         loop {
-            assert_eq!(self.probe_number(), expected);
             self.jit.poll();
-            let metrics = self.jit.metrics();
-            if metrics.installed > installed && metrics.pending_worker_jobs == 0 {
+            let before = self.jit.metrics();
+            assert_eq!(
+                self.function_number(function_name, object_name, input),
+                expected
+            );
+            let after = self.jit.metrics();
+            if after.native_entries == before.native_entries + 1 && after.pending_worker_jobs == 0 {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "function artifact was not installed: {metrics:?}"
+                "function artifact was not installed: {after:?}"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -273,6 +268,7 @@ fn post_unary_fixture(stress: bool, operator: &str) -> FrameInline {
             r#"
             globalThis.hits=0;
             globalThis.conversions=0;
+            globalThis.conversionInput={{valueOf(){{conversions++;return 41}}}};
             globalThis.plain={{value:0,after:0}};
             globalThis.state={{after:0}};
             Object.defineProperty(state,'value',{{set(v){{hits++;this.saved=v}}}});
@@ -313,8 +309,8 @@ fn post_unary_overflow_and_conversion_resume_without_replaying_effects() {
         for (operator, input, result, updated) in [
             ("++", "2147483647", 2147483652.0, 2147483648.0),
             ("--", "-2147483648", -2147483643.0, -2147483649.0),
-            ("++", "({valueOf(){conversions++;return 41}})", 46.0, 42.0),
-            ("--", "({valueOf(){conversions++;return 41}})", 46.0, 40.0),
+            ("++", "conversionInput", 46.0, 42.0),
+            ("--", "conversionInput", 46.0, 40.0),
         ] {
             let test = post_unary_fixture(stress, operator);
             test.wait_for_function_artifact("effect", "plain", 7, 7.0);
@@ -337,7 +333,7 @@ fn post_unary_overflow_and_conversion_resume_without_replaying_effects() {
             assert_eq!(test.number("state.after"), updated);
             assert_eq!(
                 test.number("conversions"),
-                if input.starts_with('(') { 1.0 } else { 0.0 }
+                if input == "conversionInput" { 1.0 } else { 0.0 }
             );
             assert_eq!(test.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL), calls);
         }
@@ -483,7 +479,7 @@ fn nested_dependency_replacement_and_gc_retire_the_root_caller() {
 fn post_setter_overflow_resumes_at_the_callee_instruction_exactly_once() {
     let test = FrameInline::new(false, SETTER_SOURCE);
     // Compile and retain the callee before the caller requests its Tier 2 body.
-    test.wait_for_tier2("effect({value:0},7)", 8.0);
+    test.wait_for_function_artifact("effect", "plain", 7, 8.0);
     test.wait_for_caller_tier2("effect", "state", "7", 13.0);
     test.context
         .with(|ctx| ctx.eval::<(), _>("hits=0;state.saved=0").unwrap());
@@ -505,7 +501,7 @@ fn post_setter_overflow_resumes_at_the_callee_instruction_exactly_once() {
 #[test]
 fn leave_completes_the_parent_call_without_a_generic_call() {
     let test = FrameInline::new(false, SETTER_SOURCE);
-    test.wait_for_tier2("effect({value:0},7)", 8.0);
+    test.wait_for_function_artifact("effect", "plain", 7, 8.0);
     test.wait_for_caller_tier2("effect", "state", "7", 13.0);
     test.context
         .with(|ctx| ctx.eval::<(), _>("hits=0;state.saved=0").unwrap());

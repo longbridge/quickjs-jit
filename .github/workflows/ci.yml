@@ -655,6 +655,9 @@ jobs:
           # over [target.<triple>].rustflags. Keep warnings denied while making
           # the LoongArch GNU linker selection effective.
           rustflags: ${{ matrix.target == 'loongarch64-unknown-linux-gnu' && '-D warnings -C link-arg=-fuse-ld=lld' || '-D warnings' }}
+      - name: Configure LoongArch GNU rustdoc linker
+        if: matrix.target == 'loongarch64-unknown-linux-gnu'
+        run: echo "RUSTDOCFLAGS=-D warnings -C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
       - name: Update deps
         run: cargo update
       - name: Build sys
