@@ -469,10 +469,14 @@ fn automatic_generic_call_entry_admits_the_bool_callee_to_tagged_tier2() {
     )
     .unwrap();
     let context = Context::full(&runtime).unwrap();
+    // Keep the Bool callee outside the acyclic frame-inline subset: this test
+    // measures admission through the tagged generic call ABI, not frame
+    // inlining. The one-iteration loop preserves the original result while its
+    // backedge makes that distinction explicit.
     context
         .with(|ctx| {
             ctx.eval::<(), _>(
-                "function incrementIf(value,enabled){let incremented=value+1;if(enabled)return incremented;return value;}\n\
+                "function incrementIf(value,enabled){for(let i=0;i<1;i++){}let incremented=value+1;if(enabled)return incremented;return value;}\n\
                  globalThis.workloadArgument=incrementIf;\n\
                  function workload(iterations,seed,target){let value=seed;for(let i=0;i<iterations;i++){value=target(value,true);}return value;}"
             )
