@@ -72,6 +72,11 @@
       "revision": "9032cfe62e6bb9ff31ae4b20659d1e6cc57365a7",
       "subject": "fix(ci): select lld for nightly LoongArch GNU",
       "classification": "CI-only; not included in measured binary"
+    },
+    {
+      "revision": "69e1471a23fc2c05f6cac3da84b5429ae87dc9c7",
+      "subject": "fix(ci): preserve LoongArch linker flags",
+      "classification": "CI-only; not included in measured binary"
     }
   ],
   "artifacts": {
