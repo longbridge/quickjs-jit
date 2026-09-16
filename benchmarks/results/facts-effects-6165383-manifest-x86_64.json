@@ -77,6 +77,11 @@
       "revision": "69e1471a23fc2c05f6cac3da84b5429ae87dc9c7",
       "subject": "fix(ci): preserve LoongArch linker flags",
       "classification": "CI-only; not included in measured binary"
+    },
+    {
+      "revision": "ee174199fe520b322bf5b495c01263359ac61120",
+      "subject": "test(jit): remove transient frame inline probes",
+      "classification": "test/CI-only; not included in measured binary"
     }
   ],
   "artifacts": {
