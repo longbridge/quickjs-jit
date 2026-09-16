@@ -529,12 +529,6 @@ fn main() {
         .expect("QuickJS integration patch must apply to the pinned public baseline");
     fs::copy("quickjs.bind.h", out_dir.join("quickjs.bind.h")).expect("Unable to copy source");
 
-    #[cfg(feature = "jit-abi")]
-    generate_jit_opcode_metadata(out_dir, out_dir);
-
-    #[cfg(feature = "jit-abi")]
-    generate_jit_helper_metadata(out_dir, out_dir);
-
     if target_os == "wasi" && !matches!(env::var("RQUICKJS_SYS_NO_WASI_SDK").as_deref(), Ok("1")) {
         let wasi_sdk_path = get_wasi_sdk_path();
         if !wasi_sdk_path.try_exists().unwrap() {
@@ -552,6 +546,12 @@ fn main() {
         env::set_var("CFLAGS", &sysroot);
         bindgen_cflags.push(sysroot);
     }
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_opcode_metadata(out_dir, out_dir);
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_helper_metadata(out_dir, out_dir);
 
     // generating bindings
     bindgen(

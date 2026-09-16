@@ -3,7 +3,10 @@
 #[path = "../build_support/patch.rs"]
 mod patch;
 
-use std::{fs, path::PathBuf, process::Command, time::SystemTime};
+use std::{fs, path::PathBuf, time::SystemTime};
+
+#[cfg(unix)]
+use std::process::Command;
 
 fn scratch_dir() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
