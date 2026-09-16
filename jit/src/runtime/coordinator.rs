@@ -3,9 +3,12 @@ use std::{
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc, Mutex,
+        Arc,
     },
 };
+
+#[cfg(feature = "test-support")]
+use std::sync::Mutex;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -1628,7 +1631,7 @@ impl Coordinator {
                         )
                     })
                     .collect::<Vec<_>>();
-                if let Some((dependency, _)) =
+                if let Some((_dependency, _)) =
                     dependency_versions
                         .iter()
                         .find(|(dependency, generation)| match *dependency {
@@ -1641,7 +1644,7 @@ impl Coordinator {
                         })
                 {
                     #[cfg(feature = "test-support")]
-                    if let DependencyKey::Function(function) = *dependency {
+                    if let DependencyKey::Function(function) = *_dependency {
                         let current_generation =
                             self.current_generations.get(&function.id).copied();
                         self.record_completion_disposition(
