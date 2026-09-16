@@ -3,7 +3,7 @@
 #[path = "../build_support/patch.rs"]
 mod patch;
 
-use std::{fs, path::PathBuf, time::SystemTime};
+use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
 fn scratch_dir() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -50,6 +50,9 @@ fn copy_patches(destination: &std::path::Path) {
         "0014-inactive-probes.patch",
         "0015-cold-object-probes.patch",
         "0017-shape-generation.patch",
+        "0018-inline-frame-recovery.patch",
+        "0019-array-feedback.patch",
+        "0020-typed-array-guard.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -108,7 +111,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 21u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 24u"));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -149,6 +152,30 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(quickjs.contains("#define QJSJIT_ABI_COUNT_MAP_OUT_IN_OP 6"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn patched_quickjs_compiles_without_the_jit_abi() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let destination = scratch_dir();
+    copy_baseline(&destination);
+    patch::apply_patch_set(&destination, &manifest.join("patches")).unwrap();
+
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let output = Command::new(compiler)
+        .current_dir(&destination)
+        .args(["-D_GNU_SOURCE", "-c", "quickjs.c", "-o", "quickjs.o"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "patched QuickJS failed to compile without CONFIG_JIT_ABI:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     fs::remove_dir_all(destination).unwrap();
 }
 
@@ -225,7 +252,17 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 21;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 24;"),
+            "{target}"
+        );
+        assert!(
+            binding.contains("pub struct JSJitArrayMetadata"),
+            "{target}"
+        );
+        assert!(binding.contains("pub struct JSJitArrayAPI"), "{target}");
+        assert!(
+            binding.contains("receiver: *const JSValue")
+                && binding.contains("pub fn JS_JitGetArrayAPI"),
             "{target}"
         );
         assert!(
@@ -269,6 +306,94 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
         assert!(
             binding.contains("size_of::<JSJitRuntimeAPI>() - 200usize"),
             "{target}"
+        );
+    }
+}
+
+#[test]
+fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
+    let binding = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bindings/wasm32-wasip1.rs"),
+    )
+    .unwrap();
+
+    for declaration in [
+        // ABI 1.22: inline recovery.
+        "pub const QJSJIT_INLINE_RECOVERY_VERSION: u32 = 1;",
+        "pub const JS_JIT_INLINE_CALL: u32 = 0;",
+        "pub const JS_JIT_INLINE_CALL_METHOD: u32 = 1;",
+        "pub const JS_JIT_INLINE_RESUME_INSTRUCTION: u32 = 0;",
+        "pub const JS_JIT_INLINE_RESUME_EXCEPTION: u32 = 1;",
+        "pub const JS_JIT_INLINE_MAX_DEPTH: u32 = 16;",
+        "pub const JS_JIT_INLINE_MAX_BYTES: u32 = 1048576;",
+        "pub fn JS_JitInlineEnter(",
+        "pub fn JS_JitInlineLeave(",
+        "pub fn JS_JitInlineResume(",
+        "pub fn JS_JitInlineCheck(",
+        "pub struct JSJitInlineAPI",
+        "pub fn JS_JitGetInlineAPI(",
+        "size_of::<JSJitInlineAPI>() - 40usize",
+        "align_of::<JSJitInlineAPI>() - 4usize",
+        "offset_of!(JSJitInlineAPI, struct_size) - 0usize",
+        "offset_of!(JSJitInlineAPI, version) - 4usize",
+        "offset_of!(JSJitInlineAPI, max_depth) - 8usize",
+        "offset_of!(JSJitInlineAPI, max_bytes) - 12usize",
+        "offset_of!(JSJitInlineAPI, effects) - 16usize",
+        "offset_of!(JSJitInlineAPI, reserved) - 20usize",
+        "offset_of!(JSJitInlineAPI, enter) - 24usize",
+        "offset_of!(JSJitInlineAPI, leave) - 28usize",
+        "offset_of!(JSJitInlineAPI, resume) - 32usize",
+        "offset_of!(JSJitInlineAPI, check) - 36usize",
+        // ABI 1.23: array feedback.
+        "JSJitFeedbackKind_JS_JIT_FEEDBACK_ARRAY: JSJitFeedbackKind = 6;",
+        "JSJitArrayMode_JS_JIT_ARRAY_MODE_GENERIC: JSJitArrayMode = 0;",
+        "JSJitArrayMode_JS_JIT_ARRAY_MODE_PACKED: JSJitArrayMode = 1;",
+        "JSJitArrayMode_JS_JIT_ARRAY_MODE_INT32: JSJitArrayMode = 2;",
+        "JSJitArrayMode_JS_JIT_ARRAY_MODE_FLOAT64: JSJitArrayMode = 3;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_STORE: u32 = 64;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_LENGTH: u32 = 128;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_EXOTIC: u32 = 256;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_SLOW: u32 = 512;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_RESIZABLE: u32 = 1024;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_DETACHED: u32 = 2048;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_IMMUTABLE: u32 = 4096;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_SHARED: u32 = 8192;",
+        "pub const JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING: u32 = 16384;",
+        // ABI 1.24: typed-array continuing guard.
+        "pub const QJSJIT_ABI_MINOR: u32 = 24;",
+        "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
+        "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",
+        "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_INVALID: JSJitArrayQueryStatus = -1;",
+        "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_MISS: JSJitArrayQueryStatus = 0;",
+        "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_OK: JSJitArrayQueryStatus = 1;",
+        "pub struct JSJitArrayMetadata",
+        "pub type JSJitArrayQueryFunc",
+        "receiver: *const JSValue",
+        "pub struct JSJitArrayAPI",
+        "pub fn JS_JitGetArrayAPI(",
+        // CONFIG_JIT_TEST_SUPPORT declarations retained by the CI generator.
+        "pub fn JS_JitGetHelperCount(",
+        "pub fn JS_JitSetExecutionTrace(",
+        "pub fn JS_JitGetExecutionTraceLength(",
+        // wasm32 layout assertions emitted by bindgen.
+        "size_of::<JSJitArrayMetadata>() - 20usize",
+        "align_of::<JSJitArrayMetadata>() - 4usize",
+        "offset_of!(JSJitArrayMetadata, struct_size) - 0usize",
+        "offset_of!(JSJitArrayMetadata, mode) - 4usize",
+        "offset_of!(JSJitArrayMetadata, count) - 8usize",
+        "offset_of!(JSJitArrayMetadata, reserved) - 12usize",
+        "offset_of!(JSJitArrayMetadata, data) - 16usize",
+        "size_of::<JSJitArrayAPI>() - 20usize",
+        "align_of::<JSJitArrayAPI>() - 4usize",
+        "offset_of!(JSJitArrayAPI, struct_size) - 0usize",
+        "offset_of!(JSJitArrayAPI, version) - 4usize",
+        "offset_of!(JSJitArrayAPI, effects) - 8usize",
+        "offset_of!(JSJitArrayAPI, reserved) - 12usize",
+        "offset_of!(JSJitArrayAPI, query) - 16usize",
+    ] {
+        assert!(
+            binding.contains(declaration),
+            "wasm32-wasip1 binding is missing `{declaration}`"
         );
     }
 }

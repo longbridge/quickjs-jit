@@ -5,9 +5,9 @@ use rquickjs_jit::compiler::optimized::{
 };
 use rquickjs_jit::ir::{OptimizedEffect, OptimizedIr, OptimizedNodeKind, ValueRepresentation};
 use rquickjs_jit::runtime::{
-    BinaryFeedbackFlags, CompileCompletion, Coordinator, DependencyGraph, DependencyKey,
-    FeedbackKind, FeedbackSnapshot, FeedbackState, FeedbackTable, FunctionKey, ObservedType,
-    SideExitAction, Tier,
+    ArrayAccess, ArrayHazards, ArrayMode, BinaryFeedbackFlags, CompileCompletion, Coordinator,
+    DependencyGraph, DependencyKey, FeedbackKind, FeedbackSnapshot, FeedbackState, FeedbackTable,
+    FunctionKey, ObservedType, SideExitAction, Tier,
 };
 use rquickjs_jit::test_support::SnapshotFixture;
 
@@ -810,6 +810,283 @@ fn stable_packed_element_loop_lowers_to_native_tier2_loads() {
 }
 
 #[test]
+fn profiled_packed_loads_reuse_guarded_metadata_within_the_hot_block() {
+    let fixture = SnapshotFixture::compile(
+        "(function sum(values,n){let s=0;for(let i=0;i<n;i++)s=(s+values[i]+values[i])|0;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Object, ObservedType::Int32]);
+        for instruction in verified.instructions() {
+            match instruction.opcode().name() {
+                "get_array_el" => {
+                    feedback.observe_array(
+                        key,
+                        instruction.pc(),
+                        ArrayAccess::Load,
+                        ArrayMode::Packed,
+                        ArrayHazards::NONE,
+                    );
+                }
+                "add" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        Default::default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(165)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(165))
+        .expect("profiled packed loop lowers");
+    assert_eq!(
+        clif.matches("load.i16").count(),
+        1,
+        "the second load must reuse the first guarded class/count/data tuple: {clif}"
+    );
+    assert!(
+        clif.matches("icmp.i32 ult").count() >= 2,
+        "each dynamic index still needs its own dense-count bounds guard: {clif}"
+    );
+}
+
+#[test]
+fn packed_counted_loop_hoists_metadata_and_deletes_the_proven_bounds_check() {
+    let fixture = SnapshotFixture::compile(
+        // Keep the observable length read in the loop condition.  The packed
+        // metadata guard proves the ordinary Array length is the exact dense
+        // count, so the guarded path should reuse that value instead of
+        // materializing the frame for a generic lookup on every iteration.
+        "(function sum(values){let s=0;for(let i=0;i<values.length;i++)s=(s+values[i])|0;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Object]);
+        for instruction in verified.instructions() {
+            match instruction.opcode().name() {
+                "get_length" => {
+                    feedback.observe_array(
+                        key,
+                        instruction.pc(),
+                        ArrayAccess::Length,
+                        ArrayMode::Packed,
+                        ArrayHazards::NONE,
+                    );
+                }
+                "get_array_el" => {
+                    feedback.observe_array(
+                        key,
+                        instruction.pc(),
+                        ArrayAccess::Load,
+                        ArrayMode::Packed,
+                        ArrayHazards::NONE,
+                    );
+                }
+                "add" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        Default::default(),
+                    );
+                }
+                "lt" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Bool,
+                        Default::default(),
+                    );
+                }
+                "or" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        Default::default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(166)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(166))
+        .expect("canonical packed traversal lowers");
+    assert_eq!(
+        clif.matches("load.i16").count(),
+        2,
+        "metadata must be checked in the preheader and only on the amortized poll slow path: {clif}"
+    );
+    assert_eq!(
+        clif.matches("icmp.i32 ult").count(),
+        0,
+        "the range-proven loop load retained a per-iteration bounds check: {clif}"
+    );
+    assert!(
+        clif.contains("load.i64") && clif.contains("icmp_imm sge"),
+        "the packed value/hole guard must remain after bounds elimination: {clif}"
+    );
+}
+
+#[test]
+fn typed_counted_loop_uses_effect_free_length_guard_and_cached_storage() {
+    let fixture = SnapshotFixture::compile(
+        "(function sum(values){let s=0;for(let i=0;i<values.length;i++)s=(s+values[i])|0;return s})",
+    );
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let return_pc = verified
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.opcode().name() == "return")
+        .unwrap()
+        .pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(key, &[ObservedType::Object]);
+        for instruction in verified.instructions() {
+            match instruction.opcode().name() {
+                "get_length" => {
+                    feedback.observe_array(
+                        key,
+                        instruction.pc(),
+                        ArrayAccess::Length,
+                        ArrayMode::Int32,
+                        ArrayHazards::NONE,
+                    );
+                }
+                "get_array_el" => {
+                    feedback.observe_array(
+                        key,
+                        instruction.pc(),
+                        ArrayAccess::Load,
+                        ArrayMode::Int32,
+                        ArrayHazards::NONE,
+                    );
+                }
+                "add" | "or" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        Default::default(),
+                    );
+                }
+                "lt" => {
+                    feedback.observe_binary(
+                        key,
+                        instruction.pc(),
+                        ObservedType::Int32,
+                        ObservedType::Int32,
+                        ObservedType::Bool,
+                        Default::default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        feedback.observe_return(key, return_pc, ObservedType::Int32);
+    }
+    let clif = Tier2Compiler::host(167)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(167))
+        .expect("canonical typed traversal lowers");
+    assert_eq!(
+        clif.matches("explicit_slot 24").count(),
+        2,
+        "typed metadata must be queried only in the preheader and cold poll path: {clif}"
+    );
+    assert_eq!(
+        clif.matches("icmp.i32 ult").count(),
+        0,
+        "the exact intrinsic length/count proof must cover loop bounds: {clif}"
+    );
+    assert!(
+        clif.contains("load.i32"),
+        "cached Int32 load missing: {clif}"
+    );
+}
+
+#[test]
+fn typed_store_reuses_only_live_guarded_storage_for_the_following_load() {
+    let fixture = SnapshotFixture::compile("(function(a,i,v){a[i]=v;return a[i]})");
+    let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+    let key = FunctionKey::new(
+        verified.snapshot().function_id(),
+        verified.snapshot().generation(),
+    );
+    let mut feedback = FeedbackTable::new(64, 2);
+    feedback.observe_call(
+        key,
+        &[
+            ObservedType::Object,
+            ObservedType::Int32,
+            ObservedType::Int32,
+        ],
+    );
+    for instruction in verified.instructions() {
+        let access = match instruction.opcode().name() {
+            "get_array_el" => ArrayAccess::Load,
+            "put_array_el" => ArrayAccess::Store,
+            _ => continue,
+        };
+        feedback.observe_array(
+            key,
+            instruction.pc(),
+            access,
+            ArrayMode::Int32,
+            ArrayHazards::NONE,
+        );
+    }
+    let clif = Tier2Compiler::host(165)
+        .lower_with_feedback_for_test(&verified, key, &feedback.snapshot(165))
+        .unwrap();
+    assert_eq!(clif.matches("explicit_slot 24").count(), 1,
+        "typed store must query attached fixed nonshared storage before publishing cached metadata: {clif}");
+}
+
+#[test]
 fn stable_typed_element_loop_lowers_native_loads_and_stores() {
     let fixture = SnapshotFixture::compile(
         "(function convert(ints,floats){let sum=0.0;for(let i=0;i<ints.length;i++){floats[i]=ints[i]*0.25+0.5;sum=sum+floats[i];}return sum})",
@@ -859,8 +1136,14 @@ fn stable_typed_element_loop_lowers_native_loads_and_stores() {
             )
         });
     assert!(
-        clif.contains("fcvt_from_sint.f64") && clif.contains("imul_imm.i32"),
+        clif.contains("fcvt_from_sint.f64")
+            && clif.contains("uextend.i64")
+            && clif.contains("imul_imm"),
         "typed address/conversion path missing: {clif}"
+    );
+    assert!(
+        !clif.contains("imul_imm.i32"),
+        "element byte offsets must not wrap at 32 bits: {clif}"
     );
     assert!(clif.contains("load.f64"), "typed load missing: {clif}");
     assert!(clif.contains("load.i8"), "detached guard missing: {clif}");
@@ -1007,14 +1290,142 @@ fn monomorphic_call_emits_pointer_guard_and_unboxed_native_abi() {
         "direct entry address absent: {clif}"
     );
     assert!(clif.contains("call_indirect"), "{clif}");
-    let bytecode_guard = clif
-        .split("\nblock")
-        .find(|block| block.contains("0x2234_5678"))
-        .expect("bytecode identity guard block");
-    assert!(
-        !bytecode_guard.contains("0x1234_5678") && !bytecode_guard.contains("eq v37, -1"),
-        "payload was dereferenced in the same block as the tag/object guards: {bytecode_guard}"
+    let block_label = |text: &str| {
+        text.trim()
+            .split(['(', ':', ',', ' '])
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let mut blocks = std::collections::BTreeMap::<String, Vec<&str>>::new();
+    let mut current = None;
+    for line in clif.lines().map(str::trim) {
+        if line.starts_with("block") {
+            let label = block_label(line);
+            blocks.insert(label.clone(), Vec::new());
+            current = Some(label);
+        } else if let Some(label) = &current {
+            blocks
+                .get_mut(label)
+                .unwrap()
+                .push(line.split(';').next().unwrap().trim());
+        }
+    }
+    let comparison = |constant: &str| {
+        blocks
+            .iter()
+            .find_map(|(block, lines)| {
+                lines.iter().find_map(|line| {
+                    let (result, instruction) = line.split_once(" = ")?;
+                    let (_, operands) = instruction.strip_prefix("icmp_imm")?.split_once(" eq ")?;
+                    let (input, value) = operands.split_once(", ")?;
+                    (value == constant).then_some((
+                        block.clone(),
+                        result.to_owned(),
+                        input.to_owned(),
+                    ))
+                })
+            })
+            .unwrap_or_else(|| panic!("missing equality guard for {constant}: {clif}"))
+    };
+    let branch = |block: &str, condition: &str| {
+        blocks[block]
+            .iter()
+            .find_map(|line| {
+                let arguments = line
+                    .strip_prefix("brif ")?
+                    .splitn(3, ", ")
+                    .collect::<Vec<_>>();
+                (arguments.len() == 3 && arguments[0] == condition)
+                    .then(|| (block_label(arguments[1]), block_label(arguments[2])))
+            })
+            .unwrap_or_else(|| {
+                panic!("guard result {condition} must control brif in {block}: {clif}")
+            })
+    };
+    let predecessors = |target: &str| {
+        blocks
+            .iter()
+            .filter_map(|(block, lines)| {
+                lines
+                    .iter()
+                    .any(|line| {
+                        (line.starts_with("brif ") || line.starts_with("jump "))
+                            && line
+                                .split_whitespace()
+                                .any(|token| block_label(token) == target)
+                    })
+                    .then_some(block.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let (object_block, object_result, object_payload) = comparison("0x1234_5678");
+    let (bytecode_block, bytecode_result, bytecode_payload) = comparison("0x2234_5678");
+    let object_predecessors = predecessors(&object_block);
+    assert_eq!(
+        object_predecessors.len(),
+        1,
+        "object identity has an unguarded incoming edge: {clif}"
     );
+    let tag_block = &object_predecessors[0];
+    let tag_result = blocks[tag_block]
+        .iter()
+        .find_map(|line| {
+            let (result, instruction) = line.split_once(" = ")?;
+            let (_, operands) = instruction.strip_prefix("icmp_imm")?.split_once(" eq ")?;
+            let (_, value) = operands.split_once(", ")?;
+            (value == "-1").then_some(result)
+        })
+        .unwrap_or_else(|| panic!("object identity predecessor must test JS_TAG_OBJECT: {clif}"));
+    let (tag_match, tag_miss) = branch(tag_block, tag_result);
+    assert_eq!(
+        tag_match, object_block,
+        "tag success must reach object identity: {clif}"
+    );
+    let (object_match, object_miss) = branch(&object_block, &object_result);
+    assert_eq!(
+        object_match, bytecode_block,
+        "object identity success must reach the payload load: {clif}"
+    );
+    assert_eq!(
+        tag_miss, object_miss,
+        "both guards must reject through the recovery edge: {clif}"
+    );
+    assert_eq!(
+        predecessors(&bytecode_block),
+        std::slice::from_ref(&object_block),
+        "payload dereference has an unguarded incoming edge: {clif}"
+    );
+    assert_ne!(tag_block, &object_block);
+    assert_ne!(object_block, bytecode_block);
+    let bytecode_load = format!("{bytecode_payload} = load.i64 {object_payload}+48");
+    let payload_load = format!("load.i64 {object_payload}+48");
+    assert_eq!(
+        blocks
+            .values()
+            .flatten()
+            .filter(|line| line.ends_with(&payload_load))
+            .count(),
+        1,
+        "the only payload dereference must be in the guarded bytecode block: {clif}"
+    );
+    assert!(
+        blocks[&bytecode_block].contains(&bytecode_load.as_str()),
+        "bytecode guard must compare the rooted object's +48 identity load: {clif}"
+    );
+    assert_eq!(
+        branch(&bytecode_block, &bytecode_result).1,
+        object_miss,
+        "bytecode identity miss must recover: {clif}"
+    );
+    for block in [tag_block, &object_block] {
+        assert!(
+            !blocks[block]
+                .iter()
+                .any(|line| line.ends_with(&payload_load)),
+            "payload was loaded before both guards succeeded: {clif}"
+        );
+    }
     assert!(
         clif.contains("brif") && clif.contains("return"),
         "guard/status mismatch must have exact deopt edge: {clif}"
@@ -1330,6 +1741,18 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
                   if (select) values = y;
                   return (originalLength + values[0]) | 0;
                 }
+                function reboundPackedLoads(x, y) {
+                  let values = x;
+                  let first = values[0];
+                  values = y;
+                  return (first + values[0]) | 0;
+                }
+                function reboundMixedLoads(x, y) {
+                  let values = x;
+                  let first = values[0];
+                  values = y;
+                  return (first + values[0]) | 0;
+                }
                 globalThis.packed = [1,2,3,4,5,6,7,8];
                 globalThis.otherPacked = [99,98];
                 globalThis.typed = new Int32Array(packed);
@@ -1368,8 +1791,15 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
     jit.poll();
     let after = jit.metrics();
     assert!(after.tier2_entries >= before.tier2_entries + 2, "{after:?}");
-    assert_eq!(after.deopts, before.deopts, "{after:?}");
-    assert_eq!(after.native_fallbacks, before.native_fallbacks, "{after:?}");
+    // The caller was compiled from monomorphic Packed feedback.  Passing an
+    // Int32Array must fail the exact ArrayMode guard before reading its
+    // storage, then resume the original element access once.
+    assert_eq!(after.deopts, before.deopts + 1, "{after:?}");
+    assert_eq!(
+        after.native_fallbacks,
+        before.native_fallbacks + 1,
+        "{after:?}"
+    );
     for select in 0..2 {
         for _ in 0..64 {
             assert_eq!(
@@ -1387,6 +1817,18 @@ fn production_tier2_executes_packed_and_typed_element_loops() {
                     })
                     .unwrap(),
                 if select == 0 { 9 } else { 107 }
+            );
+            assert_eq!(
+                context
+                    .with(|ctx| ctx.eval::<i32, _>("reboundPackedLoads(packed, otherPacked)"))
+                    .unwrap(),
+                100
+            );
+            assert_eq!(
+                context
+                    .with(|ctx| ctx.eval::<i32, _>("reboundMixedLoads(packed, typed)"))
+                    .unwrap(),
+                2
             );
             jit.poll();
         }
@@ -2350,7 +2792,18 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
         warmed.profitability_rejected, 5,
         "the stable direct-edge caller repeated the leaf's misleading baseline profitability retries: {warmed:?}"
     );
-    assert_eq!(warmed.profitability_approved, 0, "{warmed:?}");
+    assert!(
+        warmed.profitability_approved > 0,
+        "stable call IC trials must be approved: {warmed:?}"
+    );
+    assert_eq!(
+        warmed.unsupported_opcode_failures, 0,
+        "stable call ICs must not waste unsupported compilations: {warmed:?}"
+    );
+    assert_eq!(
+        warmed.compile_failures, warmed.tier1_rejections,
+        "only explicit Tier1 admission rejection is expected: {warmed:?}"
+    );
 
     for _ in 0..11 {
         let result = context.with(|ctx| {
@@ -2363,6 +2816,12 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
     }
     let after = jit.metrics();
     let entries = after.native_entries.saturating_sub(warmed.native_entries);
+    assert_eq!(
+        after.tier2_entries - warmed.tier2_entries,
+        11,
+        "each warmed invocation must enter the Tier2 caller: before={warmed:?}, after={after:?}"
+    );
+    assert_eq!(after.unsupported_opcode_failures, 0, "{after:?}");
     assert!(
         entries <= 32,
         "automatic left the direct-edge caller in the interpreter and crossed into the leaf {entries} times: before={warmed:?}, after={after:?}"
@@ -5663,6 +6122,74 @@ fn caller_request_retains_versioned_callee_snapshot_and_budget_after_retirement(
 }
 
 #[test]
+fn frame_inline_call2_result_can_be_duplicated() {
+    use rquickjs_jit::ir::FrameInlineCallee;
+    let caller_fixture = SnapshotFixture::compile("(function(f,o,n){return f(o,n)||n})");
+    let callee_fixture = SnapshotFixture::compile("(function(o,n){o.value=n;return n})");
+    let caller_body = caller_fixture
+        .snapshot()
+        .verify(VerifyLimits::default())
+        .unwrap();
+    let body = callee_fixture
+        .snapshot()
+        .verify(VerifyLimits::default())
+        .unwrap();
+    let caller = FunctionKey::new(
+        caller_body.snapshot().function_id(),
+        caller_body.snapshot().generation(),
+    );
+    let callee = FunctionKey::new(body.snapshot().function_id(), body.snapshot().generation());
+    let pair = caller_body
+        .instructions()
+        .windows(2)
+        .find(|pair| pair[0].opcode().name() == "call2" && pair[1].opcode().name() == "dup")
+        .expect("fixture must exercise call2 followed immediately by dup");
+    let call_pc = pair[0].pc();
+    let mut feedback = FeedbackTable::new(64, 2);
+    for _ in 0..32 {
+        feedback.observe_call(
+            caller,
+            &[
+                ObservedType::Function(callee),
+                ObservedType::Object,
+                ObservedType::Int32,
+            ],
+        );
+        feedback.observe_call_signature_with_identity(
+            caller,
+            call_pc,
+            callee,
+            0x12345678,
+            0x22345678,
+            &[ObservedType::Object, ObservedType::Int32],
+            ObservedType::Int32,
+        );
+    }
+    let feedback = feedback.snapshot(412);
+    let mut artifact = CompiledArtifact::fake(Tier::Baseline).key();
+    artifact.function_id = callee.id;
+    artifact.generation = callee.generation;
+    artifact.source_revision = body.snapshot().source_revision();
+    artifact.opcode_fingerprint = body.snapshot().opcode_fingerprint();
+    let candidate = FrameInlineCallee {
+        artifact,
+        target: feedback.call_link_at(caller, call_pc).unwrap(),
+        body,
+        children: Default::default(),
+    };
+    let (ir, _) = Tier2Compiler::host(412)
+        .lower_with_frame_inline_callee_for_test(
+            &caller_body,
+            caller,
+            &feedback,
+            call_pc,
+            candidate,
+        )
+        .expect("owned frame-inline result duplication must compile on its first attempt");
+    assert_eq!(ir.scalar_graph().frame_inlined_calls(), 1);
+}
+
+#[test]
 fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
     use rquickjs_jit::ir::{InlineCallee, ScalarValue};
     for (source, callee_source, representations, expected) in [
@@ -5835,6 +6362,18 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
                 false
             })
             .collect::<std::collections::BTreeSet<_>>();
+        // The rooted function's bytecode identity is the pointer loaded from
+        // JSObject::u.func.function_bytecode (+48). Poll-budget and other
+        // frame loads are legitimate inside the loop.
+        let is_heap_identity_load = |line: &str| {
+            line.split_once(" = ").is_some_and(|(_, instruction)| {
+                instruction.starts_with("load.i64 ") && instruction.ends_with("+48")
+            })
+        };
+        assert!(
+            clif.lines().map(str::trim).any(is_heap_identity_load),
+            "missing callee heap identity guard: {clif}"
+        );
         let mut pending = vec![0];
         let mut visited = std::collections::BTreeSet::new();
         while let Some(id) = pending.pop() {
@@ -5847,6 +6386,10 @@ fn effect_free_inline_regions_bind_caller_values_and_fold_known_branches() {
             }
             for line in lines {
                 if loop_blocks.contains(&id) {
+                    assert!(
+                        !is_heap_identity_load(line),
+                        "invariant call target is reloaded inside the hot scalar loop: {clif}"
+                    );
                     assert!(
                         !line.starts_with("store "),
                         "hot scalar loop writes interpreter frame: {clif}"

@@ -1,4 +1,14 @@
 #![allow(clippy::uninlined_format_args)]
+
+#[cfg(all(
+    feature = "update-bindings",
+    feature = "jit-abi",
+    not(feature = "jit-test-support")
+))]
+compile_error!(
+    "JIT binding generation requires `jit-test-support` so bundled bindings retain the test ABI"
+);
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

@@ -3,7 +3,7 @@ use std::{
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -123,6 +123,204 @@ impl DirectCallTarget {
     }
     pub(crate) fn publication(&self) -> crate::compiler::baseline::PublishedBaselineCode {
         self.published.clone()
+    }
+}
+
+/// Copied callee body retained for tagged frame inlining, independently of a
+/// scalar direct-call entry. Target guards and dependency registration remain
+/// the consuming compiler's responsibility.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Debug)]
+pub struct FrameInlineTarget {
+    target: super::CallLinkStatus,
+    artifact_key: ArtifactKey,
+    snapshot: crate::bytecode::CompileSnapshot,
+    children: Arc<[FrameInlineTarget]>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl FrameInlineTarget {
+    pub const fn target(&self) -> &super::CallLinkStatus {
+        &self.target
+    }
+    pub const fn artifact_key(&self) -> ArtifactKey {
+        self.artifact_key
+    }
+    pub const fn snapshot(&self) -> &crate::bytecode::CompileSnapshot {
+        &self.snapshot
+    }
+    pub const fn pc(&self) -> u32 {
+        self.target.pc()
+    }
+    pub fn children(&self) -> &[FrameInlineTarget] {
+        &self.children
+    }
+    /// Pre-order traversal including this target. The iterator owns only a
+    /// bounded traversal stack; snapshots remain shared by the request tree.
+    pub fn descendants(&self) -> impl Iterator<Item = &FrameInlineTarget> {
+        FrameInlineTargets {
+            pending: vec![self],
+        }
+    }
+    pub fn dependencies(&self) -> impl Iterator<Item = FunctionKey> + '_ {
+        self.descendants().map(|target| target.target.callee())
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.descendants().fold(0usize, |bytes, target| {
+            bytes.saturating_add(target.snapshot.retained_bytes())
+        })
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+struct FrameInlineTargets<'a> {
+    pending: Vec<&'a FrameInlineTarget>,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl<'a> Iterator for FrameInlineTargets<'a> {
+    type Item = &'a FrameInlineTarget;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let target = self.pending.pop()?;
+        self.pending.extend(target.children.iter().rev());
+        Some(target)
+    }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FRAME_INLINE_MAX_DEPTH: usize = 4;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FRAME_INLINE_MAX_SITES: usize = 16;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FRAME_INLINE_MAX_INSTRUCTIONS: usize = 256;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FRAME_INLINE_MAX_SLOTS: usize = 128;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FRAME_INLINE_MAX_RETAINED_BYTES: usize = 64 * 1024;
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Debug)]
+struct FrameInlineBudget {
+    // Candidate sites are charged before resolution/verification so rejected
+    // targets cannot turn the successful-retention limit into unbounded work.
+    sites_left: usize,
+    instructions_left: usize,
+    slots_left: usize,
+    bytes_left: usize,
+    cancelled: bool,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl FrameInlineBudget {
+    fn new(bytes_left: usize) -> Self {
+        Self {
+            sites_left: FRAME_INLINE_MAX_SITES,
+            instructions_left: FRAME_INLINE_MAX_INSTRUCTIONS,
+            slots_left: FRAME_INLINE_MAX_SLOTS,
+            bytes_left: bytes_left.min(FRAME_INLINE_MAX_RETAINED_BYTES),
+            cancelled: false,
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.cancelled
+            || self.sites_left == 0
+            || self.instructions_left == 0
+            || self.bytes_left == 0
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    fn begin_candidate(&mut self) -> bool {
+        if self.exhausted() {
+            self.cancel();
+            return false;
+        }
+        self.sites_left -= 1;
+        true
+    }
+
+    fn verification_limits(
+        &mut self,
+        snapshot: &crate::bytecode::CompileSnapshot,
+    ) -> Option<crate::bytecode::VerifyLimits> {
+        let slots = usize::from(snapshot.arg_count())
+            .checked_add(usize::from(snapshot.local_count()))
+            .and_then(|slots| slots.checked_add(usize::from(snapshot.stack_size())));
+        let Some(slots) = slots else {
+            self.cancel();
+            return None;
+        };
+        if slots > self.slots_left || snapshot.retained_bytes() > self.bytes_left {
+            self.cancel();
+            return None;
+        }
+
+        let mut limits = crate::bytecode::VerifyLimits::default();
+        limits.max_snapshot_bytes = limits.max_snapshot_bytes.min(self.bytes_left);
+        limits.max_instructions = limits.max_instructions.min(self.instructions_left);
+        limits.max_metadata_bytes = limits.max_metadata_bytes.min(self.bytes_left);
+        // The verifier charges initial locals once. A block is processed once
+        // initially and at most once per local widening; stack merges either
+        // agree or fail. Each processing charges instruction state, optional
+        // before/after metadata, the block entry, and at most two successors.
+        // Blocks are non-empty, so 1 + 6*slots per instruction and slots+1
+        // visits bound all of those charges. The verifier's default remains
+        // the outer cap because retained artifacts already passed that limit.
+        let visits_per_block = self.slots_left.saturating_add(1);
+        let work_per_instruction = self.slots_left.saturating_mul(6).saturating_add(1);
+        let work_limit = self.slots_left.saturating_add(
+            self.instructions_left
+                .saturating_mul(visits_per_block)
+                .saturating_mul(work_per_instruction),
+        );
+        limits.max_work_units = limits.max_work_units.min(work_limit);
+        Some(limits)
+    }
+
+    fn verify(
+        &mut self,
+        snapshot: &crate::bytecode::CompileSnapshot,
+    ) -> Option<crate::bytecode::VerifiedFunction> {
+        let limits = self.verification_limits(snapshot)?;
+        match snapshot.clone().verify(limits) {
+            Ok(body) => Some(body),
+            Err(_) => {
+                // A bounded verifier rejection may already have consumed its
+                // whole allowance. Stop the search instead of paying it again
+                // for later or recursively discovered candidates.
+                self.cancel();
+                None
+            }
+        }
+    }
+
+    fn claim(&mut self, body: &crate::bytecode::VerifiedFunction) -> bool {
+        let instructions = body.instructions().len();
+        let snapshot = body.snapshot();
+        let slots = usize::from(snapshot.arg_count())
+            .saturating_add(usize::from(snapshot.local_count()))
+            .saturating_add(usize::from(snapshot.stack_size()));
+        let bytes = snapshot.retained_bytes();
+        let Some(instructions_left) = self.instructions_left.checked_sub(instructions) else {
+            self.cancel();
+            return false;
+        };
+        let Some(slots_left) = self.slots_left.checked_sub(slots) else {
+            self.cancel();
+            return false;
+        };
+        let Some(bytes_left) = self.bytes_left.checked_sub(bytes) else {
+            self.cancel();
+            return false;
+        };
+        self.instructions_left = instructions_left;
+        self.slots_left = slots_left;
+        self.bytes_left = bytes_left;
+        true
     }
 }
 
@@ -306,10 +504,16 @@ pub struct CompileRequest {
     side_path_profile: Option<SidePathProfile>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     direct_call_targets: Arc<[DirectCallTarget]>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    frame_inline_targets: Arc<[FrameInlineTarget]>,
 }
 
 impl CompileRequest {
     pub(super) fn discard_inline_snapshots(&mut self) {
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        {
+            self.frame_inline_targets = Arc::from([]);
+        }
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         if self
             .direct_call_targets
@@ -325,7 +529,11 @@ impl CompileRequest {
     /// Budget charge for the caller snapshot and every retained callee body.
     /// Shared callee storage is conservatively charged once per call site.
     pub fn snapshot_bytes(&self) -> usize {
-        let bytes = self.snapshot.snapshot().owned_bytes();
+        let bytes = self
+            .snapshot
+            .snapshot()
+            .owned_bytes()
+            .saturating_add(self.feedback.array_feedback_bytes());
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         let bytes = self
             .direct_call_targets
@@ -336,6 +544,13 @@ impl CompileRequest {
                         .inline_snapshot()
                         .map_or(0, crate::bytecode::CompileSnapshot::retained_bytes),
                 )
+            });
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let bytes = self
+            .frame_inline_targets
+            .iter()
+            .fold(bytes, |total, target| {
+                total.saturating_add(target.retained_bytes())
             });
         bytes
     }
@@ -379,6 +594,17 @@ impl CompileRequest {
     pub(crate) fn direct_call_targets(&self) -> &[DirectCallTarget] {
         &self.direct_call_targets
     }
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn frame_inline_targets(&self) -> &[FrameInlineTarget] {
+        &self.frame_inline_targets
+    }
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn frame_inline_target(&self, pc: u32) -> Option<&FrameInlineTarget> {
+        let status = self.feedback.call_link_at(self.key, pc)?;
+        self.frame_inline_targets
+            .iter()
+            .find(|target| target.target == status)
+    }
 }
 
 #[derive(Debug)]
@@ -388,6 +614,31 @@ pub struct CompileCompletion {
     pub artifact_key: ArtifactKey,
     pub attempt_id: AttemptId,
     pub result: Result<CompiledArtifact, CompileFailure>,
+}
+
+/// Test-only record of the exact boundary at which a compiler completion was
+/// accepted or rejected. This deliberately stays out of production metrics:
+/// it is keyed by VM-assigned function identity and exists only to make
+/// asynchronous publication failures deterministic in integration tests.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletionDisposition {
+    Installed,
+    MissingInFlight,
+    StaleEnvelope,
+    FeedbackEpochMismatch {
+        expected: u64,
+        artifact: u64,
+        latest: Option<u64>,
+    },
+    DependencyGenerationMismatch {
+        dependency: FunctionKey,
+        current_generation: Option<u64>,
+    },
+    DependencyInstallFailed,
+    InstallFailed,
+    ArtifactKeyMismatch,
+    CompileFailed(CompileFailure),
 }
 
 #[derive(Debug)]
@@ -642,6 +893,8 @@ pub struct Coordinator {
     specialization_versions: HashMap<(FunctionKey, u64), u8>,
     call_specialization_versions: HashMap<FunctionKey, HashMap<u64, u8>>,
     profitability_demotions: FxHashSet<FunctionKey>,
+    #[cfg(feature = "test-support")]
+    completion_dispositions: Arc<Mutex<HashMap<FunctionKey, CompletionDisposition>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -737,7 +990,39 @@ impl Coordinator {
             specialization_versions: HashMap::new(),
             call_specialization_versions: HashMap::new(),
             profitability_demotions: FxHashSet::default(),
+            #[cfg(feature = "test-support")]
+            completion_dispositions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_completion_disposition(&self, key: FunctionKey) -> Option<CompletionDisposition> {
+        self.completion_dispositions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .copied()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_completion_dispositions(
+        &self,
+    ) -> Arc<Mutex<HashMap<FunctionKey, CompletionDisposition>>> {
+        Arc::clone(&self.completion_dispositions)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn record_completion_disposition(
+        &mut self,
+        key: FunctionKey,
+        disposition: CompletionDisposition,
+    ) {
+        self.completion_dispositions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, disposition);
     }
 
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -864,6 +1149,79 @@ impl Coordinator {
             return Err(QueueError::SnapshotIdentity);
         }
         self.queue_request(key, Tier::Optimizing, snapshot, feedback, Some(profile))
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    fn retain_frame_inline_target(
+        &mut self,
+        caller: FunctionKey,
+        pc: u32,
+        feedback: &FeedbackSnapshot,
+        budget: &mut FrameInlineBudget,
+        ancestors: &mut Vec<FunctionKey>,
+        depth: usize,
+    ) -> Option<FrameInlineTarget> {
+        if depth > FRAME_INLINE_MAX_DEPTH {
+            return None;
+        }
+        let target = feedback.call_link_at(caller, pc)?;
+        if !budget.begin_candidate() {
+            return None;
+        }
+        if ancestors.contains(&target.callee()) {
+            return None;
+        }
+        let pin = self
+            .pin(target.callee(), Tier::Optimizing)
+            .or_else(|| self.pin(target.callee(), Tier::Baseline))?;
+        let artifact = pin.artifact();
+        let snapshot = artifact.inline_snapshot()?;
+        let artifact_key = artifact.key();
+        if snapshot.function_id() != target.callee().id
+            || snapshot.generation() != target.callee().generation
+            || snapshot.function_id() != artifact_key.function_id
+            || snapshot.generation() != artifact_key.generation
+            || snapshot.source_revision() != artifact_key.source_revision
+            || snapshot.opcode_fingerprint() != artifact_key.opcode_fingerprint
+        {
+            return None;
+        }
+        let body = budget.verify(snapshot)?;
+        let snapshot = body.snapshot().clone();
+        if !budget.claim(&body) {
+            return None;
+        }
+
+        ancestors.push(target.callee());
+        let children = if depth == FRAME_INLINE_MAX_DEPTH {
+            Vec::new()
+        } else {
+            let mut children = Vec::new();
+            for instruction in body.instructions() {
+                if budget.exhausted() {
+                    break;
+                }
+                if let Some(child) = self.retain_frame_inline_target(
+                    target.callee(),
+                    instruction.pc(),
+                    feedback,
+                    budget,
+                    ancestors,
+                    depth + 1,
+                ) {
+                    children.push(child);
+                }
+            }
+            children
+        };
+        let popped = ancestors.pop();
+        debug_assert_eq!(popped, Some(target.callee()));
+        Some(FrameInlineTarget {
+            target,
+            artifact_key,
+            snapshot,
+            children: children.into(),
+        })
     }
 
     fn queue_request(
@@ -1008,7 +1366,7 @@ impl Coordinator {
                 .or_insert(feedback_epoch);
         }
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-        let direct_call_targets =
+        let direct_call_targets: Arc<[DirectCallTarget]> =
             if matches!(tier, Tier::Baseline | Tier::Optimizing) && side_path_profile.is_none() {
                 // This also bounds snapshot retention while requests wait in
                 // the coordinator's count-bounded foreground queue.
@@ -1052,6 +1410,64 @@ impl Coordinator {
             } else {
                 Arc::from([])
             };
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let frame_inline_targets: Arc<[FrameInlineTarget]> =
+            if tier == Tier::Optimizing && side_path_profile.is_none() {
+                // Pure inlining keeps first claim on the shared body budget.
+                // Bounded sites also cap candidate/IR planning overhead.
+                let bytes_left = direct_call_targets
+                    .iter()
+                    .fold(64 * 1024usize, |left, target| {
+                        left.saturating_sub(
+                            target
+                                .inline_snapshot()
+                                .map_or(0, crate::bytecode::CompileSnapshot::retained_bytes),
+                        )
+                    });
+                let mut budget = FrameInlineBudget::new(bytes_left);
+                let mut ancestors = vec![key];
+                let mut targets = Vec::new();
+                for instruction in snapshot.instructions() {
+                    if budget.exhausted() {
+                        break;
+                    }
+                    if direct_call_targets.iter().any(|target| {
+                        target.pc() == instruction.pc() && target.inline_snapshot().is_some()
+                    }) {
+                        continue;
+                    }
+                    if let Some(target) = self.retain_frame_inline_target(
+                        key,
+                        instruction.pc(),
+                        &feedback,
+                        &mut budget,
+                        &mut ancestors,
+                        1,
+                    ) {
+                        targets.push(target);
+                    }
+                }
+                targets.into()
+            } else {
+                Arc::from([])
+            };
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let artifact_key = if frame_inline_targets.is_empty() {
+            artifact_key
+        } else {
+            use std::hash::{Hash, Hasher};
+            let mut hash = rustc_hash::FxHasher::default();
+            for target in frame_inline_targets.iter() {
+                for descendant in target.descendants() {
+                    descendant.target.hash(&mut hash);
+                    descendant.artifact_key.hash(&mut hash);
+                }
+            }
+            artifact_key.with_version_identity(ArtifactVersionIdentity::new(
+                artifact_key.specialization_fingerprint,
+                hash.finish(),
+            ))
+        };
         self.queue.push_back(CompileRequest {
             key,
             tier,
@@ -1063,6 +1479,8 @@ impl Coordinator {
             side_path_profile,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_targets,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            frame_inline_targets,
         });
         if let Some(signature) = side_path_signature {
             let versions = self
@@ -1128,6 +1546,11 @@ impl Coordinator {
 
     pub fn complete(&mut self, completion: CompileCompletion) {
         let Some(expected) = self.in_flight.get(&completion.key).copied() else {
+            #[cfg(feature = "test-support")]
+            self.record_completion_disposition(
+                completion.key,
+                CompletionDisposition::MissingInFlight,
+            );
             self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             return;
         };
@@ -1141,24 +1564,40 @@ impl Coordinator {
             || expected.tier != completion.requested_tier
             || expected.artifact_key != completion.artifact_key
         {
+            #[cfg(feature = "test-support")]
+            self.record_completion_disposition(
+                completion.key,
+                CompletionDisposition::StaleEnvelope,
+            );
             self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             return;
         }
         match completion.result {
             Ok(artifact) if completion.artifact_key == artifact.key() => {
                 #[cfg(feature = "compiler")]
-                if completion.requested_tier == Tier::Optimizing
-                    && artifact.optimized_metadata().is_some_and(|metadata| {
-                        metadata.feedback_epoch() != expected.feedback_epoch
-                            || (!expected.side_path
-                                && self.latest_feedback_epochs.get(&completion.key)
-                                    != Some(&expected.feedback_epoch))
-                    })
-                {
-                    self.in_flight.remove(&completion.key);
-                    self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
-                    self.record_invalid_artifact(completion.key, completion.requested_tier);
-                    return;
+                if completion.requested_tier == Tier::Optimizing {
+                    if let Some(metadata) = artifact.optimized_metadata() {
+                        let artifact_epoch = metadata.feedback_epoch();
+                        let latest = self.latest_feedback_epochs.get(&completion.key).copied();
+                        if artifact_epoch != expected.feedback_epoch
+                            || (!expected.side_path && latest != Some(expected.feedback_epoch))
+                        {
+                            #[cfg(feature = "test-support")]
+                            self.record_completion_disposition(
+                                completion.key,
+                                CompletionDisposition::FeedbackEpochMismatch {
+                                    expected: expected.feedback_epoch,
+                                    artifact: artifact_epoch,
+                                    latest,
+                                },
+                            );
+                            self.in_flight.remove(&completion.key);
+                            self.metrics.stale_results =
+                                self.metrics.stale_results.saturating_add(1);
+                            self.record_invalid_artifact(completion.key, completion.requested_tier);
+                            return;
+                        }
+                    }
                 }
                 self.in_flight.remove(&completion.key);
                 if let Some(record) = self.functions.get_mut(&completion.key) {
@@ -1189,16 +1628,30 @@ impl Coordinator {
                         )
                     })
                     .collect::<Vec<_>>();
-                if dependency_versions
-                    .iter()
-                    .any(|(dependency, generation)| match *dependency {
-                        DependencyKey::Function(function) => {
-                            function.generation != *generation
-                                || self.current_generations.get(&function.id) != Some(generation)
-                        }
-                        DependencyKey::Shape(_) | DependencyKey::Prototype(_) => false,
-                    })
+                if let Some((dependency, _)) =
+                    dependency_versions
+                        .iter()
+                        .find(|(dependency, generation)| match *dependency {
+                            DependencyKey::Function(function) => {
+                                function.generation != *generation
+                                    || self.current_generations.get(&function.id)
+                                        != Some(generation)
+                            }
+                            DependencyKey::Shape(_) | DependencyKey::Prototype(_) => false,
+                        })
                 {
+                    #[cfg(feature = "test-support")]
+                    if let DependencyKey::Function(function) = *dependency {
+                        let current_generation =
+                            self.current_generations.get(&function.id).copied();
+                        self.record_completion_disposition(
+                            completion.key,
+                            CompletionDisposition::DependencyGenerationMismatch {
+                                dependency: function,
+                                current_generation,
+                            },
+                        );
+                    }
                     self.record_invalid_artifact(completion.key, completion.requested_tier);
                     return;
                 }
@@ -1213,11 +1666,21 @@ impl Coordinator {
                     )
                     .is_err()
                 {
+                    #[cfg(feature = "test-support")]
+                    self.record_completion_disposition(
+                        completion.key,
+                        CompletionDisposition::DependencyInstallFailed,
+                    );
                     self.record_install_failure(completion.key, completion.requested_tier);
                     return;
                 }
                 match install::publish(&mut self.cache, artifact) {
                     Ok(insert) => {
+                        #[cfg(feature = "test-support")]
+                        self.record_completion_disposition(
+                            completion.key,
+                            CompletionDisposition::Installed,
+                        );
                         self.dependencies = staged_dependencies;
                         for evicted in insert.evictions() {
                             self.record_eviction(*evicted);
@@ -1256,15 +1719,30 @@ impl Coordinator {
                         }
                     }
                     Err(_) => {
+                        #[cfg(feature = "test-support")]
+                        self.record_completion_disposition(
+                            completion.key,
+                            CompletionDisposition::InstallFailed,
+                        );
                         self.record_install_failure(completion.key, completion.requested_tier)
                     }
                 }
             }
             Ok(_) => {
+                #[cfg(feature = "test-support")]
+                self.record_completion_disposition(
+                    completion.key,
+                    CompletionDisposition::ArtifactKeyMismatch,
+                );
                 self.metrics.invalid_artifacts = self.metrics.invalid_artifacts.saturating_add(1);
                 self.metrics.stale_results = self.metrics.stale_results.saturating_add(1);
             }
             Err(failure) => {
+                #[cfg(feature = "test-support")]
+                self.record_completion_disposition(
+                    completion.key,
+                    CompletionDisposition::CompileFailed(failure),
+                );
                 self.in_flight.remove(&completion.key);
                 self.record_compile_failure(completion.key, completion.requested_tier, failure);
             }
@@ -1447,6 +1925,75 @@ impl Coordinator {
             .is_some_and(|pin| artifact_matches_direct_call(pin.artifact(), call))
     }
 
+    /// Returns whether the immutable monomorphic target has a retained body
+    /// that the frame-inline planner can actually consume. Merely finding an
+    /// inline snapshot is insufficient: unsupported CFG/exception/closure
+    /// shapes must take the call-IC backoff path rather than stall forever.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn frame_inline_candidate_ready(
+        &mut self,
+        caller: FunctionKey,
+        caller_body: &crate::bytecode::VerifiedFunction,
+        pc: u32,
+        feedback: &FeedbackSnapshot,
+    ) -> bool {
+        let Some(target) = feedback.call_link_at(caller, pc) else {
+            return false;
+        };
+        if target.callee() == caller {
+            return false;
+        }
+        let Some(pin) = self
+            .pin(target.callee(), Tier::Optimizing)
+            .or_else(|| self.pin(target.callee(), Tier::Baseline))
+        else {
+            return false;
+        };
+        let artifact = pin.artifact();
+        let Some(snapshot) = artifact.inline_snapshot() else {
+            return false;
+        };
+        let artifact_key = artifact.key();
+        let Ok(body) = snapshot.verify(crate::bytecode::VerifyLimits::default()) else {
+            return false;
+        };
+        let Some(instruction) = caller_body
+            .instructions()
+            .iter()
+            .find(|instruction| instruction.pc() == pc)
+        else {
+            return false;
+        };
+        let kind = match instruction.opcode().name() {
+            "call" | "call0" | "call1" | "call2" | "call3" => crate::ir::InlineCallKind::Call,
+            "call_method" => crate::ir::InlineCallKind::Method,
+            _ => return false,
+        };
+        let raw = caller_body.snapshot();
+        let caller_shape = crate::ir::OptimizedFrameShape::new(
+            raw.arg_count(),
+            raw.local_count(),
+            raw.stack_size(),
+        );
+        crate::ir::FrameInlineCallee {
+            artifact: artifact_key,
+            target,
+            body,
+            children: Default::default(),
+        }
+        .admission_probe(kind, caller_shape)
+    }
+
+    /// A resolved target cannot become frame-inlineable without a generation
+    /// or artifact replacement, both of which change the normal readiness
+    /// inputs and retry the caller independently.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn call_target_resolved(&mut self, callee: FunctionKey) -> bool {
+        self.pin(callee, Tier::Optimizing)
+            .or_else(|| self.pin(callee, Tier::Baseline))
+            .is_some()
+    }
+
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn baseline_direct_refresh_ready(
         &mut self,
@@ -1599,6 +2146,53 @@ impl Coordinator {
         };
         self.cache.record_benefit(artifact, saved_ns).is_ok()
     }
+
+    /// Unpublishes an optimizing artifact whose bounded production trial was
+    /// measurably slower than the tier below it.
+    ///
+    /// This mirrors the bounded tier-down/backoff used by production JITs: a
+    /// usable baseline remains the retry target, while a function whose
+    /// baseline was already rejected gets exactly one optimizing trial. Active
+    /// pins remain valid until their invocation returns; new acquisitions see
+    /// the lower tier (or the interpreter) immediately.
+    pub fn demote_unprofitable_optimized(&mut self, key: FunctionKey) -> bool {
+        self.last_benefit_target = None;
+        if self
+            .installed_keys
+            .remove(&(key, Tier::Optimizing))
+            .is_none()
+        {
+            return false;
+        }
+
+        let baseline_available = self.installed_keys.contains_key(&(key, Tier::Baseline));
+        let function = self.functions.entry(key).or_default();
+        if baseline_available {
+            function.instability_attempts = function.instability_attempts.saturating_add(1);
+            let attempts = function.instability_attempts;
+            let delay = 1u64
+                .checked_shl(u32::from(attempts.min(20)))
+                .unwrap_or(u64::MAX);
+            function.optimizing.state = CompileState::Backoff {
+                attempts,
+                retry_after: self.clock.saturating_add(delay),
+            };
+            function.published = Some(Tier::Baseline);
+        } else {
+            // Automatic tiering grants a baseline-demoted function one bounded
+            // Tier-2 trial. Repeating a measured losing trial would turn
+            // exponential backoff into periodic latency spikes, so terminate
+            // this generation after that trial loses too.
+            if function.optimizing.state != CompileState::Blacklisted {
+                self.metrics.blacklisted = self.metrics.blacklisted.saturating_add(1);
+            }
+            function.optimizing.state = CompileState::Blacklisted;
+            function.published = None;
+        }
+        self.metrics.optimized_demotions = self.metrics.optimized_demotions.saturating_add(1);
+        true
+    }
+
     pub fn record_side_path_entries(&mut self, count: u64) {
         self.metrics.value.side_path_entries =
             self.metrics.value.side_path_entries.saturating_add(count);
@@ -1808,6 +2402,537 @@ mod tests {
         CompileSnapshot::from_untrusted_bytecode(vec![opcode::RETURN_UNDEF], 0, 0, 0, 0)
             .verify(VerifyLimits::default())
             .unwrap()
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    fn frame_inline_fixture(
+        calls: usize,
+        conflicting_target: bool,
+    ) -> (
+        Coordinator,
+        CompileRequest,
+        FunctionKey,
+        ArtifactKey,
+        CompileSnapshot,
+    ) {
+        use super::super::FeedbackTable;
+        use crate::compiler::baseline::BaselineCompiler;
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let ((callee_snapshot, _callee_roots), (caller_snapshot, _caller_roots)) =
+            context.with(|ctx| {
+                let callee: rquickjs::Value = ctx.eval("(function(a){return a})").unwrap();
+                let source = format!("(function(f,a){{{}return a}})", "f(a);".repeat(calls));
+                let caller: rquickjs::Value = ctx.eval(source).unwrap();
+                unsafe {
+                    (
+                        CompileSnapshot::capture_with_runtime_constants(
+                            &runtime,
+                            ctx.as_raw().as_ptr(),
+                            callee.as_raw(),
+                        )
+                        .unwrap(),
+                        CompileSnapshot::capture_with_runtime_constants(
+                            &runtime,
+                            ctx.as_raw().as_ptr(),
+                            caller.as_raw(),
+                        )
+                        .unwrap(),
+                    )
+                }
+            });
+        let callee = FunctionKey::new(callee_snapshot.function_id(), callee_snapshot.generation());
+        let caller = FunctionKey::new(caller_snapshot.function_id(), caller_snapshot.generation());
+        let callee_body = callee_snapshot.verify(VerifyLimits::default()).unwrap();
+        let caller_body = caller_snapshot.verify(VerifyLimits::default()).unwrap();
+        let mut coordinator = Coordinator::with_limits(8, 8, 4, 1 << 20);
+        let mut callee_artifact = None;
+        for (key, body) in [(callee, callee_body), (caller, caller_body.clone())] {
+            coordinator.queue(key, Tier::Baseline, body).unwrap();
+            let request = coordinator.begin_next().unwrap();
+            let artifact_key = request.artifact_key();
+            let attempt_id = request.attempt_id();
+            let artifact = Compiler::compile(&BaselineCompiler::host(), request).unwrap();
+            if key == callee {
+                assert!(artifact.inline_snapshot().is_some());
+                assert!(artifact.direct_call_published().is_none());
+                callee_artifact = Some(artifact_key);
+            }
+            coordinator.complete(CompileCompletion {
+                key,
+                requested_tier: Tier::Baseline,
+                artifact_key,
+                attempt_id,
+                result: Ok(artifact),
+            });
+            assert_eq!(
+                coordinator.state(key),
+                CompileState::Installed(Tier::Baseline)
+            );
+        }
+        let mut feedback = FeedbackTable::new(128, 2);
+        for instruction in caller_body
+            .instructions()
+            .iter()
+            .filter(|i| i.opcode().name() == "call1")
+        {
+            for (arg, result) in [
+                (ObservedType::Object, ObservedType::Object),
+                (ObservedType::Bool, ObservedType::Int32),
+            ] {
+                feedback.observe_call_signature_with_identity(
+                    caller,
+                    instruction.pc(),
+                    callee,
+                    0x1234,
+                    0x5678,
+                    &[arg],
+                    result,
+                );
+            }
+            if conflicting_target {
+                feedback.observe_call_signature_with_identity(
+                    caller,
+                    instruction.pc(),
+                    callee,
+                    0x4321,
+                    0x5678,
+                    &[ObservedType::Object],
+                    ObservedType::Object,
+                );
+            }
+        }
+        coordinator
+            .queue_with_feedback(caller, Tier::Optimizing, caller_body, feedback.snapshot(31))
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        (
+            coordinator,
+            request,
+            callee,
+            callee_artifact.unwrap(),
+            callee_snapshot,
+        )
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_retains_actual_tagged_callee_without_scalar_entry() {
+        let (mut coordinator, request, callee, artifact, body) = frame_inline_fixture(1, false);
+        assert!(request.direct_call_targets().is_empty());
+        assert_eq!(request.frame_inline_targets().len(), 1);
+        let retained = request.frame_inline_targets()[0].clone();
+        assert_eq!(retained.target().callee(), callee);
+        assert_eq!(retained.artifact_key(), artifact);
+        assert_eq!(retained.snapshot().bytecode(), body.bytecode());
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes() + body.retained_bytes()
+        );
+        coordinator.retire(callee);
+        drop(coordinator);
+        drop(request);
+        retained.snapshot().verify(VerifyLimits::default()).unwrap();
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_conflicting_closure_keeps_generic_call() {
+        let (_, request, _, _, _) = frame_inline_fixture(1, true);
+        assert!(request.frame_inline_targets().is_empty());
+        assert!(request.direct_call_targets().is_empty());
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes()
+        );
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_budget_cancels_oversized_candidates_before_unbounded_verification() {
+        let oversized_slots = CompileSnapshot::from_untrusted_bytecode(
+            vec![opcode::RETURN_UNDEF],
+            (FRAME_INLINE_MAX_SLOTS + 1) as u16,
+            0,
+            0,
+            0,
+        );
+        let oversized_snapshot = CompileSnapshot::from_untrusted_bytecode(
+            vec![opcode::RETURN_UNDEF; FRAME_INLINE_MAX_RETAINED_BYTES],
+            0,
+            0,
+            0,
+            0,
+        );
+        let mut oversized_instructions = vec![opcode::NOP; FRAME_INLINE_MAX_INSTRUCTIONS];
+        oversized_instructions.push(opcode::RETURN_UNDEF);
+        let oversized_work =
+            CompileSnapshot::from_untrusted_bytecode(oversized_instructions, 0, 0, 0, 0);
+
+        for snapshot in [oversized_slots, oversized_snapshot, oversized_work] {
+            let mut budget = FrameInlineBudget::new(FRAME_INLINE_MAX_RETAINED_BYTES);
+            assert!(budget.begin_candidate());
+            assert!(budget.verify(&snapshot).is_none());
+            assert!(budget.exhausted());
+            assert_eq!(budget.sites_left, FRAME_INLINE_MAX_SITES - 1);
+        }
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_budget_accepts_two_legal_half_budget_bodies() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let parameters = (0..21)
+            .map(|index| format!("a{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let locals = (0..42)
+            .map(|index| format!("let x{index};"))
+            .collect::<String>();
+        let snapshot = context.with(|ctx| {
+            let function: rquickjs::Value = ctx
+                .eval(format!("(function({parameters}){{{locals}return 0;}})"))
+                .unwrap();
+            unsafe {
+                CompileSnapshot::capture_with_runtime_constants(
+                    &runtime,
+                    ctx.as_raw().as_ptr(),
+                    function.as_raw(),
+                )
+                .unwrap()
+                .0
+            }
+        });
+        let slots = usize::from(snapshot.arg_count())
+            + usize::from(snapshot.local_count())
+            + usize::from(snapshot.stack_size());
+        assert_eq!(snapshot.decode().unwrap().len(), 128);
+        assert_eq!(slots, 64);
+        let mut budget = FrameInlineBudget::new(FRAME_INLINE_MAX_RETAINED_BYTES);
+
+        assert!(budget.begin_candidate());
+        let parent = budget.verify(&snapshot).unwrap();
+        assert!(budget.claim(&parent));
+        assert_eq!(budget.instructions_left, 128);
+        assert_eq!(budget.slots_left, 64);
+
+        assert!(budget.begin_candidate());
+        let limits = budget.verification_limits(&snapshot).unwrap();
+        // A legal body may place all 64 slots in locals. Even one block then
+        // charges 64 initial locals, a 64-cell entry, and 128 instruction
+        // states of 65 units each.
+        assert!(limits.max_work_units >= 8_448);
+        let child = budget
+            .verify(&snapshot)
+            .expect("the second 128-instruction/64-slot body remains legal");
+        assert!(budget.claim(&child));
+        assert_eq!(budget.instructions_left, 0);
+        assert_eq!(budget.slots_left, 0);
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_budget_allows_zero_slot_child_after_slots_are_spent() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let parameters = (0..FRAME_INLINE_MAX_SLOTS)
+            .map(|index| format!("a{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (full_slots, zero_slots) = context.with(|ctx| {
+            let parent: rquickjs::Value =
+                ctx.eval(format!("(function({parameters}){{}})")).unwrap();
+            let child: rquickjs::Value = ctx.eval("(function(){})").unwrap();
+            unsafe {
+                (
+                    CompileSnapshot::capture_with_runtime_constants(
+                        &runtime,
+                        ctx.as_raw().as_ptr(),
+                        parent.as_raw(),
+                    )
+                    .unwrap()
+                    .0,
+                    CompileSnapshot::capture_with_runtime_constants(
+                        &runtime,
+                        ctx.as_raw().as_ptr(),
+                        child.as_raw(),
+                    )
+                    .unwrap()
+                    .0,
+                )
+            }
+        });
+        assert_eq!(full_slots.arg_count(), FRAME_INLINE_MAX_SLOTS as u16);
+        assert_eq!(full_slots.local_count(), 0);
+        assert_eq!(full_slots.stack_size(), 0);
+        assert_eq!(zero_slots.arg_count(), 0);
+        assert_eq!(zero_slots.local_count(), 0);
+        assert_eq!(zero_slots.stack_size(), 0);
+        assert_eq!(
+            zero_slots.decode().unwrap()[0].opcode().name(),
+            "return_undef"
+        );
+        let mut budget = FrameInlineBudget::new(FRAME_INLINE_MAX_RETAINED_BYTES);
+
+        assert!(budget.begin_candidate());
+        let parent = budget.verify(&full_slots).unwrap();
+        assert!(budget.claim(&parent));
+        assert_eq!(budget.slots_left, 0);
+
+        assert!(budget.begin_candidate());
+        let child = budget
+            .verify(&zero_slots)
+            .expect("a zero-slot child does not exceed an exhausted slot budget");
+        assert!(budget.claim(&child));
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_retention_is_bounded_and_discardable() {
+        let (_, mut request, _, _, body) = frame_inline_fixture(20, false);
+        assert_eq!(request.frame_inline_targets().len(), 16);
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes() + 16 * body.retained_bytes()
+        );
+        request.discard_inline_snapshots();
+        assert!(request.frame_inline_targets().is_empty());
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes()
+        );
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_target_tree_accounts_and_discards_descendants() {
+        let (_, request, _, artifact, body) = frame_inline_fixture(1, false);
+        let leaf = request.frame_inline_targets()[0].clone();
+        let parent = FrameInlineTarget {
+            target: *leaf.target(),
+            artifact_key: artifact,
+            snapshot: body.clone(),
+            children: vec![leaf].into(),
+        };
+        let root = FrameInlineTarget {
+            target: *parent.target(),
+            artifact_key: artifact,
+            snapshot: body.clone(),
+            children: vec![parent].into(),
+        };
+        assert_eq!(root.descendants().count(), 3);
+        assert_eq!(root.retained_bytes(), 3 * body.retained_bytes());
+        assert_eq!(root.dependencies().count(), 3);
+
+        let mut request = request;
+        request.frame_inline_targets = vec![root].into();
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes() + 3 * body.retained_bytes()
+        );
+        request.discard_inline_snapshots();
+        assert!(request.frame_inline_targets().is_empty());
+        assert_eq!(
+            request.snapshot_bytes(),
+            request.snapshot().snapshot().owned_bytes()
+        );
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_enqueue_builds_nested_tree_and_rejects_ancestor_cycle() {
+        use super::super::FeedbackTable;
+        use crate::compiler::baseline::BaselineCompiler;
+
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        let snapshots = context.with(|ctx| {
+            [
+                "(function(a){return a})",
+                "(function(g,a){let x=g(a);return x})",
+                "(function(f,a){let x=f(a);return x})",
+            ]
+            .map(|source| {
+                let function: rquickjs::Value = ctx.eval(source).unwrap();
+                unsafe {
+                    CompileSnapshot::capture_with_runtime_constants(
+                        &runtime,
+                        ctx.as_raw().as_ptr(),
+                        function.as_raw(),
+                    )
+                    .unwrap()
+                }
+            })
+        });
+        let keys: [FunctionKey; 3] = std::array::from_fn(|index| {
+            FunctionKey::new(
+                snapshots[index].0.function_id(),
+                snapshots[index].0.generation(),
+            )
+        });
+        let bodies =
+            snapshots.map(|(snapshot, _roots)| snapshot.verify(VerifyLimits::default()).unwrap());
+        let mut coordinator = Coordinator::with_limits(8, 8, 4, 1 << 20);
+        for index in 0..3 {
+            coordinator
+                .queue(keys[index], Tier::Baseline, bodies[index].clone())
+                .unwrap();
+            let request = coordinator.begin_next().unwrap();
+            let artifact_key = request.artifact_key();
+            let attempt_id = request.attempt_id();
+            let artifact = Compiler::compile(&BaselineCompiler::host(), request).unwrap();
+            coordinator.complete(CompileCompletion {
+                key: keys[index],
+                requested_tier: Tier::Baseline,
+                artifact_key,
+                attempt_id,
+                result: Ok(artifact),
+            });
+        }
+
+        let call_pc = |body: &VerifiedFunction| {
+            body.instructions()
+                .iter()
+                .find(|instruction| {
+                    matches!(
+                        instruction.opcode().name(),
+                        "call" | "call0" | "call1" | "call2" | "call3"
+                    )
+                })
+                .unwrap()
+                .pc()
+        };
+        let mut feedback = FeedbackTable::new(128, 2);
+        let mut observe_link = |caller: FunctionKey, pc: u32, callee: FunctionKey| {
+            for (argument, result) in [
+                (ObservedType::Object, ObservedType::Object),
+                (ObservedType::Bool, ObservedType::Int32),
+            ] {
+                feedback.observe_call_signature_with_identity(
+                    caller,
+                    pc,
+                    callee,
+                    0x1234,
+                    0x5678,
+                    &[argument],
+                    result,
+                );
+            }
+        };
+        observe_link(keys[2], call_pc(&bodies[2]), keys[1]);
+        observe_link(keys[1], call_pc(&bodies[1]), keys[0]);
+        coordinator
+            .queue_with_feedback(
+                keys[2],
+                Tier::Optimizing,
+                bodies[2].clone(),
+                feedback.snapshot(41),
+            )
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        assert_eq!(request.frame_inline_targets().len(), 1);
+        let root = &request.frame_inline_targets()[0];
+        assert_eq!(root.target().callee(), keys[1]);
+        assert_eq!(root.children().len(), 1);
+        assert_eq!(root.children()[0].target().callee(), keys[0]);
+        assert_eq!(root.descendants().count(), 2);
+
+        // A directly constructed cycle exercises the same ancestor rule used
+        // by queue construction without retaining the root body a second time.
+        let mut budget = FrameInlineBudget::new(FRAME_INLINE_MAX_RETAINED_BYTES);
+        let mut ancestors = vec![keys[1], keys[0]];
+        let cycle = coordinator.retain_frame_inline_target(
+            keys[1],
+            call_pc(&bodies[1]),
+            request.feedback(),
+            &mut budget,
+            &mut ancestors,
+            2,
+        );
+        assert!(cycle.is_none());
+        assert_eq!(budget.sites_left, FRAME_INLINE_MAX_SITES - 1);
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    #[test]
+    fn frame_inline_retired_dependency_cannot_publish_in_flight_caller() {
+        for retired in [false, true] {
+            let (mut coordinator, request, callee, _, _) = frame_inline_fixture(1, false);
+            let key = request.key();
+            let artifact = CompiledArtifact::fake(Tier::Optimizing)
+                .bind_fake(request.artifact_key())
+                .with_dependencies(vec![crate::code_cache::ArtifactDependency::new(callee)]);
+            if retired {
+                coordinator.retire(callee);
+            }
+            coordinator.complete(CompileCompletion {
+                key,
+                requested_tier: request.tier(),
+                artifact_key: request.artifact_key(),
+                attempt_id: request.attempt_id(),
+                result: Ok(artifact),
+            });
+            assert_eq!(
+                coordinator.pin(key, Tier::Optimizing).is_none(),
+                retired,
+                "retired={retired}, state={:?}, metrics={:?}",
+                coordinator.state(key),
+                coordinator.metrics()
+            );
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn completion_disposition_records_the_exact_publication_boundary_per_function() {
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        let dependency = FunctionKey::new(41, 1);
+        let caller = FunctionKey::new(42, 1);
+
+        coordinator
+            .queue(dependency, Tier::Baseline, snapshot())
+            .unwrap();
+        let dependency_request = coordinator.begin_next().unwrap();
+        let dependency_artifact =
+            CompiledArtifact::fake(Tier::Baseline).bind_fake(dependency_request.artifact_key());
+        coordinator.complete(CompileCompletion {
+            key: dependency,
+            requested_tier: Tier::Baseline,
+            artifact_key: dependency_request.artifact_key(),
+            attempt_id: dependency_request.attempt_id(),
+            result: Ok(dependency_artifact),
+        });
+        assert_eq!(
+            coordinator.test_completion_disposition(dependency),
+            Some(CompletionDisposition::Installed)
+        );
+
+        coordinator
+            .queue(caller, Tier::Baseline, snapshot())
+            .unwrap();
+        let caller_request = coordinator.begin_next().unwrap();
+        let caller_artifact = CompiledArtifact::fake(Tier::Baseline)
+            .bind_fake(caller_request.artifact_key())
+            .with_dependencies(vec![crate::code_cache::ArtifactDependency::new(dependency)]);
+        let replacement = FunctionKey::new(dependency.id, 2);
+        coordinator
+            .queue(replacement, Tier::Baseline, snapshot())
+            .unwrap();
+        coordinator.complete(CompileCompletion {
+            key: caller,
+            requested_tier: Tier::Baseline,
+            artifact_key: caller_request.artifact_key(),
+            attempt_id: caller_request.attempt_id(),
+            result: Ok(caller_artifact),
+        });
+        assert_eq!(
+            coordinator.test_completion_disposition(caller),
+            Some(CompletionDisposition::DependencyGenerationMismatch {
+                dependency,
+                current_generation: Some(2),
+            })
+        );
     }
 
     #[test]

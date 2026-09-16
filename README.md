@@ -1,5 +1,12 @@
 # quickjs-jit
 
+> Draft development snapshot (2026-09-14): the facts/effects JIT work is
+> incomplete and not ready to merge. Array metadata/range consumption,
+> production effectful inlining, general call linking, and the refreshed full
+> QuickJS/Bun/automatic-JIT benchmark matrix remain pending. Performance tables
+> below describe their recorded historical revisions, not this draft.
+> See [implementation status](docs/superpowers/plans/2026-09-13-jit-facts-effects.md).
+
 This is Longbridge's JIT-enabled distribution of `rquickjs`. The published
 package is named `quickjs-jit`, while its Rust library name remains `rquickjs`
 for source compatibility:

@@ -138,8 +138,9 @@ impl GuardSite {
     }
 }
 
-/// QuickJS-specific optimizing IR. It is translated directly from verified
-/// bytecode and never accepts or contains the baseline IR.
+/// QuickJS-specific optimizing IR translated directly from verified bytecode.
+/// Frame-backed callees retain tagged semantic IR for their recovery boundary;
+/// the caller and pure inline regions continue to use the optimizing SSA graph.
 #[derive(Clone, Debug)]
 pub struct OptimizedIr {
     scalar_graph: super::ScalarGraph,
@@ -181,19 +182,39 @@ impl OptimizedIr {
         numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
         inline_callees: &std::collections::BTreeMap<u32, super::InlineCallee>,
     ) -> Result<Self, CompileFailure> {
+        Self::translate_with_frame_inline_callees(
+            function,
+            feedback_epoch,
+            numeric_modes,
+            inline_callees,
+            &Default::default(),
+        )
+    }
+
+    pub fn translate_with_frame_inline_callees(
+        function: &VerifiedFunction,
+        feedback_epoch: u64,
+        numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
+        inline_callees: &std::collections::BTreeMap<u32, super::InlineCallee>,
+        frame_callees: &std::collections::BTreeMap<u32, super::FrameInlineCallee>,
+    ) -> Result<Self, CompileFailure> {
         match Self::translate_with_inline_callees_impl(
             function,
             feedback_epoch,
             numeric_modes,
             inline_callees,
+            frame_callees,
         ) {
-            Err(CompileFailure::ResourceLimit) if !inline_callees.is_empty() => {
+            Err(CompileFailure::ResourceLimit)
+                if !inline_callees.is_empty() || !frame_callees.is_empty() =>
+            {
                 // Expansion may exhaust a graph quota needed by later caller
                 // instructions. The ordinary caller remains a valid candidate.
                 Self::translate_with_inline_callees_impl(
                     function,
                     feedback_epoch,
                     numeric_modes,
+                    &Default::default(),
                     &Default::default(),
                 )
             }
@@ -206,6 +227,7 @@ impl OptimizedIr {
         feedback_epoch: u64,
         numeric_modes: &std::collections::BTreeMap<u32, super::ScalarNumericMode>,
         inline_callees: &std::collections::BTreeMap<u32, super::InlineCallee>,
+        frame_callees: &std::collections::BTreeMap<u32, super::FrameInlineCallee>,
     ) -> Result<Self, CompileFailure> {
         if feedback_epoch == 0 {
             return Err(CompileFailure::InvalidArtifact);
@@ -398,8 +420,48 @@ impl OptimizedIr {
         }
         let (cse_eliminated, dead_nodes_eliminated) =
             rewrite_pure_expressions(&mut nodes, &blocks, numeric_modes);
-        let (scalar_graph, scalar_cse) =
-            super::ScalarGraph::rewrite(&mut nodes, &blocks, shape, numeric_modes, inline_callees)?;
+        let (scalar_graph, scalar_cse) = super::ScalarGraph::rewrite(
+            &mut nodes,
+            &blocks,
+            shape,
+            numeric_modes,
+            inline_callees,
+            frame_callees,
+            next_guard,
+        )?;
+        for value in scalar_graph.values() {
+            let super::ScalarValue::Call(call) = value else {
+                continue;
+            };
+            let Some(region) = &call.frame_inline else {
+                continue;
+            };
+            let continuation = region.continuation;
+            let call_node = nodes
+                .get(continuation.call_node as usize)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            let pre = guards
+                .get(
+                    call_node
+                        .deopt_guard()
+                        .ok_or(CompileFailure::InvalidArtifact)? as usize,
+                )
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            let DeoptPhase::BeforeEffect(epoch) = pre.map.phase() else {
+                return Err(CompileFailure::InvalidArtifact);
+            };
+            let map = identity_deopt_map(
+                continuation.guard,
+                continuation.resume_pc,
+                DeoptPhase::AfterEffect(epoch),
+                continuation.shape,
+            )?;
+            guards.push(GuardSite {
+                guard: continuation.guard,
+                shape: continuation.shape,
+                map,
+            });
+        }
         let machine_plan = nodes
             .iter()
             .filter(|node| !node.eliminated)
@@ -452,7 +514,7 @@ impl OptimizedIr {
     }
 }
 
-fn effective_pop(instruction: &Instruction) -> usize {
+pub(super) fn effective_pop(instruction: &Instruction) -> usize {
     let base = instruction.opcode().n_pop() as usize;
     match instruction.opcode().format() {
         OperandFormat::NPop | OperandFormat::NPopU16 => {

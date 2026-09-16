@@ -153,12 +153,43 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          components: clippy
+      - name: Lint native JIT compiler and test support
+        run: cargo clippy -p quickjs-jit-runtime --all-targets --features compiler,test-support -- -D warnings
       - name: Verify native semantic test feature gates
         run: cargo test -p quickjs-jit-runtime --test required_features
       - name: Run native semantic tests
         run: cargo test -p quickjs-jit-runtime --features compiler,test-support --test helpers --test semantics --test gpui_shell_surface -- --test-threads=1
       - name: Gate closed opcode policy and executed Tier 1 manifest
         run: cargo test -p quickjs-jit-runtime --release --features compiler,test-support --test opcodes --test differential -- --test-threads=1
+      - name: Run native optimizing JIT regression suites
+        run: >-
+          cargo test -p quickjs-jit-runtime --release --features compiler,test-support
+          --lib
+          --test array_feedback
+          --test array_semantics
+          --test call_guard_licm
+          --test generic_call_cleanup
+          --test property_cache
+          --test return_ownership
+          --test semantic_heap
+          --test frame_inline
+          --test tagged_call_link
+          --test optimized
+          --test profitability_backoff
+          --test property_specialization
+          --test speculative_numeric
+          --test abi
+          -- --test-threads=1
+      - name: Run native JIT ABI, inline recovery, and typed-array guard suites
+        run: >-
+          cargo test -p quickjs-jit-sys --release --features jit-abi,jit-test-support
+          --test jit_patch
+          --test inline_recovery
+          --test typed_array_guard
+          -- --test-threads=1
+      - name: Run benchmark harness unit tests
+        run: cargo test -p rquickjs-jit-benchmarks --bin jit-bench
       - name: Run bounded Test262 in interpreter, automatic, and strict eligible tiers
         run: cargo test -p quickjs-jit-runtime --release --features compiler,test-support --test correctness_runner --test regressions --test test262 -- --test-threads=1
       - name: Install bounded fuzz runner
@@ -626,7 +657,7 @@ jobs:
           RUST_LOG: bindgen=warn,bindgen::ir=error,bindgen::codegen=error
           BUILD_TARGET: ${{ matrix.target }}
         run: |
-          cargo build ${{ matrix.optimization && '--release' || '' }} --manifest-path sys/Cargo.toml --target ${{ matrix.target }} --features bindgen,update-bindings,logging${{ ((startsWith(matrix.target, 'x86_64-') || startsWith(matrix.target, 'aarch64-')) && (contains(matrix.target, '-linux-') || contains(matrix.target, 'apple-darwin') || contains(matrix.target, 'windows'))) && ',jit-abi' || '' }}
+          cargo build ${{ matrix.optimization && '--release' || '' }} --manifest-path sys/Cargo.toml --target ${{ matrix.target }} --features bindgen,update-bindings,logging${{ (((startsWith(matrix.target, 'x86_64-') || startsWith(matrix.target, 'aarch64-')) && (contains(matrix.target, '-linux-') || contains(matrix.target, 'apple-darwin') || contains(matrix.target, 'windows'))) || matrix.target == 'wasm32-wasip1') && ',jit-abi,jit-test-support' || '' }}
           cat sys/src/bindings/${{ matrix.target }}.rs
       - name: Upload bindings
         if: matrix.task == 'bindings'

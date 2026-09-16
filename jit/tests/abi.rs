@@ -14,40 +14,54 @@ const BUNDLED_TARGETS: [&str; 9] = [
 
 fn try_jit_declarations(source: &str) -> Option<String> {
     let lines: Vec<_> = source.lines().collect();
-    let first_struct = lines
+    let function_id = lines
         .iter()
         .position(|line| line.trim_start().starts_with("pub struct JSJitFunctionId"));
-    let last_function = lines.iter().position(|line| {
+    let array_mode = lines.iter().position(|line| {
         line.trim_start()
-            .starts_with("pub fn JS_JitInvalidateFunction")
+            .starts_with("pub const JSJitArrayMode_JS_JIT_ARRAY_MODE_GENERIC")
     });
-    match (first_struct, last_function) {
-        (None, None) => return None,
-        (Some(_), None) | (None, Some(_)) => {
+    let last_function = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("pub fn JS_JitGetInlineAPI"));
+    match (function_id, array_mode, last_function) {
+        (None, None, None) => return None,
+        (Some(_), Some(_), Some(_)) => {}
+        _ => {
             panic!("fresh bindgen output contains a partial JIT ABI declaration set")
         }
-        (Some(_), Some(_)) => {}
     }
-    let first_struct = first_struct.unwrap();
+    let function_id = function_id.unwrap();
+    let array_mode = array_mode.unwrap();
     let last_function = last_function.unwrap();
+    let first_declaration = array_mode.min(
+        function_id
+            .checked_sub(2)
+            .expect("attributes before JSJitFunctionId"),
+    );
     let declarations_end = lines[last_function..]
         .iter()
         .position(|line| line.trim() == "}")
         .map(|offset| last_function + offset + 1)
-        .expect("end of JS_JitInvalidateFunction extern block");
+        .expect("end of JS_JitGetInlineAPI extern block");
     assert!(
-        first_struct < last_function,
+        first_declaration < last_function,
         "JIT declarations must retain their canonical order"
     );
     let mut normalized = String::from("pub type size_t = NORMALIZED;\n");
     for line in &lines {
         let line = line.trim_start();
-        if line.starts_with("pub const QJSJIT_ABI_") {
+        if line.starts_with("pub const QJSJIT_ABI_")
+            || line.starts_with("pub const QJSJIT_ARRAY_API_VERSION")
+            || line.starts_with("pub const QJSJIT_INLINE_")
+            || line.starts_with("pub const JS_JIT_INLINE_")
+            || line.starts_with("pub const JS_JIT_FEEDBACK_")
+        {
             normalized.push_str(line);
             normalized.push('\n');
         }
     }
-    for line in &lines[first_struct - 2..declarations_end] {
+    for line in &lines[first_declaration..declarations_end] {
         normalized.push_str(line.trim_start());
         normalized.push('\n');
     }
@@ -86,6 +100,148 @@ fn fresh_binding_classification_rejects_partial_jit_abi_output() {
     let partial =
         std::panic::catch_unwind(|| try_jit_declarations("pub struct JSJitFunctionId {}"));
     assert!(partial.is_err());
+}
+
+#[test]
+fn binding_classification_rejects_a_missing_inline_query() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    let truncated = canonical.replace("pub fn JS_JitGetInlineAPI", "pub fn MissingInlineAPI");
+    assert!(std::panic::catch_unwind(|| try_jit_declarations(&truncated)).is_err());
+}
+
+#[test]
+fn binding_comparison_includes_inline_table_fields_and_constants() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    let changed_field = canonical.replace("pub max_depth: u32", "pub renamed_depth: u32");
+    let changed_constant = canonical.replace(
+        "pub const JS_JIT_INLINE_MAX_DEPTH: u32 = 16;",
+        "pub const JS_JIT_INLINE_MAX_DEPTH: u32 = 15;",
+    );
+    assert!(
+        jit_declarations(&canonical) != jit_declarations(&changed_field),
+        "inline table field changes must affect cross-target comparison"
+    );
+    assert!(
+        jit_declarations(&canonical) != jit_declarations(&changed_constant),
+        "inline recovery constant changes must affect cross-target comparison"
+    );
+}
+
+#[test]
+fn binding_comparison_includes_inline_check_and_array_feedback_flags() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    for (original, replacement) in [
+        ("pub fn JS_JitInlineCheck", "pub fn MissingInlineCheck"),
+        ("pub check:", "pub missing_check:"),
+        (
+            "pub const JS_JIT_FEEDBACK_ARRAY_STORE: u32 = 64;",
+            "pub const JS_JIT_FEEDBACK_ARRAY_STORE: u32 = 32;",
+        ),
+    ] {
+        let changed = canonical.replace(original, replacement);
+        assert_ne!(canonical, changed, "fixture must change: {original}");
+        assert!(
+            jit_declarations(&canonical) != jit_declarations(&changed),
+            "ABI comparison must include {original}"
+        );
+    }
+}
+
+#[test]
+fn binding_comparison_includes_array_api_version() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    let normalized = jit_declarations(&canonical);
+    assert!(normalized.contains("pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;"));
+
+    let changed = canonical.replace(
+        "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
+        "pub const QJSJIT_ARRAY_API_VERSION: u32 = 2;",
+    );
+    assert_ne!(
+        canonical, changed,
+        "fixture must change the array API version"
+    );
+    assert_ne!(
+        normalized,
+        jit_declarations(&changed),
+        "array API version changes must affect cross-target comparison"
+    );
+}
+
+#[test]
+fn binding_classification_includes_array_declarations_before_function_id() {
+    let reordered = r#"
+pub const JSJitArrayMode_JS_JIT_ARRAY_MODE_GENERIC: JSJitArrayMode = 0;
+pub type JSJitArrayMode = ::core::ffi::c_uint;
+pub type JSJitArrayQueryStatus = ::core::ffi::c_int;
+#[repr(C)]
+pub struct JSJitArrayMetadata {
+    pub data: *mut ::core::ffi::c_void,
+}
+pub type JSJitArrayQueryFunc = ::core::option::Option<unsafe extern "C" fn()>;
+#[repr(C)]
+pub struct JSJitArrayAPI {
+    pub query: JSJitArrayQueryFunc,
+}
+unsafe extern "C" {
+    pub fn JS_JitGetArrayAPI(version: u32) -> *const JSJitArrayAPI;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitFunctionId {}
+unsafe extern "C" {
+    pub fn JS_JitGetInlineAPI(version: u32) -> *const JSJitInlineAPI;
+}
+"#;
+
+    let normalized = jit_declarations(reordered);
+    assert!(normalized.contains("pub type JSJitArrayMode = ::core::ffi::c_uint;"));
+    assert!(normalized.contains("pub fn JS_JitGetArrayAPI(version: u32)"));
+}
+
+#[test]
+fn binding_comparison_covers_every_array_abi_declaration() {
+    let canonical = bundled_binding(BUNDLED_TARGETS[0]);
+    let normalized = jit_declarations(&canonical);
+    for (original, replacement) in [
+        (
+            "pub type JSJitArrayMode = ::core::ffi::c_uint;",
+            "pub type JSJitArrayMode = ::core::ffi::c_int;",
+        ),
+        (
+            "pub const JSJitArrayMode_JS_JIT_ARRAY_MODE_PACKED: JSJitArrayMode = 1;",
+            "pub const JSJitArrayMode_JS_JIT_ARRAY_MODE_PACKED: JSJitArrayMode = 2;",
+        ),
+        (
+            "pub type JSJitArrayQueryStatus = ::core::ffi::c_int;",
+            "pub type JSJitArrayQueryStatus = ::core::ffi::c_uint;",
+        ),
+        (
+            "pub const JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_OK: JSJitArrayQueryStatus = 1;",
+            "pub const JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_OK: JSJitArrayQueryStatus = 2;",
+        ),
+        (
+            "pub struct JSJitArrayMetadata",
+            "pub struct ChangedArrayMetadata",
+        ),
+        (
+            "pub type JSJitArrayQueryFunc =",
+            "pub type ChangedArrayQueryFunc =",
+        ),
+        ("pub struct JSJitArrayAPI", "pub struct ChangedArrayAPI"),
+        (
+            "pub fn JS_JitGetArrayAPI(version: u32) -> *const JSJitArrayAPI;",
+            "pub fn JS_JitGetArrayAPI(version: u32) -> *mut JSJitArrayAPI;",
+        ),
+    ] {
+        let changed = canonical.replace(original, replacement);
+        assert_ne!(canonical, changed, "fixture must change: {original}");
+        assert_ne!(
+            normalized,
+            jit_declarations(&changed),
+            "ABI comparison must include {original}"
+        );
+    }
 }
 
 fn bundled_binding(target: &str) -> String {
@@ -418,7 +574,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 21);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 24);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 9);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
@@ -480,6 +636,81 @@ fn helper_abi_fields_are_append_only_tails() {
 }
 
 #[test]
+fn inline_api_has_an_exact_versioned_header_and_native_pointer_tail() {
+    use rquickjs_core::qjs;
+    use std::mem::{align_of, offset_of, size_of};
+
+    // Version one consists of six u32 header fields followed by exactly four
+    // native operation pointers. It extends the exported ABI without adding
+    // fields to the existing execution frame or generated helper table.
+    let pointer_size = size_of::<usize>();
+    assert_eq!(align_of::<qjs::JSJitInlineAPI>(), align_of::<usize>());
+    assert_eq!(size_of::<qjs::JSJitInlineAPI>(), 24 + 4 * pointer_size);
+    assert_eq!(
+        [
+            offset_of!(qjs::JSJitInlineAPI, struct_size),
+            offset_of!(qjs::JSJitInlineAPI, version),
+            offset_of!(qjs::JSJitInlineAPI, max_depth),
+            offset_of!(qjs::JSJitInlineAPI, max_bytes),
+            offset_of!(qjs::JSJitInlineAPI, effects),
+            offset_of!(qjs::JSJitInlineAPI, reserved),
+        ],
+        [0, 4, 8, 12, 16, 20]
+    );
+    assert_eq!(offset_of!(qjs::JSJitInlineAPI, enter), 24);
+    assert_eq!(
+        offset_of!(qjs::JSJitInlineAPI, check),
+        24 + 3 * pointer_size
+    );
+    assert_eq!(offset_of!(qjs::JSJitInlineAPI, leave), 24 + pointer_size);
+    assert_eq!(
+        offset_of!(qjs::JSJitInlineAPI, resume),
+        24 + 2 * pointer_size
+    );
+
+    let info = AbiInfo::linked().unwrap();
+    assert!(info.minor() >= 23);
+    let pointer = unsafe { qjs::JS_JitGetInlineAPI(1) };
+    assert!(!pointer.is_null());
+    // SAFETY: The successful versioned query returns immutable static storage.
+    // Check the header size before reading the operation-pointer tail.
+    assert_eq!(
+        unsafe { core::ptr::addr_of!((*pointer).struct_size).read() } as usize,
+        size_of::<qjs::JSJitInlineAPI>()
+    );
+    let api = unsafe { &*pointer };
+    assert_eq!(api.version, 1);
+    assert_eq!(api.max_depth, 16);
+    assert_eq!(api.max_bytes, 1024 * 1024);
+    assert_eq!(api.reserved, 0);
+    assert_eq!(
+        api.effects,
+        qjs::JS_JIT_HELPER_THROWING
+            | qjs::JS_JIT_HELPER_ALLOCATING
+            | qjs::JS_JIT_HELPER_REENTRANT
+            | qjs::JS_JIT_HELPER_FINALIZING
+    );
+    assert_eq!(
+        api.enter.unwrap() as usize,
+        qjs::JS_JitInlineEnter as *const () as usize
+    );
+    assert_eq!(
+        api.leave.unwrap() as usize,
+        qjs::JS_JitInlineLeave as *const () as usize
+    );
+    assert_eq!(
+        api.resume.unwrap() as usize,
+        qjs::JS_JitInlineResume as *const () as usize
+    );
+    assert_eq!(
+        api.check.unwrap() as usize,
+        qjs::JS_JitInlineCheck as *const () as usize
+    );
+    assert!(unsafe { qjs::JS_JitGetInlineAPI(0) }.is_null());
+    assert!(unsafe { qjs::JS_JitGetInlineAPI(2) }.is_null());
+}
+
+#[test]
 #[cfg(feature = "test-support")]
 fn backend_is_detached_before_runtime_drop() {
     let events = rquickjs_jit::test_support::record_lifecycle();
@@ -535,6 +766,12 @@ fn duplicate_attachment_does_not_replace_the_first_backend() {
 fn every_abi_mismatch_is_rejected_before_backend_storage() {
     use rquickjs_jit::test_support::AbiMismatchFixture;
 
+    for required in [AbiMismatchFixture::InlineApi, AbiMismatchFixture::ArrayApi] {
+        assert!(
+            AbiMismatchFixture::ALL.contains(&required),
+            "missing integration fixture: {required:?}"
+        );
+    }
     for mismatch in AbiMismatchFixture::ALL {
         assert!(
             rquickjs_jit::test_support::mismatch_is_rejected_before_attach(mismatch),

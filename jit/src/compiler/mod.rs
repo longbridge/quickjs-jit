@@ -53,9 +53,13 @@ impl CompileControl {
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod baseline;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+mod call_cleanup;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod helpers;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod optimized;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+mod tagged_call_link;
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 struct DirectCalleeIdentity {

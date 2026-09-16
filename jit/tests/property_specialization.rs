@@ -224,10 +224,433 @@ fn guarded_own_primitive_property_lowers_with_owned_deopt_bridge() {
     let clif = Tier2Compiler::host(1)
         .lower_with_feedback_for_test(&verified, key, &feedback)
         .expect("owned property bridge");
-    // Rooted values remain in SSA on the native guard path. Frame state is
-    // published only when a miss needs the owning deopt bridge.
-    let before_guard = clif.split("call_indirect").next().unwrap();
-    assert_eq!(before_guard.matches("store.i64").count(), 0, "{clif}");
+    // Block layout may place the owning deopt bridge before the successful
+    // continuation. Check reachable native-return paths, not textual order.
+    assert_eq!(
+        guarded_property_hit_is_leaf(&clif, 0x1000),
+        Ok(()),
+        "{clif}"
+    );
+
+    // Prove that the structural assertion rejects real hot-path regressions:
+    // moving either the existing owner helper or root spill into the entry
+    // path must fail, even though a successful return remains reachable.
+    let branch = clif
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("brif "))
+        .unwrap();
+    let helper = clif
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("call_indirect"))
+        .unwrap();
+    let with_hot_helper = clif.replacen(branch, &format!("{helper}\n    {branch}"), 1);
+    assert!(guarded_property_hit_is_leaf(&with_hot_helper, 0x1000)
+        .unwrap_err()
+        .contains("helper"));
+    let frame = clif
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("block0("))
+        .unwrap()
+        .split(',')
+        .nth(1)
+        .unwrap()
+        .trim()
+        .split(':')
+        .next()
+        .unwrap();
+    let argument_address = format!(
+        "{frame}+{}",
+        core::mem::offset_of!(rquickjs::qjs::JSJitExecFrame, arg_buf)
+    );
+    let argument_buffer = clif
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            let (value, operation) = line.split_once(" = ")?;
+            (operation.starts_with("load") && operation.ends_with(&argument_address))
+                .then_some(value)
+        })
+        .unwrap();
+    let spill = clif
+        .lines()
+        .map(|line| line.split(';').next().unwrap().trim())
+        .find(|line| line.starts_with("store") && line.ends_with(&format!(", {argument_buffer}")))
+        .unwrap();
+    let with_hot_spill = clif.replacen(branch, &format!("{spill}\n    {branch}"), 1);
+    assert!(guarded_property_hit_is_leaf(&with_hot_spill, 0x1000)
+        .unwrap_err()
+        .contains("root spill"));
+}
+
+fn guarded_property_hit_is_leaf(clif: &str, shape: i64) -> Result<(), String> {
+    guarded_property_path(clif, shape, None)
+}
+
+fn guarded_property_path(clif: &str, shape: i64, store_offset: Option<i32>) -> Result<(), String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn immediate(text: &str) -> Option<i64> {
+        let text = text.replace('_', "");
+        text.strip_prefix("0x").map_or_else(
+            || text.parse().ok(),
+            |hex| i64::from_str_radix(hex, 16).ok(),
+        )
+    }
+    fn constant(value: &str, definitions: &BTreeMap<&str, &str>, remaining: usize) -> Option<i64> {
+        if remaining == 0 {
+            return None;
+        }
+        let definition = definitions.get(value)?;
+        if definition.starts_with('v') && !definition.contains(' ') {
+            return constant(definition, definitions, remaining - 1);
+        }
+        let (operation, operands) = definition.split_once(' ')?;
+        match operation.split('.').next()? {
+            "iconst" => immediate(operands),
+            "band" | "bor" => {
+                let (a, b) = operands.split_once(", ")?;
+                let a = constant(a, definitions, remaining - 1)?;
+                let b = constant(b, definitions, remaining - 1)?;
+                Some(if operation.starts_with("band") {
+                    a & b
+                } else {
+                    a | b
+                })
+            }
+            _ => None,
+        }
+    }
+    fn source<'a>(mut value: &'a str, definitions: &BTreeMap<&str, &'a str>) -> &'a str {
+        for _ in 0..definitions.len() {
+            let Some(&definition) = definitions.get(value) else {
+                break;
+            };
+            if definition.starts_with('v') && !definition.contains(' ') {
+                value = definition;
+            } else if definition.starts_with("iadd_imm") {
+                value = definition
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .trim_end_matches(',');
+            } else {
+                break;
+            }
+        }
+        value
+    }
+    fn store(line: &str) -> Option<(&str, &str)> {
+        let (operation, operands) = line.split_once(' ')?;
+        operation.starts_with("store").then_some(())?;
+        operands.split_once(", ")
+    }
+    fn base(address: &str) -> &str {
+        address.split(['+', '-']).next().unwrap()
+    }
+    fn label(text: &str) -> &str {
+        text.split(['(', ':', ',', ' ']).next().unwrap()
+    }
+    fn success_target<'a>(lines: &[&'a str]) -> Option<&'a str> {
+        let branch = lines.iter().find(|line| line.starts_with("brif"))?;
+        Some(label(&branch[branch.find("block")?..]))
+    }
+    fn guards_are_conjoined(
+        lines: &[&str],
+        definitions: &BTreeMap<&str, &str>,
+        checks: &[&str],
+    ) -> bool {
+        let Some(branch) = lines.iter().find(|line| line.starts_with("brif")) else {
+            return false;
+        };
+        let predicate = branch
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(',');
+        definitions
+            .get(predicate)
+            .and_then(|operation| operation.strip_prefix("band "))
+            .and_then(|operands| operands.split_once(", "))
+            .is_some_and(|(a, b)| {
+                checks.len() == 2 && checks.contains(&a) && checks.contains(&b) && a != b
+            })
+    }
+
+    let mut definitions = BTreeMap::new();
+    let mut blocks = BTreeMap::<&str, Vec<&str>>::new();
+    let mut entry = None;
+    let mut parameters = Vec::new();
+    let mut current = None;
+    for line in clif
+        .lines()
+        .map(|line| line.split(';').next().unwrap().trim())
+    {
+        if line.starts_with("block") {
+            let id = label(line);
+            if entry.is_none() {
+                entry = Some(id);
+                parameters = line
+                    .split_once('(')
+                    .unwrap()
+                    .1
+                    .split(')')
+                    .next()
+                    .unwrap()
+                    .split(',')
+                    .map(|p| p.trim().split(':').next().unwrap())
+                    .collect();
+            }
+            current = Some(id);
+            blocks.entry(id).or_default();
+        } else if let Some(id) = current {
+            blocks.get_mut(id).unwrap().push(line);
+            if let Some((value, definition)) =
+                line.split_once(" = ").or_else(|| line.split_once(" -> "))
+            {
+                definitions.insert(value, definition);
+            }
+        }
+    }
+    let entry = entry.ok_or("missing entry block")?;
+    let sret = *parameters.first().ok_or("missing result parameter")?;
+    let frame = *parameters.get(1).ok_or("missing frame parameter")?;
+    let root_loads = [
+        format!(
+            "{frame}+{}",
+            core::mem::offset_of!(rquickjs::qjs::JSJitExecFrame, arg_buf)
+        ),
+        format!(
+            "{frame}+{}",
+            core::mem::offset_of!(rquickjs::qjs::JSJitExecFrame, var_buf)
+        ),
+    ];
+    let roots: BTreeSet<_> = definitions
+        .iter()
+        .filter_map(|(&value, &definition)| {
+            (definition.starts_with("load")
+                && root_loads
+                    .iter()
+                    .any(|address| definition.ends_with(address)))
+            .then_some(value)
+        })
+        .collect();
+    if roots.len() != 2 {
+        return Err("missing argument/local root buffers".into());
+    }
+    let mut edges = BTreeMap::<&str, Vec<&str>>::new();
+    let mut done = BTreeSet::new();
+    for (&id, lines) in &blocks {
+        if lines.contains(&"return")
+            && lines.iter().any(|line| {
+                store(line).is_some_and(|(value, destination)| {
+                    destination == sret
+                        && constant(value, &definitions, definitions.len())
+                            == Some(i64::from(rquickjs::qjs::JSJitExitKind_JS_JIT_EXIT_DONE))
+                })
+            })
+        {
+            done.insert(id);
+        }
+        let outgoing = edges.entry(id).or_default();
+        for line in lines
+            .iter()
+            .filter(|line| line.starts_with("brif") || line.starts_with("jump "))
+        {
+            let selected = if line.starts_with("brif") {
+                let condition = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .trim_end_matches(',');
+                constant(condition, &definitions, definitions.len()).map(|v| usize::from(v == 0))
+            } else {
+                None
+            };
+            for (edge, target) in line.match_indices("block").enumerate() {
+                if selected.is_none_or(|selected| selected == edge) {
+                    outgoing.push(label(&line[target.0..]));
+                }
+            }
+        }
+    }
+    if done.is_empty() {
+        return Err("missing normal return".into());
+    }
+    if let Some(offset) = store_offset {
+        let (&shape_block, shape_lines) = blocks
+            .iter()
+            .find(|(_, lines)| {
+                lines.iter().any(|line| {
+                    line.contains("icmp_imm")
+                        && line.contains(" eq ")
+                        && line.rsplit_once(", ").and_then(|(_, v)| immediate(v)) == Some(shape)
+                })
+            })
+            .ok_or("missing polymorphic shape guard")?;
+        let shape_checks: Vec<_> = shape_lines
+            .iter()
+            .filter_map(|line| {
+                let (result, operation) = line.split_once(" = ")?;
+                let value = operation
+                    .rsplit_once(", ")
+                    .and_then(|(_, v)| immediate(v))?;
+                (operation.starts_with("icmp_imm")
+                    && operation.contains(" eq ")
+                    && (value == shape || value == 7))
+                    .then_some(result)
+            })
+            .collect();
+        if !guards_are_conjoined(shape_lines, &definitions, &shape_checks) {
+            return Err("shape identity and live generation must both guard the field".into());
+        }
+        let field_block = success_target(shape_lines).ok_or("missing shape success edge")?;
+        let field_lines = &blocks[field_block];
+        let store_block = success_target(field_lines).ok_or("missing tag success edge")?;
+        let stores: Vec<_> = blocks[store_block]
+            .iter()
+            .filter_map(|line| store(line))
+            .collect();
+        if stores.len() != 2 {
+            return Err("successful property store must write both JSValue words".into());
+        }
+        let properties = base(stores[0].1);
+        let address = |offset| {
+            if offset == 0 {
+                properties.to_owned()
+            } else {
+                format!("{properties}+{offset}")
+            }
+        };
+        if stores[0].1 != address(offset) || stores[1].1 != address(offset + 8) {
+            return Err("wrong guarded property offset".into());
+        }
+        // Both the old field and replacement must be primitive before the raw
+        // write; checking only one side would violate the ownership contract.
+        let comparisons: Vec<_> = field_lines
+            .iter()
+            .filter_map(|line| {
+                let (result, operation) = line.split_once(" = ")?;
+                if !operation.starts_with("icmp_imm")
+                    || !operation.contains(" eq ")
+                    || operation.rsplit_once(", ").and_then(|(_, v)| immediate(v)) != Some(0)
+                {
+                    return None;
+                }
+                let operand = operation.split_whitespace().nth(2)?.trim_end_matches(',');
+                Some((result, source(operand, &definitions)))
+            })
+            .collect();
+        let current_tag = comparisons.iter().any(|(_, operand)| {
+            definitions.get(operand).is_some_and(|operation| {
+                operation.starts_with("load") && operation.ends_with(&address(offset + 8))
+            })
+        });
+        let input_tag = comparisons
+            .iter()
+            .any(|(_, operand)| *operand == source(stores[1].0, &definitions));
+        let tag_checks: Vec<_> = comparisons.iter().map(|(id, _)| *id).collect();
+        let both = guards_are_conjoined(field_lines, &definitions, &tag_checks);
+        if !current_tag || !input_tag || !both {
+            return Err("raw store is not guarded by both primitive tags".into());
+        }
+        if !edges[shape_block].contains(&field_block) || !edges[field_block].contains(&store_block)
+        {
+            return Err("missing native property store path".into());
+        }
+        // Stop at the semantic store. Returning the unrelated borrowed value
+        // has a separate stress-GC/ownership branch after this native region.
+        done = BTreeSet::from([store_block]);
+    }
+    let mut reaches_done = done;
+    loop {
+        let previous = reaches_done.len();
+        for (&id, outgoing) in &edges {
+            if outgoing.iter().any(|target| reaches_done.contains(target)) {
+                reaches_done.insert(id);
+            }
+        }
+        if previous == reaches_done.len() {
+            break;
+        }
+    }
+    let mut pending = vec![entry];
+    let mut visited = BTreeSet::new();
+    let mut checked_shape = false;
+    let mut checked_field_tag = false;
+    while let Some(id) = pending.pop() {
+        if !reaches_done.contains(id) || !visited.insert(id) {
+            continue;
+        }
+        let lines = blocks.get(id).ok_or("unknown branch target")?;
+        for line in lines {
+            if line.contains("call_indirect") || line.contains(" = call ") {
+                return Err(format!("helper on successful path in {id}"));
+            }
+            checked_shape |= line.contains("icmp_imm")
+                && line.contains(" eq ")
+                && line.rsplit_once(", ").and_then(|(_, v)| immediate(v)) == Some(shape);
+            if let Some((_, operation)) = line.split_once(" = ") {
+                if operation.starts_with("icmp_imm")
+                    && operation.contains(" eq ")
+                    && operation.rsplit_once(", ").and_then(|(_, v)| immediate(v))
+                        == Some(i64::from(rquickjs::qjs::JS_TAG_INT))
+                {
+                    let operand = operation
+                        .split_whitespace()
+                        .nth(2)
+                        .unwrap()
+                        .trim_end_matches(',');
+                    checked_field_tag |= definitions
+                        .get(source(operand, &definitions))
+                        .is_some_and(|definition| {
+                            definition.starts_with("load")
+                                && definition.split_whitespace().last().is_some_and(|address| {
+                                    !roots.contains(source(base(address), &definitions))
+                                })
+                        });
+                }
+            }
+            if let Some((value, destination)) = store(line) {
+                let value = source(value, &definitions);
+                let root_value = definitions.get(value).is_some_and(|definition| {
+                    definition.starts_with("load")
+                        && definition.split_whitespace().last().is_some_and(|address| {
+                            roots.contains(source(base(address), &definitions))
+                        })
+                });
+                let stack_spill = store_offset.is_some()
+                    && definitions
+                        .get(source(base(destination), &definitions))
+                        .is_some_and(|operation| {
+                            operation.starts_with("load")
+                                && operation.ends_with(&format!(
+                                    "{frame}+{}",
+                                    core::mem::offset_of!(
+                                        rquickjs::qjs::JSJitExecFrame,
+                                        stack_base
+                                    )
+                                ))
+                        });
+                if (root_value && store_offset.is_none())
+                    || stack_spill
+                    || roots.contains(source(base(destination), &definitions))
+                {
+                    return Err(format!("root spill on successful path in {id}: {line}"));
+                }
+            }
+        }
+        pending.extend(edges[id].iter().copied());
+    }
+    if !checked_shape {
+        return Err("no guarded shape path reaches normal return".into());
+    }
+    if !checked_field_tag {
+        return Err("no guarded primitive field reaches normal return".into());
+    }
+    Ok(())
 }
 
 #[test]
@@ -307,19 +730,35 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
             &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
         )
         .expect("bounded primitive store PIC");
-    // Shape checks are native; only the two deopt ownership calls remain.
-    let call_width = if cfg!(rquickjs_memory_sanitizer) {
-        4
-    } else {
-        1
-    };
-    assert_eq!(
-        clif.matches("call_indirect").count(),
-        2 * call_width,
-        "{clif}"
-    );
-    assert!(clif.matches("store.i64").count() >= 4, "{clif}");
-    assert!(clif.contains(", 8192"), "{clif}");
+    // Two deopt owner calls and a separate return-value ownership/stress path
+    // may exist. Neither shape's guarded native store may execute those calls.
+    for (shape, offset) in [(0x1000, 0), (0x2000, 32)] {
+        assert_eq!(
+            guarded_property_path(&clif, shape, Some(offset)),
+            Ok(()),
+            "{clif}"
+        );
+        assert!(
+            guarded_property_path(&clif, shape, Some(offset + 16)).is_err(),
+            "the assertion must reject a wrong field offset"
+        );
+    }
+    let branch = clif
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("brif "))
+        .unwrap();
+    let helper = clif
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("call_indirect"))
+        .unwrap();
+    let with_hot_helper = clif.replacen(branch, &format!("{helper}\n    {branch}"), 1);
+    for (shape, offset) in [(0x1000, 0), (0x2000, 32)] {
+        assert!(guarded_property_path(&with_hot_helper, shape, Some(offset))
+            .unwrap_err()
+            .contains("helper"));
+    }
 }
 
 #[test]
@@ -357,7 +796,7 @@ fn megamorphic_property_site_fails_closed_to_the_generic_tier() {
 }
 
 #[test]
-fn inherited_accessor_and_refcounted_values_fail_closed() {
+fn inherited_and_accessor_values_fail_closed_but_owned_objects_use_the_owning_bridge() {
     let fixture = SnapshotFixture::compile("(function(o){return o.answer})");
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let pc = verified
@@ -366,21 +805,14 @@ fn inherited_accessor_and_refcounted_values_fail_closed() {
         .find(|i| i.opcode().name() == "get_field")
         .unwrap()
         .pc();
-    for (prototype, attrs, value) in [
+    for (prototype, attrs) in [
         (
             PrototypeDependencyToken::new(2, 1),
             PropertyAttributes::WRITABLE,
-            ObservedType::Int32,
         ),
         (
             PrototypeDependencyToken::new(0, 0),
             PropertyAttributes::ACCESSOR,
-            ObservedType::Int32,
-        ),
-        (
-            PrototypeDependencyToken::new(0, 0),
-            PropertyAttributes::WRITABLE,
-            ObservedType::Object,
         ),
     ] {
         let key = FunctionKey::new(1, 1);
@@ -388,13 +820,80 @@ fn inherited_accessor_and_refcounted_values_fail_closed() {
         table.observe(
             key,
             pc,
-            ShapeObservation::new(ShapeToken::new(0x1000, 7), prototype, 1, attrs, value),
+            ShapeObservation::new(
+                ShapeToken::new(0x1000, 7),
+                prototype,
+                1,
+                attrs,
+                ObservedType::Int32,
+            ),
         );
         let feedback = FeedbackSnapshot::empty(1).with_properties(table.snapshot(key));
         assert!(Tier2Compiler::host(1)
             .lower_with_feedback_for_test(&verified, key, &feedback)
             .is_err());
     }
+
+    let key = FunctionKey::new(1, 1);
+    let mut table = ShapeFeedbackTable::new(3);
+    table.observe(
+        key,
+        pc,
+        ShapeObservation::new(
+            ShapeToken::new(0x1000, 7),
+            PrototypeDependencyToken::new(0, 0),
+            1,
+            PropertyAttributes::WRITABLE,
+            ObservedType::Object,
+        ),
+    );
+    let clif = Tier2Compiler::host(1)
+        .lower_with_feedback_for_test(
+            &verified,
+            key,
+            &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
+        )
+        .expect("a refcounted result must use the audited owning helper bridge");
+    assert!(
+        clif.matches("call_indirect").count() >= 2,
+        "the owning bridge must call GET_PROPERTY and then release its consumed receiver: {clif}"
+    );
+
+    use rquickjs::{Context, Function, Object, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.child={marker:73};globalThis.holder={answer:child};function owned(o){return o.answer}",
+            )
+        })
+        .unwrap();
+    for _ in 0..10_000 {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("owned").unwrap();
+            let holder: Object = ctx.globals().get("holder").unwrap();
+            let result: Object = f.call((holder,)).unwrap();
+            assert_eq!(result.get::<_, i32>("marker").unwrap(), 73);
+        });
+        jit.poll();
+        if jit.metrics().tier2_entries > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    assert!(jit.metrics().tier2_entries > 0, "{:?}", jit.metrics());
 }
 
 #[test]

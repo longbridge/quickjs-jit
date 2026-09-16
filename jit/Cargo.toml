@@ -108,6 +108,54 @@ name = "optimized"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "property_specialization"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "speculative_numeric"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "call_guard_licm"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "semantic_heap"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "generic_call_cleanup"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "property_cache"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "array_semantics"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "return_ownership"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "array_feedback"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "frame_inline"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tagged_call_link"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "profitability_backoff"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "deopt"
 required-features = ["compiler", "test-support"]
 

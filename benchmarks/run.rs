@@ -195,6 +195,27 @@ const WORKLOADS: &[Workload] = &[
         file: "arrays-typed.js",
     },
     Workload {
+        name: "packed-array-traversal",
+        suite: "rquickjs-jit array traversal diagnostics",
+        group: "arrays-typed",
+        designated: false,
+        file: "packed-array-traversal.js",
+    },
+    Workload {
+        name: "int32array-traversal",
+        suite: "rquickjs-jit array traversal diagnostics",
+        group: "arrays-typed",
+        designated: false,
+        file: "int32array-traversal.js",
+    },
+    Workload {
+        name: "float64array-traversal",
+        suite: "rquickjs-jit array traversal diagnostics",
+        group: "arrays-typed",
+        designated: false,
+        file: "float64array-traversal.js",
+    },
+    Workload {
         name: "objects-polymorphic",
         suite: "rquickjs-jit matrix",
         group: "objects-polymorphic",
@@ -1391,6 +1412,9 @@ mod tests {
             "scalar-expressions.js",
             "scalar-control-flow.js",
             "exceptions-promises-async.js",
+            "packed-array-traversal.js",
+            "int32array-traversal.js",
+            "float64array-traversal.js",
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
@@ -1454,6 +1478,75 @@ mod tests {
                 .join("scripts")
                 .join(workload.file)
                 .is_file());
+        }
+    }
+
+    #[test]
+    fn preallocated_array_traversal_diagnostics_are_registered_without_replacing_arrays_typed() {
+        for (name, group, file) in [
+            (
+                "packed-array-traversal",
+                "arrays-typed",
+                "packed-array-traversal.js",
+            ),
+            (
+                "int32array-traversal",
+                "arrays-typed",
+                "int32array-traversal.js",
+            ),
+            (
+                "float64array-traversal",
+                "arrays-typed",
+                "float64array-traversal.js",
+            ),
+        ] {
+            let workload = WORKLOADS
+                .iter()
+                .find(|workload| workload.name == name)
+                .unwrap();
+            assert_eq!(workload.group, group);
+            assert_eq!(workload.file, file);
+            assert!(!workload.designated);
+            assert!(Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join(workload.file)
+                .is_file());
+        }
+        assert!(WORKLOADS
+            .iter()
+            .any(|workload| workload.name == "arrays-typed"));
+    }
+
+    #[test]
+    fn preallocated_array_traversals_return_hand_checked_results_in_quickjs() {
+        for (script, expected) in [
+            ("packed-array-traversal.js", "number:41803450c0000000"),
+            ("int32array-traversal.js", "number:41803450c0000000"),
+            ("float64array-traversal.js", "number:416034cdc0000000"),
+        ] {
+            let runtime = Runtime::new().unwrap();
+            let context = Context::full(&runtime).unwrap();
+            let source = fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("scripts")
+                    .join(script),
+            )
+            .unwrap();
+            context
+                .with(|ctx| ctx.eval::<(), _>(source.as_slice()))
+                .unwrap();
+            context
+                .with(|ctx| {
+                    ctx.eval::<(), _>(
+                        "globalThis.Array=function(){throw Error('timed Array construction')};
+                         globalThis.Int32Array=function(){throw Error('timed Int32Array construction')};
+                         globalThis.Float64Array=function(){throw Error('timed Float64Array construction')};",
+                    )
+                })
+                .unwrap();
+
+            assert_eq!(invoke_workload(&context).unwrap(), expected, "{script}");
+            assert_eq!(invoke_workload(&context).unwrap(), expected, "{script}");
         }
     }
 

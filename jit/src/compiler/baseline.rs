@@ -5217,9 +5217,7 @@ fn lower_call(
                 FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
                 FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
                 FeedbackRepresentation::Bool => qjs::JS_TAG_BOOL,
-                FeedbackRepresentation::HeapRef => {
-                    unreachable!("direct calls are numeric-only")
-                }
+                FeedbackRepresentation::HeapRef => qjs::JS_TAG_OBJECT,
             };
             let typed = builder
                 .ins()
@@ -5232,10 +5230,10 @@ fn lower_call(
 
         builder.switch_to_block(invoke);
         let scalar = match direct.call.result() {
-            FeedbackRepresentation::Int32 => types::I32,
+            FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => types::I32,
             FeedbackRepresentation::Float64 => types::F64,
-            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
-                unreachable!("direct calls are numeric-only")
+            FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls cannot return owned heap values")
             }
         };
         let mut signature = Signature::new(builder.func.signature.call_conv);
@@ -5244,9 +5242,7 @@ fn lower_call(
             signature.params.push(AbiParam::new(match representation {
                 FeedbackRepresentation::Int32 | FeedbackRepresentation::Bool => types::I32,
                 FeedbackRepresentation::Float64 => types::F64,
-                FeedbackRepresentation::HeapRef => {
-                    unreachable!("direct calls are numeric-only")
-                }
+                FeedbackRepresentation::HeapRef => helpers.pointer_type,
             }));
         }
         signature.returns.push(AbiParam::new(types::I32));
@@ -5275,9 +5271,7 @@ fn lower_call(
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), argument.payload)
                 }
-                FeedbackRepresentation::HeapRef => {
-                    unreachable!("direct calls are numeric-only")
-                }
+                FeedbackRepresentation::HeapRef => argument.payload,
             });
         }
         let call = emit_external_call(
@@ -5308,8 +5302,14 @@ fn lower_call(
                     .ins()
                     .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
             },
-            FeedbackRepresentation::Bool | FeedbackRepresentation::HeapRef => {
-                unreachable!("direct calls are numeric-only")
+            FeedbackRepresentation::Bool => Pair {
+                payload: builder.ins().uextend(types::I64, raw),
+                tag: builder
+                    .ins()
+                    .iconst(types::I64, i64::from(qjs::JS_TAG_BOOL)),
+            },
+            FeedbackRepresentation::HeapRef => {
+                unreachable!("direct calls cannot return owned heap values")
             }
         };
         define_pair(builder, helpers.stack[output_index], result);
@@ -5374,7 +5374,8 @@ fn lower_call(
         );
     }
     // CALL borrows every input. The bytecode stack effect is separate and is
-    // implemented with explicit FREE calls in QuickJS interpreter order.
+    // implemented in QuickJS interpreter order, clearing primitive inputs
+    // directly and using FREE for owners or stress-GC instrumentation.
     // Move the first input aside and install the result in its logical slot
     // before FREE can finalize or re-enter, leaving at most one scratch owner.
     let displaced_index = if has_this {
@@ -5398,7 +5399,6 @@ fn lower_call(
         base,
         helpers.layout,
     )?;
-    let displaced = flat_stack_slot(helpers.ir, displaced_index)?;
     let displaced_free_state = next_helper_state(states)?;
     if let Some(hit) = direct_hit {
         let release_duplicate = builder.create_block();
@@ -5427,47 +5427,39 @@ fn lower_call(
         )?;
         builder.ins().jump(continuation, &[]);
         builder.switch_to_block(free);
-        helpers.invoke(
+        lower_call_input_free(
             builder,
-            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+            helpers,
             displaced_free_state,
-            *depth + 2,
             *depth,
-            &[displaced],
-        )?;
-        reload_pair(
-            builder,
-            helpers.stack[displaced_index],
-            helpers.stack_base,
             displaced_index,
-            helpers.layout,
-        );
+        )?;
         builder.ins().jump(continuation, &[]);
         builder.switch_to_block(continuation);
     } else {
-        helpers.invoke(
+        lower_call_input_free(
             builder,
-            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+            helpers,
             displaced_free_state,
-            *depth + 2,
             *depth,
-            &[displaced],
-        )?;
-        reload_pair(
-            builder,
-            helpers.stack[displaced_index],
-            helpers.stack_base,
             displaced_index,
-            helpers.layout,
-        );
+        )?;
     }
     for index in (base + 1)..(base + pop) {
-        let slot = flat_stack_slot(helpers.ir, index)?;
         let state = next_helper_state(states)?;
         if let Some(hit) = direct_hit {
-            // A scalar direct edge proves every argument primitive. Clearing
-            // those consumed slots is therefore the exact JS_FreeValue
-            // operation and avoids one helper transition per argument.
+            let representation = direct
+                .and_then(|site| site.call.arguments().get(index - argv_index))
+                .copied()
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            if representation == crate::runtime::FeedbackRepresentation::HeapRef {
+                // The linked leaf borrows HeapRef payloads. CALL still consumes
+                // the stack's owning reference after a hit, exactly as the
+                // generic helper path does.
+                lower_call_input_free(builder, helpers, state, *depth, index)?;
+                continue;
+            }
+            // A primitive direct argument can be cleared without a helper.
             let clear = builder.create_block();
             let free = builder.create_block();
             let continuation = builder.create_block();
@@ -5482,39 +5474,11 @@ fn lower_call(
             )?;
             builder.ins().jump(continuation, &[]);
             builder.switch_to_block(free);
-            helpers.invoke(
-                builder,
-                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
-                state,
-                *depth + 2,
-                *depth,
-                &[slot],
-            )?;
-            reload_pair(
-                builder,
-                helpers.stack[index],
-                helpers.stack_base,
-                index,
-                helpers.layout,
-            );
+            lower_call_input_free(builder, helpers, state, *depth, index)?;
             builder.ins().jump(continuation, &[]);
             builder.switch_to_block(continuation);
         } else {
-            helpers.invoke(
-                builder,
-                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
-                state,
-                *depth + 2,
-                *depth,
-                &[slot],
-            )?;
-            reload_pair(
-                builder,
-                helpers.stack[index],
-                helpers.stack_base,
-                index,
-                helpers.layout,
-            );
+            lower_call_input_free(builder, helpers, state, *depth, index)?;
         }
     }
     for index in (base + 1)..=output_index {
@@ -5528,6 +5492,58 @@ fn lower_call(
     }
     *depth = base + 1;
     helpers.set_depth(builder, *depth)
+}
+
+/// Release one consumed CALL input after the result has been installed. The
+/// remaining operands stay rooted until their turn in interpreter order.
+fn lower_call_input_free(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: usize,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    let clear = builder.create_block();
+    let free = builder.create_block();
+    let continuation = builder.create_block();
+    let input = use_pair(builder, helpers.stack[index]);
+    super::call_cleanup::emit_cleanup_dispatch(
+        builder,
+        helpers.frame,
+        input.tag,
+        helpers.layout.flags,
+        clear,
+        free,
+    );
+    builder.switch_to_block(clear);
+    clear_pair(
+        builder,
+        helpers.stack[index],
+        helpers.stack_base,
+        index,
+        helpers.layout,
+    )?;
+    builder.ins().jump(continuation, &[]);
+    builder.switch_to_block(free);
+    let slot = flat_stack_slot(helpers.ir, index)?;
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+        state,
+        depth + 2,
+        depth,
+        &[slot],
+    )?;
+    reload_pair(
+        builder,
+        helpers.stack[index],
+        helpers.stack_base,
+        index,
+        helpers.layout,
+    );
+    builder.ins().jump(continuation, &[]);
+    builder.switch_to_block(continuation);
+    Ok(())
 }
 
 fn load_jsvalue(
