@@ -1,6 +1,6 @@
 [package]
 name = "rquickjs-jit-benchmarks"
-version = "0.12.8"
+version = "0.12.9"
 edition = "2021"
 publish = false
 
