@@ -42,6 +42,6 @@ pub use scalar::{
     ScalarGraph, ScalarInlineRegion, ScalarInlineStep, ScalarNumericMode, ScalarPhiInput,
     ScalarValue, ScalarValueId,
 };
-pub use types::{BinaryOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp};
+pub use types::{BinaryOp, IrOp, IteratorOp, PollKind, StackOp, TaggedValue, UnaryOp};
 
 pub(crate) use scalar::stack_permutation;

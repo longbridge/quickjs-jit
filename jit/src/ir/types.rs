@@ -73,6 +73,44 @@ pub enum BinaryOp {
     StrictNotEqual,
 }
 
+/// Synchronous iteration opcodes lowered through the exact interpreter
+/// stack-effect helper (`ITERATOR_OP`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IteratorOp {
+    /// `obj -> iter next catch_offset`
+    ForOfStart,
+    /// `iter next catch_offset [objs] -> ... value done`; the operand counts
+    /// the extra objects between the catch offset and the stack top.
+    ForOfNext(u8),
+    /// `obj -> enum_obj`
+    ForInStart,
+    /// `enum_obj -> enum_obj value done`
+    ForInNext,
+    /// `iter next catch_offset ->`
+    Close,
+}
+
+impl IteratorOp {
+    /// Values removed below the stack top (the interpreter reads, and may
+    /// rewrite, this window in place).
+    pub const fn window_below(self) -> usize {
+        match self {
+            Self::ForOfStart | Self::ForInStart | Self::ForInNext => 1,
+            Self::ForOfNext(extra) => 3 + extra as usize,
+            Self::Close => 3,
+        }
+    }
+
+    /// Net stack-depth change.
+    pub const fn net_push(self) -> isize {
+        match self {
+            Self::ForOfStart | Self::ForOfNext(_) | Self::ForInNext => 2,
+            Self::ForInStart => 0,
+            Self::Close => -3,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrOp {
     Poll { state: FrameStateId, kind: PollKind },
@@ -95,6 +133,7 @@ pub enum IrOp {
     Call { argc: u16, has_this: bool },
     CallConstructor(u16),
     Regexp,
+    Iterator(IteratorOp),
     GetArgument(u16),
     GetLocal(u16),
     GetLocalChecked(u16),

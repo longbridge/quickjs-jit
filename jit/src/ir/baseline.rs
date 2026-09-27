@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, PollKind,
-    StackOp, TaggedValue, UnaryOp,
+    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp,
+    IteratorOp, PollKind, StackOp, TaggedValue, UnaryOp,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -453,6 +453,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
         IrOp::Regexp => 1,
+        IrOp::Iterator(_) => 1,
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
         IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
@@ -698,6 +699,11 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         },
         "call_constructor" => IrOp::CallConstructor(instruction.operand_u16(1)),
         "regexp" => IrOp::Regexp,
+        "for_of_start" => IrOp::Iterator(IteratorOp::ForOfStart),
+        "for_of_next" => IrOp::Iterator(IteratorOp::ForOfNext(instruction.operand_u8(1))),
+        "for_in_start" => IrOp::Iterator(IteratorOp::ForInStart),
+        "for_in_next" => IrOp::Iterator(IteratorOp::ForInNext),
+        "iterator_close" => IrOp::Iterator(IteratorOp::Close),
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

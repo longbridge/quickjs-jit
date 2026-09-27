@@ -386,7 +386,7 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
     use rquickjs_core::qjs;
 
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 9);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 10);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitExecFrame, runtime_api),
         std::mem::offset_of!(qjs::JSJitExecFrame, entry)
@@ -419,7 +419,8 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
         std::mem::offset_of!(qjs::JSJitRuntimeAPI, unary_arith_slow),
         192
     );
-    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 200);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, iterator_op), 200);
+    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 208);
     assert_eq!(qjs::JS_JIT_HELPER_GUARD_MISS, 1);
 }
 
@@ -530,6 +531,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
             2,
             qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
         ),
+        ("ITERATOR_OP", 0, 0),
     ];
 
     let mut count = 0_u32;
@@ -574,9 +576,9 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 24);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 25);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
-    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 9);
+    assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 10);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);
     assert_eq!(
         std::mem::offset_of!(qjs::JSJitEntryHandle, stack_map_count),
@@ -766,7 +768,11 @@ fn duplicate_attachment_does_not_replace_the_first_backend() {
 fn every_abi_mismatch_is_rejected_before_backend_storage() {
     use rquickjs_jit::test_support::AbiMismatchFixture;
 
-    for required in [AbiMismatchFixture::InlineApi, AbiMismatchFixture::ArrayApi] {
+    for required in [
+        AbiMismatchFixture::InlineApi,
+        AbiMismatchFixture::ArrayApi,
+        AbiMismatchFixture::IteratorApi,
+    ] {
         assert!(
             AbiMismatchFixture::ALL.contains(&required),
             "missing integration fixture: {required:?}"

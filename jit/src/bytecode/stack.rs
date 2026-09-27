@@ -236,6 +236,16 @@ fn transfer(
         return check_stack_size(snapshot, instruction, state);
     }
 
+    if matches!(name, "for_of_next" | "for_in_next") {
+        // The nominal pops are only the window the interpreter reads in
+        // place: the enumeration record (including its catch offset) and any
+        // intervening values stay on the stack unchanged, and the opcode
+        // pushes `value` and the boolean `done` flag above them.
+        state.stack.extend(popped);
+        state.stack.extend([SlotKind::Tagged, SlotKind::Tagged]);
+        return check_stack_size(snapshot, instruction, state);
+    }
+
     if name == "using_dispose_init" {
         state.stack.push(SlotKind::Uninitialized);
         return check_stack_size(snapshot, instruction, state);
@@ -323,8 +333,18 @@ fn merge_state(
             | (SlotKind::Int32 | SlotKind::Float64, SlotKind::Tagged)
             | (SlotKind::Int32, SlotKind::Float64)
             | (SlotKind::Float64, SlotKind::Int32) => SlotKind::Tagged,
-            // Catch offsets and uninitialized cells are verifier-only states,
-            // not interchangeable JS value representations.
+            // A lexical binding declared in a loop body (for example the
+            // `for (const value of values)` binding) is uninitialized on loop
+            // entry and initialized on the backedge. The interpreter cell
+            // holds the JS_UNINITIALIZED tag in the first case, which is still
+            // a tagged value; the join only drops the proof, and every read
+            // of such a binding is a runtime-checked `get_loc_check`.
+            (SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64, SlotKind::Uninitialized)
+            | (SlotKind::Uninitialized, SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64) => {
+                SlotKind::Tagged
+            }
+            // Catch offsets are verifier-only states, not interchangeable JS
+            // value representations.
             _ => {
                 return Err(VerifyError::new(
                     pc,

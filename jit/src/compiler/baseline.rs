@@ -32,8 +32,8 @@ use crate::{
         Relocation, RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
     ir::{
-        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, PollKind, StackOp,
-        TaggedValue, UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
+        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, IteratorOp, PollKind,
+        StackOp, TaggedValue, UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
@@ -2122,6 +2122,34 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
+                IrOp::Iterator(operation) => {
+                    let base = frame
+                        .stack
+                        .len()
+                        .checked_sub(operation.window_below())
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    match operation {
+                        IteratorOp::ForOfStart => {
+                            frame.stack.truncate(base);
+                            frame.stack.extend([
+                                AbstractValue::unknown(),
+                                AbstractValue::unknown(),
+                                AbstractValue::unknown(),
+                            ]);
+                        }
+                        IteratorOp::ForInStart => {
+                            frame.stack.truncate(base);
+                            frame.stack.push(AbstractValue::unknown());
+                        }
+                        IteratorOp::ForOfNext(_) | IteratorOp::ForInNext => {
+                            // Completion replaces the iterator with undefined.
+                            frame.stack[base] = AbstractValue::unknown();
+                            frame.stack.push(AbstractValue::unknown());
+                            frame.stack.push(AbstractValue::known(KnownKind::Boolean));
+                        }
+                        IteratorOp::Close => frame.stack.truncate(base),
+                    }
+                }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
                         .arguments
@@ -2410,6 +2438,9 @@ fn binary_returns_boolean(operation: BinaryOp) -> bool {
 fn ir_op_produces_boolean(operation: &IrOp) -> bool {
     match operation {
         IrOp::Binary(operation) => binary_returns_boolean(*operation),
+        // `js_for_of_next`/`js_for_in_next` and the Array values leaf always
+        // leave an exact JS boolean `done` flag on the stack top.
+        IrOp::Iterator(IteratorOp::ForOfNext(_) | IteratorOp::ForInNext) => true,
         _ => false,
     }
 }
@@ -2572,6 +2603,21 @@ fn lower_function(
         .into_iter()
         .map(|signature| builder.import_signature(signature))
         .collect::<Vec<_>>();
+    // Continuing-path Array values leaf. Absent (or an invalid table) means
+    // every `for_of_next` takes the exact ITERATOR_OP helper.
+    let array_values_next = if ir.blocks.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, IrOp::Iterator(IteratorOp::ForOfNext(_))))
+    }) {
+        crate::abi::AbiInfo::linked()
+            .ok()
+            .and_then(|abi| abi.iterator_api().array_values_next)
+            .map(|leaf| leaf as usize)
+    } else {
+        None
+    };
     let helper_lowering = HelperLowering {
         ir,
         frame,
@@ -2869,6 +2915,20 @@ fn lower_function(
                         layout,
                     )?;
                     depth = pattern_index + 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::Iterator(operation) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    lower_iterator(
+                        builder,
+                        &helper_lowering,
+                        state,
+                        &mut depth,
+                        operation,
+                        array_values_next,
+                    )?;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
                 IrOp::GetArgument(index) => {
@@ -5144,6 +5204,166 @@ fn lower_to_property_key(
     helpers.set_depth(builder, depth)
 }
 
+/// Synchronous iteration opcodes run the interpreter's own stack effect on
+/// the materialized frame through ITERATOR_OP. `for_of_next` first tries the
+/// non-allocating Array values leaf, which revalidates the live iterator, its
+/// exact built-in `next` method and the dense in-bounds element on every step;
+/// any miss (holes past the dense count, non-Array receivers, user iterators,
+/// completion) takes the exact helper instead.
+fn lower_iterator(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: &mut usize,
+    operation: IteratorOp,
+    array_values_next: Option<usize>,
+) -> Result<(), CompileFailure> {
+    let stack = helpers.stack;
+    let before = *depth;
+    let base = before
+        .checked_sub(operation.window_below())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let after = before
+        .checked_add_signed(operation.net_push())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    if before.max(after) > stack.len() {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let (name, operand) = match operation {
+        IteratorOp::ForOfStart => ("for_of_start", 0),
+        IteratorOp::ForOfNext(extra) => ("for_of_next", u32::from(extra)),
+        IteratorOp::ForInStart => ("for_in_start", 0),
+        IteratorOp::ForInNext => ("for_in_next", 0),
+        IteratorOp::Close => ("iterator_close", 0),
+    };
+    // The interpreter's `sp` when the operation throws: iterator_close has
+    // already dropped the catch offset and the next method.
+    let exception_depth = match operation {
+        IteratorOp::Close => before - 2,
+        _ => before,
+    };
+    let arguments = [
+        u32::try_from(before).map_err(|_| CompileFailure::ResourceLimit)?,
+        quickjs_opcode_id(name)?,
+        operand,
+        0,
+    ];
+
+    let continuation = match (operation, array_values_next) {
+        (IteratorOp::ForOfNext(_), Some(leaf)) => {
+            let continuation = builder.create_block();
+            let hit = builder.create_block();
+            let miss = builder.create_block();
+            let scratch = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(3 * mem::size_of::<qjs::JSValue>())
+                    .map_err(|_| CompileFailure::ResourceLimit)?,
+                3,
+            ));
+            let scratch = builder.ins().stack_addr(helpers.pointer_type, scratch, 0);
+            let iterator = use_pair(builder, stack[base]);
+            let next_method = use_pair(builder, stack[base + 1]);
+            store_jsvalue_slot(builder, scratch, 0, iterator, helpers.layout)?;
+            store_jsvalue_slot(builder, scratch, 1, next_method, helpers.layout)?;
+            let mut signature = Signature::new(builder.func.signature.call_conv);
+            signature.params.extend([
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+            ]);
+            signature.returns.push(AbiParam::new(types::I32));
+            let signature = builder.import_signature(signature);
+            let target = builder.ins().iconst(
+                helpers.pointer_type,
+                i64::try_from(leaf).map_err(|_| CompileFailure::ResourceLimit)?,
+            );
+            let ctx = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::new(),
+                helpers.frame,
+                helpers.layout.ctx,
+            );
+            let value_bytes = i64::try_from(mem::size_of::<qjs::JSValue>())
+                .map_err(|_| CompileFailure::ResourceLimit)?;
+            let next_address = builder.ins().iadd_imm(scratch, value_bytes);
+            let out_address = builder.ins().iadd_imm(scratch, 2 * value_bytes);
+            let call = super::emit_external_call(
+                builder,
+                signature,
+                target,
+                &[ctx, scratch, next_address, out_address],
+                helpers.pointer_type,
+                None,
+                None,
+            );
+            let status = builder.inst_results(call)[0];
+            let produced = builder.ins().icmp_imm(
+                IntCC::Equal,
+                status,
+                i64::from(qjs::JSJitIteratorQueryStatus_JS_JIT_ITERATOR_QUERY_VALUE),
+            );
+            builder.ins().brif(produced, hit, &[], miss, &[]);
+            builder.seal_block(hit);
+            builder.seal_block(miss);
+
+            builder.switch_to_block(hit);
+            let value = load_jsvalue(builder, scratch, 2, helpers.layout);
+            define_pair(builder, stack[before], value);
+            let not_done = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_BOOL as i64));
+            define_pair(builder, stack[before + 1], not_done);
+            builder.ins().jump(continuation, &[]);
+
+            builder.switch_to_block(miss);
+            Some(continuation)
+        }
+        _ => None,
+    };
+
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_ITERATOR_OP,
+        state,
+        before,
+        exception_depth,
+        &arguments,
+    )?;
+    let reload = |builder: &mut FunctionBuilder<'_>, index: usize| {
+        reload_pair(
+            builder,
+            stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        )
+    };
+    match operation {
+        IteratorOp::ForOfStart => {
+            for index in base..after {
+                reload(builder, index);
+            }
+        }
+        IteratorOp::ForInStart => reload(builder, base),
+        IteratorOp::ForOfNext(_) | IteratorOp::ForInNext => {
+            reload(builder, base);
+            reload(builder, before);
+            reload(builder, before + 1);
+        }
+        IteratorOp::Close => {
+            for (index, pair) in stack.iter().copied().enumerate().take(before).skip(base) {
+                clear_pair(builder, pair, helpers.stack_base, index, helpers.layout)?;
+            }
+        }
+    }
+    if let Some(continuation) = continuation {
+        builder.ins().jump(continuation, &[]);
+        builder.seal_block(continuation);
+        builder.switch_to_block(continuation);
+    }
+    *depth = after;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // Call bytecode operands and lowering state are separate by design.
 fn lower_call(
     builder: &mut FunctionBuilder<'_>,
@@ -6496,6 +6716,7 @@ mod tests {
             IrOp::Call { .. } => "call",
             IrOp::CallConstructor(_) => "call_constructor",
             IrOp::Regexp => "regexp",
+            IrOp::Iterator(_) => "iterator",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",

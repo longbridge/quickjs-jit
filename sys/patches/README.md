@@ -60,6 +60,19 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0028-tier1-iteration.patch` adds ABI 1.25 (runtime API 1.10). The
+append-only `ITERATOR_OP` helper runs the interpreter's own stack effect for
+`for_of_start`, `for_of_next`, `for_in_start`, `for_in_next` and
+`iterator_close` on the materialized native frame, so iterator objects, next
+methods and for-of catch offsets stay C-visible across user iterator code, and
+an exception leaves exactly the stack the interpreter unwinder expects (which
+closes the iterator with a throw completion). The versioned
+`JS_JitGetIteratorAPI` table adds a leaf for `for_of_next`: it revalidates a
+built-in Array values iterator, its exact built-in `next` method, a fast Array
+target and an in-bounds dense index on every step, then advances the iterator
+and returns a duplicated element. It performs no allocation, throw,
+finalization or reentry; every other state misses without touching anything.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

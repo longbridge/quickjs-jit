@@ -64,6 +64,7 @@ enum ManifestHelper {
     Regexp,
     NewArray,
     NewObject,
+    IteratorOp,
 }
 
 impl ManifestHelper {
@@ -90,6 +91,7 @@ impl ManifestHelper {
             Self::Regexp => HelperId::Regexp,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
+            Self::IteratorOp => HelperId::IteratorOp,
         }
     }
 }
@@ -149,6 +151,7 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::CallConstructor
                 | ManifestHelper::BinaryArithSlow
                 | ManifestHelper::UnaryArithSlow
+                | ManifestHelper::IteratorOp
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -526,6 +529,12 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f()",
             "object",
             HelperId::NewObject,
+        ),
+        (
+            "function f(values){ let sum=0; for(const value of values) sum+=value; return sum }",
+            "f(new Set([20,22]))",
+            "for_of_next",
+            HelperId::IteratorOp,
         ),
     ];
     for (definition, expression, opcode, helper) in cases {

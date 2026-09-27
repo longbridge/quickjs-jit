@@ -1281,7 +1281,8 @@ fn validate_production_frame(
         };
         let valid = match kind {
             SlotKind::Tagged => true,
-            SlotKind::Int32 | SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::Int32 => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_CATCH_OFFSET),
             SlotKind::Float64 => value.tag == i64::from(qjs::JS_TAG_FLOAT64),
             SlotKind::Uninitialized => value.tag == i64::from(qjs::JS_TAG_UNINITIALIZED),
         };

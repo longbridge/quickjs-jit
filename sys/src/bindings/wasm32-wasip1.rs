@@ -87,7 +87,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 24;
+pub const QJSJIT_ABI_MINOR: u32 = 25;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -95,6 +95,7 @@ pub const JS_JIT_SLOT_NONE: u32 = 4294967295;
 pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
 pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;
 pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;
+pub const QJSJIT_ITERATOR_API_VERSION: u32 = 1;
 pub const JS_JIT_FEEDBACK_ARRAY_STORE: u32 = 64;
 pub const JS_JIT_FEEDBACK_ARRAY_LENGTH: u32 = 128;
 pub const JS_JIT_FEEDBACK_ARRAY_EXOTIC: u32 = 256;
@@ -114,7 +115,7 @@ pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;
 pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
 pub const QJSJIT_RUNTIME_API_MAJOR: u32 = 1;
-pub const QJSJIT_RUNTIME_API_MINOR: u32 = 9;
+pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;
 pub const QJSJIT_INLINE_RECOVERY_VERSION: u32 = 1;
 pub const JS_JIT_INLINE_CALL: u32 = 0;
 pub const JS_JIT_INLINE_CALL_METHOD: u32 = 1;
@@ -2244,6 +2245,45 @@ const _: () = {
 unsafe extern "C" {
     pub fn JS_JitGetArrayAPI(version: u32) -> *const JSJitArrayAPI;
 }
+pub const JSJitIteratorQueryStatus_JS_JIT_ITERATOR_QUERY_INVALID: JSJitIteratorQueryStatus = -1;
+pub const JSJitIteratorQueryStatus_JS_JIT_ITERATOR_QUERY_MISS: JSJitIteratorQueryStatus = 0;
+pub const JSJitIteratorQueryStatus_JS_JIT_ITERATOR_QUERY_VALUE: JSJitIteratorQueryStatus = 1;
+pub type JSJitIteratorQueryStatus = ::core::ffi::c_int;
+pub type JSJitArrayValuesNextFunc = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        iterator: *const JSValue,
+        next_method: *const JSValue,
+        out: *mut JSValue,
+    ) -> ::core::ffi::c_int,
+>;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitIteratorAPI {
+    pub struct_size: u32,
+    pub version: u32,
+    pub effects: u32,
+    pub reserved: u32,
+    pub array_values_next: JSJitArrayValuesNextFunc,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitIteratorAPI"][::core::mem::size_of::<JSJitIteratorAPI>() - 20usize];
+    ["Alignment of JSJitIteratorAPI"][::core::mem::align_of::<JSJitIteratorAPI>() - 4usize];
+    ["Offset of field: JSJitIteratorAPI::struct_size"]
+        [::core::mem::offset_of!(JSJitIteratorAPI, struct_size) - 0usize];
+    ["Offset of field: JSJitIteratorAPI::version"]
+        [::core::mem::offset_of!(JSJitIteratorAPI, version) - 4usize];
+    ["Offset of field: JSJitIteratorAPI::effects"]
+        [::core::mem::offset_of!(JSJitIteratorAPI, effects) - 8usize];
+    ["Offset of field: JSJitIteratorAPI::reserved"]
+        [::core::mem::offset_of!(JSJitIteratorAPI, reserved) - 12usize];
+    ["Offset of field: JSJitIteratorAPI::array_values_next"]
+        [::core::mem::offset_of!(JSJitIteratorAPI, array_values_next) - 16usize];
+};
+unsafe extern "C" {
+    pub fn JS_JitGetIteratorAPI(version: u32) -> *const JSJitIteratorAPI;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSJitFeedbackEvent {
@@ -2785,7 +2825,8 @@ pub const JSJitHelperId_JS_JIT_HELPER_REGEXP: JSJitHelperId = 20;
 pub const JSJitHelperId_JS_JIT_HELPER_ATOM_VALUE: JSJitHelperId = 21;
 pub const JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW: JSJitHelperId = 22;
 pub const JSJitHelperId_JS_JIT_HELPER_UNARY_ARITH_SLOW: JSJitHelperId = 23;
-pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 24;
+pub const JSJitHelperId_JS_JIT_HELPER_ITERATOR_OP: JSJitHelperId = 24;
+pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 25;
 pub type JSJitHelperId = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3028,6 +3069,16 @@ unsafe extern "C" {
     ) -> JSJitHelperStatus;
 }
 unsafe extern "C" {
+    pub fn JS_JitHelperIteratorOp(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        left: u32,
+        right: u32,
+        operation: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
     pub fn JS_JitGetHelperTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitHelperInfo;
 }
 #[repr(C)]
@@ -3241,10 +3292,20 @@ pub struct JSJitRuntimeAPI {
             opcode: u32,
         ) -> JSJitHelperStatus,
     >,
+    pub iterator_op: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            left: u32,
+            right: u32,
+            operation: u32,
+        ) -> JSJitHelperStatus,
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 104usize];
+    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 108usize];
     ["Alignment of JSJitRuntimeAPI"][::core::mem::align_of::<JSJitRuntimeAPI>() - 4usize];
     ["Offset of field: JSJitRuntimeAPI::struct_size"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, struct_size) - 0usize];
@@ -3300,6 +3361,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitRuntimeAPI, binary_arith_slow) - 96usize];
     ["Offset of field: JSJitRuntimeAPI::unary_arith_slow"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, unary_arith_slow) - 100usize];
+    ["Offset of field: JSJitRuntimeAPI::iterator_op"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, iterator_op) - 104usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
