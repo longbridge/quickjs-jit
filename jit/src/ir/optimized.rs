@@ -865,6 +865,28 @@ fn optimized_block_depths(
     Ok(depths)
 }
 
+/// Feedback-independent part of Tier-2 admission. `false` means translation
+/// rejects this function with `UnsupportedOpcode` for every feedback snapshot
+/// (a reachable opcode lies outside the optimized vocabulary), so its
+/// baseline artifact is the terminal native tier.
+pub fn optimized_vocabulary_admits(function: &VerifiedFunction) -> bool {
+    let instructions = function.instructions();
+    function.control_flow_graph().blocks().iter().all(|block| {
+        instructions
+            .get(block.instruction_range())
+            .is_some_and(|block| {
+                block.iter().all(|instruction| {
+                    let name = match instruction.opcode().name() {
+                        "tail_call" => "call",
+                        "tail_call_method" => "call_method",
+                        name => name,
+                    };
+                    classify_optimized_opcode(name).is_ok()
+                })
+            })
+    })
+}
+
 fn classify_optimized_opcode(
     name: &str,
 ) -> Result<(ValueRepresentation, OptimizedEffect), CompileFailure> {

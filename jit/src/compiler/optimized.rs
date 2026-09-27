@@ -776,6 +776,10 @@ struct NumericSpecialization {
     float_pcs: std::collections::BTreeSet<u32>,
     calls: std::collections::BTreeMap<u32, crate::runtime::CallSpecializationKey>,
     properties: std::collections::BTreeMap<u32, Box<[crate::runtime::ShapeObservation]>>,
+    /// get_field/put_field sites whose feedback is megamorphic. They lower to
+    /// the owning generic property helper instead of a shape guard, so a
+    /// shape miss never becomes a deopt/recompile loop.
+    generic_properties: std::collections::BTreeSet<u32>,
     arrays: Box<[crate::runtime::ArrayFeedbackSnapshot]>,
     direct_calls: std::collections::BTreeMap<u32, DirectCallSite>,
     inline_callees: std::collections::BTreeMap<u32, crate::ir::InlineCallee>,
@@ -965,7 +969,7 @@ impl NumericSpecialization {
                 let observations = site.observations();
                 let safe = site.state() != crate::runtime::ShapeFeedbackState::Megamorphic
                     && !observations.is_empty()
-                    && observations.len() <= 3
+                    && observations.len() <= crate::runtime::POLYMORPHIC_PROPERTY_LIMIT
                     && observations.iter().all(|observation| {
                         let primitive = matches!(
                             observation.value(),
@@ -990,6 +994,17 @@ impl NumericSpecialization {
                     });
                 safe.then_some((instruction.pc(), observations.to_vec().into_boxed_slice()))
             })
+            .collect();
+        let generic_properties = function
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                matches!(instruction.opcode().name(), "get_field" | "put_field")
+                    && feedback.property_at(instruction.pc()).is_some_and(|site| {
+                        site.state() == crate::runtime::ShapeFeedbackState::Megamorphic
+                    })
+            })
+            .map(|instruction| instruction.pc())
             .collect();
         let numeric_constants = function
             .snapshot()
@@ -1061,6 +1076,7 @@ impl NumericSpecialization {
                 int_pcs,
                 calls,
                 properties,
+                generic_properties,
                 arrays,
                 numeric_constants,
                 ..Self::default()
@@ -1076,6 +1092,7 @@ impl NumericSpecialization {
                     int_pcs,
                     calls,
                     properties,
+                    generic_properties,
                     arrays,
                     numeric_constants,
                     ..Self::default()
@@ -1130,6 +1147,7 @@ impl NumericSpecialization {
             float_pcs,
             calls,
             properties,
+            generic_properties,
             arrays,
             direct_calls: Default::default(),
             inline_callees: Default::default(),
@@ -1137,6 +1155,35 @@ impl NumericSpecialization {
             numeric_constants,
         }
     }
+}
+
+/// Optimized element loads publish only primitives: a heap element
+/// deoptimizes before it reaches the operand stack. A shape-guarded property
+/// access whose receiver is exactly such an element load therefore deopts on
+/// every execution (an object element exits at the load, a primitive one at
+/// the receiver guard). Reject the function up front instead of installing an
+/// artifact that can only bounce between tiers. Generic (megamorphic) sites
+/// accept any receiver and remain admissible.
+fn shape_guarded_element_receiver(
+    ir: &OptimizedIr,
+    specialization: &NumericSpecialization,
+) -> bool {
+    let graph = ir.scalar_graph();
+    ir.nodes().iter().any(|node| {
+        let base = match graph.heap_operation(node.id()) {
+            Some(
+                crate::ir::ScalarHeapOperation::GetProperty { base, .. }
+                | crate::ir::ScalarHeapOperation::PutProperty { base, .. },
+            ) => *base,
+            _ => return false,
+        };
+        specialization.properties.contains_key(&node.pc())
+            && !specialization.generic_properties.contains(&node.pc())
+            && matches!(
+                graph.values().get(base.index()),
+                Some(crate::ir::ScalarValue::GetElement { .. })
+            )
+    })
 }
 
 fn lower_optimized_machine(
@@ -1166,6 +1213,9 @@ fn lower_optimized_machine(
     let Some(entry_site) = ir.guard_maps().first() else {
         return Err(CompileFailure::InvalidArtifact);
     };
+    if shape_guarded_element_receiver(ir, specialization) {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
     let shape = entry_site.shape();
     let int32_loop = matches!(specialization.entry, EntryRepresentation::Int32)
         && specialization.calls.is_empty()
@@ -1730,11 +1780,6 @@ fn lower_optimized_machine(
             .cloned()
             .ok_or(CompileFailure::InvalidArtifact)?;
         let poll_signature = builder.import_signature(poll_signature);
-        let shape_guard_signature = generated_signatures
-            .get(qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize)
-            .cloned()
-            .ok_or(CompileFailure::InvalidArtifact)?;
-        let shape_guard_signature = builder.import_signature(shape_guard_signature);
         let helper_signatures = generated_signatures
             .into_iter()
             .map(|signature| builder.import_signature(signature))
@@ -2451,15 +2496,32 @@ fn lower_optimized_machine(
                                     .ok_or(CompileFailure::InvalidArtifact)?;
                             }
                             "get_field" | "put_field" => {
+                                if name == "put_field"
+                                    && specialization.generic_properties.contains(&node.pc())
+                                {
+                                    property_cache.flush(&mut builder);
+                                    property_cache.invalidate(&mut builder);
+                                    let atom = opt_u32(node.bytes())?;
+                                    depth = emit_opt_owned_property_store(
+                                        &mut builder,
+                                        &env,
+                                        &mut stack_provenance,
+                                        depth,
+                                        node.pc(),
+                                        atom,
+                                    )?;
+                                    continue;
+                                }
                                 if name == "get_field"
-                                    && specialization.properties.get(&node.pc()).is_some_and(
-                                        |observations| {
-                                            observations.iter().any(|observation| {
-                                                observation.value()
-                                                    == crate::runtime::ObservedType::Object
-                                            })
-                                        },
-                                    )
+                                    && (specialization.generic_properties.contains(&node.pc())
+                                        || specialization.properties.get(&node.pc()).is_some_and(
+                                            |observations| {
+                                                observations.iter().any(|observation| {
+                                                    observation.value()
+                                                        == crate::runtime::ObservedType::Object
+                                                })
+                                            },
+                                        ))
                                 {
                                     property_cache.flush(&mut builder);
                                     property_cache.invalidate(&mut builder);
@@ -2532,7 +2594,6 @@ fn lower_optimized_machine(
                                     property,
                                     node.pc(),
                                     node.deopt_guard().unwrap_or(entry_site.guard()),
-                                    shape_guard_signature,
                                     &helper_signatures,
                                     pointer_type,
                                     layout,
@@ -6764,7 +6825,6 @@ fn emit_opt_guarded_property(
     properties: &[crate::runtime::ShapeObservation],
     pc: u32,
     guard: u32,
-    signature: cranelift_codegen::ir::SigRef,
     helper_signatures: &[cranelift_codegen::ir::SigRef],
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
@@ -6828,122 +6888,75 @@ fn emit_opt_guarded_property(
             layout,
         )?;
     }
-    if properties.is_empty() || properties.len() > 3 {
+    if properties.is_empty() || properties.len() > crate::runtime::POLYMORPHIC_PROPERTY_LIMIT {
         return Err(CompileFailure::InvalidArtifact);
     }
-    let flat = borrowed_slot
-        .or_else(|| {
-            arguments
-                .len()
-                .checked_add(locals.len())?
-                .checked_add(object_index)
-        })
-        .and_then(|slot| u32::try_from(slot).ok())
-        .ok_or(CompileFailure::ResourceLimit)?;
+    for (index, property) in properties.iter().enumerate() {
+        // Feedback retains one observation per shape identity; a duplicate
+        // would make the first matching compare select a stale slot.
+        if property.shape().identity() == 0
+            || property.shape().generation() == 0
+            || properties[..index]
+                .iter()
+                .any(|prior| prior.shape().identity() == property.shape().identity())
+        {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+    }
     let property_layout = crate::abi::AbiInfo::linked()
         .map_err(|_| CompileFailure::InvalidArtifact)?
         .property_layout();
-    let helper = if borrowed_slot.is_none() {
-        let api = builder
-            .ins()
-            .load(pointer_type, MemFlags::new(), frame, layout.runtime_api);
-        Some(builder.ins().load(
-            pointer_type,
-            MemFlags::new(),
-            api,
-            layout.helper_offsets[qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize],
-        ))
-    } else {
-        None
-    };
     let deopt = builder.create_block();
-    let exception = builder.create_block();
     let continuation = builder.create_block();
     if !store {
         builder.append_block_param(continuation, types::I64);
         builder.append_block_param(continuation, types::I64);
     }
+    // Inline polymorphic dispatch for both borrowed and owned receivers: the
+    // receiver's shape pointer and monotonic layout generation are exactly the
+    // SHAPE_GUARD helper predicate, so no helper crossing is needed. The owned
+    // path above has already published the frame for the deopt exit.
+    let object = opt_use(builder, stack[object_index]);
+    let is_object = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
+    let dispatch = builder.create_block();
+    builder.ins().brif(is_object, dispatch, &[], deopt, &[]);
+    builder.switch_to_block(dispatch);
+    // Read only the live receiver's shape. The feedback pointer is an integer
+    // identity, never a pointer we dereference or retain. A live object's
+    // shape is always valid, so its generation is loaded once for the chain.
+    let shape = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        object.payload,
+        property_layout.object_shape_offset,
+    );
+    let live_generation = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        shape,
+        property_layout.shape_generation_offset,
+    );
     for (index, property) in properties.iter().copied().enumerate() {
         let id = property.shape().identity();
         let generation = property.shape().generation();
         let access = builder.create_block();
+        let check = builder.create_block();
         let next = if index + 1 == properties.len() {
             deopt
         } else {
             builder.create_block()
         };
-        if borrowed_slot.is_some() {
-            if generation == 0 {
-                return Err(CompileFailure::InvalidArtifact);
-            }
-            let object = opt_use(builder, stack[object_index]);
-            let is_object =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, object.tag, i64::from(qjs::JS_TAG_OBJECT));
-            let check_shape = builder.create_block();
-            builder.ins().brif(is_object, check_shape, &[], deopt, &[]);
-            builder.switch_to_block(check_shape);
-            // Read only the live receiver's shape. The feedback pointer is an
-            // integer identity, never a pointer we dereference or retain.
-            let shape = builder.ins().load(
-                pointer_type,
-                MemFlags::new(),
-                object.payload,
-                property_layout.object_shape_offset,
-            );
-            let same_shape = builder.ins().icmp_imm(IntCC::Equal, shape, id as i64);
-            let live_generation = builder.ins().load(
-                types::I64,
-                MemFlags::new(),
-                shape,
-                property_layout.shape_generation_offset,
-            );
-            let same_generation =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, live_generation, generation as i64);
-            let matches = builder.ins().band(same_shape, same_generation);
-            builder.ins().brif(matches, access, &[], next, &[]);
-        } else {
-            let params = [
-                frame,
-                builder.ins().iconst(types::I32, 0),
-                builder.ins().iconst(types::I32, i64::from(flat)),
-                builder.ins().iconst(types::I32, i64::from(id as u32)),
-                builder
-                    .ins()
-                    .iconst(types::I32, i64::from((id >> 32) as u32)),
-                builder
-                    .ins()
-                    .iconst(types::I32, i64::from(generation as u32)),
-                builder
-                    .ins()
-                    .iconst(types::I32, i64::from((generation >> 32) as u32)),
-            ];
-            let call = super::emit_external_call(
-                builder,
-                signature,
-                helper.unwrap(),
-                &params,
-                pointer_type,
-                Some(frame),
-                None,
-            );
-            let status = builder.inst_results(call)[0];
-            let ok = builder
+        builder.ins().jump(check, &[]);
+        builder.switch_to_block(check);
+        let same_shape = builder.ins().icmp_imm(IntCC::Equal, shape, id as i64);
+        let same_generation =
+            builder
                 .ins()
-                .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
-            let miss_or_exception = builder.create_block();
-            builder.ins().brif(ok, access, &[], miss_or_exception, &[]);
-            builder.switch_to_block(miss_or_exception);
-            let miss = builder.ins().icmp_imm(
-                IntCC::Equal,
-                status,
-                i64::from(qjs::JS_JIT_HELPER_GUARD_MISS),
-            );
-            builder.ins().brif(miss, next, &[], exception, &[]);
-        }
+                .icmp_imm(IntCC::Equal, live_generation, generation as i64);
+        let matches = builder.ins().band(same_shape, same_generation);
+        builder.ins().brif(matches, access, &[], next, &[]);
         builder.switch_to_block(access);
         let object = opt_use(builder, stack[object_index]);
         let props = builder.ins().load(
@@ -7002,15 +7015,6 @@ fn emit_opt_guarded_property(
             builder.switch_to_block(next);
         }
     }
-    builder.switch_to_block(exception);
-    emit_opt_exit(
-        builder,
-        sret,
-        qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
-        None,
-        pointer_type,
-        0,
-    );
     builder.switch_to_block(deopt);
     if borrowed_slot.is_some() {
         // No state publication or helper crossing occurs on the native hit.
@@ -7820,14 +7824,15 @@ fn owned_local_targets(
                 "get_var" | "get_length" => true,
                 "get_field2" => true,
                 "get_field" => {
-                    specialization
-                        .properties
-                        .get(&node.pc())
-                        .is_some_and(|observations| {
-                            observations.iter().any(|observation| {
-                                observation.value() == crate::runtime::ObservedType::Object
+                    specialization.generic_properties.contains(&node.pc())
+                        || specialization
+                            .properties
+                            .get(&node.pc())
+                            .is_some_and(|observations| {
+                                observations.iter().any(|observation| {
+                                    observation.value() == crate::runtime::ObservedType::Object
+                                })
                             })
-                        })
                 }
                 n if n.starts_with("call") => {
                     ir.scalar_graph()
@@ -8377,6 +8382,128 @@ fn emit_opt_owned_property_replace(
         env.layout,
     );
     Ok(depth)
+}
+
+/// Executes PutField through the audited generic SET_PROPERTY helper for a
+/// megamorphic site. Every live stack value first becomes a real interpreter
+/// owner (as for the CALL bridge), so a throwing or reentrant setter sees an
+/// exact frame. The helper consumes the value slot; the receiver is released
+/// afterwards, leaving the stack below the operands unchanged.
+fn emit_opt_owned_property_store(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    depth: usize,
+    pc: u32,
+    atom: u32,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+    use rquickjs_core::qjs;
+    if env.int32_loop {
+        return Err(CompileFailure::UnsupportedOpcode);
+    }
+    let object_index = depth
+        .checked_sub(2)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let value_index = depth - 1;
+    if depth > env.stack.len() || depth > provenance.len() {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let object_slot = opt_flat_stack_slot(env, object_index)?;
+    let value_slot = opt_flat_stack_slot(env, value_index)?;
+    for (index, vars) in env.arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.arg_buf, index, value);
+    }
+    for (index, vars) in env.locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.var_buf, index, value);
+    }
+    for (index, vars) in env.stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, env.stack_base, index, value);
+    }
+    let bytecode = builder.ins().load(
+        env.pointer_type,
+        MemFlags::new(),
+        env.frame,
+        env.layout.bytecode_start,
+    );
+    let current_pc = builder.ins().iadd_imm(bytecode, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), current_pc, env.frame, env.layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.arguments.len() + env.locals.len(),
+        provenance,
+        env.helper_signatures,
+        env.pointer_type,
+        env.layout,
+    )?;
+    for slot in provenance.iter_mut().take(depth) {
+        if matches!(slot, OptProvenance::Argument(_) | OptProvenance::Local(_)) {
+            *slot = OptProvenance::OwnedSlot;
+        }
+    }
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        depth,
+        env.pointer_type,
+        env.layout,
+    );
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.helper_signatures,
+        qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY as usize,
+        &[0, object_slot, atom, value_slot],
+        env.pointer_type,
+        env.layout,
+    )?;
+    // SET_PROPERTY left UNDEFINED in the consumed value slot; only the
+    // receiver owner remains above the surviving stack.
+    emit_opt_helper(
+        builder,
+        env.frame,
+        env.sret,
+        env.stack_base,
+        depth,
+        env.helper_signatures,
+        qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, object_slot],
+        env.pointer_type,
+        env.layout,
+    )?;
+    let undefined = OptPair {
+        payload: builder.ins().iconst(types::I64, 0),
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
+    };
+    for index in [object_index, value_index] {
+        opt_store(builder, env.stack_base, index, undefined);
+        opt_define(builder, env.stack[index], undefined);
+        provenance[index] = OptProvenance::Unknown;
+    }
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        object_index,
+        env.pointer_type,
+        env.layout,
+    );
+    Ok(object_index)
 }
 
 #[allow(clippy::too_many_arguments)]

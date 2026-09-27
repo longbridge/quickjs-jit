@@ -636,6 +636,8 @@ struct ProductionBackend {
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     baseline_property_refreshed: std::collections::HashSet<runtime::FunctionKey>,
+    // Cached feedback-independent Tier-2 vocabulary admission per function.
+    optimized_vocabulary: std::collections::HashMap<runtime::FunctionKey, bool>,
     tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
     // CALL feedback consumers finish synchronously and never reenter QuickJS.
@@ -2074,10 +2076,11 @@ impl ProductionBackend {
             optimizing_hotness: rustc_hash::FxHashMap::default(),
             optimizing_snapshots: std::collections::HashMap::new(),
             baseline_property_refreshed: std::collections::HashSet::new(),
+            optimized_vocabulary: std::collections::HashMap::new(),
             tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
             call_feedback_types: Vec::new(),
-            shape_feedback: runtime::ShapeFeedbackTable::new(3),
+            shape_feedback: runtime::ShapeFeedbackTable::new(runtime::POLYMORPHIC_PROPERTY_LIMIT),
             metrics,
             cold_metrics_dirty: true,
             native_entries: 0,
@@ -2201,29 +2204,76 @@ impl ProductionBackend {
             );
         }
         let refresh_inputs = (self.feedback.version(), self.coordinator.installed_count());
-        let refresh_scan_due = self.config.tier_policy() == JitTierPolicy::BaselineOnly
-            && self.last_refresh_scan != Some(refresh_inputs);
+        let baseline_only = self.config.tier_policy() == JitTierPolicy::BaselineOnly;
+        let refresh_scan_due = self.last_refresh_scan != Some(refresh_inputs);
         if refresh_scan_due {
             self.last_refresh_scan = Some(refresh_inputs);
-            let refreshes = self
-                .optimizing_snapshots
-                .iter()
-                .filter_map(|(key, snapshot)| {
+            // Under automatic tiering the baseline artifact is normally a
+            // stepping stone and keeps its feedback-free helper sites. When
+            // no feedback can make Tier 2 translate the function, baseline is
+            // its terminal native tier: refresh it once with the recorded
+            // (bounded polymorphic) property feedback, exactly as the
+            // baseline-only policy does. Never race an active Tier-2 job.
+            let candidates = if baseline_only {
+                self.optimizing_snapshots
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                let mut keys = self
+                    .optimizing_snapshots
+                    .keys()
+                    .chain(self.tier2_sources.keys())
+                    .copied()
+                    .filter(|key| !self.baseline_property_refreshed.contains(key))
+                    .collect::<Vec<_>>();
+                keys.sort_unstable_by_key(|key| (key.id, key.generation));
+                keys.dedup();
+                keys.retain(|key| {
+                    !matches!(
+                        self.coordinator.tier_state(*key, runtime::Tier::Optimizing),
+                        runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                            | runtime::CompileState::Installed(_)
+                    )
+                });
+                let snapshots = &self.optimizing_snapshots;
+                let sources = &self.tier2_sources;
+                keys.retain(|key| {
+                    let admitted = *self.optimized_vocabulary.entry(*key).or_insert_with(|| {
+                        snapshots
+                            .get(key)
+                            .or_else(|| sources.get(key))
+                            .is_none_or(ir::optimized_vocabulary_admits)
+                    });
+                    !admitted
+                });
+                keys
+            };
+            let refreshes = candidates
+                .into_iter()
+                .filter_map(|key| {
+                    let snapshot = self
+                        .optimizing_snapshots
+                        .get(&key)
+                        .or_else(|| self.tier2_sources.get(&key))?;
                     let feedback = self
                         .feedback
                         .snapshot(self.clock.max(1))
-                        .with_properties(self.shape_feedback.snapshot(*key));
-                    let call_ready = self
-                        .coordinator
-                        .baseline_direct_refresh_ready(*key, &feedback);
-                    let property_ready = !self.baseline_property_refreshed.contains(key)
+                        .with_properties(self.shape_feedback.snapshot(key));
+                    let call_ready = baseline_only
+                        && self
+                            .coordinator
+                            .baseline_direct_refresh_ready(key, &feedback);
+                    let property_ready = !self.baseline_property_refreshed.contains(&key)
                         && compiler::baseline::has_baseline_property_sites(snapshot, &feedback)
                         && matches!(
-                            self.coordinator.tier_state(*key, runtime::Tier::Baseline),
+                            self.coordinator.tier_state(key, runtime::Tier::Baseline),
                             runtime::CompileState::Installed(_)
                         );
                     (call_ready || property_ready)
-                        .then(|| (*key, snapshot.clone(), feedback, property_ready))
+                        .then(|| (key, snapshot.clone(), feedback, property_ready))
                 })
                 .collect::<Vec<_>>();
             for (key, snapshot, feedback, property_ready) in refreshes {
@@ -3420,6 +3470,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
         self.tier2_sources.remove(&key);
+        self.optimized_vocabulary.remove(&key);
+        self.baseline_property_refreshed.remove(&key);
         self.entry_tiers.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();

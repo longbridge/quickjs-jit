@@ -112,6 +112,10 @@ name = "property_specialization"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "polymorphic_property_ic"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "speculative_numeric"
 required-features = ["compiler", "test-support"]
 
