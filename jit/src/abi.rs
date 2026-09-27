@@ -698,6 +698,26 @@ fn runtime_api_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitRuntimeAPI, unary_arith_slow),
             mem::size_of::<usize>(),
         ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, fclosure),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, get_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, put_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, close_loc),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, set_name),
+            mem::size_of::<usize>(),
+        ),
     ] {
         hash = layout_field(hash, offset, size);
     }

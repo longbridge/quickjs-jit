@@ -64,6 +64,11 @@ enum ManifestHelper {
     Regexp,
     NewArray,
     NewObject,
+    FClosure,
+    GetVarRef,
+    PutVarRef,
+    CloseLocal,
+    SetName,
 }
 
 impl ManifestHelper {
@@ -90,6 +95,11 @@ impl ManifestHelper {
             Self::Regexp => HelperId::Regexp,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
+            Self::FClosure => HelperId::FClosure,
+            Self::GetVarRef => HelperId::GetVarRef,
+            Self::PutVarRef => HelperId::PutVarRef,
+            Self::CloseLocal => HelperId::CloseLocal,
+            Self::SetName => HelperId::SetName,
         }
     }
 }
@@ -526,6 +536,36 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f()",
             "object",
             HelperId::NewObject,
+        ),
+        (
+            "function f(a){ const g = () => a + 1; return g() }",
+            "f(41)",
+            "fclosure8",
+            HelperId::FClosure,
+        ),
+        (
+            "function f(a){ const g = () => a + 1; return g.name + g() }",
+            "f(41)",
+            "set_name",
+            HelperId::SetName,
+        ),
+        (
+            "var f = (function(){ var c = 40; return function f(a){ return c + a } })()",
+            "f(2)",
+            "get_var_ref0",
+            HelperId::GetVarRef,
+        ),
+        (
+            "var f = (function(){ var c = 40; return function f(a){ c = a; return 1 } })()",
+            "f(2)",
+            "put_var_ref0",
+            HelperId::PutVarRef,
+        ),
+        (
+            "function f(n){ const fs = []; for (let i = 0; i < n; i++) { fs.push(() => i) } let s = 0; for (let j = 0; j < n; j++) { const g = fs[j]; s += g() } return s }",
+            "f(5)",
+            "close_loc",
+            HelperId::CloseLocal,
         ),
     ];
     for (definition, expression, opcode, helper) in cases {

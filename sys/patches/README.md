@@ -99,6 +99,18 @@ another function's still-admissible idle handle instead of evicting it. The
 runtime grows by two 32-bit fields and one pointer; the backend vtable gains
 one trailing member.
 
+`0025-tier1-closures.patch` adds the Tier 1 closure helpers under ABI 1.25
+(the integration's single minor bump, taken by 0023) and bumps the runtime API
+to 1.10, as an append-only helper-table tail (IDs 24-28): `FCLOSURE`, `GET_VAR_REF`,
+`PUT_VAR_REF`, `CLOSE_LOC` and `SET_NAME`. Each mirrors its interpreter opcode
+on the validated current stack frame (`js_closure`, `*var_refs[idx]->pvalue`
+with the exact TDZ `ReferenceError`, `set_value`, `close_lexical_var`,
+`JS_DefineObjectName`). `PUT_VAR_REF` consumes its value slot on success and
+on exception; `JSJitVarRefMode` selects the plain, checked or
+checked-initialization form. Attached var refs alias the interpreter's
+argument/local storage, so generated code publishes those slots before every
+helper and reloads them afterwards in functions that create closures.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

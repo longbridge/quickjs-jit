@@ -916,6 +916,33 @@ impl ProductionProfile {
     }
 }
 
+/// Automatic-tiering profitability gate for closure-creating functions.
+///
+/// Tier 1 lowers `fclosure`, var-ref access and `close_loc` through the
+/// generic helper bridge, and a function that creates closures must also
+/// reload every argument and local after each helper. Tier 2 rejects these
+/// opcodes, so such a function would stay in Tier 1 for its lifetime with
+/// no optimizing follow-up. Measured on `calls-recursion-closures`, that
+/// Tier 1 loop runs at about 0.74x the interpreter's speed. Until the
+/// bridge (roadmap P1/P3) or Tier 2 var refs make it profitable, automatic
+/// tiering leaves closure-creating functions in the interpreter. Explicit
+/// tier policies (`BaselineOnly`, `Optimize`) and forced test tiers still
+/// compile them, so the lowering stays covered.
+fn automatic_closure_creation_unprofitable(
+    config: &JitConfig,
+    verified: &bytecode::VerifiedFunction,
+) -> bool {
+    #[cfg(feature = "test-support")]
+    if config.force_optimized() {
+        return false;
+    }
+    config.tier_policy() == JitTierPolicy::Automatic
+        && verified
+            .instructions()
+            .iter()
+            .any(|instruction| matches!(instruction.opcode().name(), "fclosure" | "fclosure8"))
+}
+
 /// Finish the bounded Tier-2 profitability trial once. Production JITs patch
 /// an IC/tier state after classification; repeating wide average comparisons
 /// on every successful optimized exit would turn policy into hot-path tax.
@@ -3333,6 +3360,17 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if let Err(rejection) = verified.tier1_eligibility() {
             self.coordinator
                 .reject_tier1(key, runtime::Tier::Baseline, rejection.reason());
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
+        if automatic_closure_creation_unprofitable(&self.config, &verified) {
+            self.coordinator.reject_tier1(
+                key,
+                runtime::Tier::Baseline,
+                bytecode::FallbackReason::ClosureFrame,
+            );
             self.feedback_disabled.insert(key);
             self.clear_failed_request(key);
             self.maintenance();

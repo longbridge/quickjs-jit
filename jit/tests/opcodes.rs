@@ -137,8 +137,18 @@ fn unsupported_frame_and_exception_families_are_stable_rejects() {
         tier1_policy(opcode.id()).unwrap()
     };
 
+    // Derived-constructor `this` initialization through an arrow and
+    // with/global reference objects still keep the closure frame rejected.
     assert_eq!(
-        by_name("get_var_ref"),
+        by_name("put_var_ref_check_init"),
+        Tier1Policy::Reject(FallbackReason::ClosureFrame)
+    );
+    assert_eq!(
+        by_name("make_var_ref"),
+        Tier1Policy::Reject(FallbackReason::ClosureFrame)
+    );
+    assert_eq!(
+        by_name("make_var_ref_ref"),
         Tier1Policy::Reject(FallbackReason::ClosureFrame)
     );
     assert_eq!(

@@ -32,6 +32,11 @@ pub enum HelperId {
     NewObject,
     CallConstructor,
     Regexp,
+    FClosure,
+    GetVarRef,
+    PutVarRef,
+    CloseLocal,
+    SetName,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
