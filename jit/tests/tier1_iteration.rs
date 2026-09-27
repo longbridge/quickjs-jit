@@ -12,7 +12,7 @@
 
 use rquickjs::{Context, Runtime};
 use rquickjs_jit::bytecode::{FallbackReason, HelperId};
-use rquickjs_jit::test_support::{assert_tier1_rejected, differential};
+use rquickjs_jit::test_support::{assert_tier1_rejected, differential, forced_baseline};
 use rquickjs_jit::{Jit, JitConfig, JitTierPolicy};
 use std::time::{Duration, Instant};
 
@@ -336,4 +336,84 @@ fn production_tiering_enters_native_code_for_a_for_of_kernel() {
     }
     assert_eq!(result, expected);
     assert!(jit.metrics().native_entries > 0, "{:?}", jit.metrics());
+}
+
+#[test]
+fn leaf_path_storage_transitions_and_array_likes_match_the_interpreter() {
+    // Fast-to-slow storage transitions inside the body must leave the leaf
+    // (the per-step fast_array/count revalidation) without skipping or
+    // repeating an element.
+    let log = "function f(values,mutate){let out=[];for(const value of values){out.push(String(value));mutate(values,out.length)}return out.join(',')}";
+    for expression in [
+        "f([1,2,3,4],(a,n)=>{if(n===2)a[10]=7})",
+        "f([1,2,3,4],(a,n)=>{if(n===1)delete a[2]})",
+        "f([1,2,3,4],(a,n)=>{if(n===2)Object.defineProperty(a,3,{get(){return 'g'}})})",
+        "f([1,2,3,4],(a,n)=>{if(n===2)Object.freeze(a)})",
+        "f([1,2,3,4],(a,n)=>{if(n===1)a.length=2})",
+    ] {
+        differential(log, expression)
+            .force_baseline()
+            .stress_gc()
+            .expect_executed_opcode("for_of_next")
+            .assert_same();
+    }
+    // Array-likes and subclasses: each either hits the Array values leaf or
+    // takes the exact helper, and matches the interpreter.
+    for expression in [
+        "(function(){return f(arguments)})(1,2,3)",
+        "(()=>{class A extends Array{};const a=new A();a.push(4,5,6);return f(a)})()",
+        "(()=>{class A extends Array{*[Symbol.iterator](){yield 40;yield 2}};return f(A.from([1,2,3]))})()",
+        "f({[Symbol.iterator](){return Array.prototype.values.call({length:3,0:1,1:2,2:3})}})",
+        "f({[Symbol.iterator](){return Array.prototype.values.call([7,8,9])}})",
+        "f({[Symbol.iterator](){return Array.prototype.keys.call([7,8,9])}})",
+    ] {
+        differential(SUM_OF, expression)
+            .force_baseline()
+            .stress_gc()
+            .expect_executed_opcode("for_of_next")
+            .assert_same();
+    }
+}
+
+#[test]
+fn interrupt_inside_a_leaf_for_of_loop_is_uncatchable() {
+    forced_baseline(
+        "function f(values){let sum=0;for(const value of values)sum+=value;return sum} f(new Array(200000).fill(1))",
+    )
+    .interrupt_after(3)
+    .assert_uncatchable_interrupt();
+}
+
+fn osr_first_invocation(source: &str, expected: f64) {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let value = context
+        .with(|ctx| ctx.eval::<f64, _>(source))
+        .unwrap_or_else(|error| panic!("{error:?}; {:?}", jit.metrics()));
+    assert_eq!(value, expected, "{:?}", jit.metrics());
+    assert!(jit.metrics().osr_entries >= 1, "{:?}", jit.metrics());
+}
+
+#[test]
+fn long_first_for_of_invocation_osr_enters_with_the_catch_offset_on_the_stack() {
+    osr_first_invocation(
+        "const values=new Array(4000000).fill(3);function f(values){let sum=0;for(const value of values)sum+=value;return sum} f(values)",
+        12_000_000.0,
+    );
+}
+
+#[test]
+fn long_first_for_in_invocation_osr_enters_with_the_enumerator_on_the_stack() {
+    osr_first_invocation(
+        "const object={};for(let i=0;i<300000;i++)object['k'+i]=1;function f(object){let sum=0;for(const key in object)sum+=object[key];return sum} f(object)",
+        300_000.0,
+    );
 }

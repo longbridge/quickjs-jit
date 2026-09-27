@@ -45,6 +45,36 @@ Branch `perf/p2d-iteration`, based on `82d3808`. Roadmap item P2.5
   `benchmarks/run.rs`. The README matrix is not updated; that is left to the
   integrator.
 
+## Review fixes (branch `perf/p2d-iteration-r1`)
+
+- Tier 2 TDZ regression (blocking). The widened `Uninitialized` join
+  admitted functions such as `switch(k){case 0: let y=1; case 1: return y}`,
+  and Tier 2 lowers `get_loc_check`/`put_loc_check` as plain frame accesses.
+  After Tier 2 warmup, `f(1)` returned `undefined` instead of throwing
+  ReferenceError. The straight-line case `if(k) return y; let y=...` was
+  also lowered without a check. The fix is `ir::optimized::prove_lexical_checks`,
+  a forward may-be-uninitialized dataflow over the verified CFG. Frame
+  entry is initialized (QuickJS sets every local to `undefined`), and only
+  `set_loc_uninitialized` introduces TDZ. Tier 2 now rejects a function when
+  a checked access may see an uninitialized binding, and rejects
+  `put_loc_check_init` everywhere (Tier 1 also rejects it). Tier 2
+  `set_loc_uninitialized` now stores the exact `JS_TAG_UNINITIALIZED` cell
+  instead of `undefined`, so deopt/exit frames stay exact. Tier 1 keeps its
+  runtime checks, and the verifier join is unchanged. Regression tests are in
+  `jit/tests/tier2_tdz.rs`.
+- The added coverage in `jit/tests/tier1_iteration.rs` tests fast-to-slow
+  storage transitions, `delete`, accessor installation, freeze and
+  truncation in the middle of a leaf loop. It also tests `arguments`, Array
+  subclasses (plain and overriding `Symbol.iterator`), and
+  `Array.prototype.values/keys.call(...)` iterators. Further tests cover an
+  uncatchable interrupt inside a leaf for-of loop, and OSR entry on the first
+  invocation into both a for-of loop (catch offset on the stack) and a for-in
+  loop (`osr_entries >= 1`).
+- Recorded design deviation: the roadmap asked for a pristine-prototype guard
+  with deopt. This slice instead revalidates the iterator class, the exact
+  `next` C function, fast-array storage and bounds on every leaf step, and
+  every `for_of_start` goes through the exact helper.
+
 ## Deliberately not in this slice
 
 - `iterator_next`, `iterator_call` and `iterator_get_value_done` are only

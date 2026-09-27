@@ -88,7 +88,7 @@ fn effective_pop(instruction: &Instruction) -> usize {
     }
 }
 
-fn local_index(instruction: &Instruction) -> Option<usize> {
+pub(crate) fn local_index(instruction: &Instruction) -> Option<usize> {
     match instruction.opcode().format() {
         OperandFormat::Local => Some(instruction.operand_u16(1) as usize),
         OperandFormat::Local8 => Some(instruction.operand_u8(1) as usize),
@@ -338,7 +338,10 @@ fn merge_state(
             // entry and initialized on the backedge. The interpreter cell
             // holds the JS_UNINITIALIZED tag in the first case, which is still
             // a tagged value; the join only drops the proof, and every read
-            // of such a binding is a runtime-checked `get_loc_check`.
+            // of such a binding is a `get_loc_check`. Tier 1 keeps that
+            // runtime check; Tier 2 lowers it as a plain load and therefore
+            // separately proves definite initialization before admitting it
+            // (`ir::optimized::prove_lexical_checks`).
             (SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64, SlotKind::Uninitialized)
             | (SlotKind::Uninitialized, SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64) => {
                 SlotKind::Tagged
