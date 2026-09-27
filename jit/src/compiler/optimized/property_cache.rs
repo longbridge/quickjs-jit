@@ -7,10 +7,24 @@ use cranelift_frontend::{FunctionBuilder, Variable};
 
 struct CachedProperty {
     candidate: PropertyCandidate,
+    /// The guarded representation. Every definition that can be observed
+    /// while `valid` (or `dirty`) holds carries exactly this tag.
+    tag: i32,
     value: OptVars,
     data: Variable,
     valid: Variable,
     dirty: Variable,
+}
+
+impl CachedProperty {
+    /// Read a valid (or dirty) cached value. Its tag is a compile-time
+    /// constant: loop-carried tag phis would otherwise survive Cranelift's
+    /// constant-phi removal and keep a redundant tag check in the loop.
+    fn checked_value(&self, builder: &mut FunctionBuilder<'_>) -> OptPair {
+        let payload = builder.use_var(self.value.payload);
+        let tag = builder.ins().iconst(types::I64, i64::from(self.tag));
+        OptPair { payload, tag }
+    }
 }
 
 #[derive(Default)]
@@ -40,6 +54,7 @@ impl PropertyCache {
             *next_var = first.checked_add(5).ok_or(CompileFailure::ResourceLimit)?;
             let entry = CachedProperty {
                 candidate,
+                tag: primitive_tag(candidate.observation.value())?,
                 value: OptVars {
                     payload: Variable::from_u32(first),
                     tag: Variable::from_u32(first + 1),
@@ -83,7 +98,7 @@ impl PropertyCache {
         builder.ins().brif(dirty, commit, &[], done, &[]);
         builder.switch_to_block(commit);
         let data = builder.use_var(entry.data);
-        let value = opt_use(builder, entry.value);
+        let value = entry.checked_value(builder);
         opt_store_at(builder, data, 0, value);
         let no = builder.ins().iconst(types::I8, 0);
         builder.def_var(entry.dirty, no);
@@ -192,7 +207,17 @@ impl PropertyCache {
             builder.set_cold_block(checked);
             builder.ins().brif(tag_ok, checked, &[], deopt, &[]);
             builder.switch_to_block(checked);
-            opt_define(builder, entry.value, current);
+            // The tag was just checked; carry it as a constant so loop-carried
+            // cache values have a provably fixed representation.
+            let checked_tag = builder.ins().iconst(types::I64, i64::from(expected_tag));
+            opt_define(
+                builder,
+                entry.value,
+                OptPair {
+                    payload: current.payload,
+                    tag: checked_tag,
+                },
+            );
             builder.def_var(entry.data, data);
             let yes = builder.ins().iconst(types::I8, 1);
             let no = builder.ins().iconst(types::I8, 0);
@@ -253,6 +278,7 @@ impl PropertyCache {
         access: &PropertyAccessPlan,
         node: &crate::ir::OptimizedNode,
         loop_forwarded: bool,
+        proven_input: Option<crate::ir::ScalarNumericMode>,
         depth: usize,
         provenance: &mut [OptProvenance],
     ) -> Result<usize, CompileFailure> {
@@ -372,7 +398,15 @@ impl PropertyCache {
             let checked = builder.create_block();
             builder.ins().brif(tag_ok, checked, &[], deopt, &[]);
             builder.switch_to_block(checked);
-            opt_define(builder, entry.value, current);
+            let checked_tag = builder.ins().iconst(types::I64, i64::from(expected_tag));
+            opt_define(
+                builder,
+                entry.value,
+                OptPair {
+                    payload: current.payload,
+                    tag: checked_tag,
+                },
+            );
             builder.def_var(entry.data, data);
             let yes = builder.ins().iconst(types::I8, 1);
             builder.def_var(entry.valid, yes);
@@ -384,13 +418,34 @@ impl PropertyCache {
             let input_ok = builder
                 .ins()
                 .icmp_imm(IntCC::Equal, value.tag, i64::from(expected_tag));
-            let commit = builder.create_block();
-            builder.ins().brif(input_ok, commit, &[], deopt, &[]);
-            builder.switch_to_block(commit);
+            // A statically proven input representation (for example a
+            // checked Int32 arithmetic result, whose lowering always carries
+            // JS_TAG_INT) needs no branch in the hot path.
+            let proven = matches!(
+                (proven_input, expected_tag),
+                (Some(crate::ir::ScalarNumericMode::Int32), qjs::JS_TAG_INT)
+                    | (
+                        Some(crate::ir::ScalarNumericMode::Float64),
+                        qjs::JS_TAG_FLOAT64
+                    )
+            );
+            if !proven && opt_known_condition(builder.func, input_ok, 8) != Some(true) {
+                let commit = builder.create_block();
+                builder.ins().brif(input_ok, commit, &[], deopt, &[]);
+                builder.switch_to_block(commit);
+            }
             // This is the semantic store. Recovery may publish it from here
             // onward, but a failing incoming-value guard must retain the prior
             // completed value instead of writing the failed input.
-            opt_define(builder, entry.value, value);
+            let checked_tag = builder.ins().iconst(types::I64, i64::from(expected_tag));
+            opt_define(
+                builder,
+                entry.value,
+                OptPair {
+                    payload: value.payload,
+                    tag: checked_tag,
+                },
+            );
             let yes = builder.ins().iconst(types::I8, 1);
             builder.def_var(entry.dirty, yes);
         }
@@ -402,40 +457,25 @@ impl PropertyCache {
         emit_opt_deopt(builder, env, provenance, depth, node.pc(), guard)?;
         builder.switch_to_block(continuation);
 
-        // Preserve the existing leaf path's stack ownership publication: roots
-        // are represented by non-owning placeholders and primitives by values.
-        let undefined = OptPair {
-            payload: builder.ins().iconst(types::I64, 0),
-            tag: builder
-                .ins()
-                .iconst(types::I64, i64::from(qjs::JS_TAG_UNDEFINED)),
-        };
-        for (index, source) in provenance.iter().take(object_index).enumerate() {
-            let value = if *source == OptProvenance::ImmediatePrimitive {
-                opt_use(builder, env.stack[index])
-            } else {
-                undefined
-            };
-            opt_store(builder, env.stack_base, index, value);
-        }
+        // No stack memory is written on this leaf path. Every live operand is
+        // a borrowed argument/local or an immediate primitive (see
+        // `can_emit_access`), so no owner can be lost, and every observer of
+        // interpreter stack memory republishes it from SSA first: deopt
+        // (`emit_opt_deopt`), ownership helpers (`opt_own_stack_for_exit`
+        // callers) and generic bridges all store the live prefix and set
+        // `stack_top` themselves. Leaving memory and `stack_top` untouched
+        // preserves the invariant that `[stack_base, stack_top)` holds only
+        // values the interpreter may release, which is all an interrupt
+        // unwind can observe.
         let new_depth = if access.store {
             provenance[object_index..depth].fill(OptProvenance::Unknown);
             object_index
         } else {
-            let value = opt_use(builder, entry.value);
+            let value = entry.checked_value(builder);
             opt_define(builder, env.stack[object_index], value);
             provenance[object_index] = OptProvenance::ImmediatePrimitive;
-            opt_store(builder, env.stack_base, object_index, value);
             depth
         };
-        opt_set_stack_top(
-            builder,
-            env.frame,
-            env.stack_base,
-            new_depth,
-            env.pointer_type,
-            env.layout,
-        );
         Ok(new_depth)
     }
 }
@@ -568,6 +608,7 @@ mod tests {
         let cache = PropertyCache {
             entries: vec![CachedProperty {
                 candidate: candidate(),
+                tag: rquickjs_core::qjs::JS_TAG_INT,
                 value: OptVars {
                     payload: Variable::from_u32(0),
                     tag: Variable::from_u32(1),

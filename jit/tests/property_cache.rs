@@ -201,8 +201,18 @@ fn minimum_native_shape_checks(clif: &str) -> Option<usize> {
                 let operation = line.split("  ;").next().unwrap();
                 operation
                     .strip_prefix("store ")
+                    .or_else(|| operation.strip_prefix("store.i32 "))
                     .and_then(|store| store.strip_suffix(", v0"))
-                    .and_then(|value| constants.get(value))
+                    .and_then(|mut value| {
+                        // Constants may be canonicalized into aliases.
+                        for _ in 0..aliases.len() {
+                            let Some(source) = aliases.get(value) else {
+                                break;
+                            };
+                            value = source;
+                        }
+                        constants.get(value)
+                    })
                     .copied()
                     == Some(rquickjs::qjs::JSJitExitKind_JS_JIT_EXIT_DONE as i32)
             }) {
@@ -889,4 +899,115 @@ fn interrupt_observes_committed_fields_and_mutation_invalidates_loop_cache() {
     });
     assert!(jit.metrics().tier2_entries > before.tier2_entries);
     assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+}
+
+#[test]
+fn guarded_property_loop_keeps_its_induction_variable_int32() {
+    // Guarded property leaves cannot reenter JavaScript, so the loop counter
+    // read across them keeps its Int32 seed: no Float64 fallback for `i++`
+    // and an integer loop comparison.
+    let (clif, _) = property_clif(
+        "(function(n,seed,o){o.x=seed;for(let i=0;i<n;i++){o.x=o.x+1;}return o.x})",
+        2,
+        true,
+    );
+    for float_op in ["fcvt_from_sint", "fcmp", "fadd"] {
+        assert!(
+            !clif.contains(float_op),
+            "induction variable fell back to Float64 ({float_op}): {clif}"
+        );
+    }
+    assert!(clif.contains("icmp slt"), "{clif}");
+    assert_eq!(
+        continuing_property_loop_is_field_free(&clif),
+        Ok(()),
+        "{clif}"
+    );
+}
+
+#[test]
+fn specialized_property_loop_counter_overflow_and_float_seed_deoptimize_exactly() {
+    let (_runtime, jit, context) = setup(
+        "globalThis.shared={x:0};function target(o,start,n){
+             for(let i=start;i<=n;i++){o.x=o.x+1}return o.x}",
+    );
+    warm(&jit, || {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("target").unwrap();
+            let object: Object = ctx.globals().get("shared").unwrap();
+            object.set("x", 0).unwrap();
+            assert_eq!(f.call::<_, i32>((object, 0, 9)).unwrap(), 10);
+        })
+    });
+    let before = jit.metrics();
+    context.with(|ctx| {
+        let f: Function = ctx.globals().get("target").unwrap();
+        let object: Object = ctx.globals().get("shared").unwrap();
+        // `i++` overflows Int32 after the last iteration: the checked update
+        // must deoptimize and let the interpreter finish with a double.
+        object.set("x", 0).unwrap();
+        assert_eq!(
+            f.call::<_, i32>((object.clone(), i32::MAX - 3, i32::MAX))
+                .unwrap(),
+            4
+        );
+        assert_eq!(object.get::<_, i32>("x").unwrap(), 4);
+        object.set("x", 100).unwrap();
+        assert_eq!(f.call::<_, i32>((object.clone(), 0, 4)).unwrap(), 105);
+        // A Float64 seed fails the update's operand check instead of being
+        // truncated by the Int32 update.
+        object.set("x", 0).unwrap();
+        assert_eq!(f.call::<_, i32>((object.clone(), 0.5, 3.0)).unwrap(), 3);
+        assert_eq!(object.get::<_, i32>("x").unwrap(), 3);
+    });
+    assert!(jit.metrics().tier2_entries > before.tier2_entries);
+    assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+}
+
+#[test]
+fn terminating_interrupt_after_unpublished_property_reads_unwinds_cleanly() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    // Property leaves no longer publish their stack operands. A terminating
+    // interrupt at the loop poll must still unwind only releasable values.
+    let (runtime, jit, context) = setup(
+        "globalThis.shared={x:1,y:2};function target(o,n){let s=0;
+             for(let i=0;i<n;i++){s=((i&7)+o.x)+(o.y+(i&3));o.x=(o.x+1)&1023}return s}",
+    );
+    warm(&jit, || {
+        context.with(|ctx| {
+            let f: Function = ctx.globals().get("target").unwrap();
+            let object: Object = ctx.globals().get("shared").unwrap();
+            object.set("x", 1).unwrap();
+            object.set("y", 2).unwrap();
+            assert_eq!(f.call::<_, i32>((object, 3)).unwrap(), 9);
+        })
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        observed.fetch_add(1, Ordering::SeqCst) >= 2
+    })));
+    let before = jit.metrics();
+    context.with(|ctx| {
+        let f: Function = ctx.globals().get("target").unwrap();
+        let object: Object = ctx.globals().get("shared").unwrap();
+        assert!(f.call::<_, i32>((object, 10_000_000)).is_err());
+        let _ = ctx.catch();
+    });
+    runtime.set_interrupt_handler(None);
+    assert!(calls.load(Ordering::SeqCst) > 2);
+    context.with(|ctx| {
+        let f: Function = ctx.globals().get("target").unwrap();
+        let object: Object = ctx.globals().get("shared").unwrap();
+        object.set("x", 1).unwrap();
+        object.set("y", 2).unwrap();
+        assert_eq!(f.call::<_, i32>((object.clone(), 3)).unwrap(), 9);
+        assert_eq!(object.get::<_, i32>("x").unwrap(), 4);
+    });
+    assert!(jit.metrics().tier2_entries > before.tier2_entries);
+    assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+    runtime.run_gc();
 }

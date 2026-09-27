@@ -494,6 +494,20 @@ impl OptimizedIr {
     pub fn scalar_graph(&self) -> &super::ScalarGraph {
         &self.scalar_graph
     }
+
+    /// Select checked Int32 updates whose loop-carried inputs are proven only
+    /// through frame reads that `preserve` authorizes (for example, planned
+    /// guarded property leaves). The caller must emit exactly those guarded
+    /// lowerings, or fail compilation. Returns the number of selected updates;
+    /// zero leaves the graph untouched.
+    pub(crate) fn specialize_integer_updates_with_preserved_frame_reads(
+        &mut self,
+        preserve: impl Fn(u32) -> bool,
+        work: usize,
+    ) -> usize {
+        self.scalar_graph
+            .specialize_integer_updates_with_preserved_frame_reads(&self.nodes, preserve, work)
+    }
     pub fn nodes(&self) -> &[OptimizedNode] {
         &self.nodes
     }

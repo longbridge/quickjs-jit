@@ -231,6 +231,7 @@ mod array_cache;
 /// subset and attaches exact guard/deopt metadata. Unsupported semantics reject
 /// the tier and leave Tier 1 installed.
 mod call_guards;
+mod const_canon;
 mod element_address;
 mod frame_inline;
 mod property_cache;
@@ -1493,6 +1494,68 @@ fn lower_optimized_machine(
         }
         plan
     };
+    // Guarded property leaves are non-reentrant: each either completes
+    // without running JavaScript or deoptimizes from its exact pre-access
+    // frame state. Frame slots read across them therefore keep their
+    // pre-access identities, so loop-carried Int32 induction variables (for
+    // example `i++` in a loop that updates object fields) no longer degrade to
+    // mixed Int32/Float64 updates. Selected updates keep their operand check
+    // and overflow deopt; the proof only removes redundant checks and the
+    // Float64 fallback. The premise is the final plan: every preserved site
+    // must be lowered through the planned guarded leaf or compilation fails.
+    let property_specialized_ir;
+    let property_numeric;
+    let (ir, scalar_numeric) = if !int32_loop
+        && side_path.is_none()
+        && !property_plan.candidates().is_empty()
+        && ir.blocks().iter().any(|block| block.is_loop_header())
+    {
+        let preserved = |id: u32| {
+            property_plan.access(id).is_some()
+                || ir.nodes().get(id as usize).is_some_and(|node| {
+                    matches!(
+                        node.kind(),
+                        crate::ir::OptimizedNodeKind::GuardNumeric { .. }
+                    )
+                })
+        };
+        if let Some(control) = control {
+            control.check_ir_bytes(
+                ir.scalar_graph()
+                    .allocated_bytes()
+                    .saturating_mul(2)
+                    .saturating_add(ir.nodes().len().saturating_mul(128)),
+            )?;
+        }
+        let mut candidate = ir.clone();
+        let work = ir.scalar_graph().values().len().saturating_mul(128);
+        if candidate.specialize_integer_updates_with_preserved_frame_reads(preserved, work) != 0 {
+            property_numeric = candidate
+                .scalar_graph()
+                .proven_numeric_values_with_preserved_frame_reads(
+                    candidate.nodes(),
+                    |index| {
+                        usize::from(index) < usize::from(shape.arguments())
+                            && matches!(
+                                specialization
+                                    .arguments
+                                    .get(usize::from(index))
+                                    .copied()
+                                    .unwrap_or(specialization.entry),
+                                EntryRepresentation::Int32
+                            )
+                    },
+                    preserved,
+                    work,
+                );
+            property_specialized_ir = candidate;
+            (&property_specialized_ir, property_numeric)
+        } else {
+            (ir, scalar_numeric)
+        }
+    } else {
+        (ir, scalar_numeric)
+    };
     let array_site = |pc| {
         specialization
             .arrays
@@ -2752,6 +2815,15 @@ fn lower_optimized_machine(
                                         access,
                                         node,
                                         loop_forwarded_property_sites.contains(&node.id()),
+                                        match ir.scalar_graph().heap_operation(node.id()) {
+                                            Some(crate::ir::ScalarHeapOperation::PutProperty {
+                                                value,
+                                                ..
+                                            }) if access.store => {
+                                                scalar_numeric.get(value.index()).copied().flatten()
+                                            }
+                                            _ => None,
+                                        },
                                         depth,
                                         &mut stack_provenance,
                                     )?;
@@ -3852,9 +3924,15 @@ fn lower_optimized_machine(
                                 let allowed = builder.ins().bor(numeric, empty);
                                 let truth_block = builder.create_block();
                                 let deopt_block = builder.create_block();
-                                builder
-                                    .ins()
-                                    .brif(allowed, truth_block, &[], deopt_block, &[]);
+                                if opt_known_condition(builder.func, allowed, 8) == Some(true) {
+                                    // A comparison result: the unreachable
+                                    // recovery block is still emitted below.
+                                    builder.ins().jump(truth_block, &[]);
+                                } else {
+                                    builder
+                                        .ins()
+                                        .brif(allowed, truth_block, &[], deopt_block, &[]);
+                                }
                                 builder.switch_to_block(deopt_block);
                                 property_cache.flush(&mut builder);
                                 for (index, vars) in arguments.iter().enumerate() {
@@ -4096,6 +4174,11 @@ fn lower_optimized_machine(
             explicit_sret_return,
         );
     }
+    // Let Cranelift's identity-based constant-phi pass see loop-invariant
+    // tags/flags that every edge sets to the same constant. The finalizer
+    // canonicalizes again after its own cleanups; this bounded pre-pass keeps
+    // the Tier 2 lowering's guarantee independent of that pipeline.
+    const_canon::canonicalize_integer_constants(&mut clif, 4096);
     // Helpers that validate a stack map (CALL, GET_GLOBAL, GET_PROPERTY, ...)
     // are always invoked with map 0, so an artifact that calls anything must
     // publish the single helper stack map the runtime checks that id against.
@@ -5214,8 +5297,10 @@ fn emit_opt_deopt(
 
 /// Branches to a fresh pass block when `condition` holds and otherwise to an
 /// exact deoptimization exit; the builder is left positioned on the pass
-/// block. The returned deopt block may be reused by later checks of the same
-/// instruction.
+/// block. A condition that the emitted instructions already prove true (for
+/// example a tag test of a constant tag carried by a guarded value) emits no
+/// branch or exit: Cranelift folds such tests to constants but never removes
+/// the resulting constant branches from the hot path.
 fn emit_opt_guard_branch(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     env: &OptEnv<'_>,
@@ -5224,8 +5309,11 @@ fn emit_opt_guard_branch(
     pc: u32,
     guard: u32,
     condition: cranelift_codegen::ir::Value,
-) -> Result<cranelift_codegen::ir::Block, CompileFailure> {
+) -> Result<(), CompileFailure> {
     use cranelift_codegen::ir::InstBuilder;
+    if opt_known_condition(builder.func, condition, 8) == Some(true) {
+        return Ok(());
+    }
     let pass = builder.create_block();
     let deopt = builder.create_block();
     // Deoptimization exits are cold: keep them out of the hot fallthrough
@@ -5235,7 +5323,88 @@ fn emit_opt_guard_branch(
     builder.switch_to_block(deopt);
     emit_opt_deopt(builder, env, provenance, depth, pc, guard)?;
     builder.switch_to_block(pass);
-    Ok(deopt)
+    Ok(())
+}
+
+/// Evaluates a canonical 0/1 boolean built only from `iconst 0/1`,
+/// `icmp_imm eq/ne` of a constant and `band`/`bor` of such booleans. `None` means "not statically known";
+/// callers must then emit the dynamic check. `fuel` bounds the recursion.
+fn opt_known_condition(
+    func: &cranelift_codegen::ir::Function,
+    value: cranelift_codegen::ir::Value,
+    fuel: u32,
+) -> Option<bool> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstructionData, Opcode, ValueDef};
+    let fuel = fuel.checked_sub(1)?;
+    let ValueDef::Result(inst, 0) = func.dfg.value_def(func.dfg.resolve_aliases(value)) else {
+        return None;
+    };
+    let constant = |value: cranelift_codegen::ir::Value| -> Option<i64> {
+        let value = func.dfg.resolve_aliases(value);
+        let ValueDef::Result(inst, 0) = func.dfg.value_def(value) else {
+            return None;
+        };
+        match func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => {
+                let bits = func.dfg.value_type(value).bits();
+                let raw = imm.bits();
+                Some(if bits >= 64 {
+                    raw
+                } else {
+                    raw & ((1i64 << bits) - 1)
+                })
+            }
+            _ => None,
+        }
+    };
+    match func.dfg.insts[inst] {
+        InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            ..
+        } => match constant(value)? {
+            // Only canonical booleans: band/bor below are bitwise.
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        },
+        InstructionData::IntCompareImm {
+            opcode: Opcode::IcmpImm,
+            cond,
+            arg,
+            imm,
+        } => {
+            let bits = func.dfg.value_type(arg).bits();
+            let lhs = constant(arg)?;
+            let rhs = if bits >= 64 {
+                imm.bits()
+            } else {
+                imm.bits() & ((1i64 << bits) - 1)
+            };
+            match cond {
+                IntCC::Equal => Some(lhs == rhs),
+                IntCC::NotEqual => Some(lhs != rhs),
+                _ => None,
+            }
+        }
+        InstructionData::Binary {
+            opcode: opcode @ (Opcode::Band | Opcode::Bor),
+            args: [lhs, rhs],
+        } => {
+            let lhs = opt_known_condition(func, lhs, fuel);
+            let rhs = opt_known_condition(func, rhs, fuel);
+            match (opcode, lhs, rhs) {
+                (Opcode::Band, Some(false), _) | (Opcode::Band, _, Some(false)) => Some(false),
+                (Opcode::Band, Some(true), Some(true)) => Some(true),
+                (Opcode::Bor, Some(true), _) | (Opcode::Bor, _, Some(true)) => Some(true),
+                (Opcode::Bor, Some(false), Some(false)) => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn opt_tag_is(
