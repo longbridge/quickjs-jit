@@ -15,7 +15,7 @@ use cranelift_codegen::{
     ir::{
         condcodes::{FloatCC, IntCC},
         types, AbiParam, ArgumentPurpose, Block, Function, InstBuilder, MemFlags, Signature,
-        SourceLoc, StackSlotData, StackSlotKind, TrapCode, Value,
+        SourceLoc, StackSlot, StackSlotData, StackSlotKind, TrapCode, Value,
     },
     isa::{unwind::UnwindInfo as CraneliftUnwindInfo, OwnedTargetIsa, TargetIsa},
     settings::{self, Configurable},
@@ -99,6 +99,496 @@ struct HelperLowering<'a> {
     /// Landing pad of the innermost try region around the instruction being
     /// lowered; `None` exits to the interpreter with the pending exception.
     exception_target: std::cell::Cell<Option<Block>>,
+    element_layout: crate::abi::ElementLayout,
+    object_fast: Option<ObjectFastPaths>,
+}
+
+/// Addresses of the versioned object/array leaves (`JSJitObjectAPI`). Every
+/// leaf either completes the interpreter's exact effect or misses without an
+/// observable effect, never throws and never reenters the VM, so generated
+/// code keeps the generic helper sequence as the fallback of every hit test.
+#[derive(Clone, Copy, Debug)]
+struct ObjectFastPaths {
+    literal: usize,
+    retain_shape: usize,
+    array_method: usize,
+    array_push: usize,
+    array_push_method: usize,
+    max_literal_fields: usize,
+}
+
+impl ObjectFastPaths {
+    fn from_api(api: &qjs::JSJitObjectAPI) -> Option<Self> {
+        Some(Self {
+            literal: api.literal? as usize,
+            retain_shape: api.retain_shape? as usize,
+            array_method: api.array_method? as usize,
+            array_push: api.array_push? as usize,
+            array_push_method: api.array_push_method? as usize,
+            max_literal_fields: usize::try_from(api.max_literal_fields).ok()?,
+        })
+    }
+}
+
+/// A straight-line instruction range with a leaf fast path. The hit path
+/// jumps to `join`; the unchanged instructions `start..=end` are lowered in
+/// the fallback block, which then jumps to `join` as well.
+#[derive(Clone, Copy, Debug)]
+struct FusedRegion {
+    end: usize,
+    join: Block,
+    /// Stack slot of a literal built on the fallback path whose final shape
+    /// is retained so later executions hit the literal leaf.
+    retain_literal: Option<usize>,
+}
+
+fn literal_operand(op: &IrOp, argument_count: usize, local_count: usize) -> Option<LiteralValue> {
+    match *op {
+        IrOp::Push(constant) if constant.tag >= 0 => Some(LiteralValue::Constant(constant)),
+        IrOp::GetArgument(index) if usize::from(index) < argument_count => {
+            Some(LiteralValue::Argument(index))
+        }
+        IrOp::GetLocal(index) | IrOp::GetLocalChecked(index)
+            if usize::from(index) < local_count =>
+        {
+            Some(LiteralValue::Local(index))
+        }
+        _ => None,
+    }
+}
+
+fn literal_operand_pair(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    value: LiteralValue,
+) -> Result<Pair, CompileFailure> {
+    Ok(match value {
+        LiteralValue::Constant(constant) => constant_pair(builder, constant),
+        LiteralValue::Argument(argument) => use_pair(
+            builder,
+            *helpers
+                .arguments
+                .get(usize::from(argument))
+                .ok_or(CompileFailure::InvalidArtifact)?,
+        ),
+        LiteralValue::Local(local) => use_pair(
+            builder,
+            *helpers
+                .locals
+                .get(usize::from(local))
+                .ok_or(CompileFailure::InvalidArtifact)?,
+        ),
+    })
+}
+
+/// `receiver.method(value)` where the receiver and the single argument are
+/// side-effect-free reads: `(receiver, atom, value, end)`.
+fn array_push_statement_pattern(
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    argument_count: usize,
+    local_count: usize,
+) -> Option<(LiteralValue, u32, LiteralValue, usize)> {
+    let receiver = match literal_operand(&instructions.get(start)?.op, argument_count, local_count)?
+    {
+        LiteralValue::Constant(_) => return None,
+        receiver => receiver,
+    };
+    let IrOp::GetPropertyKeep(atom) = instructions.get(start + 1)?.op else {
+        return None;
+    };
+    let value = literal_operand(
+        &instructions.get(start + 2)?.op,
+        argument_count,
+        local_count,
+    )?;
+    matches!(
+        instructions.get(start + 3)?.op,
+        IrOp::Call {
+            argc: 1,
+            has_this: true
+        }
+    )
+    .then_some((receiver, atom, value, start + 3))
+}
+
+fn emit_fused_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    depth: usize,
+) -> Result<Option<FusedRegion>, CompileFailure> {
+    let argument_count = helpers.arguments.len();
+    let local_count = helpers.locals.len();
+    if let Some((atoms, values, end)) = object_literal_pattern(
+        instructions,
+        start,
+        argument_count,
+        local_count,
+        fast.max_literal_fields,
+    ) {
+        if depth + usize::from(!values.is_empty()) >= helpers.stack.len() {
+            return Ok(None);
+        }
+        let join = emit_object_literal_fast_path(builder, helpers, fast, &atoms, &values, depth)?;
+        return Ok(Some(FusedRegion {
+            end,
+            join,
+            retain_literal: Some(depth),
+        }));
+    }
+    if let Some((receiver, atom, value, end)) =
+        array_push_statement_pattern(instructions, start, argument_count, local_count)
+    {
+        if depth + 2 >= helpers.stack.len() {
+            return Ok(None);
+        }
+        let join = emit_array_push_statement_fast_path(
+            builder, helpers, fast, receiver, atom, value, depth,
+        )?;
+        return Ok(Some(FusedRegion {
+            end,
+            join,
+            retain_literal: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// Whole-statement `array.push(value)`: one leaf performs the exact
+/// `get_field2` lookup and the built-in push without materializing the
+/// receiver, method or argument references (no DUP/FREE helpers).
+#[allow(clippy::too_many_arguments)]
+fn emit_array_push_statement_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    receiver: LiteralValue,
+    atom: u32,
+    value: LiteralValue,
+    depth: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let receiver = literal_operand_pair(builder, helpers, receiver)?;
+    let value = literal_operand_pair(builder, helpers, value)?;
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let fallback = builder.create_block();
+    let join = builder.create_block();
+    let is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    let class_check = builder.create_block();
+    builder
+        .ins()
+        .brif(is_object, class_check, &[], fallback, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], fallback, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let value_size =
+        i32::try_from(mem::size_of::<qjs::JSValue>()).map_err(|_| CompileFailure::ResourceLimit)?;
+    let scratch = object_scratch(builder, 3);
+    for (index, pair) in [receiver, value].into_iter().enumerate() {
+        let offset =
+            value_size * i32::try_from(index).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, scratch, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, scratch, offset + helpers.layout.value_tag);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let receiver_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    let value_address = builder.ins().stack_addr(pointer_type, scratch, value_size);
+    let out_address = builder
+        .ins()
+        .stack_addr(pointer_type, scratch, 2 * value_size);
+    let atom = builder.ins().iconst(types::I32, i64::from(atom));
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_push_method,
+        &[ctx, receiver_address, atom, value_address, out_address],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], fallback, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(fallback);
+    builder.switch_to_block(hit);
+    let length = Pair {
+        payload: builder
+            .ins()
+            .stack_load(types::I64, scratch, 2 * value_size),
+        tag: builder.ins().stack_load(
+            types::I64,
+            scratch,
+            2 * value_size + helpers.layout.value_tag,
+        ),
+    };
+    define_pair(builder, helpers.stack[depth], length);
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    define_pair(builder, helpers.stack[depth + 1], undefined);
+    define_pair(builder, helpers.stack[depth + 2], undefined);
+    builder.ins().jump(join, &[]);
+    builder.switch_to_block(fallback);
+    Ok(join)
+}
+
+/// After the generic literal sequence, retain the object's final shape.
+fn emit_retain_literal_shape(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    object_index: usize,
+) -> Result<(), CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let object = use_pair(builder, helpers.stack[object_index]);
+    let scratch = object_scratch(builder, 1);
+    builder.ins().stack_store(object.payload, scratch, 0);
+    builder
+        .ins()
+        .stack_store(object.tag, scratch, helpers.layout.value_tag);
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let object_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.retain_shape,
+        &[ctx, object_address],
+    );
+    Ok(())
+}
+
+/// One side-effect-free value of a fused object literal. Each operand is read
+/// in place and duplicated by the leaf, exactly like the bytecode push would.
+#[derive(Clone, Copy, Debug)]
+enum LiteralValue {
+    Constant(TaggedValue),
+    Argument(u16),
+    Local(u16),
+}
+
+/// `object` followed by `(pure push, define_field)*`, all inside one block.
+/// Returns the atoms/values and the index of the last fused instruction.
+fn object_literal_pattern(
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    argument_count: usize,
+    local_count: usize,
+    max_fields: usize,
+) -> Option<(Vec<u32>, Vec<LiteralValue>, usize)> {
+    if !matches!(instructions.get(start)?.op, IrOp::NewObject) {
+        return None;
+    }
+    let mut atoms = Vec::new();
+    let mut values = Vec::new();
+    let mut end = start;
+    while atoms.len() < max_fields {
+        let (Some(value), Some(define)) = (instructions.get(end + 1), instructions.get(end + 2))
+        else {
+            break;
+        };
+        let IrOp::DefineProperty(atom) = define.op else {
+            break;
+        };
+        let Some(value) = literal_operand(&value.op, argument_count, local_count) else {
+            break;
+        };
+        if atom == 0 || atoms.contains(&atom) {
+            break;
+        }
+        atoms.push(atom);
+        values.push(value);
+        end += 2;
+    }
+    // QuickJS keeps only the final hashed shape of a literal alive (the
+    // transition shapes are mutated in place), so a prefix of a longer
+    // literal would miss on every execution. Fuse complete literals only.
+    literal_is_complete(instructions, end).then_some((atoms, values, end))
+}
+
+/// Bytecode stack effect `(pops, pushes)` of the Tier 1 operations that may
+/// follow a literal. `None` stops the completeness scan conservatively.
+fn literal_scan_stack_effect(op: &IrOp) -> Option<(usize, usize)> {
+    Some(match *op {
+        IrOp::Nop => (0, 0),
+        IrOp::Push(_)
+        | IrOp::ResolveConstant(_)
+        | IrOp::ResolveAtom(_)
+        | IrOp::GetGlobal(_)
+        | IrOp::NewObject
+        | IrOp::GetArgument(_)
+        | IrOp::GetLocal(_)
+        | IrOp::GetLocalChecked(_) => (0, 1),
+        IrOp::GetLocalPair => (0, 2),
+        IrOp::NewArrayFrom(count) => (usize::from(count), 1),
+        IrOp::GetProperty(_) | IrOp::ToPropertyKey | IrOp::Unary(_) => (1, 1),
+        IrOp::GetPropertyKeep(_) => (1, 2),
+        IrOp::SetProperty(_) => (2, 0),
+        IrOp::DefineProperty(_) | IrOp::GetElement | IrOp::Binary(_) => (2, 1),
+        IrOp::SetElement => (3, 0),
+        IrOp::DefineElement => (3, 1),
+        IrOp::Call { argc, has_this } => (usize::from(argc) + 1 + usize::from(has_this), 1),
+        IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => (1, usize::from(keep)),
+        IrOp::Drop => (1, 0),
+        _ => return None,
+    })
+}
+
+/// True when the object produced by the literal ending at `end` is consumed
+/// in this block before another definition could target it.
+fn literal_is_complete(instructions: &[crate::ir::IrInstruction], end: usize) -> bool {
+    // Depths are relative to the literal object's slot, which sits at 0.
+    let mut depth = 1_usize;
+    for instruction in instructions.iter().skip(end + 1).take(64) {
+        match instruction.op {
+            IrOp::DefineProperty(_) if depth == 2 => return false,
+            IrOp::DefineElement if depth == 3 => return false,
+            _ => {}
+        }
+        let Some((pops, pushes)) = literal_scan_stack_effect(&instruction.op) else {
+            return true;
+        };
+        if pops >= depth {
+            return true;
+        }
+        depth = depth - pops + pushes;
+    }
+    false
+}
+
+fn object_scratch(builder: &mut FunctionBuilder<'_>, values: usize) -> StackSlot {
+    let bytes = values.max(1) * mem::size_of::<qjs::JSValue>();
+    builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        u32::try_from(bytes).expect("bounded scratch"),
+        3,
+    ))
+}
+
+fn emit_object_leaf_call(
+    builder: &mut FunctionBuilder<'_>,
+    pointer_type: cranelift_codegen::ir::Type,
+    target: usize,
+    params: &[Value],
+) -> Value {
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    for param in params {
+        signature
+            .params
+            .push(AbiParam::new(builder.func.dfg.value_type(*param)));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    let signature = builder.import_signature(signature);
+    let target = builder.ins().iconst(pointer_type, target as i64);
+    let call = emit_external_call(builder, signature, target, params, pointer_type, None, None);
+    builder.inst_results(call)[0]
+}
+
+/// Emit the literal leaf before the generic `object`/`define_field` sequence.
+/// On a hit the fused result is installed and control jumps to the returned
+/// join block; on a miss the builder is left in the fallback block, where the
+/// caller lowers the unchanged instruction sequence and then jumps to join.
+#[allow(clippy::too_many_arguments)]
+fn emit_object_literal_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    atoms: &[u32],
+    values: &[LiteralValue],
+    depth: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let value_slot = object_scratch(builder, values.len());
+    let out_slot = object_scratch(builder, 1);
+    let atom_slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        u32::try_from(atoms.len().max(1) * 4).map_err(|_| CompileFailure::ResourceLimit)?,
+        2,
+    ));
+    for (index, (atom, value)) in atoms.iter().zip(values).enumerate() {
+        let pair = literal_operand_pair(builder, helpers, *value)?;
+        let offset = i32::try_from(index * mem::size_of::<qjs::JSValue>())
+            .map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, value_slot, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, value_slot, offset + helpers.layout.value_tag);
+        let atom = builder.ins().iconst(types::I32, i64::from(*atom));
+        let atom_offset = i32::try_from(index * 4).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(atom, atom_slot, atom_offset);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let atoms_address = builder.ins().stack_addr(pointer_type, atom_slot, 0);
+    let values_address = builder.ins().stack_addr(pointer_type, value_slot, 0);
+    let count = builder.ins().iconst(
+        types::I32,
+        i64::try_from(atoms.len()).map_err(|_| CompileFailure::ResourceLimit)?,
+    );
+    let out_address = builder.ins().stack_addr(pointer_type, out_slot, 0);
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.literal,
+        &[ctx, atoms_address, values_address, count, out_address],
+    );
+    let hit = builder.create_block();
+    let fallback = builder.create_block();
+    let join = builder.create_block();
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], fallback, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(fallback);
+    builder.switch_to_block(hit);
+    let object = Pair {
+        payload: builder.ins().stack_load(types::I64, out_slot, 0),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, out_slot, helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[depth], object);
+    if !values.is_empty() {
+        let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+        define_pair(builder, helpers.stack[depth + 1], undefined);
+    }
+    builder.ins().jump(join, &[]);
+    builder.switch_to_block(fallback);
+    Ok(join)
 }
 
 impl HelperLowering<'_> {
@@ -520,9 +1010,9 @@ impl BaselineCompiler {
         let layout = FrameLayout::validated(
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
-        let element_layout = crate::abi::AbiInfo::linked()
-            .map_err(|_| CompileFailure::InvalidArtifact)?
-            .element_layout();
+        let abi = crate::abi::AbiInfo::linked().map_err(|_| CompileFailure::InvalidArtifact)?;
+        let element_layout = abi.element_layout();
+        let object_fast = ObjectFastPaths::from_api(abi.object_api());
         let ir = match policy {
             CompilePolicy::AdvertisedOnly => BaselineIr::translate(function)?,
             #[cfg(feature = "test-support")]
@@ -567,6 +1057,7 @@ impl BaselineCompiler {
                 GuardExit::Retry,
                 direct_calls,
                 properties,
+                object_fast,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -3060,6 +3551,7 @@ fn lower_function(
     _guard_exit: GuardExit,
     direct_calls: &[BaselineDirectCallSite],
     properties: &[BaselinePropertySite],
+    object_fast: Option<ObjectFastPaths>,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -3207,6 +3699,8 @@ fn lower_function(
         layout,
         reload_captured_slots: creates_closures(ir),
         exception_target: std::cell::Cell::new(None),
+        element_layout,
+        object_fast,
     };
     // One landing pad per handler: every exceptional edge of its try region
     // publishes the exact owned stack and enters it.
@@ -3242,7 +3736,20 @@ fn lower_function(
         let mut terminated = false;
         let mut entered_osr_continuation = false;
         let mut previous_effectful_op_was_boolean = false;
-        for instruction in &block.instructions {
+        let mut fused: Option<FusedRegion> = None;
+        for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+            if fused.is_none() {
+                if let Some(fast) = object_fast {
+                    fused = emit_fused_fast_path(
+                        builder,
+                        &helper_lowering,
+                        fast,
+                        &block.instructions,
+                        instruction_index,
+                        depth,
+                    )?;
+                }
+            }
             let mut helper_states = instruction.helper_states.iter().copied();
             let prior_op_was_boolean = previous_effectful_op_was_boolean;
             if !matches!(
@@ -4554,9 +5061,26 @@ fn lower_function(
             if helper_states.next().is_some() {
                 return Err(CompileFailure::InvalidArtifact);
             }
+            if let Some(region) = fused {
+                if instruction_index == region.end {
+                    if terminated {
+                        return Err(CompileFailure::InvalidArtifact);
+                    }
+                    if let (Some(object_index), Some(fast)) = (region.retain_literal, object_fast) {
+                        emit_retain_literal_shape(builder, &helper_lowering, fast, object_index)?;
+                    }
+                    builder.ins().jump(region.join, &[]);
+                    builder.seal_block(region.join);
+                    builder.switch_to_block(region.join);
+                    fused = None;
+                }
+            }
             if terminated {
                 break;
             }
+        }
+        if fused.is_some() {
+            return Err(CompileFailure::InvalidArtifact);
         }
         if !terminated {
             if let Some(next) = ir.blocks.get(block_index + 1) {
@@ -5532,10 +6056,18 @@ fn lower_get_property_keep(
         .ok_or(CompileFailure::InvalidArtifact)?;
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let output = flat_stack_slot(helpers.ir, *depth)?;
+    let state = next_helper_state(states)?;
+    // `receiver.method` on a fast Array whose lookup resolves to a plain data
+    // property of the realm's Array.prototype (for example `push`): the leaf
+    // returns the duplicated value without running the generic lookup helper.
+    let joined = helpers
+        .object_fast
+        .map(|fast| emit_array_method_fast_path(builder, helpers, fast, object_index, *depth, atom))
+        .transpose()?;
     helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
-        next_helper_state(states)?,
+        state,
         *depth,
         *depth,
         &[output, object, atom],
@@ -5547,8 +6079,187 @@ fn lower_get_property_keep(
         *depth,
         helpers.layout,
     );
+    if let Some(joined) = joined {
+        builder.ins().jump(joined, &[]);
+        builder.seal_block(joined);
+        builder.switch_to_block(joined);
+    }
     *depth += 1;
     helpers.set_depth(builder, *depth)
+}
+
+/// Inline fast-Array class test followed by the `array_method` leaf. Leaves
+/// the builder in the generic block and returns the join block.
+fn emit_array_method_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    object_index: usize,
+    output_index: usize,
+    atom: u32,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let receiver = use_pair(builder, helpers.stack[object_index]);
+    let class_check = builder.create_block();
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    builder
+        .ins()
+        .brif(is_object, class_check, &[], generic, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], generic, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let scratch = object_scratch(builder, 2);
+    builder.ins().stack_store(receiver.payload, scratch, 0);
+    builder
+        .ins()
+        .stack_store(receiver.tag, scratch, helpers.layout.value_tag);
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let receiver_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    let out_offset =
+        i32::try_from(mem::size_of::<qjs::JSValue>()).map_err(|_| CompileFailure::ResourceLimit)?;
+    let out_address = builder.ins().stack_addr(pointer_type, scratch, out_offset);
+    let atom_value = builder.ins().iconst(types::I32, i64::from(atom));
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_method,
+        &[ctx, receiver_address, atom_value, out_address],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], generic, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(generic);
+    builder.switch_to_block(hit);
+    let method = Pair {
+        payload: builder.ins().stack_load(types::I64, scratch, out_offset),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, scratch, out_offset + helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[output_index], method);
+    builder.ins().jump(joined, &[]);
+    builder.switch_to_block(generic);
+    Ok(joined)
+}
+
+/// `Array.prototype.push` with one argument: the leaf mirrors
+/// `js_array_push`'s fast-array path after verifying the exact built-in
+/// function, and misses (generic CALL) on anything else. All inputs remain
+/// borrowed, so the caller's interpreter-order cleanup is shared by both paths.
+#[allow(clippy::too_many_arguments)]
+fn emit_array_push_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    function_index: usize,
+    this_index: usize,
+    argument_index: usize,
+    output_index: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let function = use_pair(builder, helpers.stack[function_index]);
+    let receiver = use_pair(builder, helpers.stack[this_index]);
+    let argument = use_pair(builder, helpers.stack[argument_index]);
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let function_is_object = tag_is(builder, function.tag, qjs::JS_TAG_OBJECT);
+    let receiver_is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    let objects = builder.ins().band(function_is_object, receiver_is_object);
+    let class_check = builder.create_block();
+    builder.ins().brif(objects, class_check, &[], generic, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    // Only Array receivers can hit; other method calls go straight to CALL.
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], generic, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let value_size = mem::size_of::<qjs::JSValue>();
+    let scratch = object_scratch(builder, 4);
+    for (index, pair) in [function, receiver, argument].into_iter().enumerate() {
+        let offset =
+            i32::try_from(index * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, scratch, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, scratch, offset + helpers.layout.value_tag);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let mut addresses = Vec::with_capacity(4);
+    for index in 0..4 {
+        let offset =
+            i32::try_from(index * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+        addresses.push(builder.ins().stack_addr(pointer_type, scratch, offset));
+    }
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_push,
+        &[ctx, addresses[0], addresses[1], addresses[2], addresses[3]],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], generic, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(generic);
+    builder.switch_to_block(hit);
+    let out_offset = i32::try_from(3 * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+    let length = Pair {
+        payload: builder.ins().stack_load(types::I64, scratch, out_offset),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, scratch, out_offset + helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[output_index], length);
+    builder.ins().jump(joined, &[]);
+    builder.switch_to_block(generic);
+    Ok(joined)
 }
 
 fn lower_set_property(
@@ -6924,6 +7635,20 @@ fn lower_call(
         builder.switch_to_block(joined);
         direct_hit = Some(builder.block_params(joined)[0]);
     } else {
+        let push_joined = match helpers.object_fast {
+            Some(fast) if has_this && !is_constructor && argc == 1 => {
+                Some(emit_array_push_fast_path(
+                    builder,
+                    helpers,
+                    fast,
+                    function_index,
+                    this_index,
+                    argv_index,
+                    output_index,
+                )?)
+            }
+            _ => None,
+        };
         helpers.invoke(
             builder,
             if is_constructor {
@@ -6950,6 +7675,11 @@ fn lower_call(
             helpers.layout,
         );
         clear_reloaded_output(builder, helpers, output_index)?;
+        if let Some(joined) = push_joined {
+            builder.ins().jump(joined, &[]);
+            builder.seal_block(joined);
+            builder.switch_to_block(joined);
+        }
     }
     // CALL borrows every input. The bytecode stack effect is separate and is
     // implemented in QuickJS interpreter order, clearing primitive inputs

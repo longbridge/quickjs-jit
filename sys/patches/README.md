@@ -179,6 +179,23 @@ compiler verify the context layout before generating code. The new
 `JSRuntime` fields are internal (the bundled bindings keep `JSRuntime`
 opaque), so neither the ABI version nor the bindings change.
 
+`0032-object-fast-paths.patch` adds the versioned object table
+(`JS_JitGetObjectAPI`, part of ABI 1.25 whose minor bump 0023 made). Its leaves either complete the interpreter's exact
+effect or miss without an observable effect; none throws, calls user code or
+reenters the VM, so native code keeps the generic helpers as the fallback.
+`literal` builds `{a: v0, ...}` (OP_object plus one OP_define_field per atom)
+from the existing final hashed shape, found directly from the
+`(Object.prototype, atom, JS_PROP_C_W_E)` hash chain, with non-throwing
+allocation and the same allocation-time GC trigger as `JS_NewObjectFromShape`.
+`retain_shape` keeps a generically built literal's final shape in the bounded
+0012 shape cache. `array_method` performs the exact `get_field2` lookup of an
+`Array.prototype` data property on fast arrays; `array_push` and
+`array_push_method` mirror a one-argument call of the built-in
+`Array.prototype.push` (stack check, fast-array path, non-throwing growth).
+The patch also fixes an upstream `js_array_push` fast path that appended at
+`length` when a fast array kept `count < length` after `length` grew, leaving
+uninitialized element slots (a crash in the unmodified interpreter).
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

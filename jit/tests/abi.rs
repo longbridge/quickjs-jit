@@ -812,6 +812,7 @@ fn every_abi_mismatch_is_rejected_before_backend_storage() {
         AbiMismatchFixture::InlineApi,
         AbiMismatchFixture::ArrayApi,
         AbiMismatchFixture::IteratorApi,
+        AbiMismatchFixture::ObjectApi,
     ] {
         assert!(
             AbiMismatchFixture::ALL.contains(&required),

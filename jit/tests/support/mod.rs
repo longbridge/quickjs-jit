@@ -1710,11 +1710,12 @@ pub enum AbiMismatchFixture {
     InlineApi,
     ArrayApi,
     IteratorApi,
+    ObjectApi,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -1734,6 +1735,7 @@ impl AbiMismatchFixture {
         Self::InlineApi,
         Self::ArrayApi,
         Self::IteratorApi,
+        Self::ObjectApi,
         Self::BackendVTableLayout,
     ];
 
@@ -1760,6 +1762,7 @@ impl AbiMismatchFixture {
             Self::InlineApi => AbiMismatch::StructureLayout(AbiStructure::InlineApi),
             Self::ArrayApi => AbiMismatch::StructureLayout(AbiStructure::ArrayApi),
             Self::IteratorApi => AbiMismatch::StructureLayout(AbiStructure::IteratorApi),
+            Self::ObjectApi => AbiMismatch::StructureLayout(AbiStructure::ObjectApi),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }

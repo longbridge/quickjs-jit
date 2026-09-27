@@ -31,6 +31,7 @@ pub enum AbiStructure {
     InlineApi,
     ArrayApi,
     IteratorApi,
+    ObjectApi,
 }
 
 /// Constructors for the authoritative native-to-interpreter exit contract.
@@ -117,6 +118,7 @@ pub struct AbiInfo {
     inline_api: qjs::JSJitInlineAPI,
     array_api: qjs::JSJitArrayAPI,
     iterator_api: qjs::JSJitIteratorAPI,
+    object_api: qjs::JSJitObjectAPI,
 }
 
 /// Runtime-exported, append-only offsets for element fast paths.  QuickJS
@@ -207,6 +209,14 @@ impl AbiInfo {
         &self.iterator_api
     }
 
+    /// Non-throwing, non-reentrant allocation and array-method fast paths.
+    /// Each entry completes the exact interpreter effect or misses without an
+    /// observable effect; callers keep their generic helper as the fallback.
+    #[cfg(feature = "compiler")]
+    pub(crate) const fn object_api(&self) -> &qjs::JSJitObjectAPI {
+        &self.object_api
+    }
+
     #[cfg(feature = "compiler")]
     pub(crate) fn element_layout(&self) -> ElementLayout {
         let raw = self.raw.element_layout;
@@ -250,6 +260,7 @@ impl AbiInfo {
                 inline_api: unsafe { mem::zeroed() },
                 array_api: unsafe { mem::zeroed() },
                 iterator_api: unsafe { mem::zeroed() },
+                object_api: unsafe { mem::zeroed() },
             };
             // Do not resolve native inline addresses against a mismatched
             // main ABI, even when the optional table has a familiar version.
@@ -257,6 +268,7 @@ impl AbiInfo {
             info.inline_api = query_inline_api()?;
             info.array_api = query_array_api()?;
             info.iterator_api = query_iterator_api()?;
+            info.object_api = query_object_api()?;
             Ok(info)
         } else {
             Err(AbiError::QueryFailed(status))
@@ -267,7 +279,8 @@ impl AbiInfo {
         self.validate_main()?;
         validate_inline_api(self.inline_api())?;
         validate_array_api(&self.array_api)?;
-        validate_iterator_api(&self.iterator_api)
+        validate_iterator_api(&self.iterator_api)?;
+        validate_object_api(&self.object_api)
     }
 
     fn validate_main(&self) -> Result<(), AbiError> {
@@ -388,6 +401,7 @@ impl AbiInfo {
             AbiMismatch::StructureLayout(AbiStructure::IteratorApi) => {
                 self.iterator_api.version ^= 1
             }
+            AbiMismatch::StructureLayout(AbiStructure::ObjectApi) => self.object_api.version ^= 1,
             AbiMismatch::BuildFingerprint => self.raw.build_fingerprint ^= 1,
         }
     }
@@ -1121,6 +1135,89 @@ mod iterator_api_tests {
             info.validate(),
             Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
                 AbiStructure::IteratorApi
+            )))
+        );
+    }
+}
+
+fn query_object_api() -> Result<qjs::JSJitObjectAPI, AbiError> {
+    let pointer = unsafe { qjs::JS_JitGetObjectAPI(qjs::QJSJIT_OBJECT_API_VERSION) };
+    if pointer.is_null()
+        || unsafe { core::ptr::addr_of!((*pointer).struct_size).read() }
+            != mem::size_of::<qjs::JSJitObjectAPI>() as u32
+    {
+        return Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ObjectApi,
+        )));
+    }
+    let api = unsafe { pointer.read() };
+    validate_object_api(&api)?;
+    Ok(api)
+}
+
+/// The object table may allocate and trigger QuickJS' allocation-time cycle
+/// collection (C finalizers only). Any other advertised effect, such as a
+/// throw or VM reentry, is incompatible with the leaf call sites.
+fn validate_object_api(api: &qjs::JSJitObjectAPI) -> Result<(), AbiError> {
+    let permitted = qjs::JS_JIT_OBJECT_EFFECT_ALLOCATE | qjs::JS_JIT_OBJECT_EFFECT_COLLECT;
+    if api.struct_size != mem::size_of::<qjs::JSJitObjectAPI>() as u32
+        || api.version != qjs::QJSJIT_OBJECT_API_VERSION
+        || api.effects & !permitted != 0
+        || api.max_literal_fields != qjs::JS_JIT_OBJECT_LITERAL_MAX_FIELDS
+        || api.literal.is_none()
+        || api.retain_shape.is_none()
+        || api.array_method.is_none()
+        || api.array_push.is_none()
+        || api.array_push_method.is_none()
+    {
+        Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ObjectApi,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod object_api_tests {
+    use super::*;
+
+    fn linked_table() -> qjs::JSJitObjectAPI {
+        let pointer = unsafe { qjs::JS_JitGetObjectAPI(qjs::QJSJIT_OBJECT_API_VERSION) };
+        assert!(!pointer.is_null());
+        unsafe { *pointer }
+    }
+
+    #[test]
+    fn object_api_is_exactly_versioned_bounded_and_complete() {
+        let valid = linked_table();
+        assert!(validate_object_api(&valid).is_ok());
+        assert!(unsafe { qjs::JS_JitGetObjectAPI(0) }.is_null());
+        for field in 0..9 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.struct_size -= 1,
+                1 => invalid.version += 1,
+                2 => invalid.effects |= 1 << 8,
+                3 => invalid.max_literal_fields += 1,
+                4 => invalid.literal = None,
+                5 => invalid.retain_shape = None,
+                6 => invalid.array_method = None,
+                7 => invalid.array_push_method = None,
+                _ => invalid.array_push = None,
+            }
+            assert!(validate_object_api(&invalid).is_err(), "field {field}");
+        }
+    }
+
+    #[test]
+    fn object_table_validation_is_part_of_the_main_abi_contract() {
+        let mut info = AbiInfo::linked().unwrap();
+        info.object_api.array_push = None;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::ObjectApi
             )))
         );
     }
