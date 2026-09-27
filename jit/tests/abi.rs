@@ -574,7 +574,7 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
 fn helper_abi_fields_are_append_only_tails() {
     use rquickjs_core::qjs;
 
-    assert_eq!(qjs::QJSJIT_ABI_MINOR, 24);
+    assert_eq!(qjs::QJSJIT_ABI_MINOR, 25);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MAJOR, 1);
     assert_eq!(qjs::QJSJIT_RUNTIME_API_MINOR, 9);
     assert_eq!(qjs::QJSJIT_HELPER_ABI_VERSION, 1);

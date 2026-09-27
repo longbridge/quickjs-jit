@@ -113,10 +113,70 @@ fn artifact_environment(
     }
 }
 
+/// Backend-owned ABI 1.25 fast-entry state shared with QuickJS.
+///
+/// QuickJS reads `epoch` and increments the counters with plain stores on
+/// the runtime thread while executing callback-free native calls. Rust only
+/// loads them, so a reader on another thread may observe a stale count. The
+/// allocation outlives the attached backend, which keeps one `Arc` clone.
+#[repr(C)]
+#[derive(Debug)]
+struct FastEntryShared {
+    struct_size: u32,
+    reserved: u32,
+    epoch: AtomicU64,
+    entries: AtomicU64,
+    exits: AtomicU64,
+    optimized_entries: AtomicU64,
+}
+
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    use rquickjs_core::qjs::JSJitFastEntryState as Raw;
+    assert!(size_of::<FastEntryShared>() == size_of::<Raw>());
+    assert!(align_of::<FastEntryShared>() >= align_of::<Raw>());
+    assert!(offset_of!(FastEntryShared, epoch) == offset_of!(Raw, epoch));
+    assert!(offset_of!(FastEntryShared, entries) == offset_of!(Raw, entries));
+    assert!(offset_of!(FastEntryShared, exits) == offset_of!(Raw, exits));
+    assert!(offset_of!(FastEntryShared, optimized_entries) == offset_of!(Raw, optimized_entries));
+};
+
+impl FastEntryShared {
+    fn new(epoch: u64) -> Self {
+        Self {
+            struct_size: core::mem::size_of::<rquickjs_core::qjs::JSJitFastEntryState>() as u32,
+            reserved: 0,
+            epoch: AtomicU64::new(epoch),
+            entries: AtomicU64::new(0),
+            exits: AtomicU64::new(0),
+            optimized_entries: AtomicU64::new(0),
+        }
+    }
+
+    /// The counters and epoch are atomics, so QuickJS may update them through
+    /// this pointer while Rust holds shared references.
+    /// Unused by targets without the native production backend.
+    #[allow(dead_code)]
+    fn as_raw(&self) -> *mut rquickjs_core::qjs::JSJitFastEntryState {
+        (self as *const Self).cast_mut().cast()
+    }
+
+    /// Adds callback-free executions to a published snapshot.
+    fn add_to(&self, metrics: &mut JitMetrics) {
+        let entries = self.entries.load(Ordering::Relaxed);
+        let exits = self.exits.load(Ordering::Relaxed);
+        let optimized = self.optimized_entries.load(Ordering::Relaxed);
+        metrics.native_entries = metrics.native_entries.saturating_add(entries);
+        metrics.native_exits = metrics.native_exits.saturating_add(exits);
+        metrics.tier2_entries = metrics.tier2_entries.saturating_add(optimized);
+    }
+}
+
 /// Owns the guard that keeps a JIT backend attached to a runtime.
 #[derive(Debug)]
 pub struct Jit {
     metrics: Arc<Mutex<JitMetrics>>,
+    fast_entry: Arc<FastEntryShared>,
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
     #[cfg(all(feature = "test-support", feature = "compiler"))]
@@ -265,6 +325,48 @@ impl Jit {
         let backend = NoopBackend {
             _config: config.clone(),
         };
+        #[cfg(not(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        )))]
+        let fast_entry = Arc::new(FastEntryShared::new(0));
+        #[cfg(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let fast_entry = Arc::clone(&backend.fast_entry);
         let guard = match runtime.attach_jit_backend(backend) {
             Ok(guard) => guard,
             Err(error) => {
@@ -274,6 +376,7 @@ impl Jit {
         };
         Ok(Self {
             metrics,
+            fast_entry,
             config,
             _guard: guard,
             #[cfg(all(feature = "test-support", feature = "compiler"))]
@@ -454,10 +557,13 @@ impl Jit {
 
     /// Returns the metrics associated with this backend guard.
     pub fn metrics(&self) -> JitMetrics {
-        self.metrics
+        let mut snapshot = self
+            .metrics
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone()
+            .clone();
+        self.fast_entry.add_to(&mut snapshot);
+        snapshot
     }
 
     /// Performs bounded installation and reclamation work on the runtime thread.
@@ -597,6 +703,23 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const HOT_MAINTENANCE_INTERVAL: u32 = 64;
 
+/// Inputs of a deferred Tier-2 candidate decision: feedback lattices, the
+/// installed-artifact count (callee resolution and direct-call readiness), and
+/// whether the element-loop gate has its eight baseline samples.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Tier2ScanInputs {
+    feedback: u64,
+    shapes: u64,
+    installed: u64,
+    element_samples: u64,
+}
+
+/// Callback-free executions granted per full call of a steady native entry.
+/// Every renewal still runs hot, feedback, timing and maintenance callbacks.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FAST_ENTRY_BUDGET: u32 = 255;
+
 /// Feedback pc used for return types observed at native `DONE` exits.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
@@ -665,6 +788,11 @@ struct ProductionBackend {
     last_scan_feedback_version: u64,
     last_scan_installed: u64,
     last_refresh_scan: Option<(u64, u64)>,
+    /// Tier-2 candidates whose last scan deferred them for missing feedback or
+    /// an unresolved callee, keyed by the inputs that decision depended on.
+    /// Rescanning with equal inputs would repeat the same feedback snapshot
+    /// and reach the same deferral, so maintenance skips it.
+    tier2_deferred: rustc_hash::FxHashMap<runtime::FunctionKey, Tier2ScanInputs>,
     direct_refresh_probes: std::collections::HashMap<runtime::FunctionKey, (u64, u64)>,
     queue_reasons: std::collections::HashMap<runtime::FunctionKey, runtime::HotReason>,
     prequeue_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
@@ -679,6 +807,9 @@ struct ProductionBackend {
     // retain their own tier in execution_starts across recursive replacement.
     entry_tiers: rustc_hash::FxHashMap<runtime::FunctionKey, runtime::Tier>,
     entry_cache_epoch: u64,
+    /// ABI 1.25 state granted to cached steady-state entries. Its epoch
+    /// mirrors `entry_cache_epoch`.
+    fast_entry: Arc<FastEntryShared>,
     // C brackets each native invocation with a synchronous enter/exit pair.
     // Keep active records through retirement and preserve each invocation's tier.
     execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
@@ -1326,6 +1457,7 @@ unsafe extern "C" fn production_entry_trampoline(
     // Capture trusted entry context before native execution can modify the
     // frame. Rejection must not dereference pointers supplied by a bad exit.
     let validated_ctx = frame.ctx;
+    let fast_entry = frame.flags & qjs::JS_JIT_FRAME_FAST_ENTRY != 0;
     let validated_bytecode_start = frame.bytecode_start;
     let validated_arg_buf = frame.arg_buf;
     let validated_var_buf = frame.var_buf;
@@ -1373,7 +1505,9 @@ unsafe extern "C" fn production_entry_trampoline(
             .side_path_entries
             .fetch_add(1, Ordering::Release);
     }
-    if exit.kind == qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
+    // A granted fast DONE exit reports no native_exit to consume this
+    // handoff; its steady return type is resampled on the next full call.
+    if exit.kind == qjs::JSJitExitKind_JS_JIT_EXIT_DONE && !fast_entry {
         if let Some(observed) = observed_value_type(frame.result) {
             pin.validation
                 .mark_native_return(pin.key.id, pin.key.generation, observed);
@@ -2098,6 +2232,7 @@ impl ProductionBackend {
             last_scan_feedback_version: u64::MAX,
             last_scan_installed: u64::MAX,
             last_refresh_scan: None,
+            tier2_deferred: rustc_hash::FxHashMap::default(),
             direct_refresh_probes: std::collections::HashMap::new(),
             queue_reasons: std::collections::HashMap::new(),
             prequeue_backoff: std::collections::HashMap::new(),
@@ -2110,6 +2245,7 @@ impl ProductionBackend {
             execution_starts: Vec::new(),
             entry_tiers: rustc_hash::FxHashMap::default(),
             entry_cache_epoch: 1,
+            fast_entry: Arc::new(FastEntryShared::new(1)),
             execution_profiles: rustc_hash::FxHashMap::default(),
             profitability_evaluations: 0,
             profitability_approved: 0,
@@ -2171,12 +2307,53 @@ impl ProductionBackend {
         }
     }
 
+    /// The tier of a cached entry for which per-call callbacks can no longer
+    /// change any decision: either its optimized artifact is installed and
+    /// the bounded profitability trial is over (or cannot run without
+    /// baseline samples), or its baseline artifact is installed and the
+    /// optimizing tier is terminally blacklisted, so neither hot counts nor
+    /// baseline timing feed a pending promotion. Hot counts, call feedback
+    /// and timing are then only sampled on the full call that renews each
+    /// fast-entry grant.
+    fn fast_entry_steady(&self, key: runtime::FunctionKey) -> Option<runtime::Tier> {
+        if self.feedback_disabled.contains(&key) {
+            return None;
+        }
+        let tier = *self.entry_tiers.get(&key)?;
+        let optimizing = self.coordinator.tier_state(key, runtime::Tier::Optimizing);
+        let steady = match tier {
+            runtime::Tier::Optimizing => {
+                matches!(optimizing, runtime::CompileState::Installed(_))
+                    && self.execution_profiles.get(&key).is_some_and(|profile| {
+                        profile.tier2_trial_decided || profile.baseline_executions == 0
+                    })
+            }
+            runtime::Tier::Baseline => {
+                // Baseline-only refresh probing consumes every hot event.
+                self.config.tier_policy() != JitTierPolicy::BaselineOnly
+                    && optimizing == runtime::CompileState::Blacklisted
+                    && matches!(
+                        self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                        runtime::CompileState::Installed(_)
+                    )
+                    && !self.optimizing_requested.contains(&key)
+                    && !self.optimizing_snapshots.contains_key(&key)
+            }
+        };
+        steady.then_some(tier)
+    }
+
     fn invalidate_entry_cache(&mut self) {
         // Epoch zero permanently disables caching after exhaustion: never let
         // an old handle become admissible again through wraparound.
         if self.entry_cache_epoch != 0 {
             self.entry_cache_epoch = self.entry_cache_epoch.checked_add(1).unwrap_or(0);
         }
+        // Granted QuickJS handles compare this copy instead of querying
+        // `entry_cache_epoch`, so publish every change before returning.
+        self.fast_entry
+            .epoch
+            .store(self.entry_cache_epoch, Ordering::Relaxed);
     }
 
     fn maintenance(&mut self) {
@@ -2275,6 +2452,18 @@ impl ProductionBackend {
             let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
                 continue;
             };
+            let scan_inputs = Tier2ScanInputs {
+                feedback: self.feedback.version(),
+                shapes: self.shape_feedback.version(),
+                installed: self.coordinator.installed_count(),
+                element_samples: self
+                    .execution_profiles
+                    .get(&key)
+                    .map_or(0, |profile| profile.baseline_executions.min(8)),
+            };
+            if self.tier2_deferred.get(&key) == Some(&scan_inputs) {
+                continue;
+            }
             let observed = self
                 .feedback
                 .snapshot(self.clock.max(1))
@@ -2321,6 +2510,7 @@ impl ProductionBackend {
              * the first Tier2 artifact. Self-recursive and non-specializable
              * calls keep their existing generic lowering. */
             if direct_call_pending {
+                self.tier2_deferred.insert(key, scan_inputs);
                 continue;
             }
             // A stable call link can fund a bounded optimizing trial before
@@ -2335,6 +2525,7 @@ impl ProductionBackend {
                     && observed.property_at(instruction.pc()).is_none()
             });
             if property_feedback_pending {
+                self.tier2_deferred.insert(key, scan_inputs);
                 continue;
             }
             /* A native-to-native call through the generic CALL bridge still
@@ -2443,6 +2634,7 @@ impl ProductionBackend {
                             })
                     });
                 if !observed_element_loop || !completed_numeric_returns {
+                    self.tier2_deferred.insert(key, scan_inputs);
                     continue;
                 }
             }
@@ -2574,6 +2766,7 @@ impl ProductionBackend {
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
                 } else {
+                    self.tier2_deferred.remove(&key);
                     self.tier2_sources.insert(key, snapshot);
                 }
             }
@@ -3277,7 +3470,33 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             .push((key, std::time::Instant::now(), tier));
     }
 
+    fn entry_fast_grant(
+        &mut self,
+        id: u64,
+        generation: u64,
+        grant: &mut rquickjs_core::qjs::JSJitFastEntryGrant,
+    ) {
+        let key = runtime::FunctionKey::new(id, generation);
+        if self.entry_cache_epoch == 0 {
+            return;
+        }
+        let Some(tier) = self.fast_entry_steady(key) else {
+            return;
+        };
+        grant.budget = FAST_ENTRY_BUDGET;
+        grant.flags = if tier == runtime::Tier::Optimizing {
+            rquickjs_core::qjs::JS_JIT_FAST_ENTRY_OPTIMIZED
+        } else {
+            0
+        };
+        grant.state = self.fast_entry.as_raw();
+    }
+
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
+        // A granted execution skipped native_enter; its non-DONE exit still
+        // reports here for deopt, retry and exception accounting.
+        let unpaired = exit_kind & rquickjs_core::qjs::JS_JIT_EXIT_FAST_UNPAIRED != 0;
+        let exit_kind = exit_kind & !rquickjs_core::qjs::JS_JIT_EXIT_FAST_UNPAIRED;
         self.native_exits = self.native_exits.saturating_add(1);
         let key = runtime::FunctionKey::new(id, generation);
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
@@ -3296,7 +3515,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             .execution_starts
             .last()
             .copied()
-            .filter(|(active, _, _)| *active == key)
+            .filter(|(active, _, _)| !unpaired && *active == key)
         {
             self.execution_starts.pop();
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
@@ -3419,6 +3638,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_requested.remove(&key);
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
+        self.tier2_deferred.remove(&key);
         self.tier2_sources.remove(&key);
         self.entry_tiers.remove(&key);
         self.coordinator.retire(key);
@@ -3426,6 +3646,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     }
 
     fn runtime_detach(&mut self) {
+        self.entry_cache_epoch = 0;
+        self.fast_entry.epoch.store(0, Ordering::Relaxed);
         self.workers.shutdown(&mut self.coordinator);
         self.coordinator.shutdown();
         self.maintenance();
