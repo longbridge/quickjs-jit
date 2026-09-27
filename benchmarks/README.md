@@ -161,6 +161,7 @@ fallback-only result as proof that a JIT tier supports the feature.
 | `strings-regexp` | String construction, slicing, RegExp capture and replacement |
 | `arrays-typed` | Packed-array growth/traversal and Int32Array/Float64Array traffic |
 | `objects-polymorphic` | Allocation, property reads/writes, and four stable shapes |
+| `property-polymorphic` | Allocation-free reads at two sites that each observe four stable shapes (one prototype-less); the bounded polymorphic inline cache |
 | `calls-recursion-closures` | Four-deep calls, bounded recursion, and mutable closure capture |
 | `json-codec` | Repeated nested JSON encoding and decoding |
 | `map-set-bigint` | Map and Set mutation/iteration plus bounded BigInt arithmetic |

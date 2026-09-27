@@ -223,6 +223,13 @@ const WORKLOADS: &[Workload] = &[
         file: "objects-polymorphic.js",
     },
     Workload {
+        name: "property-polymorphic",
+        suite: "rquickjs-jit property diagnostics",
+        group: "objects-polymorphic",
+        designated: false,
+        file: "property-polymorphic.js",
+    },
+    Workload {
         name: "calls-recursion-closures",
         suite: "rquickjs-jit matrix",
         group: "calls-recursion-closures",
