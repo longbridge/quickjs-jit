@@ -40,6 +40,12 @@ bounds compare itself but everything around it.
    Bounds checks stay; polls revalidate data/count exactly like length hoists.
    Packed candidates never get such a hoist (their guard would demand
    `length == dense_count`, which an element-only loop never needed).
+   The preheader runs even when no access does (zero trips, a conditional
+   access), so this query never side-exits (review round 1): a miss publishes
+   an empty view (`count = 0`, `data = null`) through a cold join, every
+   consumer's retained bounds check then exits at the access that actually
+   runs, poll revalidation is skipped while `count == 0`, and the receiver's
+   object tag is not restated at the header.
 6. **Hoisted sources across in-loop diamonds.** A block inherits a hoisted
    source only when every (already lowered) predecessor's exit state holds the
    identical source; the preheader dominates every such block. This carries
@@ -103,6 +109,30 @@ Checksums match the interpreter for every run. Speed = baseline / branch.
 `property-heavy` stays about 2% slower even with every new lowering change
 disabled through temporary switches, so it is attributed to host-binary layout
 noise, not to generated code; the publishable matrix must confirm it.
+
+## Review round 1 (`perf/p4b-bce-r1`)
+
+- Blocking: the metadata-only hoist side-exited in the preheader under the
+  header's numeric guard id, so a wrong-kind receiver whose access never ran
+  deopted on every call and demoted the function (reproduced: 10 deopts and
+  a demotion for 50 `cond([9, 9], 4, false)` calls). Fixed as described in
+  item 5; `metadata_only_typed_hoist_never_deopts_for_an_access_that_does_not_run`
+  covers skipped conditional, zero-trip and poll-crossing loops, plus exact
+  results when the access does run with a wrong receiver.
+- Hardening: a range-covered load skips its bounds check only against a
+  source whose count was guarded equal to the length (`exact_length`, which
+  only a preheader hoist guard establishes). A load- or store-established
+  source keeps the check even if the planned hoist was not emitted (for
+  example a preheader ending in an explicit `goto`).
+  `covered_loads_keep_bounds_checks_without_an_exact_length_source` checks
+  four loop shapes against a stretched packed Array.
+- An exit-free `select` form of the miss path measured about 0.81x the speed
+  of the guarded form on `typed-convert-traversal`; the cold-join form
+  measured 0.99x (tied) against the pre-fix branch, so the join is used.
+- `tier2_mixed_edge_eliminates_helper_and_preserves_guard_misses`
+  (`mixed_direct_calls`) is flaky under load on both revisions: with 6
+  concurrent copies, 9/60 failures on the `82d3808` sources and 11/60 on this
+  branch.
 
 ## Remaining work
 

@@ -759,6 +759,15 @@ struct GuardedElementSource {
     /// Cached accesses then emit only that kind's load instead of a runtime
     /// dispatch on `kind`.
     static_kind: Option<i64>,
+    /// Established by a metadata-only loop hoist that does not side-exit.
+    /// Such a hoist runs in the preheader even when the loop body never
+    /// reaches the access (zero trips, a conditional access), so a failed
+    /// storage query must not deopt there. Instead `count` is 0 and `data`
+    /// null, and every consumer's retained bounds check exits at the access
+    /// itself, exactly where the unhoisted guard would have. Consumers must
+    /// therefore never skip the bounds check for such a source (it never has
+    /// `exact_length`), and poll revalidation is skipped while `count` is 0.
+    unguarded: bool,
 }
 
 /// Guarded element metadata currently valid on the lowering path, at most one
@@ -781,6 +790,7 @@ impl GuardedElementSource {
             && self.exact_length == other.exact_length
             && self.typed_mode == other.typed_mode
             && self.static_kind == other.static_kind
+            && self.unguarded == other.unguarded
     }
 }
 
@@ -2075,6 +2085,8 @@ fn lower_optimized_machine(
                 .get(&block.start_pc())
                 .into_iter()
                 .flatten()
+                // An unguarded hoist never proved its receiver is an object.
+                .filter(|source| !source.unguarded)
                 .filter_map(|source| match source.provenance {
                     OptProvenance::Argument(argument)
                         if stable_hoisted_receivers.contains(&(block.start_pc(), argument)) =>
@@ -5892,6 +5904,7 @@ fn emit_opt_packed_metadata_guard(
         exact_length: true,
         typed_mode: None,
         static_kind: Some(0),
+        unguarded: false,
     })
 }
 
@@ -5909,6 +5922,7 @@ fn emit_opt_typed_metadata_guard(
     mode: crate::runtime::ArrayMode,
     array_query: usize,
     needs_length: bool,
+    side_exit: bool,
 ) -> Result<GuardedElementSource, CompileFailure> {
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData,
@@ -5990,25 +6004,52 @@ fn emit_opt_typed_metadata_guard(
         status,
         i64::from(qjs::JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_OK),
     );
-    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, accepted)?;
+    if side_exit {
+        emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, accepted)?;
+    }
     let live_mode = builder.ins().load(types::I32, MemFlags::new(), metadata, 4);
     let mode_matches = builder
         .ins()
         .icmp(IntCC::Equal, live_mode, expected_mode_value);
-    emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, mode_matches)?;
-    let count = builder.ins().load(types::I32, MemFlags::new(), metadata, 8);
-    let data = builder
+    if side_exit {
+        emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, mode_matches)?;
+    }
+    let mut count = builder.ins().load(types::I32, MemFlags::new(), metadata, 8);
+    let mut data = builder
         .ins()
         .load(env.pointer_type, MemFlags::new(), metadata, 16);
+    if !side_exit {
+        // A missed query publishes an empty view instead of exiting: every
+        // consumer's bounds check then exits at the access that actually
+        // runs. The slot is a live stack slot, so the loads discarded on the
+        // miss path read valid (if stale) memory.
+        let usable = builder.ins().band(accepted, mode_matches);
+        let miss = builder.create_block();
+        let join = builder.create_block();
+        builder.append_block_param(join, types::I32);
+        builder.append_block_param(join, env.pointer_type);
+        builder.set_cold_block(miss);
+        builder.ins().brif(usable, join, &[count, data], miss, &[]);
+        builder.seal_block(miss);
+        builder.switch_to_block(miss);
+        let empty_count = builder.ins().iconst(types::I32, 0);
+        let null_data = builder.ins().iconst(env.pointer_type, 0);
+        builder.ins().jump(join, &[empty_count, null_data]);
+        builder.seal_block(join);
+        builder.switch_to_block(join);
+        count = builder.block_params(join)[0];
+        data = builder.block_params(join)[1];
+    }
     Ok(GuardedElementSource {
         provenance: source_provenance,
         block_pc,
         data,
         count,
         kind: builder.ins().iconst(types::I8, kind),
-        exact_length: needs_length,
+        exact_length: needs_length && side_exit,
         typed_mode: Some(mode),
         static_kind: Some(kind),
+        unguarded: !side_exit,
     })
 }
 
@@ -6028,6 +6069,20 @@ fn emit_opt_packed_loop_revalidate(
     let OptProvenance::Argument(argument) = expected.provenance else {
         return Err(CompileFailure::InvalidArtifact);
     };
+    // An unguarded source whose query missed (or found an empty view) holds
+    // `count == 0`: every consumer's bounds check exits before touching
+    // `data`, whatever the receiver has become, so there is nothing to
+    // revalidate. Requiring the current state here would reintroduce the
+    // speculative exit the unguarded hoist exists to avoid.
+    let skip = expected.unguarded.then(|| {
+        let empty = builder.ins().icmp_imm(IntCC::Equal, expected.count, 0);
+        let check = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(empty, done, &[], check, &[]);
+        builder.seal_block(check);
+        builder.switch_to_block(check);
+        done
+    });
     let object = opt_use(
         builder,
         *env.arguments
@@ -6048,6 +6103,7 @@ fn emit_opt_packed_loop_revalidate(
             mode,
             array_query,
             expected.exact_length,
+            true,
         )?
     } else {
         emit_opt_packed_metadata_guard(
@@ -6071,6 +6127,11 @@ fn emit_opt_packed_loop_revalidate(
         .icmp(IntCC::Equal, current.data, expected.data);
     let unchanged = builder.ins().band(same_count, same_data);
     emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, unchanged)?;
+    if let Some(done) = skip {
+        builder.ins().jump(done, &[]);
+        builder.seal_block(done);
+        builder.switch_to_block(done);
+    }
     Ok(())
 }
 
@@ -6149,6 +6210,10 @@ fn emit_opt_array_loop_hoists(
                     array_query,
                     // Only a hoist that owns the loop's length read queries
                     // (and so certifies) the intrinsic length lookup.
+                    hoist.length.is_some(),
+                    // A metadata-only hoist covers no bounds check, so it
+                    // need not (and, being speculative for zero-trip loops
+                    // and conditional accesses, must not) side-exit here.
                     hoist.length.is_some(),
                 )?
             }
@@ -6409,6 +6474,15 @@ fn emit_opt_element_get(
         // fail-closed if that invariant changes.
         crate::runtime::ArrayMode::Generic => -1,
     });
+    // Range analysis proved `index < bound` for the loop's single length
+    // read; that deletes this check only against a count guarded equal to
+    // that length. Only a hoist guard establishes `exact_length` (packed
+    // logical length == dense count, or the intrinsic typed getter), so a
+    // source established by an earlier load or store, or by an unguarded
+    // metadata-only hoist, keeps its bounds check even when the planned
+    // hoist that the proof relied on was not emitted on this path.
+    let bounds_covered_by_hoist =
+        bounds_covered_by_hoist && cached.is_some_and(|source| source.exact_length);
     // A cached source whose storage kind is a compile-time constant needs no
     // runtime kind dispatch. Its receiver was tag/class/storage guarded when
     // the source was established for this exact frame slot, and every frame
@@ -6869,6 +6943,7 @@ fn emit_opt_element_get(
             typed_mode: None,
             // Only the packed arm reaches the continuation for this mode.
             static_kind: Some(0),
+            unguarded: false,
         })
     });
     opt_define(builder, stack[object_index], result);
@@ -6931,6 +7006,7 @@ fn emit_opt_typed_store(
             mode,
             array_query,
             false,
+            true,
         )?,
     };
     let index = builder.ins().ireduce(types::I32, key.payload);
@@ -7282,6 +7358,7 @@ fn emit_opt_element_put(
         exact_length: false,
         typed_mode: None,
         static_kind: None,
+        unguarded: false,
     });
     for provenance in &mut stack_provenance[object_index..depth] {
         *provenance = OptProvenance::Unknown;

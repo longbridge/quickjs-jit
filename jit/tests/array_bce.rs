@@ -261,3 +261,147 @@ fn literal_tag_folding_keeps_exact_numeric_semantics() {
     assert_eq!(after.native_entries, after.native_exits);
     assert!(after.tier2_entries > before.tier2_entries);
 }
+
+const SKIPPED: &str = r#"
+    function cond(a, n, use) {
+      let s = 0;
+      for (let i = 0; i < n; i++) {
+        if (use) s = (s + a[i]) | 0;
+        else s = (s + i) | 0;
+      }
+      return s;
+    }
+    function zero(a, n) {
+      let s = 0;
+      for (let i = 0; i < n; i++) s = (s + a[i]) | 0;
+      return s;
+    }
+"#;
+
+/// Runs `call` `times` times in separate evaluations and returns the metric
+/// deltas `(deopts, tier2_entries, optimized_demotions)` plus the results.
+fn repeated(jit: &Jit, context: &Context, call: &str, times: usize) -> ((u64, u64, u64), String) {
+    let before = jit.metrics();
+    let mut results = Vec::with_capacity(times);
+    for _ in 0..times {
+        results.push(context.with(|ctx| ctx.eval::<String, _>(call)).unwrap());
+        jit.poll();
+    }
+    let after = jit.metrics();
+    assert_eq!(after.native_entries, after.native_exits);
+    (
+        (
+            after.deopts - before.deopts,
+            after.tier2_entries - before.tier2_entries,
+            after.optimized_demotions - before.optimized_demotions,
+        ),
+        results.join(","),
+    )
+}
+
+#[test]
+fn metadata_only_typed_hoist_never_deopts_for_an_access_that_does_not_run() {
+    // A typed element access with no `length` read in its loop hoists its
+    // storage query to the preheader. That query runs even when the access
+    // never does (a skipped conditional, a zero-trip loop), so a receiver of
+    // another kind must not side-exit there: the unhoisted per-access guard
+    // would never have run, and a preheader exit would deopt on every call
+    // and demote the function. Long loops also cross amortized polls, whose
+    // revalidation must accept the empty view such a miss publishes.
+    let (_runtime, jit, context) = prepared(
+        SKIPPED,
+        "cond(new Int32Array([1,2,3,4,5,6,7,8]), 8, true);\
+         zero(new Int32Array([1,2,3,4,5,6,7,8]), 8)",
+    );
+    for call in [
+        "String(cond([9, 9], 4, false))",
+        "String(cond({ 0: 1 }, 3, false))",
+        "String(cond(new Float64Array([0.5]), 60000, false))",
+        "String(zero([9, 9], 0))",
+        "String(zero(new Float64Array(3), 0))",
+    ] {
+        let expected = evaluate_without_jit(SKIPPED, call);
+        let ((deopts, entries, demotions), actual) = repeated(&jit, &context, call, 50);
+        assert_eq!(actual, vec![expected; 50].join(","), "{call}");
+        assert_eq!(deopts, 0, "{call}: a skipped access must not deopt");
+        assert_eq!(demotions, 0, "{call}: a skipped access must not demote");
+        assert!(
+            entries >= 50,
+            "{call}: every call stays in Tier 2 ({entries})"
+        );
+    }
+
+    // An access that does run with the wrong receiver still exits at the
+    // access itself and matches the interpreter exactly, as do primitive
+    // receivers (which the entry specialization already rejects).
+    const CASES: &str = r#"JSON.stringify([
+        cond(undefined, 3, false),
+        zero(undefined, 0),
+        zero(7, 0),
+        cond([1, 2, 3, 4], 4, true),
+        cond(new Float64Array([1.5, 2.5]), 2, true),
+        cond(new Int32Array([5, 6]), 4, true),
+        cond(new Int32Array(0), 3, true),
+        zero([1, 2, 3], 3),
+        zero(new Int32Array([4, 5, 6]), 5),
+        zero(new Int32Array([4, 5, 6]), 3),
+        cond(new Int32Array(100000).fill(3), 100000, true)
+    ])"#;
+    let expected = evaluate_without_jit(SKIPPED, CASES);
+    let actual = context.with(|ctx| ctx.eval::<String, _>(CASES)).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
+}
+
+#[test]
+fn covered_loads_keep_bounds_checks_without_an_exact_length_source() {
+    // Range analysis may cover `a[i + 1]` by `i + 1 < a.length`, but that
+    // only deletes the check against a count guarded equal to that length.
+    // Whatever the loop shape (and so whether the preheader hoist was
+    // emitted), a source established by the earlier `a[i]` load must not
+    // skip the check: a packed Array whose logical length exceeds its dense
+    // count would otherwise read past its storage.
+    const SOURCE: &str = r#"
+        function pairsFor(a) {
+          let s = 0;
+          for (let i = 0; i + 1 < a.length; i++) s = (s + a[i] + a[i + 1]) | 0;
+          return s;
+        }
+        function pairsWhile(a) {
+          let s = 0, i = 0;
+          while (i + 1 < a.length) { s = (s + a[i] + a[i + 1]) | 0; i++; }
+          return s;
+        }
+        function pairsBreak(a) {
+          let s = 0, i = 0;
+          for (;;) {
+            if (!(i + 1 < a.length)) break;
+            s = (s + a[i] + a[i + 1]) | 0;
+            i++;
+          }
+          return s;
+        }
+        function pairsDo(a) {
+          let s = 0, i = 0;
+          if (a.length < 2) return 0;
+          do { s = (s + a[i] + a[i + 1]) | 0; i++; } while (i + 1 < a.length);
+          return s;
+        }
+        function all(a) {
+          return [pairsFor(a), pairsWhile(a), pairsBreak(a), pairsDo(a)];
+        }
+        function stretched() { const a = [1, 2, 3]; a.length = 10; return a; }
+    "#;
+    const CASES: &str = r#"JSON.stringify([
+        all([1, 2, 3, 4]), all([]), all([5]), all(stretched()),
+        all(new Int32Array([1, 2, 3])), all([1, 2.5, 3]), all([1, , 3])
+    ])"#;
+    let expected = evaluate_without_jit(SOURCE, CASES);
+    let (_runtime, jit, context) = prepared(SOURCE, "all([1,2,3,4,5,6,7,8])");
+    let before = jit.metrics();
+    let actual = context.with(|ctx| ctx.eval::<String, _>(CASES)).unwrap();
+    let after = jit.metrics();
+    assert_eq!(actual, expected);
+    assert_eq!(after.native_entries, after.native_exits);
+    assert!(after.tier2_entries > before.tier2_entries);
+}

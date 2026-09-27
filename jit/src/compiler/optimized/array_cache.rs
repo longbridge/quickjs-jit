@@ -45,7 +45,10 @@ pub(super) struct ArrayAccessPlan {
 /// attached, nonshared backing cannot change without one of the reentrant
 /// effects the plan already excludes from the loop, and every poll
 /// revalidates `data`/`count`. Such a hoist removes the per-iteration
-/// metadata query but never a bounds check.
+/// metadata query but never a bounds check. Because the preheader runs even
+/// when no access does (zero trips, a conditional access), its query never
+/// side-exits: a miss publishes an empty view, so the retained bounds check
+/// exits at the access that actually runs, exactly like the unhoisted guard.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArrayLoopHoist {
     pub candidate: usize,
