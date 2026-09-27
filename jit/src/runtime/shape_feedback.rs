@@ -2,6 +2,12 @@ use std::collections::BTreeMap;
 
 use super::{FunctionKey, ObservedType};
 
+/// Maximum number of receiver shapes one property site may record before it
+/// becomes megamorphic. Both native tiers emit at most this many inline
+/// shape/generation compares per site; a megamorphic site uses the generic
+/// property helper instead of guarding (and deoptimizing) on a shape.
+pub const POLYMORPHIC_PROPERTY_LIMIT: usize = 4;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShapeToken {
     identity: u64,
@@ -157,6 +163,8 @@ struct ShapeFeedbackKey {
 pub struct ShapeFeedbackTable {
     polymorphic_limit: usize,
     sites: BTreeMap<ShapeFeedbackKey, ShapeFeedbackSite>,
+    /// Advances whenever any site's state or observation list changes.
+    version: u64,
 }
 
 impl ShapeFeedbackTable {
@@ -164,7 +172,16 @@ impl ShapeFeedbackTable {
         Self {
             polymorphic_limit: polymorphic_limit.max(1),
             sites: BTreeMap::new(),
+            version: 0,
         }
+    }
+
+    /// Monotonic change counter for site states and observation sets.
+    /// Repeating a recorded observation only refreshes its recency, so
+    /// steady-state probes do not invalidate consumers that cache decisions
+    /// derived from snapshots.
+    pub const fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn observe(
@@ -182,6 +199,15 @@ impl ShapeFeedbackTable {
             });
         if site.state == ShapeFeedbackState::Megamorphic {
             return site.state;
+        }
+        // Each observation leaves at most one entry per shape identity, so an
+        // exact match of the newest entry is a repeat that changes nothing,
+        // and an exact match elsewhere only moves it to the end.
+        if site.observations.last() == Some(&observation) {
+            return site.state;
+        }
+        if !site.observations.contains(&observation) {
+            self.version = self.version.wrapping_add(1);
         }
         // A generation change for the same shape identity is invalidation,
         // not polymorphism. Forget the stale layout so recompilation never
@@ -275,6 +301,39 @@ mod tests {
             ShapeFeedbackState::Megamorphic
         );
         assert!(table.get(function, 8).unwrap().observations().is_empty());
+    }
+
+    #[test]
+    fn version_tracks_observation_sets_but_not_repeats_or_recency() {
+        let mut table = ShapeFeedbackTable::new(3);
+        let function = FunctionKey::new(4, 1);
+        let start = table.version();
+        table.observe(function, 8, observation(1, 1, 8));
+        let first = table.version();
+        assert_ne!(first, start);
+        table.observe(function, 8, observation(1, 1, 8));
+        assert_eq!(table.version(), first);
+        table.observe(function, 8, observation(2, 1, 16));
+        let second = table.version();
+        assert_ne!(second, first);
+        // Alternating known shapes only reorders the site.
+        table.observe(function, 8, observation(1, 1, 8));
+        table.observe(function, 8, observation(2, 1, 16));
+        assert_eq!(table.version(), second);
+        assert_eq!(
+            table.get(function, 8).unwrap().state(),
+            ShapeFeedbackState::Polymorphic
+        );
+        // A new layout for a known shape identity replaces it.
+        table.observe(function, 8, observation(1, 1, 24));
+        assert_ne!(table.version(), second);
+        let third = table.version();
+        table.observe(function, 8, observation(3, 1, 32));
+        table.observe(function, 8, observation(4, 1, 40));
+        assert_ne!(table.version(), third);
+        let megamorphic = table.version();
+        table.observe(function, 8, observation(5, 1, 48));
+        assert_eq!(table.version(), megamorphic);
     }
 
     #[test]

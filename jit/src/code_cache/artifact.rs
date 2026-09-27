@@ -348,6 +348,8 @@ pub struct OptimizedArtifactMetadata {
     inlined_calls: u64,
     side_path_profile: Option<crate::runtime::SidePathProfile>,
     direct_call_signature: Option<crate::runtime::BoundedSpecializationSignature>,
+    #[cfg(not(target_family = "wasm"))]
+    native_call_plan: Option<crate::compiler::native_call::NativeCallPlan>,
 }
 
 #[cfg(feature = "compiler")]
@@ -368,6 +370,8 @@ impl OptimizedArtifactMetadata {
             inlined_calls: 0,
             side_path_profile: None,
             direct_call_signature: None,
+            #[cfg(not(target_family = "wasm"))]
+            native_call_plan: None,
         }
     }
     /// Number of statically expanded call sites, not runtime call executions.
@@ -411,6 +415,19 @@ impl OptimizedArtifactMetadata {
         &self,
     ) -> Option<&crate::runtime::BoundedSpecializationSignature> {
         self.direct_call_signature.as_ref()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn with_native_call_plan(
+        mut self,
+        plan: crate::compiler::native_call::NativeCallPlan,
+    ) -> Self {
+        self.native_call_plan = Some(plan);
+        self
+    }
+    /// The pure self-recursive native entry published with this artifact.
+    #[cfg(not(target_family = "wasm"))]
+    pub const fn native_call_plan(&self) -> Option<&crate::compiler::native_call::NativeCallPlan> {
+        self.native_call_plan.as_ref()
     }
 }
 
@@ -479,6 +496,10 @@ pub struct CompiledArtifact {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     direct_call_published: Option<crate::compiler::baseline::PublishedBaselineCode>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    native_call_relocatable: Option<Box<crate::compiler::baseline::RelocatableCode>>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    native_call_published: Option<crate::compiler::baseline::PublishedBaselineCode>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     direct_call_dependencies: Box<[crate::compiler::baseline::PublishedBaselineCode]>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     inline_snapshot: Option<crate::bytecode::CompileSnapshot>,
@@ -525,6 +546,10 @@ impl CompiledArtifact {
             direct_call_relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_published: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_dependencies: Box::new([]),
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -659,6 +684,7 @@ impl CompiledArtifact {
         if function.instructions().len() <= 128
             && snapshot.retained_bytes() <= 16 * 1024
             && snapshot.exception_map().is_empty()
+            && !function.has_exception_regions()
             && snapshot.function_id() == self.key.function_id
             && snapshot.generation() == self.key.generation
             && snapshot.source_revision() == self.key.source_revision
@@ -696,9 +722,32 @@ impl CompiledArtifact {
     }
 
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub(crate) fn with_native_call_relocatable(
+        mut self,
+        code: crate::compiler::baseline::RelocatableCode,
+    ) -> Self {
+        self.native_call_relocatable = Some(Box::new(code));
+        self
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub(crate) fn publish_relocatable(&mut self) -> Result<(), crate::platform::CodeMemoryError> {
+        // The native entry publishes first: the main body embeds its address
+        // and retains its publication for the body's whole executable life.
+        if let Some(code) = self.native_call_relocatable.take() {
+            self.native_call_published = Some(code.publish()?);
+        }
         if let Some(code) = self.relocatable.take() {
-            self.published = Some(code.publish()?);
+            self.published = Some(match &self.native_call_published {
+                Some(native) => code.publish_with(
+                    &[(
+                        crate::compiler::native_call::NATIVE_ENTRY_SYMBOL,
+                        native.as_ptr() as usize as u64,
+                    )],
+                    vec![native.clone()],
+                )?,
+                None => code.publish()?,
+            });
         }
         if let Some(code) = self.direct_call_relocatable.take() {
             self.direct_call_published = Some(code.publish()?);
@@ -709,6 +758,13 @@ impl CompiledArtifact {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn published(&self) -> Option<&crate::compiler::baseline::PublishedBaselineCode> {
         self.published.as_ref()
+    }
+
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn native_call_published(
+        &self,
+    ) -> Option<&crate::compiler::baseline::PublishedBaselineCode> {
+        self.native_call_published.as_ref()
     }
 
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -760,6 +816,10 @@ impl CompiledArtifact {
             direct_call_relocatable: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_published: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_relocatable: None,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_published: None,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             direct_call_dependencies: Box::new([]),
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]

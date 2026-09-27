@@ -111,18 +111,31 @@ fn exercise_mixed_edge(
         })
     };
     let deadline = Instant::now() + Duration::from_secs(60);
+    // The timed Tier-2 profitability trial needs eight optimized caller
+    // executions and may demote the caller once it decides, which briefly
+    // reroutes the edge through generic CALL until the replacement installs.
+    // Require enough consecutive stable rounds (two caller entries each) for
+    // that trial to have finished before asserting the steady state.
+    let mut stable_rounds = 0;
     loop {
         let before = count();
         let entry_before = jit.metrics();
         assert_eq!(invoke(true), 135);
         assert_eq!(invoke(false), 7);
         jit.poll();
-        if jit.metrics().native_entries - entry_before.native_entries == 2
-            && (!force_tier2 || jit.metrics().tier2_entries - entry_before.tier2_entries == 2)
-            && jit.metrics().pending_worker_jobs == 0
+        let after = jit.metrics();
+        if after.native_entries - entry_before.native_entries == 2
+            && (!force_tier2 || after.tier2_entries - entry_before.tier2_entries == 2)
+            && after.pending_worker_jobs == 0
+            && after.optimized_demotions == entry_before.optimized_demotions
             && count() == before
         {
-            break;
+            stable_rounds += 1;
+            if stable_rounds >= 5 {
+                break;
+            }
+        } else {
+            stable_rounds = 0;
         }
         assert!(
             Instant::now() < deadline,

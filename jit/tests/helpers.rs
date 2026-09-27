@@ -84,6 +84,8 @@ enum InvalidKind {
     Slot,
     ConstantIndex,
     HelperVersion,
+    PcInsideInstruction,
+    PcPastEnd,
 }
 
 #[derive(Clone)]
@@ -440,6 +442,7 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                 let saved_stack_capacity = (*frame).stack_capacity;
                 let saved_stack_top = (*frame).stack_top;
                 let saved_helper_version = (*frame).entry.helper_abi_version;
+                let saved_pc = (*frame).pc;
                 let status = match *kind {
                     InvalidKind::RuntimeId => {
                         (*frame).runtime_id ^= 1;
@@ -492,6 +495,17 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                         (*frame).entry.helper_abi_version ^= 1;
                         api.free.expect("FREE helper")(frame, 0, 0)
                     }
+                    // `return 'constant'` starts with a five-byte atom push,
+                    // so offset 1 is inside an instruction. The boundary
+                    // bitmap must reject it exactly like the linear scan.
+                    InvalidKind::PcInsideInstruction => {
+                        (*frame).pc = (*frame).bytecode_start.add(1);
+                        api.free.expect("FREE helper")(frame, 0, 0)
+                    }
+                    InvalidKind::PcPastEnd => {
+                        (*frame).pc = (*frame).bytecode_start.wrapping_add(1 << 20);
+                        api.free.expect("FREE helper")(frame, 0, 0)
+                    }
                 };
                 (*frame).rt = saved_runtime;
                 (*frame).ctx = saved_context;
@@ -502,6 +516,7 @@ unsafe extern "C" fn helper_entry(frame: *mut qjs::JSJitExecFrame) -> qjs::JSJit
                 (*frame).stack_capacity = saved_stack_capacity;
                 (*frame).stack_top = saved_stack_top;
                 (*frame).entry.helper_abi_version = saved_helper_version;
+                (*frame).pc = saved_pc;
                 let after = *(*frame).arg_buf;
                 untouched.store(
                     status < 0 && before.u.ptr == after.u.ptr && before.tag == after.tag,
@@ -1162,6 +1177,8 @@ fn invalid_identity_map_index_and_slot_are_rejected_before_touching_values() {
         InvalidKind::Slot,
         InvalidKind::ConstantIndex,
         InvalidKind::HelperVersion,
+        InvalidKind::PcInsideInstruction,
+        InvalidKind::PcPastEnd,
     ];
     for kind in kinds {
         let runtime = Runtime::new().unwrap();

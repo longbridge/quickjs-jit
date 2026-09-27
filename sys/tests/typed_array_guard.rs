@@ -105,7 +105,7 @@ int main(void)
     void *expected_data;
     uint32_t expected_count;
 
-    assert(QJSJIT_ABI_MAJOR == 1 && QJSJIT_ABI_MINOR == 24);
+    assert(QJSJIT_ABI_MAJOR == 1 && QJSJIT_ABI_MINOR == 25);
     assert(QJSJIT_ARRAY_API_VERSION == 1);
     assert(ctx && api);
     assert(api->struct_size == sizeof(*api));

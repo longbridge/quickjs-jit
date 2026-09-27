@@ -7,13 +7,13 @@ use std::collections::BTreeSet;
 
 #[test]
 fn synthetic_function_identity_cannot_bypass_the_closed_policy() {
-    // `typeof` has no Tier 1 lowering and stays a policy reject; the synthetic
-    // ID-zero function must not bypass that row.
+    // `get_super` has no Tier 1 lowering and stays a policy reject; the
+    // synthetic ID-zero function must not bypass that row.
     let mut bytecode = vec![
         rquickjs_jit::bytecode::opcode::PUSH_UNDEFINED,
         linked_opcode_table()
-            .find(|opcode| opcode.name() == "typeof")
-            .expect("linked typeof opcode")
+            .find(|opcode| opcode.name() == "get_super")
+            .expect("linked get_super opcode")
             .id(),
     ];
     bytecode.push(rquickjs_jit::bytecode::opcode::RETURN);
@@ -113,6 +113,19 @@ fn policies_are_semantic_and_categorized() {
         Tier1Policy::Helper(HelperId::CallConstructor)
     );
     assert_eq!(by_name("regexp"), Tier1Policy::Helper(HelperId::Regexp));
+    for iteration in [
+        "for_of_start",
+        "for_of_next",
+        "for_in_start",
+        "for_in_next",
+        "iterator_close",
+    ] {
+        assert_eq!(
+            by_name(iteration),
+            Tier1Policy::Helper(HelperId::IteratorOp),
+            "{iteration}"
+        );
+    }
     assert_eq!(
         by_name("eval"),
         Tier1Policy::Reject(FallbackReason::DirectEval)
@@ -129,7 +142,7 @@ fn policies_are_semantic_and_categorized() {
 }
 
 #[test]
-fn unsupported_frame_and_exception_families_are_stable_rejects() {
+fn unsupported_frame_families_reject_and_exception_regions_are_native() {
     let by_name = |name| {
         let opcode = linked_opcode_table()
             .find(|opcode| opcode.name() == name)
@@ -137,22 +150,125 @@ fn unsupported_frame_and_exception_families_are_stable_rejects() {
         tier1_policy(opcode.id()).unwrap()
     };
 
+    // Derived-constructor `this` initialization through an arrow and
+    // with/global reference objects still keep the closure frame rejected.
     assert_eq!(
-        by_name("get_var_ref"),
+        by_name("put_var_ref_check_init"),
         Tier1Policy::Reject(FallbackReason::ClosureFrame)
     );
     assert_eq!(
-        by_name("push_this"),
-        Tier1Policy::Reject(FallbackReason::ExtendedFrame)
+        by_name("make_var_ref"),
+        Tier1Policy::Reject(FallbackReason::ClosureFrame)
     );
     assert_eq!(
-        by_name("catch"),
-        Tier1Policy::Reject(FallbackReason::ExceptionRegion)
+        by_name("make_var_ref_ref"),
+        Tier1Policy::Reject(FallbackReason::ClosureFrame)
     );
+    // Exception regions dispatch natively through the ABI 1.25 entry points.
+    for native in ["throw", "throw_error", "catch", "nip_catch", "gosub", "ret"] {
+        assert_eq!(by_name(native), Tier1Policy::Native, "{native}");
+    }
     assert_eq!(
-        by_name("typeof"),
+        by_name("get_super"),
         Tier1Policy::Reject(FallbackReason::UnsupportedOpcode)
     );
+}
+
+#[test]
+fn generic_opcode_family_is_advertised_through_the_exact_helper() {
+    let by_name = |name| {
+        let opcode = linked_opcode_table()
+            .find(|opcode| opcode.name() == name)
+            .unwrap();
+        tier1_policy(opcode.id()).unwrap()
+    };
+
+    for generic in [
+        "push_this",
+        "special_object",
+        "get_var_undef",
+        "put_var",
+        "typeof",
+        "typeof_is_undefined",
+        "typeof_is_function",
+        "in",
+        "instanceof",
+        "delete",
+        "delete_var",
+        "to_object",
+        "to_propkey2",
+    ] {
+        assert_eq!(
+            by_name(generic),
+            Tier1Policy::Helper(HelperId::GenericOp),
+            "{generic}"
+        );
+    }
+    assert_eq!(
+        by_name("pow"),
+        Tier1Policy::Helper(HelperId::BinaryArithSlow)
+    );
+    for dup in ["dup1", "dup2"] {
+        assert_eq!(by_name(dup), Tier1Policy::Helper(HelperId::Dup), "{dup}");
+    }
+    for native in ["perm4", "swap2", "rot3l", "rot3r"] {
+        assert_eq!(by_name(native), Tier1Policy::Native, "{native}");
+    }
+
+    // These remain closed until their producers can reach Tier 1: `nop` and
+    // `nip1` are never emitted after label resolution, `dup3`/`insert4`/
+    // `perm5`/`rot4l`/`rot5l` only follow `super` references or async
+    // iteration, `set_name_computed` only names computed-key closures or
+    // classes, and the global declaration family only occurs in script/eval
+    // code, which is never a Tier 1 function. (`set_name` itself is admitted
+    // through the P2a closure helper.)
+    for rejected in [
+        "nop",
+        "nip1",
+        "dup3",
+        "insert4",
+        "perm5",
+        "rot4l",
+        "rot5l",
+        "set_name_computed",
+        "put_var_init",
+        "define_var",
+        "check_define_var",
+        "define_func",
+    ] {
+        assert_eq!(
+            by_name(rejected),
+            Tier1Policy::Reject(FallbackReason::UnsupportedOpcode),
+            "{rejected}"
+        );
+    }
+    assert_eq!(by_name("set_name"), Tier1Policy::Helper(HelperId::SetName));
+}
+
+#[test]
+fn aliasing_and_module_special_objects_remain_operand_rejections() {
+    let special = linked_opcode_table()
+        .find(|opcode| opcode.name() == "special_object")
+        .unwrap()
+        .id();
+    // QuickJS OP_SPECIAL_OBJECT_{ARGUMENTS, MAPPED_ARGUMENTS, IMPORT_META}.
+    for (kind, expected) in [
+        (0_u8, None),
+        (1, Some(FallbackReason::ExtendedFrame)),
+        (6, Some(FallbackReason::UnsupportedOpcode)),
+        (8, Some(FallbackReason::UnsupportedOpcode)),
+    ] {
+        let bytecode = vec![special, kind, rquickjs_jit::bytecode::opcode::RETURN];
+        let verified = rquickjs_jit::test_support::verified_bytecode(bytecode, 0, 0);
+        assert_eq!(
+            verified
+                .tier1_eligibility()
+                .err()
+                .map(|rejection| rejection.reason()),
+            expected,
+            "special_object kind {kind}"
+        );
+    }
 }
 
 #[test]
@@ -239,20 +355,4 @@ fn m2_core_opcodes_are_advertised_with_their_lowering_family() {
         by_name("tail_call_method"),
         Tier1Policy::Helper(HelperId::Call)
     );
-
-    // Stack shuffles that ordinary Tier 1 eligible source cannot reach stay
-    // rejected: `nop`/`nip1` are never emitted by the QuickJS compiler,
-    // `dup1`/`swap2`/`rot3r`/`rot3l` need destructuring or for-in lvalues
-    // (`to_object`, `for_in_start`), `dup2`/`perm4` need `to_propkey2`, and
-    // `dup3`/`insert4`/`perm5`/`rot4l`/`rot5l` need `super` lvalues.
-    for rejected in [
-        "nop", "nip1", "dup1", "dup2", "dup3", "insert4", "perm4", "perm5", "swap2", "rot3l",
-        "rot3r", "rot4l", "rot5l",
-    ] {
-        assert_eq!(
-            by_name(rejected),
-            Tier1Policy::Reject(FallbackReason::UnsupportedOpcode),
-            "{rejected}"
-        );
-    }
 }

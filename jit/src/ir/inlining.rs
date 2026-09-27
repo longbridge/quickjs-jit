@@ -168,6 +168,7 @@ impl FrameInlineCallee {
             || snapshot.retained_bytes() > 16 * 1024
             || snapshot.closure_count() != 0
             || !snapshot.exception_map().is_empty()
+            || self.body.has_exception_regions()
             || self.body.control_flow_graph().blocks().len() > 16
             || self.body.control_flow_graph().blocks().iter().any(|block| {
                 block
@@ -178,6 +179,14 @@ impl FrameInlineCallee {
             || instructions
                 .iter()
                 .any(|instruction| instruction.opcode().name().starts_with("tail_call"))
+            // A callee that instantiates closures may alias its shadow-frame
+            // locals through attached var refs; keep it out of frame inlining.
+            || instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "fclosure" | "fclosure8" | "close_loc"
+                )
+            })
         {
             return None;
         }
@@ -327,6 +336,7 @@ impl InlineCallee {
             || snapshot.local_count() != 0
             || snapshot.closure_count() != 0
             || !snapshot.exception_map().is_empty()
+            || self.body.has_exception_regions()
             || self.body.instructions().len() > 128
         {
             return None;

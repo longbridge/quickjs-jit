@@ -15,6 +15,8 @@ pub use array_feedback::{
     ArrayAccess, ArrayFeedbackSnapshot, ArrayFeedbackTable, ArrayHazards, ArrayMode,
 };
 pub use background::{BackgroundCompiler, BackgroundCompilerError};
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub(crate) use coordinator::tier2_direct_call_site_usable;
 #[cfg(feature = "test-support")]
 pub use coordinator::CompletionDisposition;
 pub use coordinator::{
@@ -24,7 +26,7 @@ pub use coordinator::{
     SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-pub use coordinator::{DirectCallTarget, FrameInlineTarget};
+pub use coordinator::{DirectCallTarget, FrameInlineTarget, NativeCallTarget};
 pub use feedback::{
     BinaryFeedbackFlags, BinaryFeedbackSnapshot, BoundedSpecializationSignature,
     BranchFeedbackSnapshot, CallFeedbackSnapshot, CallLinkStatus, CallSignatureFeedbackSnapshot,
@@ -41,7 +43,7 @@ pub use invalidate::{DependencyError, DependencyGraph, DependencyKey};
 pub use osr::{OsrKey, OsrMap};
 pub use shape_feedback::{
     PropertyAttributes, PrototypeDependencyToken, ShapeFeedbackSite, ShapeFeedbackState,
-    ShapeFeedbackTable, ShapeObservation, ShapeToken,
+    ShapeFeedbackTable, ShapeObservation, ShapeToken, POLYMORPHIC_PROPERTY_LIMIT,
 };
 
 #[cfg(test)]

@@ -20,6 +20,61 @@ pub enum SlotKind {
 pub(crate) struct AbstractState {
     pub(crate) locals: Vec<SlotKind>,
     pub(crate) stack: Vec<SlotKind>,
+    /// Live catch offsets, innermost last: the operand-stack index of each
+    /// `CatchOffset` slot and its handler (`None` for iterator close offsets,
+    /// which the interpreter unwinds through without resuming).
+    pub(crate) catches: Vec<(usize, Option<u32>)>,
+}
+
+/// Where an exception raised while executing an instruction resumes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExceptionHandler {
+    catch_index: u16,
+    handler_pc: Option<u32>,
+    resumes_in_frame: bool,
+}
+
+impl ExceptionHandler {
+    /// Operand-stack index of the innermost live catch offset.
+    pub const fn catch_index(self) -> u16 {
+        self.catch_index
+    }
+
+    /// Handler PC of that catch offset; `None` for an iterator close offset.
+    pub const fn handler_pc(self) -> Option<u32> {
+        self.handler_pc
+    }
+
+    /// Whether some live catch offset (this one or an enclosing one) resumes
+    /// a handler in this frame. `false` when every live catch offset is a
+    /// for-of iterator close offset: the interpreter then closes the
+    /// iterators and propagates the exception out of the frame, exactly what
+    /// an ordinary native exception exit leads to.
+    pub const fn resumes_in_frame(self) -> bool {
+        self.resumes_in_frame
+    }
+}
+
+impl AbstractState {
+    /// The innermost live catch offset, which the interpreter's exception
+    /// unwinding reaches first.
+    fn innermost_catch(&self) -> Option<ExceptionHandler> {
+        self.catches.last().and_then(|(index, handler_pc)| {
+            Some(ExceptionHandler {
+                catch_index: u16::try_from(*index).ok()?,
+                handler_pc: *handler_pc,
+                resumes_in_frame: self.innermost_handler().is_some(),
+            })
+        })
+    }
+
+    /// The innermost catch offset that resumes a handler in this frame.
+    fn innermost_handler(&self) -> Option<(usize, u32)> {
+        self.catches
+            .iter()
+            .rev()
+            .find_map(|(index, handler_pc)| handler_pc.map(|pc| (*index, pc)))
+    }
 }
 
 impl AbstractState {
@@ -69,9 +124,11 @@ pub(crate) struct StateProof {
     pub(crate) before: BTreeMap<u32, AbstractState>,
     pub(crate) after: BTreeMap<u32, AbstractState>,
     pub(crate) visited: BTreeSet<u32>,
+    /// Innermost live catch offset before each instruction inside a region.
+    pub(crate) handlers: BTreeMap<u32, ExceptionHandler>,
 }
 
-fn effective_pop(instruction: &Instruction) -> usize {
+pub(crate) fn effective_pop(instruction: &Instruction) -> usize {
     let base = instruction.opcode().n_pop() as usize;
     match instruction.opcode().format() {
         OperandFormat::NPop | OperandFormat::NPopU16 => {
@@ -88,7 +145,7 @@ fn effective_pop(instruction: &Instruction) -> usize {
     }
 }
 
-fn local_index(instruction: &Instruction) -> Option<usize> {
+pub(crate) fn local_index(instruction: &Instruction) -> Option<usize> {
     match instruction.opcode().format() {
         OperandFormat::Local => Some(instruction.operand_u16(1) as usize),
         OperandFormat::Local8 => Some(instruction.operand_u8(1) as usize),
@@ -203,8 +260,56 @@ fn transfer(
     }
 
     let name = instruction.opcode().name();
+    if name == "nip_catch" {
+        // `catch_offset ... value -> value`: the interpreter releases every
+        // operand down to the innermost catch offset, whatever its depth.
+        let value = state.stack.pop().ok_or_else(|| {
+            VerifyError::new(
+                instruction.pc(),
+                VerifyErrorKind::StackUnderflow {
+                    needed: 1,
+                    available: 0,
+                },
+            )
+        })?;
+        let Some((index, _)) = state.catches.pop() else {
+            return Err(VerifyError::new(
+                instruction.pc(),
+                VerifyErrorKind::UnsupportedExceptionRegion,
+            ));
+        };
+        if state.stack.get(index) != Some(&SlotKind::CatchOffset) {
+            return Err(VerifyError::new(
+                instruction.pc(),
+                VerifyErrorKind::UnsupportedExceptionRegion,
+            ));
+        }
+        state.stack.truncate(index);
+        state.stack.push(value);
+        return check_stack_size(snapshot, instruction, state);
+    }
     let popped = state.stack.split_off(state.stack.len() - pop);
     let popped_top = popped.last().copied().unwrap_or(SlotKind::Tagged);
+    if matches!(name, "for_of_next" | "for_in_next") {
+        // The nominal pops are only the window the interpreter reads in
+        // place: the enumeration record (including its catch offset) and any
+        // intervening values stay on the stack unchanged, and the opcode
+        // pushes `value` and the boolean `done` flag above them. This runs
+        // before the consumed-catch-offset trim below: the for-of catch
+        // offset stays live across `for_of_next`.
+        state.stack.extend(popped);
+        state.stack.extend([SlotKind::Tagged, SlotKind::Tagged]);
+        return check_stack_size(snapshot, instruction, state);
+    }
+
+    // Any catch offset consumed by this instruction is no longer live.
+    while state
+        .catches
+        .last()
+        .is_some_and(|(index, _)| *index >= state.stack.len())
+    {
+        state.catches.pop();
+    }
 
     if name == "get_loc0_loc1" {
         state.stack.push(state.locals[0]);
@@ -233,6 +338,28 @@ fn transfer(
         state
             .stack
             .extend([SlotKind::Tagged, SlotKind::Tagged, SlotKind::CatchOffset]);
+        state.catches.push((state.stack.len() - 1, None));
+        return check_stack_size(snapshot, instruction, state);
+    }
+
+    if name == "catch" {
+        let target = instruction
+            .branch_target()
+            .and_then(|target| u32::try_from(target).ok())
+            .ok_or_else(|| {
+                VerifyError::new(
+                    instruction.pc(),
+                    VerifyErrorKind::UnsupportedExceptionRegion,
+                )
+            })?;
+        state.stack.push(SlotKind::CatchOffset);
+        state.catches.push((state.stack.len() - 1, Some(target)));
+        return check_stack_size(snapshot, instruction, state);
+    }
+
+    if name == "gosub" {
+        // The return address is an Int32 bytecode offset consumed by `ret`.
+        state.stack.push(SlotKind::Int32);
         return check_stack_size(snapshot, instruction, state);
     }
 
@@ -289,6 +416,12 @@ fn merge_state(
             },
         ));
     }
+    if expected.catches != actual.catches {
+        return Err(VerifyError::new(
+            pc,
+            VerifyErrorKind::UnsupportedExceptionRegion,
+        ));
+    }
     // Operand-stack representations must agree exactly. Unlike locals, these
     // are transient values consumed directly by the following bytecode. A
     // merge is not an operation and therefore cannot silently insert the
@@ -323,8 +456,21 @@ fn merge_state(
             | (SlotKind::Int32 | SlotKind::Float64, SlotKind::Tagged)
             | (SlotKind::Int32, SlotKind::Float64)
             | (SlotKind::Float64, SlotKind::Int32) => SlotKind::Tagged,
-            // Catch offsets and uninitialized cells are verifier-only states,
-            // not interchangeable JS value representations.
+            // A lexical binding declared in a loop body (for example the
+            // `for (const value of values)` binding) is uninitialized on loop
+            // entry and initialized on the backedge. The interpreter cell
+            // holds the JS_UNINITIALIZED tag in the first case, which is still
+            // a tagged value; the join only drops the proof, and every read
+            // of such a binding is a `get_loc_check`. Tier 1 keeps that
+            // runtime check; Tier 2 lowers it as a plain load and therefore
+            // separately proves definite initialization before admitting it
+            // (`ir::optimized::prove_lexical_checks`).
+            (SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64, SlotKind::Uninitialized)
+            | (SlotKind::Uninitialized, SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64) => {
+                SlotKind::Tagged
+            }
+            // Catch offsets are verifier-only states, not interchangeable JS
+            // value representations.
             _ => {
                 return Err(VerifyError::new(
                     pc,
@@ -355,6 +501,7 @@ pub(crate) fn prove(
             before: BTreeMap::new(),
             after: BTreeMap::new(),
             visited: BTreeSet::new(),
+            handlers: BTreeMap::new(),
         });
     }
     let before_points: BTreeSet<u32> = snapshot
@@ -396,12 +543,14 @@ pub(crate) fn prove(
         AbstractState {
             locals: vec![SlotKind::Tagged; snapshot.local_count() as usize],
             stack: Vec::new(),
+            catches: Vec::new(),
         },
     );
     let mut queue = VecDeque::from([0_u32]);
     let mut before = BTreeMap::new();
     let mut after = BTreeMap::new();
     let mut visited = BTreeSet::new();
+    let mut handlers = BTreeMap::new();
 
     while let Some(block_pc) = queue.pop_front() {
         let block = cfg.block(block_pc).expect("CFG successor names a block");
@@ -415,13 +564,83 @@ pub(crate) fn prove(
                 before.insert(instruction.pc(), state.clone());
             }
             visited.insert(instruction.pc());
+            if let Some(handler) = state.innermost_catch() {
+                handlers.insert(instruction.pc(), handler);
+            }
+            // Any instruction inside a try region may transfer to its
+            // handler with the locals it observed on entry.
+            if let Some((_, handler_pc)) = state.innermost_handler() {
+                budget.charge(instruction.pc(), state.locals.len())?;
+                let Some(expected) = block_entries.get_mut(&handler_pc) else {
+                    return Err(VerifyError::new(
+                        instruction.pc(),
+                        VerifyErrorKind::UnsupportedExceptionRegion,
+                    ));
+                };
+                if join_handler_locals(handler_pc, expected, &state.locals)? {
+                    queue.push_back(handler_pc);
+                }
+            }
             transfer(snapshot, instruction, &mut state)?;
             if after_points.contains(&instruction.pc()) {
                 budget.charge(instruction.pc(), state.cell_count())?;
                 after.insert(instruction.pc(), state.clone());
             }
         }
+        let tail = &instructions[block.instruction_range()]
+            .last()
+            .expect("CFG blocks are non-empty");
+        let catch_target = (tail.opcode().name() == "catch")
+            .then(|| tail.branch_target())
+            .flatten()
+            .and_then(|target| u32::try_from(target).ok());
+        // A handler must be distinct from the protected fallthrough, which
+        // continues with the catch offset itself on the stack.
+        if catch_target.is_some_and(|target| {
+            usize::try_from(target).ok() == (tail.pc() as usize).checked_add(tail.size())
+        }) {
+            return Err(VerifyError::new(
+                tail.pc(),
+                VerifyErrorKind::UnsupportedExceptionRegion,
+            ));
+        }
         for successor in block.successors() {
+            if catch_target == Some(*successor) {
+                // The interpreter resumes a handler with the caught value in
+                // place of its catch offset and that offset no longer live.
+                let mut incoming = state.clone();
+                let caught = incoming.stack.last_mut().filter(|kind| {
+                    **kind == SlotKind::CatchOffset
+                        && incoming
+                            .catches
+                            .last()
+                            .is_some_and(|(_, handler)| *handler == Some(*successor))
+                });
+                let Some(caught) = caught else {
+                    return Err(VerifyError::new(
+                        tail.pc(),
+                        VerifyErrorKind::UnsupportedExceptionRegion,
+                    ));
+                };
+                *caught = SlotKind::Tagged;
+                incoming.catches.pop();
+                budget.charge(*successor, incoming.cell_count())?;
+                if let Some(expected) = block_entries.get_mut(successor) {
+                    if expected.stack != incoming.stack || expected.catches != incoming.catches {
+                        return Err(VerifyError::new(
+                            *successor,
+                            VerifyErrorKind::UnsupportedExceptionRegion,
+                        ));
+                    }
+                    if join_handler_locals(*successor, expected, &incoming.locals)? {
+                        queue.push_back(*successor);
+                    }
+                } else {
+                    block_entries.insert(*successor, incoming);
+                    queue.push_back(*successor);
+                }
+                continue;
+            }
             let mut incoming = state.clone();
             if cfg.is_loop_header(*successor) {
                 // Establish the conservative frame-domain fixed point before
@@ -452,5 +671,42 @@ pub(crate) fn prove(
         before,
         after,
         visited,
+        handlers,
     })
+}
+
+/// Joins the locals observed at one exceptional edge into a handler entry.
+/// Unlike an ordinary merge, a handler is reached from every instruction of
+/// its try region, including those before a block-scoped binding in the
+/// region is initialized. That binding is out of scope in the handler, so an
+/// initialized/uninitialized disagreement conservatively becomes `Tagged`,
+/// which proves nothing about the cell's contents.
+fn join_handler_locals(
+    pc: u32,
+    expected: &mut AbstractState,
+    actual: &[SlotKind],
+) -> Result<bool, VerifyError> {
+    if expected.locals.len() != actual.len() {
+        return Err(VerifyError::new(
+            pc,
+            VerifyErrorKind::UnsupportedExceptionRegion,
+        ));
+    }
+    let mut changed = false;
+    for (expected, actual) in expected.locals.iter_mut().zip(actual) {
+        if expected == actual {
+            continue;
+        }
+        if matches!(*expected, SlotKind::CatchOffset) || matches!(*actual, SlotKind::CatchOffset) {
+            return Err(VerifyError::new(
+                pc,
+                VerifyErrorKind::UnsupportedExceptionRegion,
+            ));
+        }
+        if *expected != SlotKind::Tagged {
+            *expected = SlotKind::Tagged;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }

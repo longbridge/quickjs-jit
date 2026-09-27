@@ -2783,7 +2783,13 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
             assert_eq!(result, 7_000);
             jit.poll();
             let after = jit.metrics();
+            // The leaf's five baseline profitability retries are paced by
+            // the runtime clock, while the Tier1-rejection blacklist and the
+            // caller's first Tier2 entry can both happen earlier; faster
+            // native loops finish that race sooner. Wait for the leaf's
+            // retries to settle so the exact count below checks the caller.
             if after.blacklisted > 0
+                && after.profitability_rejected >= 5
                 && after.pending_worker_jobs == 0
                 && after.pending_snapshot_bytes == 0
                 && after.native_entries - before.native_entries == 1
@@ -3211,7 +3217,24 @@ fn guard_specific_float_side_path_changes_machine_guard_and_preserves_profile() 
         generic, specialized,
         "side path must alter the selected guard block"
     );
-    assert!(specialized.matches("brif").count() > generic.matches("brif").count());
+    // Proven checks fold away in both versions, so count the side path's
+    // own evidence: the guard block that records a side-path hit in the
+    // frame flags before continuing on the alternate representation.
+    let side_path_hits = |clif: &str| {
+        clif.lines()
+            .filter(|line| {
+                line.contains("bor_imm")
+                    && line.trim_end().ends_with(&format!(
+                        ", {}",
+                        rquickjs_core::qjs::JS_JIT_FRAME_SIDE_PATH_HIT
+                    ))
+            })
+            .count()
+    };
+    assert!(
+        side_path_hits(&specialized) > side_path_hits(&generic),
+        "{specialized}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3265,15 +3288,39 @@ fn bitops_loop_lowers_to_native_shift_and_xor_instructions() {
         0,
         0,
     );
-    for operation in ["ishl", "ushr", "bxor", "fcvt_from_uint"] {
+    for operation in ["ishl", "ushr", "bxor"] {
         assert!(
             straight.contains(operation),
             "missing {operation}: {straight}"
         );
     }
+    // A constant count with non-zero low five bits keeps `>>>` below 2^31,
+    // so the result is an Int32 without a Float64 alternative.
+    assert!(
+        !straight.contains("fcvt_from_uint"),
+        "constant unsigned shifts are always Int32: {straight}"
+    );
     assert!(
         !straight.contains("call_indirect"),
         "bit operations must not call a helper: {straight}"
+    );
+    // A count whose low five bits are zero shifts by nothing: `-1 >>> 32`
+    // is 4294967295 and must keep its Float64 representation.
+    let unmasked = raw_clif(
+        vec![
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            255,
+            rquickjs_core::qjs::QJS_JIT_OP_PUSH_I8,
+            32,
+            rquickjs_core::qjs::QJS_JIT_OP_SHR,
+            rquickjs_core::qjs::QJS_JIT_OP_RETURN,
+        ],
+        0,
+        0,
+    );
+    assert!(
+        unmasked.contains("fcvt_from_uint"),
+        "a zero effective count may produce a Float64: {unmasked}"
     );
 }
 
@@ -4110,6 +4157,17 @@ mod m2_core_opcodes {
             value(&[
                 qjs::QJS_JIT_OP_PUSH_MINUS1,
                 qjs::QJS_JIT_OP_PUSH_0,
+                qjs::QJS_JIT_OP_SHR,
+                opcode::RETURN
+            ]),
+            float(4_294_967_295.0)
+        );
+        // A constant count of 32 masks to zero: still a Float64 result.
+        assert_eq!(
+            value(&[
+                qjs::QJS_JIT_OP_PUSH_MINUS1,
+                opcode::PUSH_I8,
+                32,
                 qjs::QJS_JIT_OP_SHR,
                 opcode::RETURN
             ]),

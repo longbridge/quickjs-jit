@@ -202,9 +202,43 @@ mod tests {
         assert_eq!(p99, 100);
         assert!(ci[0] <= median && median <= ci[1]);
     }
+
+    #[test]
+    fn timed_batch_summary_uses_the_median_and_counts_but_keeps_spikes() {
+        // A single one-off stall (the old fixed-batch artifact) no longer
+        // determines the reported latency, but it stays visible.
+        let mut batches = vec![5_000u64; 16];
+        batches[0] = 187_000;
+        let (median, outliers) = timed_batch_summary(&batches);
+        assert_eq!(median, 5_000);
+        assert_eq!(outliers, 1);
+        // Exactly 5x the median is not an outlier; above it is.
+        batches[0] = 25_000;
+        assert_eq!(timed_batch_summary(&batches).1, 0);
+        batches[0] = 25_001;
+        assert_eq!(timed_batch_summary(&batches).1, 1);
+        // Even K uses the harness-wide upper median.
+        assert_eq!(timed_batch_summary(&[1, 2, 3, 4]), (3, 0));
+        assert_eq!(timed_batch_summary(&[]), (0, 0));
+    }
 }
 
+/// Legacy timing protocol: 64 warmup batches, then one timed batch.
+#[allow(dead_code)]
+pub const PROTOCOL_FIXED_WARMUP_V2: &str = "shared-js-fixed-warmup-v2";
+/// Current timing protocol: 64 warmup batches, then K consecutive timed
+/// batches whose median becomes `elapsed_ns`.
+#[allow(dead_code)]
+pub const PROTOCOL_MULTIBATCH_V3: &str = "shared-js-multibatch-v3";
+/// A timed batch slower than this multiple of the timed-batch median is
+/// counted as an outlier. Outliers are never discarded.
+#[allow(dead_code)]
+pub const OUTLIER_RATIO: u64 = 5;
+
 /// Protocol identity separates these fixed-warmup timings from historical v1 timing.
+///
+/// Fields after `readiness_diagnostic_ns` were added by
+/// `shared-js-multibatch-v3`; they default to empty in v2 evidence.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolEvidence {
@@ -217,4 +251,45 @@ pub struct ProtocolEvidence {
     pub fixed_metrics_before: Option<std::collections::BTreeMap<String, u64>>,
     pub fixed_metrics_after: Option<std::collections::BTreeMap<String, u64>>,
     pub readiness_diagnostic_ns: Option<u64>,
+    /// Number of consecutive timed batches after the warmups (v3).
+    #[serde(default)]
+    pub timed_batches: u32,
+    /// Raw latency of every timed batch, in execution order (v3).
+    #[serde(default)]
+    pub timed_batch_ns: Vec<u64>,
+    /// Diagnostic only: the first timed batch, i.e. the single batch that
+    /// `shared-js-fixed-warmup-v2` reported as `elapsed_ns` (v3).
+    #[serde(default)]
+    pub fixed_batch_ns: Option<u64>,
+    /// Outlier rule: a timed batch above `outlier_ratio` times the median (v3).
+    #[serde(default)]
+    pub outlier_ratio: u64,
+    /// Number of timed batches that exceed the outlier rule (v3).
+    #[serde(default)]
+    pub outlier_batches: u32,
+    /// JIT metric snapshots around the whole timed window. They include the
+    /// untimed checksum and poll steps between timed batches (v3).
+    #[serde(default)]
+    pub timed_metrics_before: Option<std::collections::BTreeMap<String, u64>>,
+    #[serde(default)]
+    pub timed_metrics_after: Option<std::collections::BTreeMap<String, u64>>,
+    /// How Bun loaded its wrapper: `file` (v3 default) or `eval` (control) (v3).
+    #[serde(default)]
+    pub bun_launch: Option<String>,
+    /// SHA-256 of the exact Bun wrapper module that was executed (v3).
+    #[serde(default)]
+    pub bun_wrapper_sha256: Option<String>,
+}
+
+/// Summary of K timed batches: (upper median, outlier count).
+///
+/// The median uses the same upper-quantile rule as the rest of the harness.
+#[allow(dead_code)]
+pub fn timed_batch_summary(batches: &[u64]) -> (u64, u32) {
+    let mut sorted = batches.to_vec();
+    sorted.sort_unstable();
+    let median = quantile(&sorted, 0.5);
+    let threshold = median.saturating_mul(OUTLIER_RATIO);
+    let outliers = batches.iter().filter(|&&ns| ns > threshold).count();
+    (median, u32::try_from(outliers).unwrap_or(u32::MAX))
 }

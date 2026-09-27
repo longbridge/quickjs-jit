@@ -112,6 +112,10 @@ name = "property_specialization"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "polymorphic_property_ic"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "speculative_numeric"
 required-features = ["compiler", "test-support"]
 
@@ -180,11 +184,31 @@ name = "tier1_globals"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_closures"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "tier1_constructors"
 required-features = ["compiler", "test-support"]
 
 [[test]]
 name = "tier1_regexp"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_generic_ops"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "untranslatable_settle"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier1_iteration"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier2_tdz"
 required-features = ["compiler", "test-support"]
 
 [[test]]

@@ -278,13 +278,26 @@ static JSJitExit native(JSJitExecFrame *root)
     } else if (scenario == 16) {
         double value;
         size_t nested_bytes = root->rt->jit_inline_bytes;
+        size_t nested_arena = root->rt->jit_inline_arena_used;
         assert(root->rt->jit_inline_depth == 2 && root->rt->jit_inline_top);
         assert(&root->rt->jit_inline_top->view == leaf);
+        /* Nested shadow frames are stacked in the runtime arena. */
+        assert(!QJSJIT_INLINE_ARENA_ENABLED ||
+               (root->rt->jit_inline_top->arena_bytes &&
+                root->rt->jit_inline_top->previous->arena_bytes &&
+                root->rt->jit_inline_top->arena_mark ==
+                    root->rt->jit_inline_top->previous->arena_mark +
+                    root->rt->jit_inline_top->previous->arena_bytes &&
+                nested_arena == root->rt->jit_inline_top->arena_mark +
+                    root->rt->jit_inline_top->arena_bytes));
         leaf->stack_base[0] = JS_NewFloat64(leaf->ctx, 2147483648.0);
         leaf->stack_top = leaf->stack_base + 1;
         assert(JS_JitInlineLeave(leaf, callee_snapshot->arg_count + callee_snapshot->local_count) == JS_JIT_HELPER_OK);
         assert(root->rt->jit_inline_depth == 1 && root->rt->jit_inline_bytes < nested_bytes);
         assert(root->rt->jit_inline_top && &root->rt->jit_inline_top->view == middle);
+        assert(!QJSJIT_INLINE_ARENA_ENABLED ||
+               root->rt->jit_inline_arena_used ==
+                   root->rt->jit_inline_top->arena_mark + root->rt->jit_inline_top->arena_bytes);
         assert(root->rt->jit_active_frame == middle && middle->stack_top == middle->stack_base + 1);
         assert(middle->pc == middle->bytecode_start + find_opcode(middle_snapshot, "call1", 0) + 1);
         assert(JS_ToFloat64(middle->ctx, &value, middle->stack_base[0]) == 0 && value == 2147483648.0);
@@ -292,6 +305,7 @@ static JSJitExit native(JSJitExecFrame *root)
         middle->stack_base[0] = JS_NewFloat64(middle->ctx, 2147483668.0);
         assert(JS_JitInlineLeave(middle, middle_snapshot->arg_count + middle_snapshot->local_count) == JS_JIT_HELPER_OK);
         assert(!root->rt->jit_inline_top && root->rt->jit_inline_depth == 0 && root->rt->jit_inline_bytes == 0);
+        assert(root->rt->jit_inline_arena_used == 0);
         assert(root->rt->jit_active_frame == root);
     } else if (scenario == 17) {
         unsigned throw_pc = find_opcode(callee_snapshot, "throw", 0);
@@ -496,6 +510,9 @@ cleanup:
     }
     if (mode == 9) JS_FreeValue(ctx, args[0]);
     assert(JS_SetJitBackend(rt, NULL, NULL) == JS_JIT_BACKEND_OK);
+    /* Every shadow frame, published or declined, returned its storage. */
+    assert(!rt->jit_inline_top && rt->jit_inline_depth == 0 &&
+           rt->jit_inline_bytes == 0 && rt->jit_inline_arena_used == 0);
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
 }

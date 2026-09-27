@@ -113,10 +113,70 @@ fn artifact_environment(
     }
 }
 
+/// Backend-owned ABI 1.25 fast-entry state shared with QuickJS.
+///
+/// QuickJS reads `epoch` and increments the counters with plain stores on
+/// the runtime thread while executing callback-free native calls. Rust only
+/// loads them, so a reader on another thread may observe a stale count. The
+/// allocation outlives the attached backend, which keeps one `Arc` clone.
+#[repr(C)]
+#[derive(Debug)]
+struct FastEntryShared {
+    struct_size: u32,
+    reserved: u32,
+    epoch: AtomicU64,
+    entries: AtomicU64,
+    exits: AtomicU64,
+    optimized_entries: AtomicU64,
+}
+
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    use rquickjs_core::qjs::JSJitFastEntryState as Raw;
+    assert!(size_of::<FastEntryShared>() == size_of::<Raw>());
+    assert!(align_of::<FastEntryShared>() >= align_of::<Raw>());
+    assert!(offset_of!(FastEntryShared, epoch) == offset_of!(Raw, epoch));
+    assert!(offset_of!(FastEntryShared, entries) == offset_of!(Raw, entries));
+    assert!(offset_of!(FastEntryShared, exits) == offset_of!(Raw, exits));
+    assert!(offset_of!(FastEntryShared, optimized_entries) == offset_of!(Raw, optimized_entries));
+};
+
+impl FastEntryShared {
+    fn new(epoch: u64) -> Self {
+        Self {
+            struct_size: core::mem::size_of::<rquickjs_core::qjs::JSJitFastEntryState>() as u32,
+            reserved: 0,
+            epoch: AtomicU64::new(epoch),
+            entries: AtomicU64::new(0),
+            exits: AtomicU64::new(0),
+            optimized_entries: AtomicU64::new(0),
+        }
+    }
+
+    /// The counters and epoch are atomics, so QuickJS may update them through
+    /// this pointer while Rust holds shared references.
+    /// Unused by targets without the native production backend.
+    #[allow(dead_code)]
+    fn as_raw(&self) -> *mut rquickjs_core::qjs::JSJitFastEntryState {
+        (self as *const Self).cast_mut().cast()
+    }
+
+    /// Adds callback-free executions to a published snapshot.
+    fn add_to(&self, metrics: &mut JitMetrics) {
+        let entries = self.entries.load(Ordering::Relaxed);
+        let exits = self.exits.load(Ordering::Relaxed);
+        let optimized = self.optimized_entries.load(Ordering::Relaxed);
+        metrics.native_entries = metrics.native_entries.saturating_add(entries);
+        metrics.native_exits = metrics.native_exits.saturating_add(exits);
+        metrics.tier2_entries = metrics.tier2_entries.saturating_add(optimized);
+    }
+}
+
 /// Owns the guard that keeps a JIT backend attached to a runtime.
 #[derive(Debug)]
 pub struct Jit {
     metrics: Arc<Mutex<JitMetrics>>,
+    fast_entry: Arc<FastEntryShared>,
     config: JitConfig,
     _guard: rquickjs_core::runtime::RuntimeJitGuard,
     #[cfg(all(feature = "test-support", feature = "compiler"))]
@@ -148,6 +208,10 @@ impl Jit {
             }
             return Err(error.into());
         }
+        // Measure the interpreter's per-call stack cost once per process,
+        // outside JIT callbacks, before any native call entry is compiled.
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let _ = compiler::native_call::interpreter_frame_bytes();
 
         let metrics = Arc::new(Mutex::new(JitMetrics::disabled()));
         #[cfg(all(
@@ -265,6 +329,48 @@ impl Jit {
         let backend = NoopBackend {
             _config: config.clone(),
         };
+        #[cfg(not(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        )))]
+        let fast_entry = Arc::new(FastEntryShared::new(0));
+        #[cfg(all(
+            feature = "compiler",
+            any(
+                all(
+                    target_os = "macos",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "windows",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(
+                    target_os = "linux",
+                    target_endian = "little",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )
+        ))]
+        let fast_entry = Arc::clone(&backend.fast_entry);
         let guard = match runtime.attach_jit_backend(backend) {
             Ok(guard) => guard,
             Err(error) => {
@@ -274,6 +380,7 @@ impl Jit {
         };
         Ok(Self {
             metrics,
+            fast_entry,
             config,
             _guard: guard,
             #[cfg(all(feature = "test-support", feature = "compiler"))]
@@ -454,10 +561,13 @@ impl Jit {
 
     /// Returns the metrics associated with this backend guard.
     pub fn metrics(&self) -> JitMetrics {
-        self.metrics
+        let mut snapshot = self
+            .metrics
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone()
+            .clone();
+        self.fast_entry.add_to(&mut snapshot);
+        snapshot
     }
 
     /// Performs bounded installation and reclamation work on the runtime thread.
@@ -597,6 +707,69 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const HOT_MAINTENANCE_INTERVAL: u32 = 64;
 
+/// Inputs of a deferred Tier-2 candidate decision: feedback lattices, the
+/// installed-artifact count (callee resolution and direct-call readiness), and
+/// whether the element-loop gate has its eight baseline samples.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Tier2ScanInputs {
+    feedback: u64,
+    shapes: u64,
+    installed: u64,
+    element_samples: u64,
+}
+
+/// Callback-free executions granted per full call of a steady native entry.
+/// Every renewal still runs hot, feedback, timing and maintenance callbacks.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const FAST_ENTRY_BUDGET: u32 = 255;
+
+/// Baseline executions an untranslatable generation serves before it is
+/// settled into the interpreter (see `settle_untranslatable_tier2_candidate`).
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const UNTRANSLATABLE_SETTLE_EXECUTIONS: u64 = 16;
+
+/// Opcodes that Tier 1 admitted only through the P2b slice (82d3808 rejected
+/// each of them). A function containing one ran in the interpreter at
+/// 82d3808; the untranslatable settle returns it there. Every other function
+/// keeps the unchanged optimizing scan, so Tier 1-only code that already ran
+/// natively (string/object literals, `new`, ...) keeps its baseline.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const SETTLED_GENERIC_TIER1_OPCODES: &[&str] = &[
+    "push_this",
+    "special_object",
+    "dup1",
+    "dup2",
+    "perm4",
+    "swap2",
+    "rot3l",
+    "rot3r",
+    "get_var_undef",
+    "put_var",
+    "to_object",
+    "to_propkey2",
+    "typeof",
+    "delete",
+    "delete_var",
+    "pow",
+    "instanceof",
+    "in",
+    "typeof_is_undefined",
+    "typeof_is_function",
+];
+
+/// Whether the optimizing scan settles this generation into the interpreter
+/// instead of evaluating a Tier 2 trial: Tier 2 can never translate it and
+/// it contains an opcode from `SETTLED_GENERIC_TIER1_OPCODES`.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn settles_untranslatable_candidate(snapshot: &bytecode::VerifiedFunction) -> bool {
+    snapshot
+        .instructions()
+        .iter()
+        .any(|instruction| SETTLED_GENERIC_TIER1_OPCODES.contains(&instruction.opcode().name()))
+        && !ir::optimized_opcodes_supported(snapshot)
+}
+
 /// Feedback pc used for return types observed at native `DONE` exits.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
@@ -636,6 +809,8 @@ struct ProductionBackend {
     optimizing_snapshots:
         std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     baseline_property_refreshed: std::collections::HashSet<runtime::FunctionKey>,
+    // Cached feedback-independent Tier-2 vocabulary admission per function.
+    optimized_vocabulary: std::collections::HashMap<runtime::FunctionKey, bool>,
     tier2_sources: std::collections::HashMap<runtime::FunctionKey, bytecode::VerifiedFunction>,
     feedback: runtime::FeedbackTable,
     // CALL feedback consumers finish synchronously and never reenter QuickJS.
@@ -665,6 +840,11 @@ struct ProductionBackend {
     last_scan_feedback_version: u64,
     last_scan_installed: u64,
     last_refresh_scan: Option<(u64, u64)>,
+    /// Tier-2 candidates whose last scan deferred them for missing feedback or
+    /// an unresolved callee, keyed by the inputs that decision depended on.
+    /// Rescanning with equal inputs would repeat the same feedback snapshot
+    /// and reach the same deferral, so maintenance skips it.
+    tier2_deferred: rustc_hash::FxHashMap<runtime::FunctionKey, Tier2ScanInputs>,
     direct_refresh_probes: std::collections::HashMap<runtime::FunctionKey, (u64, u64)>,
     queue_reasons: std::collections::HashMap<runtime::FunctionKey, runtime::HotReason>,
     prequeue_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
@@ -679,6 +859,9 @@ struct ProductionBackend {
     // retain their own tier in execution_starts across recursive replacement.
     entry_tiers: rustc_hash::FxHashMap<runtime::FunctionKey, runtime::Tier>,
     entry_cache_epoch: u64,
+    /// ABI 1.25 state granted to cached steady-state entries. Its epoch
+    /// mirrors `entry_cache_epoch`.
+    fast_entry: Arc<FastEntryShared>,
     // C brackets each native invocation with a synchronous enter/exit pair.
     // Keep active records through retirement and preserve each invocation's tier.
     execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
@@ -691,6 +874,22 @@ struct ProductionBackend {
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
     profitability_blacklisted: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Generations whose bytecode Tier 2 can never translate and whose
+    /// baseline decision is settled; they leave the optimizing scan.
+    tier2_untranslatable: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Functions whose Tier 2 artifact runs self recursion as native calls.
+    /// One optimized entry then covers a whole recursion tree, so its
+    /// invocation time is not comparable with per-call baseline samples.
+    native_recursive: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Last native-entry admission answer per function and signature.
+    native_call_plans: rustc_hash::FxHashMap<
+        runtime::FunctionKey,
+        (
+            Box<[runtime::FeedbackRepresentation]>,
+            runtime::FeedbackRepresentation,
+            bool,
+        ),
+    >,
     /// Immutable generations for which neither tier can ever produce code.
     /// `record_hot` reports these to QuickJS so it can turn off all probes and
     /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
@@ -757,6 +956,10 @@ struct ProductionProfile {
     helper_calls: u64,
     baseline_executions: u64,
     baseline_ns: u64,
+    /// Baseline entries not nested in an active execution of the same
+    /// function: `baseline_executions / baseline_outermost` estimates how many
+    /// calls one outside entry performs through self recursion.
+    baseline_outermost: u64,
     optimized_executions: u64,
     optimized_ns: u64,
     /// Fastest optimized invocation observed so far; meaningful only while
@@ -782,6 +985,44 @@ impl ProductionProfile {
         self.optimized_ns = self.optimized_ns.saturating_add(elapsed_ns);
     }
 }
+
+/// Automatic-tiering profitability gate for closure-creating functions.
+///
+/// Tier 1 lowers `fclosure`, var-ref access and `close_loc` through the
+/// generic helper bridge, and a function that creates closures must also
+/// reload every argument and local after each helper. Tier 2 rejects these
+/// opcodes, so such a function would stay in Tier 1 for its lifetime with
+/// no optimizing follow-up. Measured on `calls-recursion-closures`, that
+/// Tier 1 loop runs at about 0.74x the interpreter's speed. Until the
+/// bridge (roadmap P1/P3) or Tier 2 var refs make it profitable, automatic
+/// tiering leaves closure-creating functions in the interpreter. Explicit
+/// tier policies (`BaselineOnly`, `Optimize`) and forced test tiers still
+/// compile them, so the lowering stays covered.
+fn automatic_closure_creation_unprofitable(
+    config: &JitConfig,
+    verified: &bytecode::VerifiedFunction,
+) -> bool {
+    #[cfg(feature = "test-support")]
+    if config.force_optimized() {
+        return false;
+    }
+    config.tier_policy() == JitTierPolicy::Automatic
+        && verified
+            .instructions()
+            .iter()
+            .any(|instruction| matches!(instruction.opcode().name(), "fclosure" | "fclosure8"))
+}
+
+/// Minimum observed self-recursive calls per outside entry before a pure
+/// recursive function is admitted to the native-call convention.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_MIN_CALLS_PER_ENTRY: u64 = 16;
+/// Baseline executions observed before that ratio can admit a function.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_PROFILE_EXECUTIONS: u64 = 64;
+/// Outside entries observed before a shallow ratio rejects a function.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_PROFILE_ENTRIES: u64 = 64;
 
 /// Finish the bounded Tier-2 profitability trial once. Production JITs patch
 /// an IC/tier state after classification; repeating wide average comparisons
@@ -1118,8 +1359,12 @@ impl TrustedFrameBuffers {
         let value_size = core::mem::size_of::<rquickjs_core::qjs::JSValue>();
         let stack = stack_base as usize;
         let capacity = stack_capacity as usize;
-        if arg_buf.is_null()
-            || var_buf.is_null()
+        // QuickJS aliases `arg_buf` to the caller's `argv` when no argument
+        // copy is needed, and a zero-argument call may pass a null `argv`
+        // (the baseline CALL helper does for `argc == 0`). An empty argument
+        // or local area therefore may be null; it is never dereferenced.
+        if (arg_buf.is_null() && argument_capacity != 0)
+            || (var_buf.is_null() && local_capacity != 0)
             || stack_base.is_null()
             || stack_capacity.is_null()
             || stack > capacity
@@ -1257,9 +1502,11 @@ fn validate_production_frame(
     let value_size = core::mem::size_of::<qjs::JSValue>();
     let expected_top = (frame.stack_base as usize)
         .checked_add(usize::from(map.stack_depth()).saturating_mul(value_size));
+    // An empty argument/local area may be null (a zero-argument call can
+    // pass a null `argv`); it is never read below.
     if expected_top != Some(frame.stack_top as usize)
-        || frame.arg_buf.is_null()
-        || frame.var_buf.is_null()
+        || (frame.arg_buf.is_null() && map.argument_count() != 0)
+        || (frame.var_buf.is_null() && map.local_count() != 0)
         || map.live_slots().len()
             != usize::from(map.argument_count())
                 + usize::from(map.local_count())
@@ -1281,7 +1528,8 @@ fn validate_production_frame(
         };
         let valid = match kind {
             SlotKind::Tagged => true,
-            SlotKind::Int32 | SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::Int32 => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_CATCH_OFFSET),
             SlotKind::Float64 => value.tag == i64::from(qjs::JS_TAG_FLOAT64),
             SlotKind::Uninitialized => value.tag == i64::from(qjs::JS_TAG_UNINITIALIZED),
         };
@@ -1326,6 +1574,7 @@ unsafe extern "C" fn production_entry_trampoline(
     // Capture trusted entry context before native execution can modify the
     // frame. Rejection must not dereference pointers supplied by a bad exit.
     let validated_ctx = frame.ctx;
+    let fast_entry = frame.flags & qjs::JS_JIT_FRAME_FAST_ENTRY != 0;
     let validated_bytecode_start = frame.bytecode_start;
     let validated_arg_buf = frame.arg_buf;
     let validated_var_buf = frame.var_buf;
@@ -1373,7 +1622,9 @@ unsafe extern "C" fn production_entry_trampoline(
             .side_path_entries
             .fetch_add(1, Ordering::Release);
     }
-    if exit.kind == qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
+    // A granted fast DONE exit reports no native_exit to consume this
+    // handoff; its steady return type is resampled on the next full call.
+    if exit.kind == qjs::JSJitExitKind_JS_JIT_EXIT_DONE && !fast_entry {
         if let Some(observed) = observed_value_type(frame.result) {
             pin.validation
                 .mark_native_return(pin.key.id, pin.key.generation, observed);
@@ -1446,14 +1697,18 @@ fn observed_deopt_type(
     shape: ir::OptimizedFrameShape,
 ) -> Option<runtime::ObservedType> {
     use rquickjs_core::qjs;
-    let values = unsafe {
-        core::slice::from_raw_parts(buffers.arg_buf, usize::from(shape.arguments()))
-            .iter()
-            .chain(core::slice::from_raw_parts(
-                buffers.var_buf,
-                usize::from(shape.locals()),
-            ))
+    // Empty areas may be null (see `TrustedFrameBuffers::capture_raw`), and a
+    // slice may not be built from a null pointer even when it is empty.
+    let area = |pointer: *mut qjs::JSValue, count: u16| -> &[qjs::JSValue] {
+        if count == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(pointer, usize::from(count)) }
+        }
     };
+    let values = area(buffers.arg_buf, shape.arguments())
+        .iter()
+        .chain(area(buffers.var_buf, shape.locals()));
     values
         .filter_map(|value| {
             let tag = unsafe { qjs::JS_VALUE_GET_TAG(*value) };
@@ -2074,10 +2329,11 @@ impl ProductionBackend {
             optimizing_hotness: rustc_hash::FxHashMap::default(),
             optimizing_snapshots: std::collections::HashMap::new(),
             baseline_property_refreshed: std::collections::HashSet::new(),
+            optimized_vocabulary: std::collections::HashMap::new(),
             tier2_sources: std::collections::HashMap::new(),
             feedback: runtime::FeedbackTable::new(feedback_capacity, 3),
             call_feedback_types: Vec::new(),
-            shape_feedback: runtime::ShapeFeedbackTable::new(3),
+            shape_feedback: runtime::ShapeFeedbackTable::new(runtime::POLYMORPHIC_PROPERTY_LIMIT),
             metrics,
             cold_metrics_dirty: true,
             native_entries: 0,
@@ -2098,6 +2354,7 @@ impl ProductionBackend {
             last_scan_feedback_version: u64::MAX,
             last_scan_installed: u64::MAX,
             last_refresh_scan: None,
+            tier2_deferred: rustc_hash::FxHashMap::default(),
             direct_refresh_probes: std::collections::HashMap::new(),
             queue_reasons: std::collections::HashMap::new(),
             prequeue_backoff: std::collections::HashMap::new(),
@@ -2110,12 +2367,16 @@ impl ProductionBackend {
             execution_starts: Vec::new(),
             entry_tiers: rustc_hash::FxHashMap::default(),
             entry_cache_epoch: 1,
+            fast_entry: Arc::new(FastEntryShared::new(1)),
             execution_profiles: rustc_hash::FxHashMap::default(),
             profitability_evaluations: 0,
             profitability_approved: 0,
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
+            tier2_untranslatable: rustc_hash::FxHashSet::default(),
+            native_recursive: rustc_hash::FxHashSet::default(),
+            native_call_plans: rustc_hash::FxHashMap::default(),
             feedback_disabled: rustc_hash::FxHashSet::default(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
@@ -2171,11 +2432,125 @@ impl ProductionBackend {
         }
     }
 
+    /// The tier of a cached entry for which per-call callbacks can no longer
+    /// change any decision: either its optimized artifact is installed and
+    /// the bounded profitability trial is over (or cannot run without
+    /// baseline samples), or its baseline artifact is installed and the
+    /// optimizing tier is terminally blacklisted, so neither hot counts nor
+    /// baseline timing feed a pending promotion. Hot counts, call feedback
+    /// and timing are then only sampled on the full call that renews each
+    /// fast-entry grant.
+    fn fast_entry_steady(&self, key: runtime::FunctionKey) -> Option<runtime::Tier> {
+        if self.feedback_disabled.contains(&key) {
+            return None;
+        }
+        let tier = *self.entry_tiers.get(&key)?;
+        let optimizing = self.coordinator.tier_state(key, runtime::Tier::Optimizing);
+        let steady = match tier {
+            runtime::Tier::Optimizing => {
+                matches!(optimizing, runtime::CompileState::Installed(_))
+                    && self.execution_profiles.get(&key).is_some_and(|profile| {
+                        profile.tier2_trial_decided || profile.baseline_executions == 0
+                    })
+            }
+            runtime::Tier::Baseline => {
+                // Baseline-only refresh probing consumes every hot event.
+                self.config.tier_policy() != JitTierPolicy::BaselineOnly
+                    && optimizing == runtime::CompileState::Blacklisted
+                    && matches!(
+                        self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                        runtime::CompileState::Installed(_)
+                    )
+                    && !self.optimizing_requested.contains(&key)
+                    && !self.optimizing_snapshots.contains_key(&key)
+            }
+        };
+        steady.then_some(tier)
+    }
+
     fn invalidate_entry_cache(&mut self) {
         // Epoch zero permanently disables caching after exhaustion: never let
         // an old handle become admissible again through wraparound.
         if self.entry_cache_epoch != 0 {
             self.entry_cache_epoch = self.entry_cache_epoch.checked_add(1).unwrap_or(0);
+        }
+        // Granted QuickJS handles compare this copy instead of querying
+        // `entry_cache_epoch`, so publish every change before returning.
+        self.fast_entry
+            .epoch
+            .store(self.entry_cache_epoch, Ordering::Relaxed);
+    }
+
+    /// Settles a generation that Tier 2 can never translate and whose Tier 1
+    /// code exists only because of the opcodes in
+    /// `SETTLED_GENERIC_TIER1_OPCODES` (see `settles_untranslatable_candidate`).
+    /// Such a function ran in the interpreter at 82d3808, and its baseline is
+    /// dominated by exact slow-path helper calls: the optimizing scan would
+    /// otherwise revisit it at every maintenance, rebuilding feedback
+    /// snapshots whenever a property/call/numeric gate defers the trial, and
+    /// the new `methods-dynamic` kernel ran 5.4x slower that way. After a short
+    /// baseline warmup it returns to the interpreter with its probes off, the
+    /// state it had at 82d3808. The call-only rule runs first so that its
+    /// metric keeps its meaning.
+    fn settle_untranslatable_tier2_candidate(&mut self, key: runtime::FunctionKey) {
+        let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
+            return;
+        };
+        if self.profitability_blacklisted.contains(&key) {
+            self.retire_untranslatable_to_interpreter(key);
+            return;
+        }
+        // Let the installed baseline serve a short warmup (and any OSR it
+        // enabled) first. The deferral is a map lookup; no feedback snapshot
+        // is built.
+        if self
+            .execution_profiles
+            .get(&key)
+            .is_none_or(|profile| profile.baseline_executions < UNTRANSLATABLE_SETTLE_EXECUTIONS)
+        {
+            return;
+        }
+        let has_loop = snapshot.control_flow_graph().blocks().iter().any(|block| {
+            snapshot
+                .control_flow_graph()
+                .is_loop_header(block.start_pc())
+        });
+        // Both outcomes retire to the interpreter; only the call-only
+        // demotion metric differs.
+        if !has_loop {
+            let observed = self.feedback.snapshot(self.clock.max(1));
+            let generic_call = snapshot.instructions().iter().any(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "call"
+                        | "call0"
+                        | "call1"
+                        | "call2"
+                        | "call3"
+                        | "call_method"
+                        | "tail_call"
+                        | "tail_call_method"
+                        | "call_constructor"
+                ) && !observed
+                    .call_specialization_at(key, instruction.pc())
+                    .is_some_and(|call| {
+                        call.callee() != key && self.coordinator.direct_call_ready(&call)
+                    })
+            });
+            if generic_call {
+                self.cold_metrics_dirty = true;
+                self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
+            }
+        }
+        self.retire_untranslatable_to_interpreter(key);
+    }
+
+    fn retire_untranslatable_to_interpreter(&mut self, key: runtime::FunctionKey) {
+        self.optimizing_snapshots.remove(&key);
+        self.feedback_disabled.insert(key);
+        self.tier2_untranslatable.insert(key);
+        if self.profitability_blacklisted.insert(key) {
+            self.coordinator.demote_baseline_to_interpreter(key);
         }
     }
 
@@ -2201,29 +2576,97 @@ impl ProductionBackend {
             );
         }
         let refresh_inputs = (self.feedback.version(), self.coordinator.installed_count());
-        let refresh_scan_due = self.config.tier_policy() == JitTierPolicy::BaselineOnly
-            && self.last_refresh_scan != Some(refresh_inputs);
+        let baseline_only = self.config.tier_policy() == JitTierPolicy::BaselineOnly;
+        let refresh_scan_due = self.last_refresh_scan != Some(refresh_inputs);
         if refresh_scan_due {
             self.last_refresh_scan = Some(refresh_inputs);
-            let refreshes = self
-                .optimizing_snapshots
-                .iter()
-                .filter_map(|(key, snapshot)| {
+            // Under automatic tiering the baseline artifact is normally a
+            // stepping stone and keeps its feedback-free helper sites. When
+            // no feedback can make Tier 2 translate the function, baseline is
+            // its terminal native tier: refresh it once with the recorded
+            // (bounded polymorphic) property feedback, exactly as the
+            // baseline-only policy does. Never race an active Tier-2 job.
+            let candidates = if baseline_only {
+                self.optimizing_snapshots
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                let mut keys = self
+                    .optimizing_snapshots
+                    .keys()
+                    .chain(self.tier2_sources.keys())
+                    .copied()
+                    .filter(|key| !self.baseline_property_refreshed.contains(key))
+                    .collect::<Vec<_>>();
+                keys.sort_unstable_by_key(|key| (key.id, key.generation));
+                keys.dedup();
+                keys.retain(|key| {
+                    !matches!(
+                        self.coordinator.tier_state(*key, runtime::Tier::Optimizing),
+                        runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                            | runtime::CompileState::Installed(_)
+                    )
+                });
+                let snapshots = &self.optimizing_snapshots;
+                let sources = &self.tier2_sources;
+                keys.retain(|key| {
+                    let admitted = *self.optimized_vocabulary.entry(*key).or_insert_with(|| {
+                        snapshots
+                            .get(key)
+                            .or_else(|| sources.get(key))
+                            .is_none_or(ir::optimized_vocabulary_admits)
+                    });
+                    !admitted
+                });
+                // P2b x P4c: a generation that contains an opcode Tier 1 first
+                // admitted in P2b and that Tier 2 cannot translate was
+                // interpreter-only at 82d3808, and the optimizing scan settles
+                // it back into the interpreter; its terminal tier is not
+                // baseline, so it never takes a terminal refresh. Refreshing
+                // it would race that demotion (an in-flight refresh leaves no
+                // installed baseline to demote, and its later install keeps
+                // the function native). Forced-trial test runs skip the
+                // settle but still skip the refresh: recompiling such a
+                // callee (for example an accessor reached from a frame-inlined
+                // caller) re-publishes it mid-warmup and was observed to leave
+                // the caller's Tier 2 artifact deoptimizing on an
+                // object-typed guard until its side-path trial failed.
+                let untranslatable = &self.tier2_untranslatable;
+                keys.retain(|key| {
+                    !untranslatable.contains(key)
+                        && !snapshots
+                            .get(key)
+                            .or_else(|| sources.get(key))
+                            .is_some_and(settles_untranslatable_candidate)
+                });
+                keys
+            };
+            let refreshes = candidates
+                .into_iter()
+                .filter_map(|key| {
+                    let snapshot = self
+                        .optimizing_snapshots
+                        .get(&key)
+                        .or_else(|| self.tier2_sources.get(&key))?;
                     let feedback = self
                         .feedback
                         .snapshot(self.clock.max(1))
-                        .with_properties(self.shape_feedback.snapshot(*key));
-                    let call_ready = self
-                        .coordinator
-                        .baseline_direct_refresh_ready(*key, &feedback);
-                    let property_ready = !self.baseline_property_refreshed.contains(key)
+                        .with_properties(self.shape_feedback.snapshot(key));
+                    let call_ready = baseline_only
+                        && self
+                            .coordinator
+                            .baseline_direct_refresh_ready(key, &feedback);
+                    let property_ready = !self.baseline_property_refreshed.contains(&key)
                         && compiler::baseline::has_baseline_property_sites(snapshot, &feedback)
                         && matches!(
-                            self.coordinator.tier_state(*key, runtime::Tier::Baseline),
+                            self.coordinator.tier_state(key, runtime::Tier::Baseline),
                             runtime::CompileState::Installed(_)
                         );
                     (call_ready || property_ready)
-                        .then(|| (*key, snapshot.clone(), feedback, property_ready))
+                        .then(|| (key, snapshot.clone(), feedback, property_ready))
                 })
                 .collect::<Vec<_>>();
             for (key, snapshot, feedback, property_ready) in refreshes {
@@ -2243,7 +2686,7 @@ impl ProductionBackend {
             .keys()
             .copied()
             .filter(|key| {
-                if self.feedback_disabled.contains(key) {
+                if self.feedback_disabled.contains(key) || self.tier2_untranslatable.contains(key) {
                     return false;
                 }
                 if self
@@ -2266,6 +2709,23 @@ impl ProductionBackend {
                     }
             })
             .collect::<Vec<_>>();
+        let mut ready_for_tier2 = ready_for_tier2;
+        if ready_for_tier2.len() > 1 {
+            // Queue callees before their callers in one scan. A caller then
+            // observes its callee's optimizing compile as in flight (below)
+            // instead of freezing the callee's Baseline shape into its artifact.
+            let calls = self.feedback.snapshot(self.clock.max(1));
+            let ready = ready_for_tier2
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            ready_for_tier2.sort_by_cached_key(|key| {
+                calls
+                    .call_specializations_for(*key)
+                    .filter(|call| call.callee() != *key && ready.contains(&call.callee()))
+                    .count()
+            });
+        }
         self.last_scan_installed = self.coordinator.installed_count();
         for key in if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
             Vec::new()
@@ -2275,11 +2735,45 @@ impl ProductionBackend {
             let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
                 continue;
             };
+            #[cfg(feature = "test-support")]
+            let forced_trial = self.config.force_optimized();
+            #[cfg(not(feature = "test-support"))]
+            let forced_trial = false;
+            if !forced_trial && settles_untranslatable_candidate(snapshot) {
+                self.settle_untranslatable_tier2_candidate(key);
+                continue;
+            }
+            // Tier 2 has no exceptional control flow; exception regions stay
+            // on their Tier 1 code instead of failing admission. Checked only
+            // for ready candidates so the per-maintenance scan stays as is.
+            // The P2b untranslatable settle above runs first, so a region
+            // that also uses a newly admitted generic opcode still returns to
+            // the interpreter exactly as that settle documents.
+            if snapshot.has_exception_regions() {
+                continue;
+            }
+            let scan_inputs = Tier2ScanInputs {
+                feedback: self.feedback.version(),
+                shapes: self.shape_feedback.version(),
+                installed: self.coordinator.installed_count(),
+                element_samples: self
+                    .execution_profiles
+                    .get(&key)
+                    .map_or(0, |profile| profile.baseline_executions.min(8)),
+            };
+            if self.tier2_deferred.get(&key) == Some(&scan_inputs) {
+                continue;
+            }
             let observed = self
                 .feedback
                 .snapshot(self.clock.max(1))
                 .with_properties(self.shape_feedback.snapshot(key));
             let mut direct_call_pending = false;
+            // The callee-compile wait below depends on another function's
+            // optimizing state, which `Tier2ScanInputs` does not capture: a
+            // callee compile that fails or goes stale changes no scan input.
+            // Such a deferral is transient and must not be cached.
+            let mut callee_compile_wait = false;
             for instruction in snapshot.instructions() {
                 let Some(call) = observed.call_specialization_at(key, instruction.pc()) else {
                     continue;
@@ -2307,7 +2801,52 @@ impl ProductionBackend {
                     &observed,
                 );
                 let resolved = self.coordinator.call_target_resolved(call.callee());
-                if direct_ready || frame_ready {
+                let native_ready = self.coordinator.native_call_ready(call.callee());
+                if direct_ready || native_ready {
+                    continue;
+                }
+                if frame_ready {
+                    /* A linked entry is published only by an artifact compiled
+                     * with the callee's property feedback, which Baseline
+                     * usually lacks. While that optimizing compile is in
+                     * flight, wait for it rather than capture a frame inline
+                     * of the Baseline body: the caller would never re-link.
+                     * The wait ends when the compile installs or fails. */
+                    let callee_optimizing = matches!(
+                        self.coordinator
+                            .tier_state(call.callee(), runtime::Tier::Optimizing),
+                        runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                    );
+                    // Only a site the Tier 2 caller can link is worth the
+                    // wait; any other site is frame-inlined regardless.
+                    if callee_optimizing
+                        && observed.bounded_specialization(call.callee()).is_some()
+                        && runtime::tier2_direct_call_site_usable(snapshot, instruction.pc(), &call)
+                    {
+                        direct_call_pending = true;
+                        callee_compile_wait = true;
+                    }
+                    continue;
+                }
+                // An admitted pure recursive callee publishes its native
+                // entry with its optimizing artifact; wait for it as for a
+                // compiling scalar callee. Like that wait, it depends on the
+                // callee's optimizing state, which the scan inputs do not
+                // capture, so it is rescanned instead of cached.
+                if self.native_recursive.contains(&call.callee())
+                    && matches!(
+                        self.coordinator
+                            .tier_state(call.callee(), runtime::Tier::Optimizing),
+                        runtime::CompileState::Cold
+                            | runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                    )
+                {
+                    direct_call_pending = true;
+                    callee_compile_wait = true;
                     continue;
                 }
                 if !resolved {
@@ -2321,6 +2860,11 @@ impl ProductionBackend {
              * the first Tier2 artifact. Self-recursive and non-specializable
              * calls keep their existing generic lowering. */
             if direct_call_pending {
+                if callee_compile_wait {
+                    self.tier2_deferred.remove(&key);
+                } else {
+                    self.tier2_deferred.insert(key, scan_inputs);
+                }
                 continue;
             }
             // A stable call link can fund a bounded optimizing trial before
@@ -2335,6 +2879,7 @@ impl ProductionBackend {
                     && observed.property_at(instruction.pc()).is_none()
             });
             if property_feedback_pending {
+                self.tier2_deferred.insert(key, scan_inputs);
                 continue;
             }
             /* A native-to-native call through the generic CALL bridge still
@@ -2350,6 +2895,74 @@ impl ProductionBackend {
                     .control_flow_graph()
                     .is_loop_header(block.start_pc())
             });
+            /* A pure self-recursive Int32 function publishes a native call
+             * entry (P3a): its monomorphic self calls run as direct native
+             * calls without the generic bridge, so they no longer need the
+             * loop amortization below. */
+            let native_self_call = |pc: u32| {
+                observed
+                    .call_link_at(key, pc)
+                    .is_some_and(|link| link.callee() == key)
+            };
+            let native_call_shape = !has_loop
+                && snapshot
+                    .instructions()
+                    .iter()
+                    .any(|instruction| native_self_call(instruction.pc()))
+                && observed
+                    .bounded_specialization(key)
+                    .is_some_and(|signature| {
+                        // Admission builds the entry's CLIF; reuse the answer
+                        // while the function waits for its baseline profile.
+                        // The feedback epoch changes every pass; the plan only
+                        // depends on the representations.
+                        match self.native_call_plans.get(&key) {
+                            Some((arguments, result, admitted))
+                                if **arguments == *signature.arguments()
+                                    && *result == signature.result() =>
+                            {
+                                *admitted
+                            }
+                            _ => {
+                                let admitted =
+                                    compiler::native_call::plan(snapshot, &signature).is_some();
+                                self.native_call_plans.insert(
+                                    key,
+                                    (signature.arguments().into(), signature.result(), admitted),
+                                );
+                                admitted
+                            }
+                        }
+                    });
+            // Entering native code from QuickJS still costs several hundred
+            // nanoseconds of bookkeeping (B2), about ten interpreter calls.
+            // Admit only recursion whose observed trees amortize it; while the
+            // installed baseline is still collecting that profile, wait.
+            let (baseline_executions, baseline_outermost) =
+                self.execution_profiles.get(&key).map_or((0, 0), |profile| {
+                    (profile.baseline_executions, profile.baseline_outermost)
+                });
+            let native_call_admitted = native_call_shape
+                && baseline_executions >= NATIVE_RECURSION_PROFILE_EXECUTIONS
+                && baseline_outermost != 0
+                && baseline_executions
+                    >= baseline_outermost.saturating_mul(NATIVE_RECURSION_MIN_CALLS_PER_ENTRY);
+            // Trees already running in the interpreter when the baseline was
+            // installed make early samples look shallow; reject only after
+            // enough outside entries have been observed.
+            if native_call_shape
+                && !native_call_admitted
+                && baseline_outermost < NATIVE_RECURSION_PROFILE_ENTRIES
+                && matches!(
+                    self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                    runtime::CompileState::Installed(_)
+                )
+            {
+                continue;
+            }
+            if native_call_admitted {
+                self.native_recursive.insert(key);
+            }
             let generic_call_without_loop = !has_loop
                 && snapshot.instructions().iter().any(|instruction| {
                     matches!(
@@ -2368,6 +2981,13 @@ impl ProductionBackend {
                         .is_some_and(|call| {
                             call.callee() != key && self.coordinator.direct_call_ready(&call)
                         })
+                        && !(native_call_admitted && native_self_call(instruction.pc()))
+                        && !observed
+                            .call_link_at(key, instruction.pc())
+                            .is_some_and(|link| {
+                                link.callee() != key
+                                    && self.coordinator.native_call_ready(link.callee())
+                            })
                 });
             #[cfg(feature = "test-support")]
             let forced_call_only = self.config.force_optimized();
@@ -2443,6 +3063,7 @@ impl ProductionBackend {
                             })
                     });
                 if !observed_element_loop || !completed_numeric_returns {
+                    self.tier2_deferred.insert(key, scan_inputs);
                     continue;
                 }
             }
@@ -2455,15 +3076,16 @@ impl ProductionBackend {
             // compiled call/property/element fast path, so rejecting it here
             // would make the optimized path permanently unreachable. The
             // measured Tier-2 window below still demotes a losing artifact.
-            let stable_ic_candidate = snapshot.instructions().iter().any(|instruction| {
-                observed
-                    .call_specialization_at(key, instruction.pc())
-                    .is_some_and(|call| call.callee() != key)
-                    || observed.property_at(instruction.pc()).is_some()
-                    || observed
-                        .array_at(key, instruction.pc())
-                        .is_some_and(|site| site.can_specialize())
-            });
+            let stable_ic_candidate = native_call_admitted
+                || snapshot.instructions().iter().any(|instruction| {
+                    observed
+                        .call_specialization_at(key, instruction.pc())
+                        .is_some_and(|call| call.callee() != key)
+                        || observed.property_at(instruction.pc()).is_some()
+                        || observed
+                            .array_at(key, instruction.pc())
+                            .is_some_and(|site| site.can_specialize())
+                });
             /* A rejected baseline does not predict Tier2 profitability: the
              * baseline can lose to dispatch/callback overhead while a stable
              * unboxed loop wins by orders of magnitude.  Give such a function
@@ -2574,6 +3196,7 @@ impl ProductionBackend {
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
                 } else {
+                    self.tier2_deferred.remove(&key);
                     self.tier2_sources.insert(key, snapshot);
                 }
             }
@@ -3044,6 +3667,17 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.maintenance();
             return;
         }
+        if automatic_closure_creation_unprofitable(&self.config, &verified) {
+            self.coordinator.reject_tier1(
+                key,
+                runtime::Tier::Baseline,
+                bytecode::FallbackReason::ClosureFrame,
+            );
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
         self.ensure_artifact_environment();
         let adaptive = runtime::AdaptiveInputs {
             bytecode_bytes: verified
@@ -3273,11 +3907,50 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
+        // Counted at entry: a recursion tree's root is still active while
+        // maintenance samples its completed nested executions. Profiles are
+        // created by the first exit; entry never allocates.
+        if tier == runtime::Tier::Baseline
+            && self
+                .execution_starts
+                .last()
+                .is_none_or(|(parent, _, _)| *parent != key)
+        {
+            if let Some(profile) = self.execution_profiles.get_mut(&key) {
+                profile.baseline_outermost = profile.baseline_outermost.saturating_add(1);
+            }
+        }
         self.execution_starts
             .push((key, std::time::Instant::now(), tier));
     }
 
+    fn entry_fast_grant(
+        &mut self,
+        id: u64,
+        generation: u64,
+        grant: &mut rquickjs_core::qjs::JSJitFastEntryGrant,
+    ) {
+        let key = runtime::FunctionKey::new(id, generation);
+        if self.entry_cache_epoch == 0 {
+            return;
+        }
+        let Some(tier) = self.fast_entry_steady(key) else {
+            return;
+        };
+        grant.budget = FAST_ENTRY_BUDGET;
+        grant.flags = if tier == runtime::Tier::Optimizing {
+            rquickjs_core::qjs::JS_JIT_FAST_ENTRY_OPTIMIZED
+        } else {
+            0
+        };
+        grant.state = self.fast_entry.as_raw();
+    }
+
     fn native_exit(&mut self, id: u64, generation: u64, pc: u32, exit_kind: u32) {
+        // A granted execution skipped native_enter; its non-DONE exit still
+        // reports here for deopt, retry and exception accounting.
+        let unpaired = exit_kind & rquickjs_core::qjs::JS_JIT_EXIT_FAST_UNPAIRED != 0;
+        let exit_kind = exit_kind & !rquickjs_core::qjs::JS_JIT_EXIT_FAST_UNPAIRED;
         self.native_exits = self.native_exits.saturating_add(1);
         let key = runtime::FunctionKey::new(id, generation);
         if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
@@ -3296,7 +3969,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             .execution_starts
             .last()
             .copied()
-            .filter(|(active, _, _)| *active == key)
+            .filter(|(active, _, _)| !unpaired && *active == key)
         {
             self.execution_starts.pop();
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
@@ -3304,6 +3977,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             let profile = self.execution_profiles.entry(key).or_default();
             if optimized {
                 profile.record_optimized(elapsed);
+                if self.native_recursive.contains(&key) {
+                    // Keep the trial, but never classify a collapsed
+                    // recursion tree against per-call baseline samples.
+                    profile.tier2_trial_decided = true;
+                }
                 // Like V8/JSC tier-down decisions, use a bounded observation
                 // window and a material margin instead of reacting to one
                 // noisy invocation. Cross-multiply so the decision remains
@@ -3413,19 +4091,27 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn function_retire(&mut self, id: u64, generation: u64) {
         let key = runtime::FunctionKey::new(id, generation);
         self.requested.remove(&key);
+        self.native_recursive.remove(&key);
+        self.native_call_plans.remove(&key);
         self.queue_reasons.remove(&key);
         self.prequeue_backoff.remove(&key);
         self.hotness.remove(&key);
         self.optimizing_requested.remove(&key);
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
+        self.tier2_deferred.remove(&key);
+        self.tier2_untranslatable.remove(&key);
         self.tier2_sources.remove(&key);
+        self.optimized_vocabulary.remove(&key);
+        self.baseline_property_refreshed.remove(&key);
         self.entry_tiers.remove(&key);
         self.coordinator.retire(key);
         self.maintenance();
     }
 
     fn runtime_detach(&mut self) {
+        self.entry_cache_epoch = 0;
+        self.fast_entry.epoch.store(0, Ordering::Relaxed);
         self.workers.shutdown(&mut self.coordinator);
         self.coordinator.shutdown();
         self.maintenance();

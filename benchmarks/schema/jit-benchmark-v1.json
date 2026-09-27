@@ -190,7 +190,7 @@
           "additionalProperties": false,
           "required": ["name", "script_sha256", "driver_sha256", "warmup_batches", "calls_per_batch", "warmup_batch_ns", "fixed_metrics_before", "fixed_metrics_after", "readiness_diagnostic_ns"],
           "properties": {
-            "name": { "const": "shared-js-fixed-warmup-v2" },
+            "name": { "enum": ["shared-js-fixed-warmup-v2", "shared-js-multibatch-v3"] },
             "script_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "driver_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "warmup_batches": { "const": 64 },
@@ -198,7 +198,25 @@
             "warmup_batch_ns": { "type": "array", "minItems": 64, "maxItems": 64, "items": { "type": "integer", "minimum": 0 } },
             "fixed_metrics_before": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
             "fixed_metrics_after": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
-            "readiness_diagnostic_ns": { "type": ["integer", "null"], "minimum": 0 }
+            "readiness_diagnostic_ns": { "type": ["integer", "null"], "minimum": 0 },
+            "timed_batches": { "type": "integer", "minimum": 0 },
+            "timed_batch_ns": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+            "fixed_batch_ns": { "type": ["integer", "null"], "minimum": 0 },
+            "outlier_ratio": { "type": "integer", "minimum": 0 },
+            "outlier_batches": { "type": "integer", "minimum": 0 },
+            "timed_metrics_before": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "timed_metrics_after": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "bun_launch": { "enum": ["file", "eval", null] },
+            "bun_wrapper_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+          },
+          "if": { "properties": { "name": { "const": "shared-js-multibatch-v3" } } },
+          "then": {
+            "required": ["timed_batches", "timed_batch_ns", "fixed_batch_ns", "outlier_ratio", "outlier_batches"],
+            "properties": {
+              "timed_batches": { "minimum": 1 },
+              "timed_batch_ns": { "minItems": 1 },
+              "outlier_ratio": { "const": 5 }
+            }
           }
         },
         "pair_index": { "type": "integer" },

@@ -3,14 +3,28 @@
 //! every operation that can reenter, finalize a reference or alter storage.
 
 use crate::ir::{
-    IntegerRangeAnalysis, KnownFacts, LoopAnalysis, OptimizedIr, ScalarHeapEffect,
+    FrameSlot, IntegerRangeAnalysis, KnownFacts, LoopAnalysis, OptimizedIr, ScalarHeapEffect,
     ScalarHeapOperation, ScalarValueId,
 };
 use crate::runtime::{ArrayAccess, ArrayFeedbackSnapshot, ArrayMode};
 
+/// The frame slot whose current value is the guarded receiver.
+///
+/// Lowering keys cached metadata by the provenance of the stack operand, so a
+/// receiver is identified by the one frame slot that the operand was read
+/// from. An entry argument uses the SSA identity proof. A local receiver
+/// (for example `const ints = buffers.ints`) is admitted only when it is the
+/// unique frame slot holding the operand's SSA value at every planned access,
+/// and when no node of the enclosing natural loop writes that local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ArrayReceiver {
+    Argument(u16),
+    Local(u16),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArrayCandidate {
-    pub argument: u16,
+    pub receiver: ArrayReceiver,
     pub mode: ArrayMode,
     /// Typed length requires the metadata query to guard observable lookup.
     pub needs_length: bool,
@@ -48,16 +62,40 @@ pub(super) struct ArrayLoopHoist {
     pub length_node: u32,
 }
 
+/// Typed-array storage metadata (mode, fixed attached backing, count and data
+/// pointer, but not the observable `length` lookup) guarded once on the
+/// loop-entry edge. Accesses keep their per-access index guards; the hoist only
+/// removes the repeated leaf query for a loop-invariant receiver, like JSC's
+/// hoisted CheckStructure/GetButterfly for typed-array views.
+///
+/// Because the preheader runs even when no access does (a zero-trip loop),
+/// lowering emits this query without a side exit: a miss publishes an empty
+/// view (`count == 0`), so each retained index guard exits at the access that
+/// actually runs, exactly like the unhoisted query, and poll revalidation is
+/// skipped while the view is empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ArrayStorageHoist {
+    pub candidate: usize,
+    pub preheader: u32,
+    pub header: u32,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ArrayPlan {
     candidates: Vec<ArrayCandidate>,
     accesses: Vec<Option<ArrayAccessPlan>>,
     hoists: Vec<ArrayLoopHoist>,
+    storage_hoists: Vec<ArrayStorageHoist>,
+    /// Loop headers whose hoisted tuples a poll node must revalidate.
+    poll_revalidations: Vec<(u32, Vec<u32>)>,
     invalidations: Vec<bool>,
 }
 
 impl ArrayPlan {
     const MAX_CANDIDATES: usize = 16;
+    /// Metadata tuples lowering may keep live at once. Every loop header seeds
+    /// at most this many hoisted sources.
+    pub(super) const MAX_LIVE_SOURCES: usize = 4;
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn analyze(
@@ -96,7 +134,7 @@ impl ArrayPlan {
         #[derive(Clone, Copy)]
         struct Proposed {
             node: u32,
-            argument: u16,
+            receiver: ArrayReceiver,
             mode: ArrayMode,
             access: ArrayAccess,
             index: Option<ScalarValueId>,
@@ -152,7 +190,11 @@ impl ArrayPlan {
             if access == ArrayAccess::Length && mode != ArrayMode::Packed && !typed_length_guard {
                 continue;
             }
-            let Some(argument) = facts.entry_argument(base) else {
+            let receiver = if let Some(argument) = facts.entry_argument(base) {
+                ArrayReceiver::Argument(argument)
+            } else if let Some(local) = unique_local_receiver(graph, facts, operation, base) {
+                ArrayReceiver::Local(local)
+            } else {
                 continue;
             };
             let Some(block) = loops.block_for_node(node.id()) else {
@@ -196,7 +238,7 @@ impl ArrayPlan {
             };
             proposed.push(Proposed {
                 node: node.id(),
-                argument,
+                receiver,
                 mode,
                 access,
                 index,
@@ -213,17 +255,17 @@ impl ArrayPlan {
         if spend(&mut work, conflict_work).is_none() {
             return Self::default();
         }
-        let mut conflicting_arguments = Vec::new();
+        let mut conflicting_receivers = Vec::new();
         for left in &proposed {
             if proposed
                 .iter()
-                .any(|right| right.argument == left.argument && right.mode != left.mode)
-                && !conflicting_arguments.contains(&left.argument)
+                .any(|right| right.receiver == left.receiver && right.mode != left.mode)
+                && !conflicting_receivers.contains(&left.receiver)
             {
-                conflicting_arguments.push(left.argument);
+                conflicting_receivers.push(left.receiver);
             }
         }
-        proposed.retain(|access| !conflicting_arguments.contains(&access.argument));
+        proposed.retain(|access| !conflicting_receivers.contains(&access.receiver));
 
         // A reentrant operation in the natural loop can replace storage, detach
         // a buffer, or run arbitrary script. Feedback never authorizes carrying
@@ -268,6 +310,27 @@ impl ArrayPlan {
                 {
                     continue;
                 }
+                // A local receiver is loop-invariant only when no loop node can
+                // rebind it. The metadata cache is keyed by that frame slot.
+                if let ArrayReceiver::Local(local) = candidate.receiver {
+                    if graph.effect_for_node(node.id())
+                        == ScalarHeapEffect::FrameWrite(FrameSlot::Local(local))
+                    {
+                        return false;
+                    }
+                }
+                // Lowering revalidates hoisted tuples only at loop polls
+                // (every such poll of an enclosing loop, see
+                // `revalidating_headers`). Any other safepoint could observe
+                // an interrupt without that revalidation.
+                if graph.effect_for_node(node.id()) == ScalarHeapEffect::Safepoint
+                    && !matches!(
+                        node.kind(),
+                        crate::ir::OptimizedNodeKind::GuardNumeric { mid_loop: true, .. }
+                    )
+                {
+                    return false;
+                }
                 if graph.effect_for_node(node.id()) != ScalarHeapEffect::Reentrant
                     || non_reentrant(node.id())
                     || proposed_nodes[node.id() as usize]
@@ -283,7 +346,7 @@ impl ArrayPlan {
         let mut accesses: Vec<Option<ArrayAccessPlan>> = vec![None; nodes.len()];
         for proposed in proposed {
             let candidate = if let Some(index) = candidates.iter().position(|candidate| {
-                candidate.argument == proposed.argument && candidate.mode == proposed.mode
+                candidate.receiver == proposed.receiver && candidate.mode == proposed.mode
             }) {
                 index
             } else {
@@ -291,7 +354,7 @@ impl ArrayPlan {
                     return Self::default();
                 }
                 candidates.push(ArrayCandidate {
-                    argument: proposed.argument,
+                    receiver: proposed.receiver,
                     mode: proposed.mode,
                     needs_length: false,
                 });
@@ -347,6 +410,16 @@ impl ArrayPlan {
                 if lengths.next().is_some() {
                     continue;
                 }
+                // Check the live-tuple cap before marking any access as
+                // covered: a capped loop keeps every per-access index guard.
+                if hoists
+                    .iter()
+                    .filter(|hoist: &&ArrayLoopHoist| hoist.header == natural_loop.header())
+                    .count()
+                    >= Self::MAX_LIVE_SOURCES
+                {
+                    continue;
+                }
                 let mut covered_any = false;
                 for (node, access) in accesses.iter_mut().enumerate() {
                     let Some(access) = access.as_mut() else {
@@ -373,6 +446,96 @@ impl ArrayPlan {
                         bound,
                         length_node,
                     });
+                }
+            }
+        }
+        // A loop-invariant typed receiver without a hoisted length (for
+        // example the destination of `floats[i] = ...`) still needs only one
+        // storage query per loop entry. The admission above already rejected
+        // loops containing a write to the receiver's frame slot or any
+        // uncertified reentrant node; polls revalidate the tuple.
+        let mut storage_hoists = Vec::new();
+        for (candidate, typed) in candidates.iter().enumerate() {
+            if !matches!(typed.mode, ArrayMode::Int32 | ArrayMode::Float64) {
+                continue;
+            }
+            for natural_loop in loops.loops() {
+                let Some(preheader) = natural_loop.preheader() else {
+                    continue;
+                };
+                let header = natural_loop.header();
+                if hoists
+                    .iter()
+                    .any(|hoist| hoist.candidate == candidate && hoist.header == header)
+                {
+                    continue;
+                }
+                // Guarding the receiver on the loop-entry edge is profitable
+                // only when every completed iteration performs one of its
+                // accesses anyway. A conditionally used receiver (for example
+                // `if (out) out[i] = v` with `out === null`) would otherwise
+                // deopt on every loop entry although the loop never touches it.
+                let latches: Vec<u32> = ir
+                    .blocks()
+                    .iter()
+                    .filter(|block| {
+                        natural_loop.contains_block(block.start_pc())
+                            && block.successors().contains(&header)
+                    })
+                    .map(|block| block.start_pc())
+                    .collect();
+                let used = !latches.is_empty()
+                    && accesses.iter().enumerate().any(|(node, access)| {
+                        access.as_ref().is_some_and(|access| {
+                            access.candidate == candidate
+                                && access.loop_header == header
+                                && access.access != ArrayAccess::Length
+                                && loops.block_for_node(node as u32).is_some_and(|block| {
+                                    latches.iter().all(|&latch| loops.dominates(block, latch))
+                                })
+                        })
+                    });
+                let live = hoists.iter().filter(|hoist| hoist.header == header).count()
+                    + storage_hoists
+                        .iter()
+                        .filter(|hoist: &&ArrayStorageHoist| hoist.header == header)
+                        .count();
+                if used && live < Self::MAX_LIVE_SOURCES {
+                    storage_hoists.push(ArrayStorageHoist {
+                        candidate,
+                        preheader,
+                        header,
+                    });
+                }
+            }
+        }
+        // Every loop poll that can run the interrupt handler must revalidate
+        // the hoisted tuples of each loop enclosing it, not only those of its
+        // own header: an inner loop's poll can detach an outer receiver's
+        // buffer, and the outer header re-seeds its preheader tuple on every
+        // backedge while its own amortized countdown rarely expires.
+        let mut poll_revalidations = Vec::new();
+        if !hoists.is_empty() || !storage_hoists.is_empty() {
+            for node in nodes {
+                if graph.effect_for_node(node.id()) != ScalarHeapEffect::Safepoint {
+                    continue;
+                }
+                let Some(block) = loops.block_for_node(node.id()) else {
+                    continue;
+                };
+                let mut headers = Vec::new();
+                for natural_loop in loops.loops() {
+                    let header = natural_loop.header();
+                    if natural_loop.contains_block(block)
+                        && (hoists.iter().any(|hoist| hoist.header == header)
+                            || storage_hoists.iter().any(|hoist| hoist.header == header))
+                        && !headers.contains(&header)
+                    {
+                        headers.push(header);
+                    }
+                }
+                if !headers.is_empty() {
+                    poll_revalidations.push((node.id(), headers));
                 }
             }
         }
@@ -405,6 +568,8 @@ impl ArrayPlan {
             candidates,
             accesses,
             hoists,
+            storage_hoists,
+            poll_revalidations,
             invalidations,
         }
     }
@@ -428,6 +593,30 @@ impl ArrayPlan {
     pub(super) fn hoists(&self) -> &[ArrayLoopHoist] {
         &self.hoists
     }
+    pub(super) fn storage_hoists(&self) -> &[ArrayStorageHoist] {
+        &self.storage_hoists
+    }
+    /// Headers of every loop containing poll `node` that owns hoisted
+    /// metadata. The poll's observable (runtime-calling) path must revalidate
+    /// all of their tuples before native code continues.
+    pub(super) fn revalidating_headers(&self, node: u32) -> &[u32] {
+        self.poll_revalidations
+            .iter()
+            .find(|(poll, _)| *poll == node)
+            .map_or(&[], |(_, headers)| headers.as_slice())
+    }
+    /// Hoisted tuples (length and storage-only) seeded at `header`.
+    pub(super) fn hoisted_sources_at(&self, header: u32) -> usize {
+        self.hoists
+            .iter()
+            .filter(|hoist| hoist.header == header)
+            .count()
+            + self
+                .storage_hoists
+                .iter()
+                .filter(|hoist| hoist.header == header)
+                .count()
+    }
     pub(super) fn invalidates_before(&self, node: u32) -> bool {
         self.invalidations
             .get(node as usize)
@@ -443,6 +632,36 @@ impl ArrayPlan {
             .saturating_mul(160)
             .saturating_add(Self::MAX_CANDIDATES.saturating_mul(64))
     }
+}
+
+/// The single local that holds `base` in the operation's pre-effect frame
+/// state. Any other frame slot holding the same SSA value makes the stack
+/// operand's lowering provenance ambiguous, so the site is left unplanned.
+/// Lowering independently requires the operand provenance to be this local.
+fn unique_local_receiver(
+    graph: &crate::ir::ScalarGraph,
+    facts: &KnownFacts,
+    operation: ScalarHeapOperation,
+    base: ScalarValueId,
+) -> Option<u16> {
+    let state = graph.frame_state_for_node(operation.frame_state_node())?;
+    if state
+        .arguments
+        .iter()
+        .any(|&value| facts.same_value(value, base))
+    {
+        return None;
+    }
+    let mut holders = state
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, &value)| facts.same_value(value, base));
+    let (local, _) = holders.next()?;
+    if holders.next().is_some() {
+        return None;
+    }
+    u16::try_from(local).ok()
 }
 
 fn spend(work: &mut usize, cost: usize) -> Option<()> {
@@ -587,7 +806,7 @@ mod tests {
         assert_eq!(
             plan.candidates(),
             &[ArrayCandidate {
-                argument: 0,
+                receiver: ArrayReceiver::Argument(0),
                 mode: ArrayMode::Packed,
                 needs_length: true
             }]
@@ -750,6 +969,207 @@ mod tests {
                         && !access.bounds_covered_by_hoist),
                 "effectful loop removed a per-access bounds guard: {source}; {plan:#?}"
             );
+        }
+    }
+
+    #[test]
+    fn loop_invariant_local_typed_receiver_is_a_hoisted_candidate() {
+        let (ir, feedback) = fixture(
+            "(function(o){const a=o.a;let s=0;for(let i=0;i<a.length;i++)s=(s+a[i])|0;return s})",
+            ArrayMode::Int32,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        let [candidate] = plan.candidates() else {
+            panic!("one local receiver candidate expected: {plan:#?}");
+        };
+        assert!(matches!(candidate.receiver, ArrayReceiver::Local(_)));
+        assert!(candidate.needs_length);
+        let [hoist] = plan.hoists() else {
+            panic!("the local receiver's intrinsic length must be hoisted: {plan:#?}");
+        };
+        assert!(plan.guarded_leaf(hoist.length_node));
+        assert!(plan.storage_hoists().is_empty());
+    }
+
+    #[test]
+    fn rebound_or_aliased_local_receivers_are_not_candidates() {
+        for source in [
+            // Rebinding the receiver local inside the loop.
+            "(function(o){let a=o.a,b=o.b,s=0;for(let i=0;i<a.length;i++){s=(s+a[i])|0;a=b}return s})",
+            // Two locals hold the receiver: lowering provenance is ambiguous.
+            "(function(o){const a=o.a;const b=a;let s=0;for(let i=0;i<a.length;i++)s=(s+b[i])|0;return s})",
+            // An argument also holds the receiver.
+            "(function(o){const a=o;let s=0;for(let i=0;i<a.length;i++)s=(s+a[i])|0;return s})",
+        ] {
+            let (ir, feedback) = fixture(source, ArrayMode::Int32);
+            let plan = plan(&ir, &feedback, true, 100_000);
+            assert!(
+                plan.candidates()
+                    .iter()
+                    .all(|candidate| !matches!(candidate.receiver, ArrayReceiver::Local(_))),
+                "{source}: {plan:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inner_loop_polls_revalidate_outer_hoisted_tuples() {
+        let (ir, feedback) = fixture(
+            "(function(o,m){const f=o.f;let t=0;for(let i=0;i<f.length;i++){f[i]=i;for(let j=0;j<m;j++)t=(t+1)|0}return t})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        // The store-only destination gets one storage hoist on the outer loop.
+        assert!(plan.hoists().is_empty());
+        let [hoist] = plan.storage_hoists() else {
+            panic!("the outer storage hoist is expected: {plan:#?}");
+        };
+        let polls: Vec<_> = ir
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    OptimizedNodeKind::GuardNumeric { mid_loop: true, .. }
+                )
+            })
+            .collect();
+        assert_eq!(polls.len(), 2, "outer and inner loop polls expected");
+        // Both the outer header poll and the nested inner poll must
+        // revalidate the outer receiver's tuple.
+        for poll in polls {
+            assert!(
+                plan.revalidating_headers(poll.id()).contains(&hoist.header),
+                "poll {} does not revalidate the outer tuple: {plan:#?}",
+                poll.id()
+            );
+        }
+        assert_eq!(plan.hoisted_sources_at(hoist.header), 1);
+    }
+
+    #[test]
+    fn conditionally_used_typed_receiver_gets_no_storage_hoist() {
+        let (ir, feedback) = fixture(
+            "(function(o,n){const f=o.f;for(let i=0;i<n;i++){if(f)f[i]=i}return 0})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        assert!(
+            ir.nodes().iter().any(|node| plan
+                .access(node.id())
+                .is_some_and(|access| access.access == ArrayAccess::Store)),
+            "the conditional store is still a planned guarded leaf: {plan:#?}"
+        );
+        assert!(
+            plan.storage_hoists().is_empty(),
+            "a conditional store must not guard its receiver on loop entry: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn more_than_max_live_receivers_keep_exact_guards() {
+        let (ir, feedback) = fixture(
+            "(function(o){const a=o.a,b=o.b,c=o.c,d=o.d,e=o.e,f=o.f;let s=0;for(let i=0;i<a.length;i++){s=s+a[i]+b[i]+c[i]+d[i]+e[i];f[i]=s}return s})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        for natural_loop in LoopAnalysis::analyze(&ir, 100_000).loops() {
+            assert!(
+                plan.hoisted_sources_at(natural_loop.header()) <= ArrayPlan::MAX_LIVE_SOURCES,
+                "{plan:#?}"
+            );
+        }
+        // Accesses of an unhoisted receiver keep their own index guard and
+        // are never marked as covered by a hoist.
+        let hoisted: Vec<usize> = plan
+            .hoists()
+            .iter()
+            .map(|hoist| hoist.candidate)
+            .chain(plan.storage_hoists().iter().map(|hoist| hoist.candidate))
+            .collect();
+        let mut unhoisted = 0;
+        for node in ir.nodes() {
+            let Some(access) = plan.access(node.id()) else {
+                continue;
+            };
+            if access.bounds_covered_by_hoist {
+                assert!(
+                    plan.hoists()
+                        .iter()
+                        .any(|hoist| hoist.candidate == access.candidate),
+                    "{plan:#?}"
+                );
+            }
+            if access.access != ArrayAccess::Length && !hoisted.contains(&access.candidate) {
+                assert!(access.requires_index_guard, "{plan:#?}");
+                unhoisted += 1;
+            }
+        }
+        assert!(
+            unhoisted > 0,
+            "six receivers exceed the live-tuple cap: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn store_only_typed_receiver_gets_one_storage_hoist() {
+        let (ir, feedback) = fixture(
+            "(function(o,n){const f=o.f;for(let i=0;i<n;i++)f[i]=i;return 0})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        assert!(plan.hoists().is_empty());
+        let [hoist] = plan.storage_hoists() else {
+            panic!("one storage hoist expected: {plan:#?}");
+        };
+        assert_ne!(hoist.preheader, hoist.header);
+        assert!(matches!(
+            plan.candidates()[hoist.candidate].receiver,
+            ArrayReceiver::Local(_)
+        ));
+        // The store keeps its own per-access index guard.
+        assert!(ir
+            .nodes()
+            .iter()
+            .filter_map(|node| plan.access(node.id()))
+            .all(|access| access.requires_index_guard));
+    }
+
+    #[test]
+    fn typed_loop_without_length_hoists_metadata_but_keeps_every_bounds_check() {
+        for mode in [ArrayMode::Int32, ArrayMode::Float64, ArrayMode::Packed] {
+            let (ir, feedback) = fixture(
+                "(function(a,n){let s=0;for(let i=0;i<n;i++)s=(s+a[i])|0;return s})",
+                mode,
+            );
+            let plan = plan(&ir, &feedback, true, 100_000);
+            let loads = ir
+                .nodes()
+                .iter()
+                .filter_map(|node| plan.access(node.id()))
+                .filter(|access| access.access == ArrayAccess::Load)
+                .collect::<Vec<_>>();
+            assert_eq!(loads.len(), 1, "{mode:?}: {plan:#?}");
+            assert!(
+                loads[0].requires_index_guard && !loads[0].bounds_covered_by_hoist,
+                "an unrelated loop bound can never delete a bounds check: {mode:?}"
+            );
+            // Element-only loops never get a length hoist.
+            assert!(plan.hoists().is_empty(), "{plan:#?}");
+            if mode == ArrayMode::Packed {
+                // A packed guard would demand logical length == dense count,
+                // which an element-only loop never needed.
+                assert!(plan.storage_hoists().is_empty(), "{plan:#?}");
+            } else {
+                let [hoist] = plan.storage_hoists() else {
+                    panic!("typed element loop must hoist its storage metadata: {plan:#?}");
+                };
+                assert!(matches!(
+                    plan.candidates()[hoist.candidate].receiver,
+                    ArrayReceiver::Argument(0)
+                ));
+                assert_ne!(hoist.preheader, hoist.header);
+            }
         }
     }
 }

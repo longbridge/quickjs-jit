@@ -564,13 +564,43 @@ fn well_formedness_and_tier1_eligibility_are_separate() {
 }
 
 #[test]
-fn exception_opcodes_are_well_formed_but_tier1_rejected() {
-    let verified = snapshot_from_parts(vec![opcode::CATCH, 4, 0, 0, 0, opcode::RETURN], 0, 0, 0, 0)
+fn exception_regions_are_tier1_eligible_with_exact_handler_states() {
+    // catch L7; drop; return_undef; L7: drop; return_undef
+    let verified = snapshot_from_parts(
+        vec![
+            opcode::CATCH,
+            6,
+            0,
+            0,
+            0,
+            opcode::DROP,
+            opcode::RETURN_UNDEF,
+            opcode::DROP,
+            opcode::RETURN_UNDEF,
+        ],
+        0,
+        0,
+        0,
+        0,
+    )
+    .verify(VerifyLimits::default())
+    .unwrap();
+    assert!(verified.tier1_eligibility().is_ok());
+    let handler = verified
+        .exception_handler(5)
+        .expect("drop is inside the region");
+    assert_eq!(handler.catch_index(), 0);
+    assert_eq!(handler.handler_pc(), Some(7));
+    assert!(verified.exception_handler(7).is_none());
+    assert!(verified.exception_handler(0).is_none());
+}
+
+#[test]
+fn a_catch_whose_handler_is_its_fallthrough_is_rejected() {
+    let error = snapshot_from_parts(vec![opcode::CATCH, 4, 0, 0, 0, opcode::RETURN], 0, 0, 0, 0)
         .verify(VerifyLimits::default())
-        .unwrap();
-    let rejection = verified.tier1_eligibility().unwrap_err();
-    assert_eq!(rejection.pc(), 0);
-    assert_eq!(rejection.reason(), FallbackReason::ExceptionRegion);
+        .unwrap_err();
+    assert_eq!(error.kind(), &VerifyErrorKind::UnsupportedExceptionRegion);
 }
 
 #[test]

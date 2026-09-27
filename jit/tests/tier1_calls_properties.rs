@@ -328,7 +328,7 @@ fn baseline_only_direct_call_hit_skips_call_helper_and_misses_remain_exact() {
 }
 
 #[test]
-fn baseline_property_cache_validates_once_per_site_and_mutation_misses_exactly() {
+fn baseline_property_cache_hits_inline_and_mutation_misses_exactly() {
     let runtime = Runtime::new().unwrap();
     let jit = Jit::attach(
         &runtime,
@@ -377,8 +377,8 @@ fn baseline_property_cache_validates_once_per_site_and_mutation_misses_exactly()
             rt,
             rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD
         ),
-        3,
-        "each get/put site must validate once, not once per loop iteration"
+        0,
+        "the shape/generation compare is inline; hits never cross a helper"
     );
     assert_eq!(
         helper_count(
@@ -401,9 +401,13 @@ fn baseline_property_cache_validates_once_per_site_and_mutation_misses_exactly()
     assert!(
         helper_count(
             rt,
-            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD
-        ) > 3,
-        "shape mutation did not force revalidation/miss"
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY
+        ) > 0
+            && helper_count(
+                rt,
+                rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_PROPERTY
+            ) > 0,
+        "shape mutation did not take the generic helper miss edge"
     );
 }
 

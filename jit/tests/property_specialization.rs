@@ -437,7 +437,14 @@ fn guarded_property_path(clif: &str, shape: i64, store_offset: Option<i32>) -> R
             .then_some(value)
         })
         .collect();
-    if roots.len() != 2 {
+    // Cold owner-materialization paths may reload a root buffer pointer from
+    // the frame (inline `js_dup` of an argument/local), so every such load is
+    // a root; both buffers must be present.
+    if !root_loads.iter().all(|address| {
+        definitions
+            .values()
+            .any(|definition| definition.starts_with("load") && definition.ends_with(address))
+    }) {
         return Err("missing argument/local root buffers".into());
     }
     let mut edges = BTreeMap::<&str, Vec<&str>>::new();
@@ -762,7 +769,7 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
 }
 
 #[test]
-fn megamorphic_property_site_fails_closed_to_the_generic_tier() {
+fn megamorphic_property_site_uses_the_generic_helper_instead_of_guards() {
     let fixture = SnapshotFixture::compile("(function(o){return o.answer})");
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let pc = verified
@@ -786,13 +793,17 @@ fn megamorphic_property_site_fails_closed_to_the_generic_tier() {
             ),
         );
     }
-    assert!(Tier2Compiler::host(1)
+    // A megamorphic site has no shape contract to guard. It lowers to the
+    // owning GET_PROPERTY bridge rather than failing the whole function or
+    // deoptimizing on every unobserved layout.
+    let clif = Tier2Compiler::host(1)
         .lower_with_feedback_for_test(
             &verified,
             key,
             &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
         )
-        .is_err());
+        .expect("megamorphic site lowers through the generic helper");
+    assert!(clif.contains("call_indirect"), "{clif}");
 }
 
 #[test]

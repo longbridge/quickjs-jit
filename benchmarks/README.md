@@ -6,11 +6,13 @@ latencies, process-throughput windows, phase timings, counters, memory/code
 sizes, checksums, build fingerprints, and host provenance.
 
 Current samples identify their timing protocol as
-`protocol.name = "shared-js-fixed-warmup-v2"`. The JSON envelope remains
-`jit-benchmark-v1`, but these timings are **not equivalent to historical v1
-measurements**. The legacy `jit-bench-report` gate reporter explicitly rejects
-v2 samples as an incompatible timing protocol. Do not pass `--report` when
-collecting v2 evidence or interpret that rejection as a runtime test failure.
+`protocol.name = "shared-js-multibatch-v3"`. The JSON envelope remains
+`jit-benchmark-v1`, but these timings are **not equivalent to historical v1 or
+`shared-js-fixed-warmup-v2` measurements** (see
+[Multi-batch timing](#multi-batch-timing-and-readiness-diagnostics)). The legacy
+`jit-bench-report` gate reporter explicitly rejects v2 and v3 samples as an
+incompatible timing protocol. Do not pass `--report` when collecting v2/v3
+evidence or interpret that rejection as a runtime test failure.
 
 Build and collect the complete five-mode raw matrix:
 
@@ -18,7 +20,7 @@ Build and collect the complete five-mode raw matrix:
 cargo build --release --manifest-path benchmarks/Cargo.toml --bins
 ./target/release/jit-bench compare \
   --modes interpreter,tier1,tier2,automatic,bun \
-  --output benchmarks/results/comparison-v2.json
+  --output benchmarks/results/comparison-v3.json
 ```
 
 Bun uses its default engine configuration: the runner no longer adds `--smol`.
@@ -27,6 +29,13 @@ records its version, resolved path, and executable SHA-256. Bun's native
 counters in comparison samples are JSON `null` (N/A). Raw worker output keeps
 zero placeholders in the legacy cumulative counter fields; these are not Bun
 execution-tier measurements.
+
+Bun runs the shared wrapper from a temporary `.mjs` file, not with `bun -e`;
+the file is deleted after the run and its SHA-256 is recorded in
+`protocol.bun_wrapper_sha256` (`protocol.bun_launch = "file"`). The wrapper does
+not embed the script path, so its hash only changes with the driver, the warmup
+count, or `JIT_BENCH_TIMED_BATCHES`. `JIT_BENCH_BUN_LAUNCH=eval` reproduces the
+historical `bun -e` launch as a **control only**; `paired.py` rejects it.
 
 For an external paired baseline/candidate collector, each command below emits
 one worker JSON object. Build both runtime revisions with the exact same
@@ -43,46 +52,75 @@ External collectors must check checksums, protocol identity, script/driver
 hashes, sampling counts, and native-counter consistency themselves, and record
 engine identities and host/build provenance.
 
-## Fixed-warmup timing and readiness diagnostics
+## Multi-batch timing and readiness diagnostics
 
 Every engine executes one first call, then exactly 64 warmup batches of ten
-calls, then one measured batch of ten calls. The shared `batch-driver.js` uses
-identical workload arguments and stores every result. Promise results complete
-sequentially before the batch ends. Primitive checksums are generated after
-timing, including during warmup, and combine all ten results. The
-`protocol.warmup_batch_ns` array records the 64 consecutive warmup timings.
+calls, then **K consecutive timed batches** of ten calls (`K = 16` by default;
+`JIT_BENCH_TIMED_BATCHES` overrides it, and `paired.py` passes the same K to
+every engine and variant). The shared `batch-driver.js` uses identical workload
+arguments and stores every result. Promise results complete sequentially before
+the batch ends. Primitive checksums are generated after timing, including during
+warmup, and combine all ten results; every timed batch must reproduce the first
+timed batch's checksum. QuickJS polls the JIT after every warmup and timed
+batch, outside the timed region, exactly as during warmup.
 
-`elapsed_ns` is the **fixed-warmup batch latency**, not a claim that compilation
-has settled. `protocol.fixed_metrics_before` and `fixed_metrics_after` surround
-that measured batch and exclude checksum execution. Derive native, Tier 2,
-deopt, fallback, compilation, and installation deltas from these snapshots.
+- `elapsed_ns` is the **upper median of the K timed batches** (the harness-wide
+  `ceil((n - 1) / 2)` quantile rule). It is a steady-batch latency after a
+  fixed warmup, not a claim that compilation has settled.
+- `protocol.timed_batch_ns` stores all K raw timings in execution order;
+  `protocol.warmup_batch_ns` stores the 64 warmup timings.
+- `protocol.fixed_batch_ns` is the first timed batch, i.e. the single batch that
+  `shared-js-fixed-warmup-v2` reported as `elapsed_ns`. It is a cold/jitter
+  **diagnostic only**.
+- `protocol.outlier_batches` counts timed batches slower than
+  `protocol.outlier_ratio` (5) times the median. Outliers stay in
+  `timed_batch_ns` and are never silently dropped; `summarize_paired.py` reports
+  their total and the number of affected processes.
+
+Why v3 exists: under `bun -e`, Bun's batch at index 64 (the only batch v2 timed)
+deterministically hit a one-off ~0.1-0.2 ms JSC stall, inflating Bun latency by
+1.2x-32x on two-argument kernels. Running the same wrapper from a file removes
+the stall, and the median of K batches no longer depends on one batch index.
+For example, a noisy smoke of `numeric` on one host measured Bun at about
+0.005 ms per ten calls with the file launch (fixed batch also about 0.005 ms),
+while the `-e` control still showed a 0.13-0.19 ms fixed batch with 2-3 flagged
+outliers and a median of about 0.005 ms. v2 and v3 numbers must not be mixed in
+one comparison; `protocol_check.py` rejects mixed evidence.
+
+`protocol.fixed_metrics_before` and `fixed_metrics_after` surround the first
+timed batch and exclude checksum execution, as in v2.
+`protocol.timed_metrics_before` and `timed_metrics_after` surround the whole
+timed window, **including** the untimed checksum and JIT-poll steps between
+batches. Derive native, Tier 2, deopt, fallback, compilation, and installation
+deltas from these snapshots; `paired.py` stores them as `fixed_deltas` and
+`timed_deltas` and uses the timed window for `compilation_quiet_samples`.
 Counters aggregate the shared driver and workload; they do not identify the
 native tier of an individual workload function. Bun has no equivalent internal
 metrics and reports these snapshots as `null`; interpreter workers have no
 attached JIT and also leave them `null`.
 
-QuickJS still times one outer Rust `Function::call` and, for asynchronous work,
-its Promise completion bridge. Bun times the corresponding JS call and await.
-Both timings include driver array/closure work. The protocol removes the old
-per-workload Rust lookup/checksum/poll loop from the measured region, but does
-not eliminate the outer host-call difference. The driver is part of the
-measured workload; these are not isolated function-body timings.
+QuickJS still times one outer Rust `Function::call` per batch and, for
+asynchronous work, its Promise completion bridge. Bun times the corresponding JS
+call and await. Both timings include driver array/closure work. The protocol
+removes the old per-workload Rust lookup/checksum/poll loop from the measured
+region, but does not eliminate the outer host-call difference. The driver is
+part of the measured workload; these are not isolated function-body timings.
 
-After collecting the fixed-window sample, QuickJS runs the existing bounded
+After collecting the timed batches, QuickJS runs the existing bounded
 JIT readiness and settling checks, then another shared batch. Its timing is
 stored in `protocol.readiness_diagnostic_ns` and `phases.steady_state_ns`.
 Bun has no separately conditioned readiness diagnostic. Do not divide Bun's
-fixed-window latency by QuickJS's post-readiness diagnostic and call that a
+multi-batch latency by QuickJS's post-readiness diagnostic and call that a
 matched steady-state comparison. Legacy cumulative counters include first
-execution, warmup, the fixed sample, and subsequent diagnostics; they cannot
-prove native execution or settled compilation during the fixed window.
+execution, warmup, the timed batches, and subsequent diagnostics; they cannot
+prove native execution or settled compilation during the timed window.
 
 Forced Tier 2 probes can declare `globalThis.tier2ReadyInstalls` to require a
 known publication count in the readiness diagnostic. The direct-call probe
 requires four: two baseline and two optimizing artifacts. An unrelated
 blacklisted function cannot bypass that requirement. Explicit forced-Tier2
 requirements reject unsettled diagnostic startup or new compilation during
-the diagnostic batch. Those checks happen after the fixed-window sample and
+the diagnostic batch. Those checks happen after the timed batches and
 do not make its warmup policy variable. Unsupported probes retain bounded
 fallback/readiness behavior.
 
@@ -161,10 +199,12 @@ fallback-only result as proof that a JIT tier supports the feature.
 | `strings-regexp` | String construction, slicing, RegExp capture and replacement |
 | `arrays-typed` | Packed-array growth/traversal and Int32Array/Float64Array traffic |
 | `objects-polymorphic` | Allocation, property reads/writes, and four stable shapes |
+| `property-polymorphic` | Allocation-free reads at two sites that each observe four stable shapes (one prototype-less); the bounded polymorphic inline cache |
 | `calls-recursion-closures` | Four-deep calls, bounded recursion, and mutable closure capture |
 | `json-codec` | Repeated nested JSON encoding and decoding |
 | `map-set-bigint` | Map and Set mutation/iteration plus bounded BigInt arithmetic |
 | `exceptions-promises-async` | Throw/catch, Promise jobs, async functions, and continuations |
+| `methods-dynamic` | Prototype methods using `this`, `typeof`/`in`/`instanceof` dispatch, object destructuring, `**`, and compound element updates |
 
 Select the matrix with `JIT_BENCH_WORKLOADS` for smoke or publishable runs; the
 sample/warmup/window rules above remain unchanged.

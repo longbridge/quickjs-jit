@@ -1,7 +1,7 @@
 use std::{fs, io, path::Path};
 
 const QUICKJS_BASELINE_FNV64: u64 = 0x3302_116a_b0fc_269c;
-const EXPECTED_PATCHES: [(&str, u64); 19] = [
+const EXPECTED_PATCHES: [(&str, u64); 28] = [
     ("0001-rquickjs-jit.patch", 0x18d7_40cc_6943_30cf),
     ("0002-runtime-feedback.patch", 0xe4c1_ed52_ee5d_d469),
     ("0003-element-layout.patch", 0xa12c_ccd2_7420_e880),
@@ -21,6 +21,15 @@ const EXPECTED_PATCHES: [(&str, u64); 19] = [
     ("0018-inline-frame-recovery.patch", 0xb971d61edccde229),
     ("0019-array-feedback.patch", 0x11c3cb13a8297dd4),
     ("0020-typed-array-guard.patch", 0x5d10_38a3_8bc9_9821),
+    ("0021-helper-boundary.patch", 0xdf20_0245_013f_eb89),
+    ("0022-inline-refcount.patch", 0x508b_6114_19be_28da),
+    ("0023-fast-native-entry.patch", 0xbdee_5442_1fd7_ee3e),
+    ("0025-tier1-closures.patch", 0x1bfb_2739_eb74_9885),
+    ("0026-tier1-generic-ops.patch", 0xd0d9_cdd3_c58e_eb8e),
+    ("0027-tier1-exception-regions.patch", 0xb440_7c8a_4873_a208),
+    ("0028-tier1-iteration.patch", 0x40d9_9376_b310_d4d4),
+    ("0029-native-call-convention.patch", 0xb9cf_65e5_3bca_852e),
+    ("0032-object-fast-paths.patch", 0x3104_b683_7243_9d7e),
 ];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
@@ -60,9 +69,9 @@ const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("list.h", 0xb337_70f7_b76d_a3d8),
     ("quickjs-atom.h", 0x30b4_9116_b6a2_aa99),
     ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
-    ("quickjs.c", 0xc535_b5f1_48e7_9b27),
-    ("quickjs-jit.h", 0x0188_04ad_21d2_95a7),
-    ("quickjs-jit-helpers.h", 0xa469_e80f_be47_404c),
+    ("quickjs.c", 0xa291_a4b4_7e88_fa66),
+    ("quickjs-jit.h", 0xcb77_8ada_a891_dd38),
+    ("quickjs-jit-helpers.h", 0x7a0c_9a1f_beb2_0014),
     ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
     ("quickjs.h", 0x4831_2cde_9c2f_a5ee),
 ];
