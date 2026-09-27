@@ -53,24 +53,48 @@ Branch `perf/p2c-exceptions`, based on `82d3808`. Roadmap item P2.3 in
 ## Noisy diagnostic (not publishable evidence)
 
 Median over 7 alternating worker runs of `median(warmup_batch_ns[-16:])`,
-automatic tiering, on the shared 24-core host while ~16 agents were building
-and testing. Baseline is the `82d3808` `jit-bench`; speed is baseline time /
-new time. Checksums matched the interpreter in every run.
+automatic tiering, measured at `354a86c` on the shared 24-core host while ~16
+agents were building and testing. Baseline is the `82d3808` `jit-bench`;
+speed is baseline time / new time (above 1.00x is faster). Checksums matched
+the interpreter in every run. The interpreter column is one same-host run.
 
-| workload | 82d3808 ms | p2c ms | speed |
-| --- | ---: | ---: | ---: |
-| exceptions-sync (new) | 2.9537 | 1.6643 | 1.78x |
-| exceptions-promises-async | 3.7634 | 2.4500 | 1.54x |
-| adversarial | 0.9545 | 0.9501 | 1.00x (tied) |
-| scalar-loop (control) | 0.0293 | 0.0290 | 1.01x (tied) |
-| call-heavy (control) | 0.0599 | 0.0605 | 0.99x (tied) |
-| mixed-quotes (control) | 2.5143 | 2.5564 | 0.98x (tied) |
+| workload | 82d3808 ms | p2c ms | speed | interpreter ms |
+| --- | ---: | ---: | ---: | ---: |
+| exceptions-sync (new) | 2.9318 | 0.8765 | 3.35x | 2.9442 |
+| exceptions-promises-async | 3.6864 | 2.4385 | 1.51x | 2.3155 |
+| adversarial | 0.9528 | 0.9526 | 1.00x | 0.9347 |
+| mixed-quotes (control) | 2.4885 | 2.5132 | 0.99x | 2.7690 |
+| property-heavy (control) | 0.0981 | 0.0968 | 1.01x | 1.0673 |
+| generic-call-entry (control) | 0.0323 | 0.0323 | 1.00x | 0.9689 |
+| scalar-loop (control) | 0.0540 | 0.0300 | inconclusive | 0.5405 |
+| call-heavy (control) | 0.0853 | 0.0598 | inconclusive | 1.2823 |
 
-`exceptions-promises-async` is now at interpreter speed (its `workload` and
-`asyncStep` are async and stay interpreted; the gain is the removed probe
-overhead). `adversarial` has no exception region; its Tier 1 code is rejected
-by the profitability gate, which this item does not change. The publishable
+The scalar-loop and call-heavy baseline medians were inflated by host load:
+earlier rounds measured 0.0291/0.0290 ms and 0.0595/0.0608 ms, and an A/A run
+of the same `82d3808` binary against itself spread call-heavy between 0.95x
+and 1.77x. Neither control executes code this item changes. An earlier
+candidate checked every Tier 2 candidate snapshot for exception regions on
+each maintenance pass and measured mixed-quotes at 0.98x in three rounds; the
+check now runs once at verification and only for ready candidates (0.999x on
+11 runs, 0.99x above).
+
+`exceptions-sync` uses Tier 1 with native handlers (3.35x the previous JIT,
+about 3.4x the interpreter). `exceptions-promises-async` is now at interpreter
+speed: its `workload` and `asyncStep` are async and stay interpreted, and the
+gain is the removed probe overhead (2,030 to 7 snapshot requests per worker
+run). `adversarial` has no exception region; its Tier 1 code is rejected by
+the profitability gate, which this item does not change. The publishable
 three-engine matrix, including `exceptions-sync`, is left to the integrator.
+
+## Verification
+
+- `cargo test --release -p quickjs-jit-runtime --features compiler,test-support --tests`:
+  797 passed, 0 failed, 1 ignored at `354a86c`.
+- `cargo test -p quickjs-jit-sys --test jit_patch`: 13 passed.
+- `cargo clippy -p quickjs-jit-runtime --all-targets --features compiler,test-support -- -D warnings`: clean.
+- `mixed_direct_calls::tier2_mixed_edge_eliminates_helper_and_preserves_guard_misses`
+  failed once in an earlier full run on this branch. It is timing-dependent and
+  also fails on an unmodified `82d3808` build on this host (3 of 19 runs).
 
 ## Remaining work
 
