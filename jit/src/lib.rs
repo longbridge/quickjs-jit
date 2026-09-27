@@ -1281,7 +1281,8 @@ fn validate_production_frame(
         };
         let valid = match kind {
             SlotKind::Tagged => true,
-            SlotKind::Int32 | SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::Int32 => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_CATCH_OFFSET),
             SlotKind::Float64 => value.tag == i64::from(qjs::JS_TAG_FLOAT64),
             SlotKind::Uninitialized => value.tag == i64::from(qjs::JS_TAG_UNINITIALIZED),
         };
@@ -2244,6 +2245,15 @@ impl ProductionBackend {
             .copied()
             .filter(|key| {
                 if self.feedback_disabled.contains(key) {
+                    return false;
+                }
+                // Tier 2 has no exceptional control flow; exception regions
+                // stay on their Tier 1 code instead of failing admission.
+                if self
+                    .optimizing_snapshots
+                    .get(key)
+                    .is_some_and(bytecode::VerifiedFunction::has_exception_regions)
+                {
                     return false;
                 }
                 if self

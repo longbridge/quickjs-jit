@@ -52,6 +52,23 @@ pub struct IrBlock {
     pub instructions: Vec<IrInstruction>,
 }
 
+/// The handler an exception raised by an instruction resumes in this frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrExceptionHandler {
+    /// Operand-stack index of the innermost live catch offset.
+    pub catch_index: u16,
+    /// First PC of the handler block, entered with the caught value at
+    /// `catch_index` and stack depth `catch_index + 1`.
+    pub handler_pc: u32,
+}
+
+/// The CATCH call of one handler's landing pad.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrCatchSite {
+    pub catch_index: u16,
+    pub state: FrameStateId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaselineIr {
     pub blocks: Vec<IrBlock>,
@@ -59,6 +76,10 @@ pub struct BaselineIr {
     pub max_stack_depth: u16,
     pub argument_count: u16,
     pub local_count: u16,
+    /// Innermost handler of every instruction PC inside a try region.
+    pub exception_handlers: BTreeMap<u32, IrExceptionHandler>,
+    /// One landing-pad CATCH call per handler PC.
+    pub catch_sites: BTreeMap<u32, IrCatchSite>,
 }
 
 impl BaselineIr {
@@ -85,12 +106,61 @@ impl BaselineIr {
         let block_depths = block_depths(function)?;
         let snapshot = function.snapshot();
         let mut states = FrameStateTable::default();
+        let mut exception_handlers = BTreeMap::new();
+        for instruction in function.instructions() {
+            let Some(handler) = function.exception_handler(instruction.pc()) else {
+                continue;
+            };
+            // An iterator-close offset is unwound by the interpreter itself;
+            // native dispatch only resumes ordinary catch handlers.
+            let handler_pc = handler
+                .handler_pc()
+                .ok_or(CompileFailure::UnsupportedOpcode)?;
+            exception_handlers.insert(
+                instruction.pc(),
+                IrExceptionHandler {
+                    catch_index: handler.catch_index(),
+                    handler_pc,
+                },
+            );
+        }
+        let mut catch_sites = BTreeMap::new();
+        for handler in exception_handlers.values() {
+            if catch_sites.contains_key(&handler.handler_pc) {
+                continue;
+            }
+            if block_depths.get(&handler.handler_pc).copied()
+                != Some(usize::from(handler.catch_index) + 1)
+            {
+                return Err(CompileFailure::InvalidArtifact);
+            }
+            let state = record_state(
+                &mut states,
+                snapshot.arg_count(),
+                snapshot.local_count(),
+                usize::from(handler.catch_index) + 1,
+                FrameStateKind::Helper,
+                handler.handler_pc,
+            )?;
+            catch_sites.insert(
+                handler.handler_pc,
+                IrCatchSite {
+                    catch_index: handler.catch_index,
+                    state,
+                },
+            );
+        }
         let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
         let mut max_stack_depth = 0_usize;
         let mut emitted_since_poll = 0_usize;
         let loop_bodies = loop_body_blocks(function);
 
         for (block_index, block) in function.control_flow_graph().blocks().iter().enumerate() {
+            // Dead code after a finally block's `ret` has no predecessor and
+            // no proof; it is never lowered.
+            if !function.is_reachable(block.start_pc()) {
+                continue;
+            }
             let mut depth = *block_depths
                 .get(&block.start_pc())
                 .ok_or(CompileFailure::InvalidArtifact)?;
@@ -240,7 +310,26 @@ impl BaselineIr {
                     });
                 }
 
-                let op = translate_instruction(instruction)?;
+                let op = match instruction.opcode().name() {
+                    // The verifier resolved each `ret` to the exact return
+                    // points of its finally block.
+                    "ret" => IrOp::Ret {
+                        targets: block.successors().to_vec().into_boxed_slice(),
+                    },
+                    // Values between the kept operand and its catch offset
+                    // would need ordered releases; only the direct form is
+                    // lowered.
+                    "nip_catch"
+                        if exception_handlers
+                            .get(&pc)
+                            .map(|handler| usize::from(handler.catch_index) + 2)
+                            == Some(depth) =>
+                    {
+                        IrOp::NipCatch
+                    }
+                    "nip_catch" => return Err(CompileFailure::UnsupportedOpcode),
+                    _ => translate_instruction(instruction)?,
+                };
                 let depth_before = depth;
                 let helper_call_count = operation_helper_call_count(&op);
                 let frame_state = if operation_may_exit(&op) && helper_call_count == 0 {
@@ -259,7 +348,7 @@ impl BaselineIr {
                 if depth < pop {
                     return Err(CompileFailure::InvalidArtifact);
                 }
-                let next_depth = depth - pop + instruction.opcode().n_push() as usize;
+                let next_depth = depth - pop + effective_push(instruction);
                 max_stack_depth = max_stack_depth.max(next_depth).max(depth);
                 let helper_depth = helper_stack_depth(&op, depth, next_depth)?;
                 max_stack_depth = max_stack_depth.max(helper_depth);
@@ -381,6 +470,8 @@ impl BaselineIr {
                 .map_err(|_| CompileFailure::ResourceLimit)?,
             argument_count: snapshot.arg_count(),
             local_count: snapshot.local_count(),
+            exception_handlers,
+            catch_sites,
         })
     }
 }
@@ -433,6 +524,7 @@ fn operation_may_exit(operation: &IrOp) -> bool {
             | IrOp::Branch { .. }
             | IrOp::Return
             | IrOp::ReturnUndefined
+            | IrOp::Ret { .. }
     )
 }
 
@@ -492,6 +584,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
             | BinaryOp::StrictNotEqual,
         ) => 1,
         IrOp::Branch { .. } => 1,
+        IrOp::Throw | IrOp::ThrowError { .. } => 1,
         _ => 0,
     }
 }
@@ -571,6 +664,12 @@ fn effective_pop(instruction: &Instruction) -> usize {
     }
 }
 
+/// `gosub` is declared without stack effects in the QuickJS opcode table but
+/// pushes the Int32 return offset that its finally block's `ret` consumes.
+fn effective_push(instruction: &Instruction) -> usize {
+    instruction.opcode().n_push() as usize + usize::from(instruction.opcode().name() == "gosub")
+}
+
 fn block_depths(function: &VerifiedFunction) -> Result<BTreeMap<u32, usize>, CompileFailure> {
     let cfg = function.control_flow_graph();
     let mut depths = BTreeMap::from([(0_u32, 0_usize)]);
@@ -583,7 +682,7 @@ fn block_depths(function: &VerifiedFunction) -> Result<BTreeMap<u32, usize>, Com
             if depth < pop {
                 return Err(CompileFailure::InvalidArtifact);
             }
-            depth = depth - pop + instruction.opcode().n_push() as usize;
+            depth = depth - pop + effective_push(instruction);
         }
         for &successor in block.successors() {
             match depths.get(&successor) {
@@ -814,6 +913,33 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         },
         "return" => IrOp::Return,
         "return_undef" => IrOp::ReturnUndefined,
+        "catch" => IrOp::Catch(
+            u32::try_from(
+                instruction
+                    .branch_target()
+                    .ok_or(CompileFailure::InvalidArtifact)?,
+            )
+            .map_err(|_| CompileFailure::InvalidArtifact)?,
+        ),
+        "throw" => IrOp::Throw,
+        "throw_error" => IrOp::ThrowError {
+            atom: instruction.operand_u32(1),
+            kind: instruction.operand_u8(5),
+        },
+        "gosub" => IrOp::Gosub {
+            target: u32::try_from(
+                instruction
+                    .branch_target()
+                    .ok_or(CompileFailure::InvalidArtifact)?,
+            )
+            .map_err(|_| CompileFailure::InvalidArtifact)?,
+            return_pc: instruction
+                .pc()
+                .checked_add(
+                    u32::try_from(instruction.size()).map_err(|_| CompileFailure::ResourceLimit)?,
+                )
+                .ok_or(CompileFailure::ResourceLimit)?,
+        },
         _ => return Err(CompileFailure::UnsupportedOpcode),
     };
     Ok(operation)

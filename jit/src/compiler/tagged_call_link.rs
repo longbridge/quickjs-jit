@@ -46,6 +46,7 @@ pub(crate) fn lower_target_only_linked_leaf(
         || signature.function().generation != snapshot.generation()
         || signature.arity() != usize::from(snapshot.arg_count())
         || !snapshot.exception_map().is_empty()
+        || function.has_exception_regions()
         || function.control_flow_graph().blocks().len() != 1
         || !matches!(
             signature.result(),

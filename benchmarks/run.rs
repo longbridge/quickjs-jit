@@ -250,6 +250,13 @@ const WORKLOADS: &[Workload] = &[
         designated: false,
         file: "exceptions-promises-async.js",
     },
+    Workload {
+        name: "exceptions-sync",
+        suite: "rquickjs-jit matrix",
+        group: "exceptions-sync",
+        designated: false,
+        file: "exceptions-sync.js",
+    },
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1412,6 +1419,7 @@ mod tests {
             "scalar-expressions.js",
             "scalar-control-flow.js",
             "exceptions-promises-async.js",
+            "exceptions-sync.js",
             "packed-array-traversal.js",
             "int32array-traversal.js",
             "float64array-traversal.js",
@@ -1467,6 +1475,7 @@ mod tests {
             ("json-codec", "json-codec"),
             ("map-set-bigint", "map-set-bigint"),
             ("exceptions-promises-async", "exceptions-promises-async"),
+            ("exceptions-sync", "exceptions-sync"),
         ] {
             let workload = WORKLOADS.iter().find(|w| w.name == name).unwrap();
             assert_eq!(workload.group, group);

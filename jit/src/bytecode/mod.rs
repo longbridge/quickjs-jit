@@ -18,7 +18,7 @@ pub use policy::{
     audited_opcode_policy_table, tier1_policy, AuditedOpcodePolicy, FallbackReason, HelperId,
     Tier1Policy, Tier1Rejection, GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
 };
-pub use stack::SlotKind;
+pub use stack::{ExceptionHandler, SlotKind};
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
 
 /// Numeric opcode constants generated from QuickJS's authoritative macro table.

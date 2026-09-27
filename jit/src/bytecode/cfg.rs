@@ -51,7 +51,18 @@ impl ControlFlowGraph {
 }
 
 fn is_unconditional(instruction: &Instruction) -> bool {
-    matches!(instruction.opcode().name(), "goto" | "goto8" | "goto16")
+    // `gosub` transfers to its finally block; control returns to the next
+    // instruction only through that block's `ret`, never by fallthrough.
+    matches!(
+        instruction.opcode().name(),
+        "goto" | "goto8" | "goto16" | "gosub"
+    )
+}
+
+/// `ret` has no static target. Its successors are the return points of the
+/// `gosub` sites that enter the finally block containing it.
+fn is_subroutine_return(instruction: &Instruction) -> bool {
+    instruction.opcode().name() == "ret"
 }
 
 fn is_terminal(instruction: &Instruction) -> bool {
@@ -69,6 +80,7 @@ fn is_terminal(instruction: &Instruction) -> bool {
 
 pub(crate) fn has_valid_exit(instruction: &Instruction) -> bool {
     is_terminal(instruction)
+        || is_subroutine_return(instruction)
         || (instruction.branch_target().is_some() && is_unconditional(instruction))
 }
 
@@ -107,7 +119,9 @@ pub(crate) fn build(
             if next_pc < byte_len {
                 boundaries.insert(next_pc as u32);
             }
-        } else if is_terminal(instruction) && next_pc < byte_len {
+        } else if (is_terminal(instruction) || is_subroutine_return(instruction))
+            && next_pc < byte_len
+        {
             boundaries.insert(next_pc as u32);
         }
     }
@@ -146,7 +160,7 @@ pub(crate) fn build(
                     successors.push(next);
                 }
             }
-        } else if !is_terminal(tail) {
+        } else if !is_terminal(tail) && !is_subroutine_return(tail) {
             if let Some(next) = next {
                 successors.push(next);
             }
@@ -160,14 +174,79 @@ pub(crate) fn build(
             successors,
         });
     }
-    let by_pc = blocks
+    let by_pc: BTreeMap<u32, usize> = blocks
         .iter()
         .enumerate()
         .map(|(index, block)| (block.start_pc, index))
         .collect();
+    link_subroutine_returns(instructions, &mut blocks, &by_pc)?;
     Ok(ControlFlowGraph {
         blocks,
         by_pc,
         loop_headers,
     })
+}
+
+/// Resolves every `ret` to the return points of the finally block that owns
+/// it. The owner is found by a walk from each `gosub` target in which nested
+/// `gosub` sites step over their finally block to their own return point, so
+/// a `ret` is attributed only to the finally block that reaches it directly.
+/// A `ret` reachable from two different finally entries has no exact static
+/// return set and is rejected.
+fn link_subroutine_returns(
+    instructions: &[Instruction],
+    blocks: &mut [BasicBlock],
+    by_pc: &BTreeMap<u32, usize>,
+) -> Result<(), VerifyError> {
+    let unsupported = |pc| VerifyError::new(pc, VerifyErrorKind::UnsupportedExceptionRegion);
+    let return_point = |instruction: &Instruction| {
+        (instruction.pc() as usize)
+            .checked_add(instruction.size())
+            .and_then(|pc| u32::try_from(pc).ok())
+            .filter(|pc| by_pc.contains_key(pc))
+            .ok_or_else(|| unsupported(instruction.pc()))
+    };
+    let mut return_points: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for block in blocks.iter() {
+        let tail = &instructions[block.instruction_range.end - 1];
+        if tail.opcode().name() == "gosub" {
+            let target = *block
+                .successors
+                .first()
+                .ok_or_else(|| unsupported(tail.pc()))?;
+            return_points
+                .entry(target)
+                .or_default()
+                .insert(return_point(tail)?);
+        }
+    }
+    let mut owners: BTreeMap<usize, u32> = BTreeMap::new();
+    for &entry in return_points.keys() {
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![entry];
+        while let Some(pc) = pending.pop() {
+            if !visited.insert(pc) {
+                continue;
+            }
+            let index = *by_pc.get(&pc).ok_or_else(|| unsupported(pc))?;
+            let block = &blocks[index];
+            let tail = &instructions[block.instruction_range.end - 1];
+            match tail.opcode().name() {
+                "ret" => {
+                    if owners
+                        .insert(index, entry)
+                        .is_some_and(|owner| owner != entry)
+                    {
+                        return Err(unsupported(tail.pc()));
+                    }
+                }
+                "gosub" => pending.push(return_point(tail)?),
+                _ => pending.extend(block.successors.iter().copied()),
+            }
+        }
+    }
+    for (index, owner) in owners {
+        blocks[index].successors = return_points[&owner].iter().copied().collect();
+    }
+    Ok(())
 }

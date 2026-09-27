@@ -9262,6 +9262,15 @@ impl Compiler for Tier2Compiler {
         #[cfg(feature = "test-support")]
         let _diagnostic_scope = Tier2DiagnosticScope::enter(request.artifact_key().runtime_id);
         let key = request.key();
+        if request.snapshot().has_exception_regions() {
+            #[cfg(feature = "test-support")]
+            record_tier2_stage(
+                key,
+                Tier2CompileStage::Admission,
+                Some(CompileFailure::UnsupportedOpcode),
+            );
+            return Err(CompileFailure::UnsupportedOpcode);
+        }
         if request.tier() != Tier::Optimizing {
             #[cfg(feature = "test-support")]
             record_tier2_stage(
@@ -9428,6 +9437,15 @@ impl Compiler for Tier2Compiler {
         let _diagnostic_scope = Tier2DiagnosticScope::enter(request.artifact_key().runtime_id);
         let key = request.key();
         tier2_stage(key, Tier2CompileStage::Admission, control.check())?;
+        if request.snapshot().has_exception_regions() {
+            #[cfg(feature = "test-support")]
+            record_tier2_stage(
+                key,
+                Tier2CompileStage::Admission,
+                Some(CompileFailure::UnsupportedOpcode),
+            );
+            return Err(CompileFailure::UnsupportedOpcode);
+        }
         if request.tier() != Tier::Optimizing {
             #[cfg(feature = "test-support")]
             record_tier2_stage(

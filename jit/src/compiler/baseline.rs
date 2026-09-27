@@ -91,6 +91,9 @@ struct HelperLowering<'a> {
     signatures: &'a [cranelift_codegen::ir::SigRef],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    /// Landing pad of the innermost try region around the instruction being
+    /// lowered; `None` exits to the interpreter with the pending exception.
+    exception_target: std::cell::Cell<Option<Block>>,
 }
 
 impl HelperLowering<'_> {
@@ -123,6 +126,7 @@ impl HelperLowering<'_> {
             arguments,
             self.pointer_type,
             self.layout,
+            self.exception_target.get(),
         )
     }
 
@@ -2026,9 +2030,66 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
         let mut terminated = false;
 
         for instruction in &block.instructions {
+            // Every helper edge of an instruction inside a try region may
+            // enter its handler. The handler observes the frame's arguments
+            // and locals as they are at that edge: before, after, or (for a
+            // kept store) between the release of the old value and the store.
+            let handler = (!matches!(
+                instruction.op,
+                IrOp::Poll { .. } | IrOp::OsrLabel { .. } | IrOp::Nop
+            ))
+            .then(|| ir.exception_handlers.get(&instruction.pc).copied())
+            .flatten();
+            if let Some(handler) = handler {
+                successors.push(exceptional_input(&frame, handler)?);
+                match instruction.op {
+                    IrOp::PutLocal { index, keep: true } => {
+                        let mut transient = frame.clone();
+                        *transient
+                            .locals
+                            .get_mut(usize::from(index))
+                            .ok_or(CompileFailure::InvalidArtifact)? =
+                            AbstractValue::known(KnownKind::Undefined);
+                        successors.push(exceptional_input(&transient, handler)?);
+                    }
+                    IrOp::PutArgument { index, keep: true } => {
+                        let mut transient = frame.clone();
+                        *transient
+                            .arguments
+                            .get_mut(usize::from(index))
+                            .ok_or(CompileFailure::InvalidArtifact)? =
+                            AbstractValue::known(KnownKind::Undefined);
+                        successors.push(exceptional_input(&transient, handler)?);
+                    }
+                    _ => {}
+                }
+            }
             match &instruction.op {
                 IrOp::Poll { .. } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
                 IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
+                IrOp::Catch(_) => frame.stack.push(AbstractValue::known(KnownKind::Other)),
+                IrOp::NipCatch => {
+                    let value = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(value);
+                }
+                IrOp::Throw => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    terminated = true;
+                }
+                IrOp::ThrowError { .. } => terminated = true,
+                IrOp::Gosub { target, .. } => {
+                    frame.stack.push(AbstractValue::known(KnownKind::Number));
+                    successors.push((*target, frame.clone()));
+                    terminated = true;
+                }
+                IrOp::Ret { targets } => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    for target in targets.iter() {
+                        successors.push((*target, frame.clone()));
+                    }
+                    terminated = true;
+                }
                 // Constant-pool descriptors are pointer-free but intentionally
                 // do not carry the full runtime value. Keep their abstract
                 // domain unknown: the lowering performs the exact tag guard
@@ -2321,6 +2382,11 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 }
                 IrOp::ReturnUndefined => terminated = true,
             }
+            if let Some(handler) = handler {
+                if frame.stack.len() >= usize::from(handler.catch_index) {
+                    successors.push(exceptional_input(&frame, handler)?);
+                }
+            }
             if terminated {
                 break;
             }
@@ -2354,6 +2420,29 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
     }
 
     Ok(analysis)
+}
+
+/// The abstract frame a handler block is entered with from one exceptional
+/// edge: operands below the catch offset, then the caught (unknown) value.
+fn exceptional_input(
+    frame: &AbstractFrame,
+    handler: crate::ir::IrExceptionHandler,
+) -> Result<(u32, AbstractFrame), CompileFailure> {
+    let catch_index = usize::from(handler.catch_index);
+    let mut stack = frame
+        .stack
+        .get(..catch_index)
+        .ok_or(CompileFailure::InvalidArtifact)?
+        .to_vec();
+    stack.push(AbstractValue::unknown());
+    Ok((
+        handler.handler_pc,
+        AbstractFrame {
+            arguments: frame.arguments.clone(),
+            locals: frame.locals.clone(),
+            stack,
+        },
+    ))
 }
 
 /// `helper_backed` is true for the plain `Unary` form, whose non-numeric
@@ -2586,7 +2675,16 @@ fn lower_function(
         signatures: &helper_signatures,
         pointer_type,
         layout,
+        exception_target: std::cell::Cell::new(None),
     };
+    // One landing pad per handler: every exceptional edge of its try region
+    // publishes the exact owned stack and enters it.
+    let landing_blocks: BTreeMap<u32, Block> = ir
+        .catch_sites
+        .keys()
+        .map(|handler_pc| (*handler_pc, builder.create_block()))
+        .collect();
+    let fixed_slots = usize::from(ir.argument_count) + usize::from(ir.local_count);
 
     macro_rules! invoke_helper {
         ($helper_id:expr, $state:expr, $live_depth:expr, $arguments:expr) => {{
@@ -2622,6 +2720,15 @@ fn lower_function(
             ) {
                 previous_effectful_op_was_boolean = ir_op_produces_boolean(&instruction.op);
             }
+            let exception_target = match ir.exception_handlers.get(&instruction.pc) {
+                Some(handler) => Some(
+                    *landing_blocks
+                        .get(&handler.handler_pc)
+                        .ok_or(CompileFailure::InvalidArtifact)?,
+                ),
+                None => None,
+            };
+            helper_lowering.exception_target.set(exception_target);
             builder.set_srcloc(SourceLoc::default());
             if !matches!(&instruction.op, IrOp::Poll { .. }) {
                 if let Some(state) = instruction.frame_state {
@@ -3529,6 +3636,185 @@ fn lower_function(
                         .brif(taken, blocks[&target], &[], blocks[&fallthrough], &[]);
                     terminated = true;
                 }
+                IrOp::Catch(handler_pc) => {
+                    let offset = constant_pair(
+                        builder,
+                        TaggedValue::new(u64::from(handler_pc), qjs::JS_TAG_CATCH_OFFSET as i64),
+                    );
+                    define_pair(
+                        builder,
+                        *stack.get(depth).ok_or(CompileFailure::InvalidArtifact)?,
+                        offset,
+                    );
+                    depth += 1;
+                }
+                IrOp::NipCatch => {
+                    // `catch_offset value -> value`; a catch offset owns no
+                    // reference, so moving the value over it releases nothing.
+                    let value_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let catch_index = depth
+                        .checked_sub(2)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = use_pair(builder, stack[value_index]);
+                    define_pair(builder, stack[catch_index], value);
+                    clear_pair(builder, stack[value_index], stack_base, value_index, layout)?;
+                    depth = value_index;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::Throw | IrOp::ThrowError { .. } => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let frame_state = ir.frame_states.get(state);
+                    let visible_depth = frame_state
+                        .slots
+                        .len()
+                        .checked_sub(fixed_slots)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        visible_depth,
+                        frame_state.pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    let exception_depth = match instruction.op {
+                        IrOp::ThrowError { atom, kind } => {
+                            emit_exception_api_call(
+                                builder,
+                                frame,
+                                qjs::JS_JitThrowError as *const () as usize,
+                                state,
+                                &[atom, u32::from(kind)],
+                                pointer_type,
+                            )?;
+                            depth
+                        }
+                        _ => {
+                            let value_index = depth
+                                .checked_sub(1)
+                                .ok_or(CompileFailure::InvalidArtifact)?;
+                            emit_exception_api_call(
+                                builder,
+                                frame,
+                                qjs::JS_JitThrowValue as *const () as usize,
+                                state,
+                                &[flat_stack_slot(ir, value_index)?],
+                                pointer_type,
+                            )?;
+                            // The operand is the pending exception now.
+                            clear_pair(
+                                builder,
+                                stack[value_index],
+                                stack_base,
+                                value_index,
+                                layout,
+                            )?;
+                            value_index
+                        }
+                    };
+                    // Both calls always leave an exception pending.
+                    emit_exception_edge(
+                        builder,
+                        frame,
+                        sret,
+                        stack_base,
+                        exception_depth,
+                        exception_target,
+                        pointer_type,
+                        layout,
+                    )?;
+                    terminated = true;
+                }
+                IrOp::Gosub { target, return_pc } => {
+                    let return_offset = constant_pair(
+                        builder,
+                        TaggedValue::new(i64::from(return_pc) as u64, qjs::JS_TAG_INT as i64),
+                    );
+                    define_pair(
+                        builder,
+                        *stack.get(depth).ok_or(CompileFailure::InvalidArtifact)?,
+                        return_offset,
+                    );
+                    builder.ins().jump(
+                        *blocks.get(&target).ok_or(CompileFailure::InvalidArtifact)?,
+                        &[],
+                    );
+                    terminated = true;
+                }
+                IrOp::Ret { ref targets } => {
+                    let index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = use_pair(builder, stack[index]);
+                    clear_pair(builder, stack[index], stack_base, index, layout)?;
+                    let is_int = tag_is(builder, value.tag, qjs::JS_TAG_INT);
+                    let offset = builder.ins().ireduce(types::I32, value.payload);
+                    let unknown = builder.create_block();
+                    for target in targets.iter() {
+                        let block = *blocks.get(target).ok_or(CompileFailure::InvalidArtifact)?;
+                        let matches = builder.ins().icmp_imm(
+                            IntCC::Equal,
+                            offset,
+                            i64::from(
+                                i32::try_from(*target)
+                                    .map_err(|_| CompileFailure::InvalidArtifact)?,
+                            ),
+                        );
+                        let hit = builder.ins().band(is_int, matches);
+                        let next = builder.create_block();
+                        builder.ins().brif(hit, block, &[], next, &[]);
+                        builder.seal_block(next);
+                        builder.switch_to_block(next);
+                    }
+                    builder.ins().jump(unknown, &[]);
+                    // Only this function's `gosub` sites push return offsets;
+                    // anything else is resumed by the interpreter's own `ret`.
+                    builder.seal_block(unknown);
+                    builder.switch_to_block(unknown);
+                    builder.set_cold_block(unknown);
+                    define_pair(builder, stack[index], value);
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        depth,
+                        instruction.pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    let bytecode = builder.ins().load(
+                        pointer_type,
+                        MemFlags::new(),
+                        frame,
+                        layout.bytecode_start,
+                    );
+                    let resume = builder.ins().iadd_imm(bytecode, i64::from(instruction.pc));
+                    emit_exit(
+                        builder,
+                        sret,
+                        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+                        Some(resume),
+                        pointer_type,
+                    );
+                    terminated = true;
+                }
                 IrOp::Return => {
                     let result_index = depth
                         .checked_sub(1)
@@ -3610,6 +3896,63 @@ fn lower_function(
                 return Err(CompileFailure::InvalidArtifact);
             }
         }
+    }
+
+    // Landing pads run the interpreter's exception prologue on the published
+    // frame. A caught exception resumes the handler natively with the caught
+    // value in the catch offset's slot; anything else (uncatchable errors,
+    // invariant failures) leaves through the ordinary exception exit so the
+    // interpreter unwinds the exact published frame.
+    for (handler_pc, landing) in &landing_blocks {
+        let site = *ir
+            .catch_sites
+            .get(handler_pc)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let catch_index = usize::from(site.catch_index);
+        let handler = *blocks
+            .get(handler_pc)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        builder.set_srcloc(SourceLoc::default());
+        builder.switch_to_block(*landing);
+        builder.set_cold_block(*landing);
+        let status = emit_exception_api_call(
+            builder,
+            frame,
+            qjs::JS_JitCatchException as *const () as usize,
+            site.state,
+            &[flat_stack_slot(ir, catch_index)?, *handler_pc],
+            pointer_type,
+        )?;
+        let caught = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+        let resume = builder.create_block();
+        let propagate = builder.create_block();
+        builder.ins().brif(caught, resume, &[], propagate, &[]);
+        builder.seal_block(resume);
+        builder.seal_block(propagate);
+        builder.switch_to_block(propagate);
+        builder.set_cold_block(propagate);
+        emit_exit(
+            builder,
+            sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+            None,
+            pointer_type,
+        );
+        builder.switch_to_block(resume);
+        reload_pair(
+            builder,
+            *stack
+                .get(catch_index)
+                .ok_or(CompileFailure::InvalidArtifact)?,
+            stack_base,
+            catch_index,
+            layout,
+        );
+        let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+        for pair in stack.iter().skip(catch_index + 1) {
+            define_pair(builder, *pair, undefined);
+        }
+        builder.ins().jump(handler, &[]);
     }
 
     builder.set_srcloc(SourceLoc::default());
@@ -5700,6 +6043,7 @@ fn emit_helper_call(
     arguments: &[Value],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    exception_target: Option<Block>,
 ) -> Result<(), CompileFailure> {
     let signature = *signatures
         .get(helper_id)
@@ -5735,15 +6079,46 @@ fn emit_helper_call(
     builder.seal_block(exception);
     builder.seal_block(continuation);
     builder.switch_to_block(exception);
-    force_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
-    emit_exit(
+    emit_exception_edge(
         builder,
+        frame,
         sret,
-        qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
-        None,
+        stack_base,
+        exception_depth,
+        exception_target,
         pointer_type,
-    );
+        layout,
+    )?;
     builder.switch_to_block(continuation);
+    Ok(())
+}
+
+/// Publishes the exact operand stack owned at a pending exception, then
+/// either enters the innermost try region's landing pad or exits so the
+/// interpreter unwinds the frame.
+#[allow(clippy::too_many_arguments)]
+fn emit_exception_edge(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    sret: Value,
+    stack_base: Value,
+    exception_depth: usize,
+    exception_target: Option<Block>,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    force_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
+    if let Some(landing) = exception_target {
+        builder.ins().jump(landing, &[]);
+    } else {
+        emit_exit(
+            builder,
+            sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+            None,
+            pointer_type,
+        );
+    }
     Ok(())
 }
 
@@ -5768,6 +6143,7 @@ fn invoke_frame_helper(
     helper_arguments: &[u32],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    exception_target: Option<Block>,
 ) -> Result<(), CompileFailure> {
     let frame_state = ir.frame_states.get(state);
     let fixed_slots = usize::from(ir.argument_count) + usize::from(ir.local_count);
@@ -5815,7 +6191,60 @@ fn invoke_frame_helper(
         &values,
         pointer_type,
         layout,
+        exception_target,
     )
+}
+
+/// Calls one of the ABI 1.25 exception entry points (`JS_JitThrowValue`,
+/// `JS_JitThrowError`, `JS_JitCatchException`). They share the helper
+/// convention: frame, stack-map id and u32 operands in, status out. The call
+/// carries its frame state's source location so the state maps to exactly
+/// this call's return address.
+fn emit_exception_api_call(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    address: usize,
+    state: FrameStateId,
+    operands: &[u32],
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Result<Value, CompileFailure> {
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(types::I32));
+    for _ in operands {
+        signature.params.push(AbiParam::new(types::I32));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    let signature = builder.import_signature(signature);
+    let target = builder.ins().iconst(
+        pointer_type,
+        i64::try_from(address).map_err(|_| CompileFailure::InvalidArtifact)?,
+    );
+    let mut params = Vec::with_capacity(operands.len() + 2);
+    params.push(frame);
+    params.push(helper_u32(
+        builder,
+        u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
+    ));
+    params.extend(
+        operands
+            .iter()
+            .copied()
+            .map(|operand| helper_u32(builder, operand)),
+    );
+    let source_location = frame_state_source_loc(state)?;
+    builder.set_srcloc(source_location);
+    let call = emit_external_call(
+        builder,
+        signature,
+        target,
+        &params,
+        pointer_type,
+        Some(frame),
+        Some(source_location),
+    );
+    builder.set_srcloc(SourceLoc::default());
+    Ok(builder.inst_results(call)[0])
 }
 
 fn helper_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
@@ -6471,6 +6900,8 @@ mod tests {
             max_stack_depth: 16,
             argument_count: 4,
             local_count: 4,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         }
     }
 
@@ -6515,6 +6946,12 @@ mod tests {
             IrOp::Branch { .. } => "branch",
             IrOp::Return => "return",
             IrOp::ReturnUndefined => "return_undefined",
+            IrOp::Catch(_) => "catch",
+            IrOp::NipCatch => "nip_catch",
+            IrOp::Throw => "throw",
+            IrOp::ThrowError { .. } => "throw_error",
+            IrOp::Gosub { .. } => "gosub",
+            IrOp::Ret { .. } => "ret",
         }
     }
 
@@ -6604,7 +7041,50 @@ mod tests {
             linear_ir(vec![numeric_push()], IrOp::AddLocal(0)),
             linear_ir(vec![numeric_push()], IrOp::Return),
             linear_ir(Vec::new(), IrOp::ReturnUndefined),
+            linear_ir(Vec::new(), IrOp::Catch(1)),
+            linear_ir(
+                vec![instruction(0, IrOp::Catch(1)), numeric_push()],
+                IrOp::NipCatch,
+            ),
+            linear_ir(vec![numeric_push()], IrOp::Throw),
+            linear_ir(Vec::new(), IrOp::ThrowError { atom: 1, kind: 2 }),
         ];
+        cases.push(BaselineIr {
+            blocks: vec![
+                IrBlock {
+                    start_pc: 0,
+                    stack_depth: 0,
+                    instructions: vec![instruction(
+                        0,
+                        IrOp::Gosub {
+                            target: 2,
+                            return_pc: 1,
+                        },
+                    )],
+                },
+                IrBlock {
+                    start_pc: 1,
+                    stack_depth: 0,
+                    instructions: vec![instruction(1, IrOp::ReturnUndefined)],
+                },
+                IrBlock {
+                    start_pc: 2,
+                    stack_depth: 1,
+                    instructions: vec![instruction(
+                        2,
+                        IrOp::Ret {
+                            targets: Box::new([1]),
+                        },
+                    )],
+                },
+            ],
+            frame_states: FrameStateTable::default(),
+            max_stack_depth: 1,
+            argument_count: 0,
+            local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
+        });
         for operation in [
             StackOp::Nip,
             StackOp::Nip1,
@@ -6687,6 +7167,8 @@ mod tests {
             max_stack_depth: 0,
             argument_count: 0,
             local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         });
         cases.push(BaselineIr {
             blocks: vec![
@@ -6719,6 +7201,8 @@ mod tests {
             max_stack_depth: 1,
             argument_count: 0,
             local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         });
 
         let mut seen = BTreeSet::new();
@@ -6739,7 +7223,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            33,
+            39,
             "every IrOp variant is represented: {seen:?}"
         );
     }

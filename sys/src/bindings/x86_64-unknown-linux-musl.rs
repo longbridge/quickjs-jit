@@ -86,7 +86,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 24;
+pub const QJSJIT_ABI_MINOR: u32 = 25;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -3899,6 +3899,26 @@ const _: () = {
 };
 unsafe extern "C" {
     pub fn JS_JitGetInlineAPI(version: u32) -> *const JSJitInlineAPI;
+}
+unsafe extern "C" {
+    pub fn JS_JitThrowValue(frame: *mut JSJitExecFrame, stack_map_id: u32, slot: u32)
+        -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitThrowError(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        atom: u32,
+        type_: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitCatchException(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        catch_slot: u32,
+        handler_pc: u32,
+    ) -> JSJitHelperStatus;
 }
 pub const __JS_ATOM_NULL: _bindgen_ty_7 = 0;
 pub const JS_ATOM_null: _bindgen_ty_7 = 1;
