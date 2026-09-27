@@ -148,6 +148,10 @@ impl Jit {
             }
             return Err(error.into());
         }
+        // Measure the interpreter's per-call stack cost once per process,
+        // outside JIT callbacks, before any native call entry is compiled.
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let _ = compiler::native_call::interpreter_frame_bytes();
 
         let metrics = Arc::new(Mutex::new(JitMetrics::disabled()));
         #[cfg(all(
@@ -691,6 +695,19 @@ struct ProductionBackend {
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
     profitability_blacklisted: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Functions whose Tier 2 artifact runs self recursion as native calls.
+    /// One optimized entry then covers a whole recursion tree, so its
+    /// invocation time is not comparable with per-call baseline samples.
+    native_recursive: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Last native-entry admission answer per function and signature.
+    native_call_plans: rustc_hash::FxHashMap<
+        runtime::FunctionKey,
+        (
+            Box<[runtime::FeedbackRepresentation]>,
+            runtime::FeedbackRepresentation,
+            bool,
+        ),
+    >,
     /// Immutable generations for which neither tier can ever produce code.
     /// `record_hot` reports these to QuickJS so it can turn off all probes and
     /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
@@ -757,6 +774,10 @@ struct ProductionProfile {
     helper_calls: u64,
     baseline_executions: u64,
     baseline_ns: u64,
+    /// Baseline entries not nested in an active execution of the same
+    /// function: `baseline_executions / baseline_outermost` estimates how many
+    /// calls one outside entry performs through self recursion.
+    baseline_outermost: u64,
     optimized_executions: u64,
     optimized_ns: u64,
     /// Fastest optimized invocation observed so far; meaningful only while
@@ -782,6 +803,17 @@ impl ProductionProfile {
         self.optimized_ns = self.optimized_ns.saturating_add(elapsed_ns);
     }
 }
+
+/// Minimum observed self-recursive calls per outside entry before a pure
+/// recursive function is admitted to the native-call convention.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_MIN_CALLS_PER_ENTRY: u64 = 16;
+/// Baseline executions observed before that ratio can admit a function.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_PROFILE_EXECUTIONS: u64 = 64;
+/// Outside entries observed before a shallow ratio rejects a function.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const NATIVE_RECURSION_PROFILE_ENTRIES: u64 = 64;
 
 /// Finish the bounded Tier-2 profitability trial once. Production JITs patch
 /// an IC/tier state after classification; repeating wide average comparisons
@@ -2116,6 +2148,8 @@ impl ProductionBackend {
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
+            native_recursive: rustc_hash::FxHashSet::default(),
+            native_call_plans: rustc_hash::FxHashMap::default(),
             feedback_disabled: rustc_hash::FxHashSet::default(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
@@ -2307,7 +2341,24 @@ impl ProductionBackend {
                     &observed,
                 );
                 let resolved = self.coordinator.call_target_resolved(call.callee());
-                if direct_ready || frame_ready {
+                let native_ready = self.coordinator.native_call_ready(call.callee());
+                if direct_ready || frame_ready || native_ready {
+                    continue;
+                }
+                // An admitted pure recursive callee publishes its native
+                // entry with its optimizing artifact; wait for it as for a
+                // compiling scalar callee.
+                if self.native_recursive.contains(&call.callee())
+                    && matches!(
+                        self.coordinator
+                            .tier_state(call.callee(), runtime::Tier::Optimizing),
+                        runtime::CompileState::Cold
+                            | runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                    )
+                {
+                    direct_call_pending = true;
                     continue;
                 }
                 if !resolved {
@@ -2350,6 +2401,74 @@ impl ProductionBackend {
                     .control_flow_graph()
                     .is_loop_header(block.start_pc())
             });
+            /* A pure self-recursive Int32 function publishes a native call
+             * entry (P3a): its monomorphic self calls run as direct native
+             * calls without the generic bridge, so they no longer need the
+             * loop amortization below. */
+            let native_self_call = |pc: u32| {
+                observed
+                    .call_link_at(key, pc)
+                    .is_some_and(|link| link.callee() == key)
+            };
+            let native_call_shape = !has_loop
+                && snapshot
+                    .instructions()
+                    .iter()
+                    .any(|instruction| native_self_call(instruction.pc()))
+                && observed
+                    .bounded_specialization(key)
+                    .is_some_and(|signature| {
+                        // Admission builds the entry's CLIF; reuse the answer
+                        // while the function waits for its baseline profile.
+                        // The feedback epoch changes every pass; the plan only
+                        // depends on the representations.
+                        match self.native_call_plans.get(&key) {
+                            Some((arguments, result, admitted))
+                                if **arguments == *signature.arguments()
+                                    && *result == signature.result() =>
+                            {
+                                *admitted
+                            }
+                            _ => {
+                                let admitted =
+                                    compiler::native_call::plan(snapshot, &signature).is_some();
+                                self.native_call_plans.insert(
+                                    key,
+                                    (signature.arguments().into(), signature.result(), admitted),
+                                );
+                                admitted
+                            }
+                        }
+                    });
+            // Entering native code from QuickJS still costs several hundred
+            // nanoseconds of bookkeeping (B2), about ten interpreter calls.
+            // Admit only recursion whose observed trees amortize it; while the
+            // installed baseline is still collecting that profile, wait.
+            let (baseline_executions, baseline_outermost) =
+                self.execution_profiles.get(&key).map_or((0, 0), |profile| {
+                    (profile.baseline_executions, profile.baseline_outermost)
+                });
+            let native_call_admitted = native_call_shape
+                && baseline_executions >= NATIVE_RECURSION_PROFILE_EXECUTIONS
+                && baseline_outermost != 0
+                && baseline_executions
+                    >= baseline_outermost.saturating_mul(NATIVE_RECURSION_MIN_CALLS_PER_ENTRY);
+            // Trees already running in the interpreter when the baseline was
+            // installed make early samples look shallow; reject only after
+            // enough outside entries have been observed.
+            if native_call_shape
+                && !native_call_admitted
+                && baseline_outermost < NATIVE_RECURSION_PROFILE_ENTRIES
+                && matches!(
+                    self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                    runtime::CompileState::Installed(_)
+                )
+            {
+                continue;
+            }
+            if native_call_admitted {
+                self.native_recursive.insert(key);
+            }
             let generic_call_without_loop = !has_loop
                 && snapshot.instructions().iter().any(|instruction| {
                     matches!(
@@ -2368,6 +2487,13 @@ impl ProductionBackend {
                         .is_some_and(|call| {
                             call.callee() != key && self.coordinator.direct_call_ready(&call)
                         })
+                        && !(native_call_admitted && native_self_call(instruction.pc()))
+                        && !observed
+                            .call_link_at(key, instruction.pc())
+                            .is_some_and(|link| {
+                                link.callee() != key
+                                    && self.coordinator.native_call_ready(link.callee())
+                            })
                 });
             #[cfg(feature = "test-support")]
             let forced_call_only = self.config.force_optimized();
@@ -2455,15 +2581,16 @@ impl ProductionBackend {
             // compiled call/property/element fast path, so rejecting it here
             // would make the optimized path permanently unreachable. The
             // measured Tier-2 window below still demotes a losing artifact.
-            let stable_ic_candidate = snapshot.instructions().iter().any(|instruction| {
-                observed
-                    .call_specialization_at(key, instruction.pc())
-                    .is_some_and(|call| call.callee() != key)
-                    || observed.property_at(instruction.pc()).is_some()
-                    || observed
-                        .array_at(key, instruction.pc())
-                        .is_some_and(|site| site.can_specialize())
-            });
+            let stable_ic_candidate = native_call_admitted
+                || snapshot.instructions().iter().any(|instruction| {
+                    observed
+                        .call_specialization_at(key, instruction.pc())
+                        .is_some_and(|call| call.callee() != key)
+                        || observed.property_at(instruction.pc()).is_some()
+                        || observed
+                            .array_at(key, instruction.pc())
+                            .is_some_and(|site| site.can_specialize())
+                });
             /* A rejected baseline does not predict Tier2 profitability: the
              * baseline can lose to dispatch/callback overhead while a stable
              * unboxed loop wins by orders of magnitude.  Give such a function
@@ -3273,6 +3400,19 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         if pc != 0 {
             self.osr_attempts = self.osr_attempts.saturating_add(1);
         }
+        // Counted at entry: a recursion tree's root is still active while
+        // maintenance samples its completed nested executions. Profiles are
+        // created by the first exit; entry never allocates.
+        if tier == runtime::Tier::Baseline
+            && self
+                .execution_starts
+                .last()
+                .is_none_or(|(parent, _, _)| *parent != key)
+        {
+            if let Some(profile) = self.execution_profiles.get_mut(&key) {
+                profile.baseline_outermost = profile.baseline_outermost.saturating_add(1);
+            }
+        }
         self.execution_starts
             .push((key, std::time::Instant::now(), tier));
     }
@@ -3304,6 +3444,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             let profile = self.execution_profiles.entry(key).or_default();
             if optimized {
                 profile.record_optimized(elapsed);
+                if self.native_recursive.contains(&key) {
+                    // Keep the trial, but never classify a collapsed
+                    // recursion tree against per-call baseline samples.
+                    profile.tier2_trial_decided = true;
+                }
                 // Like V8/JSC tier-down decisions, use a bounded observation
                 // window and a material margin instead of reacting to one
                 // noisy invocation. Cross-multiply so the decision remains
@@ -3413,6 +3558,8 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn function_retire(&mut self, id: u64, generation: u64) {
         let key = runtime::FunctionKey::new(id, generation);
         self.requested.remove(&key);
+        self.native_recursive.remove(&key);
+        self.native_call_plans.remove(&key);
         self.queue_reasons.remove(&key);
         self.prequeue_backoff.remove(&key);
         self.hotness.remove(&key);

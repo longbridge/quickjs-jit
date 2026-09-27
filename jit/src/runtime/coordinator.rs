@@ -129,6 +129,33 @@ impl DirectCallTarget {
     }
 }
 
+/// A monomorphic call edge whose callee artifact publishes a P3a native call
+/// entry. The caller guards the callee identity and proves its global self
+/// binding at run time; the publication pin keeps the entry executable.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Debug)]
+pub struct NativeCallTarget {
+    link: super::CallLinkStatus,
+    plan: crate::compiler::native_call::NativeCallPlan,
+    published: crate::compiler::baseline::PublishedBaselineCode,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl NativeCallTarget {
+    pub const fn link(&self) -> &super::CallLinkStatus {
+        &self.link
+    }
+    pub const fn plan(&self) -> &crate::compiler::native_call::NativeCallPlan {
+        &self.plan
+    }
+    pub fn entry(&self) -> *const u8 {
+        self.published.as_ptr()
+    }
+    pub(crate) fn publication(&self) -> crate::compiler::baseline::PublishedBaselineCode {
+        self.published.clone()
+    }
+}
+
 /// Copied callee body retained for tagged frame inlining, independently of a
 /// scalar direct-call entry. Target guards and dependency registration remain
 /// the consuming compiler's responsibility.
@@ -509,6 +536,8 @@ pub struct CompileRequest {
     direct_call_targets: Arc<[DirectCallTarget]>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     frame_inline_targets: Arc<[FrameInlineTarget]>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    native_call_targets: Arc<[NativeCallTarget]>,
 }
 
 impl CompileRequest {
@@ -600,6 +629,15 @@ impl CompileRequest {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn frame_inline_targets(&self) -> &[FrameInlineTarget] {
         &self.frame_inline_targets
+    }
+    /// The native-call target of a monomorphic call site, if its callee
+    /// published a P3a native entry when this request was queued.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn native_call_target(&self, pc: u32) -> Option<&NativeCallTarget> {
+        let status = self.feedback.call_link_at(self.key, pc)?;
+        self.native_call_targets
+            .iter()
+            .find(|target| target.link == status)
     }
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn frame_inline_target(&self, pc: u32) -> Option<&FrameInlineTarget> {
@@ -1455,6 +1493,32 @@ impl Coordinator {
                 Arc::from([])
             };
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let native_call_targets: Arc<[NativeCallTarget]> =
+            if tier == Tier::Optimizing && side_path_profile.is_none() {
+                snapshot
+                    .instructions()
+                    .iter()
+                    .filter_map(|instruction| {
+                        let link = feedback.call_link_at(key, instruction.pc())?;
+                        if link.callee() == key {
+                            return None;
+                        }
+                        let pin = self.pin(link.callee(), Tier::Optimizing)?;
+                        let artifact = pin.artifact();
+                        let plan = artifact.optimized_metadata()?.native_call_plan()?.clone();
+                        let published = artifact.native_call_published()?.clone();
+                        Some(NativeCallTarget {
+                            link,
+                            plan,
+                            published,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            } else {
+                Arc::from([])
+            };
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         let artifact_key = if frame_inline_targets.is_empty() {
             artifact_key
         } else {
@@ -1484,6 +1548,8 @@ impl Coordinator {
             direct_call_targets,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             frame_inline_targets,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_targets,
         });
         if let Some(signature) = side_path_signature {
             let versions = self
@@ -1985,6 +2051,19 @@ impl Coordinator {
             children: Default::default(),
         }
         .admission_probe(kind, caller_shape)
+    }
+
+    /// True when the callee's installed optimizing artifact publishes a P3a
+    /// native call entry that a monomorphic caller can link to.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn native_call_ready(&mut self, callee: FunctionKey) -> bool {
+        self.pin(callee, Tier::Optimizing).is_some_and(|pin| {
+            pin.artifact().native_call_published().is_some()
+                && pin
+                    .artifact()
+                    .optimized_metadata()
+                    .is_some_and(|metadata| metadata.native_call_plan().is_some())
+        })
     }
 
     /// A resolved target cannot become frame-inlineable without a generation

@@ -57,6 +57,8 @@ mod call_cleanup;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod helpers;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub mod native_call;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod optimized;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod tagged_call_link;
