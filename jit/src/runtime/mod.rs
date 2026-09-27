@@ -26,7 +26,7 @@ pub use coordinator::{
     SideExitAction, SidePathProfile, Tier, DEFAULT_COMPLETION_DRAIN_BUDGET,
 };
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
-pub use coordinator::{DirectCallTarget, FrameInlineTarget};
+pub use coordinator::{DirectCallTarget, FrameInlineTarget, NativeCallTarget};
 pub use feedback::{
     BinaryFeedbackFlags, BinaryFeedbackSnapshot, BoundedSpecializationSignature,
     BranchFeedbackSnapshot, CallFeedbackSnapshot, CallLinkStatus, CallSignatureFeedbackSnapshot,

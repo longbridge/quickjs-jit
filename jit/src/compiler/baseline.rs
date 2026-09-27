@@ -937,6 +937,29 @@ impl Compiler for BaselineCompiler {
 /// Finalizes Cranelift IR produced by the independent optimizing builder. This
 /// owns only target encoding/unwind packaging; it does not translate or lower
 /// baseline IR.
+/// Native-call entries call themselves through a colocated user name, and a
+/// Tier 2 body names the native entry published in its own artifact. Both are
+/// resolved at publication; every other external name keeps its symbol text.
+fn native_call_relocation_target(
+    name: &cranelift_codegen::ir::ExternalName,
+    parameters: &cranelift_codegen::ir::function::FunctionParameters,
+) -> Option<RelocationTarget> {
+    let cranelift_codegen::ir::ExternalName::User(reference) = name else {
+        return None;
+    };
+    let user = parameters.user_named_funcs().get(*reference)?;
+    if user.index != 0 {
+        return None;
+    }
+    match user.namespace {
+        super::native_call::NATIVE_SELF_NAMESPACE => Some(RelocationTarget::FunctionOffset(0)),
+        super::native_call::NATIVE_ENTRY_NAMESPACE => Some(RelocationTarget::Symbol(
+            super::native_call::NATIVE_ENTRY_SYMBOL.into(),
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn finalize_optimized_machine(
     isa: &OwnedTargetIsa,
     clif: Function,
@@ -1023,11 +1046,15 @@ pub(crate) fn finalize_optimized_machine_with_lowered_text(
         .map(|reloc| {
             let target = match &reloc.target {
                 FinalizedRelocTarget::Func(offset) => RelocationTarget::FunctionOffset(*offset),
-                FinalizedRelocTarget::ExternalName(name) => RelocationTarget::Symbol(
-                    name.display(Some(&function_parameters))
-                        .to_string()
-                        .into_boxed_str(),
-                ),
+                FinalizedRelocTarget::ExternalName(name) => {
+                    native_call_relocation_target(name, &function_parameters).unwrap_or_else(|| {
+                        RelocationTarget::Symbol(
+                            name.display(Some(&function_parameters))
+                                .to_string()
+                                .into_boxed_str(),
+                        )
+                    })
+                }
             };
             Relocation::with_target(
                 reloc.offset,
@@ -1524,6 +1551,17 @@ impl RelocatableCode {
     }
 
     pub fn publish(self) -> Result<PublishedBaselineCode, CodeMemoryError> {
+        self.publish_with(&[], Vec::new())
+    }
+
+    /// Publishes with named relocation symbols resolved to absolute
+    /// addresses. `retained` publications stay executable at least as long
+    /// as this code, which may embed their addresses.
+    pub(crate) fn publish_with(
+        self,
+        symbols: &[(&str, u64)],
+        retained: Vec<PublishedBaselineCode>,
+    ) -> Result<PublishedBaselineCode, CodeMemoryError> {
         if !self.host_publishable || self.target != Triple::host() {
             return Err(CodeMemoryError::TargetIsaMismatch);
         }
@@ -1541,7 +1579,10 @@ impl RelocatableCode {
                         base.checked_add(u64::from(*offset))
                     }
                     RelocationTarget::Absolute(value) => Some(*value),
-                    RelocationTarget::Symbol(_) => None,
+                    RelocationTarget::Symbol(name) => symbols
+                        .iter()
+                        .find(|(symbol, _)| *symbol == &**name)
+                        .map(|(_, address)| *address),
                 })
                 .map_err(|_| CodeMemoryError::UnresolvedRelocationTarget)?;
             resolved.push(resolved_relocation);
@@ -1553,16 +1594,22 @@ impl RelocatableCode {
         let osr_codes = self
             .osr_codes
             .into_iter()
-            .map(|(map, code)| Ok((map, code.publish()?)))
+            .map(|(map, code)| Ok((map, code.publish_with(symbols, retained.clone())?)))
             .collect::<Result<Vec<_>, CodeMemoryError>>()?;
-        Ok(PublishedBaselineCode::new(
+        let mut published = PublishedBaselineCode::new(
             executable,
             unwind_registration,
             self.unwind_metadata,
             self.stack_maps,
             self.frame_states,
             osr_codes,
-        ))
+        );
+        if !retained.is_empty() {
+            Arc::get_mut(&mut published.allocation)
+                .expect("new publication is uniquely owned")
+                .retained = retained.into_boxed_slice();
+        }
+        Ok(published)
     }
 }
 
@@ -1580,6 +1627,8 @@ struct PublishedBaselineAllocation {
     stack_maps: Box<[StackMap]>,
     frame_states: Box<[ArtifactFrameState]>,
     osr_codes: Box<[(crate::runtime::OsrMap, PublishedBaselineCode)]>,
+    /// Publications whose absolute addresses this code embeds.
+    retained: Box<[PublishedBaselineCode]>,
     #[cfg(feature = "test-support")]
     lifetime_events: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -1601,6 +1650,7 @@ impl PublishedBaselineCode {
                 stack_maps: stack_maps.into_boxed_slice(),
                 frame_states: frame_states.into_boxed_slice(),
                 osr_codes: osr_codes.into_boxed_slice(),
+                retained: Box::new([]),
                 #[cfg(feature = "test-support")]
                 lifetime_events: Arc::new(Mutex::new(Vec::new())),
             }),

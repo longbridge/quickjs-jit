@@ -63,6 +63,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0026-tier1-generic-ops.patch",
         "0027-tier1-exception-regions.patch",
         "0028-tier1-iteration.patch",
+        "0029-native-call-convention.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }

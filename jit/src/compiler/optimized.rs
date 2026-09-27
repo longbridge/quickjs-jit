@@ -891,6 +891,7 @@ struct NumericSpecialization {
     generic_properties: std::collections::BTreeSet<u32>,
     arrays: Box<[crate::runtime::ArrayFeedbackSnapshot]>,
     direct_calls: std::collections::BTreeMap<u32, DirectCallSite>,
+    native_calls: std::collections::BTreeMap<u32, NativeCallSite>,
     inline_callees: std::collections::BTreeMap<u32, crate::ir::InlineCallee>,
     frame_inline_callees: std::collections::BTreeMap<u32, crate::ir::FrameInlineCallee>,
     numeric_constants: std::collections::BTreeMap<u32, crate::ir::TaggedValue>,
@@ -900,6 +901,19 @@ struct NumericSpecialization {
 struct DirectCallSite {
     call: crate::runtime::CallSpecializationKey,
     entry: usize,
+}
+
+/// A monomorphic call site lowered through the P3a native-call convention.
+#[derive(Clone)]
+struct NativeCallSite {
+    /// Global name whose binding `JS_JitNativeCallBegin` proves.
+    atom: u32,
+    arguments: Box<[crate::runtime::FeedbackRepresentation]>,
+    result: crate::runtime::FeedbackRepresentation,
+    callee_identity: u64,
+    callee_bytecode_identity: u64,
+    /// `None` names the native entry published in this same artifact.
+    entry: Option<usize>,
 }
 
 impl NumericSpecialization {
@@ -930,6 +944,11 @@ impl NumericSpecialization {
             return;
         }
         for target in request.direct_call_targets() {
+            // A published native entry runs the callee's whole recursion
+            // natively; inlining one level would call it generically.
+            if request.native_call_target(target.pc()).is_some() {
+                continue;
+            }
             if let Some(body) = target.inline_snapshot().and_then(|snapshot| {
                 snapshot
                     .verify(crate::bytecode::VerifyLimits::default())
@@ -946,6 +965,9 @@ impl NumericSpecialization {
             }
         }
         for target in request.frame_inline_targets() {
+            if request.native_call_target(target.pc()).is_some() {
+                continue;
+            }
             if let Some(callee) = Self::retain_frame_inline_target(target) {
                 self.frame_inline_callees.insert(target.pc(), callee);
             }
@@ -1259,6 +1281,7 @@ impl NumericSpecialization {
             generic_properties,
             arrays,
             direct_calls: Default::default(),
+            native_calls: Default::default(),
             inline_callees: Default::default(),
             frame_inline_callees: Default::default(),
             numeric_constants,
@@ -3381,6 +3404,7 @@ fn lower_optimized_machine(
                                     pointer_type,
                                     layout,
                                     specialization.direct_calls.get(&node.pc()),
+                                    specialization.native_calls.get(&node.pc()),
                                     call_guard,
                                     call.is_some_and(|call| {
                                         call.result()
@@ -8749,6 +8773,7 @@ fn emit_opt_specialized_call(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
     direct: Option<&DirectCallSite>,
+    native: Option<&NativeCallSite>,
     guard: u32,
     scalar_result: bool,
     diagnostic_key: Option<crate::runtime::FunctionKey>,
@@ -8796,6 +8821,38 @@ fn emit_opt_specialized_call(
             );
         }
         return Err(CompileFailure::ResourceLimit);
+    }
+    if let Some(native) = native.filter(|native| {
+        !has_this
+            && native.arguments.len() == argc
+            && native.callee_identity != 0
+            && native.callee_bytecode_identity != 0
+            && matches!(
+                stack_provenance[function_index],
+                OptProvenance::Argument(_) | OptProvenance::Local(_) | OptProvenance::OwnedSlot
+            )
+    }) {
+        return emit_opt_native_call(
+            builder,
+            frame,
+            sret,
+            arg_buf,
+            var_buf,
+            stack_base,
+            arguments,
+            locals,
+            stack,
+            stack_provenance,
+            depth,
+            base,
+            argc,
+            pc,
+            signatures,
+            pointer_type,
+            layout,
+            native,
+            guard,
+        );
     }
     if let Some(direct) = direct.filter(|direct| {
         !has_this
@@ -9186,6 +9243,283 @@ fn emit_opt_specialized_call(
         *provenance = OptProvenance::Unknown;
     }
     opt_set_stack_top(builder, frame, stack_base, base + 1, pointer_type, layout);
+    Ok(base + 1)
+}
+
+/// Lowers a monomorphic CALL through the P3a native-call convention: guard
+/// the callee identity and Int32 argument tags, prove the callee's global
+/// self binding once (`JS_JitNativeCallBegin`), then run the whole pure
+/// native chain. Every refusal or chain failure deoptimizes before the CALL,
+/// so the interpreter re-executes it with no effect lost or duplicated.
+#[allow(clippy::too_many_arguments)] // Mirrors the specialized-call lowering state.
+fn emit_opt_native_call(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    arg_buf: cranelift_codegen::ir::Value,
+    var_buf: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    arguments: &[OptVars],
+    locals: &[OptVars],
+    stack: &[OptVars],
+    stack_provenance: &mut [OptProvenance],
+    depth: usize,
+    base: usize,
+    argc: usize,
+    pc: u32,
+    signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    native: &NativeCallSite,
+    guard: u32,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    use cranelift_codegen::ir::{
+        types, AbiParam, ExtFuncData, ExternalName, InstBuilder, MemFlags, Signature,
+        StackSlotData, StackSlotKind, UserExternalName,
+    };
+    use rquickjs_core::qjs;
+
+    let function_index = base;
+    let argv_index = base + 1;
+    let function = opt_use(builder, stack[function_index]);
+    let arguments_ok = builder.create_block();
+    let invoke = builder.create_block();
+    let deopt = builder.create_block();
+    super::emit_guarded_direct_callee_identity(
+        builder,
+        function.tag,
+        function.payload,
+        super::DirectCalleeIdentity {
+            object: native.callee_identity,
+            bytecode: native.callee_bytecode_identity,
+        },
+        pointer_type,
+        arguments_ok,
+        deopt,
+    );
+    builder.switch_to_block(arguments_ok);
+    let mut matches = builder.ins().iconst(types::I8, 1);
+    for (index, representation) in native.arguments.iter().enumerate() {
+        let value = opt_use(builder, stack[argv_index + index]);
+        let tag = match representation {
+            crate::runtime::FeedbackRepresentation::Int32 => qjs::JS_TAG_INT,
+            crate::runtime::FeedbackRepresentation::Float64 => qjs::JS_TAG_FLOAT64,
+            _ => return Err(CompileFailure::InvalidArtifact),
+        };
+        let typed = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, value.tag, i64::from(tag));
+        matches = builder.ins().band(matches, typed);
+    }
+    builder.ins().brif(matches, invoke, &[], deopt, &[]);
+
+    builder.switch_to_block(deopt);
+    for (index, vars) in arguments.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, arg_buf, index, value);
+    }
+    for (index, vars) in locals.iter().enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, var_buf, index, value);
+    }
+    for (index, vars) in stack.iter().take(depth).enumerate() {
+        let value = opt_use(builder, *vars);
+        opt_store(builder, stack_base, index, value);
+    }
+    opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
+    let start = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);
+    let resume = builder.ins().iadd_imm(start, i64::from(pc));
+    builder
+        .ins()
+        .store(MemFlags::new(), resume, frame, layout.pc);
+    opt_own_stack_for_exit(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        arguments.len() + locals.len(),
+        stack_provenance,
+        signatures,
+        pointer_type,
+        layout,
+    )?;
+    emit_opt_exit(
+        builder,
+        sret,
+        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+        Some(resume),
+        pointer_type,
+        guard,
+    );
+
+    builder.switch_to_block(invoke);
+    let call_conv = builder.func.signature.call_conv;
+    let context_slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 3));
+    let context = builder.ins().stack_addr(pointer_type, context_slot, 0);
+    let output_slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+    let output = builder.ins().stack_addr(pointer_type, output_slot, 0);
+    let stack_pointer = builder.ins().get_stack_pointer(pointer_type);
+    let ctx = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.ctx);
+    let mut begin_signature = Signature::new(call_conv);
+    for ty in [
+        pointer_type,
+        pointer_type,
+        types::I32,
+        pointer_type,
+        pointer_type,
+    ] {
+        begin_signature.params.push(AbiParam::new(ty));
+    }
+    begin_signature.returns.push(AbiParam::new(types::I32));
+    let begin_signature = builder.import_signature(begin_signature);
+    let begin = builder.ins().iconst(
+        pointer_type,
+        super::native_call::qjsjit_native_call_begin as *const () as usize as i64,
+    );
+    let atom = builder
+        .ins()
+        .iconst(types::I32, i64::from(native.atom as i32));
+    let call = super::emit_external_call(
+        builder,
+        begin_signature,
+        begin,
+        &[ctx, function.payload, atom, context, stack_pointer],
+        pointer_type,
+        Some(frame),
+        None,
+    );
+    let refused = builder.inst_results(call)[0];
+    let enter = builder.create_block();
+    builder.ins().brif(refused, deopt, &[], enter, &[]);
+
+    builder.switch_to_block(enter);
+    let entry_signature = builder.import_signature(super::native_call::entry_signature(
+        pointer_type,
+        call_conv,
+        &native.arguments,
+    )?);
+    let target = match native.entry {
+        Some(entry) => builder.ins().iconst(pointer_type, entry as i64),
+        None => {
+            let name = builder
+                .func
+                .declare_imported_user_function(UserExternalName::new(
+                    super::native_call::NATIVE_ENTRY_NAMESPACE,
+                    0,
+                ));
+            let entry = builder.import_function(ExtFuncData {
+                name: ExternalName::user(name),
+                signature: entry_signature,
+                colocated: false,
+            });
+            builder.ins().func_addr(pointer_type, entry)
+        }
+    };
+    let mut params = Vec::with_capacity(argc + 3);
+    params.push(context);
+    params.push(output);
+    params.push(stack_pointer);
+    for (index, representation) in native.arguments.iter().enumerate() {
+        let value = opt_use(builder, stack[argv_index + index]);
+        params.push(match representation {
+            crate::runtime::FeedbackRepresentation::Float64 => {
+                builder
+                    .ins()
+                    .bitcast(types::F64, MemFlags::new(), value.payload)
+            }
+            _ => builder.ins().ireduce(types::I32, value.payload),
+        });
+    }
+    let call = super::emit_external_call(
+        builder,
+        entry_signature,
+        target,
+        &params,
+        pointer_type,
+        None,
+        None,
+    );
+    let status = builder.inst_results(call)[0];
+    let mut end_signature = Signature::new(call_conv);
+    end_signature.params.push(AbiParam::new(pointer_type));
+    end_signature.params.push(AbiParam::new(pointer_type));
+    let end_signature = builder.import_signature(end_signature);
+    let end = builder.ins().iconst(
+        pointer_type,
+        super::native_call::qjsjit_native_call_end as *const () as usize as i64,
+    );
+    super::emit_external_call(
+        builder,
+        end_signature,
+        end,
+        &[context, stack_pointer],
+        pointer_type,
+        Some(frame),
+        None,
+    );
+    let done = builder.create_block();
+    builder.ins().brif(status, deopt, &[], done, &[]);
+
+    builder.switch_to_block(done);
+    let result = match native.result {
+        crate::runtime::FeedbackRepresentation::Int32 => {
+            let raw = builder
+                .ins()
+                .load(types::I32, MemFlags::trusted(), output, 0);
+            OptPair {
+                payload: builder.ins().sextend(types::I64, raw),
+                tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+            }
+        }
+        crate::runtime::FeedbackRepresentation::Float64 => OptPair {
+            payload: builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), output, 0),
+            tag: builder
+                .ins()
+                .iconst(types::I64, i64::from(qjs::JS_TAG_FLOAT64)),
+        },
+        _ => return Err(CompileFailure::InvalidArtifact),
+    };
+    if stack_provenance[function_index] == OptProvenance::OwnedSlot {
+        // The binding proven by Begin still holds the callee, so this only
+        // drops the global lookup's extra reference.
+        opt_store(builder, stack_base, function_index, function);
+        opt_set_stack_top(
+            builder,
+            frame,
+            stack_base,
+            function_index + 1,
+            pointer_type,
+            layout,
+        );
+        let flat_slot = (arguments.len() + locals.len())
+            .checked_add(function_index)
+            .and_then(|slot| u32::try_from(slot).ok())
+            .ok_or(CompileFailure::ResourceLimit)?;
+        emit_opt_helper(
+            builder,
+            frame,
+            sret,
+            stack_base,
+            function_index + 1,
+            signatures,
+            qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+            &[0, flat_slot],
+            pointer_type,
+            layout,
+        )?;
+    }
+    opt_define(builder, stack[base], result);
+    stack_provenance[base] = OptProvenance::ImmediatePrimitive;
     Ok(base + 1)
 }
 
@@ -10981,6 +11315,74 @@ fn tier2_stage<T>(
     result
 }
 
+/// Routes monomorphic calls to callees that published a P3a native entry,
+/// and compiles this artifact's own native entry when the function is a pure
+/// self-recursive Int32 function, routing its self-call sites to it. Other
+/// sites keep their existing lowering.
+///
+/// Every linked callee is added to `callee_dependencies`: the site guards raw
+/// object and bytecode addresses, so retiring the callee must invalidate this
+/// artifact before a different function can reuse those addresses (ABA).
+fn prepare_native_calls(
+    isa: &cranelift_codegen::isa::OwnedTargetIsa,
+    request: &CompileRequest,
+    specialization: &mut NumericSpecialization,
+    control: Option<&CompileControl>,
+    direct_dependencies: &mut Vec<super::baseline::PublishedBaselineCode>,
+    callee_dependencies: &mut Vec<crate::runtime::FunctionKey>,
+) -> Option<(
+    super::native_call::NativeCallPlan,
+    super::baseline::RelocatableCode,
+)> {
+    if request.side_path_profile().is_some() {
+        return None;
+    }
+    let key = request.key();
+    for instruction in request.snapshot().instructions() {
+        if let Some(target) = request.native_call_target(instruction.pc()) {
+            direct_dependencies.push(target.publication());
+            callee_dependencies.push(target.link().callee());
+            specialization.native_calls.insert(
+                instruction.pc(),
+                NativeCallSite {
+                    atom: target.plan().atom(),
+                    arguments: target.plan().arguments().into(),
+                    result: target.plan().result(),
+                    callee_identity: target.link().callee_identity(),
+                    callee_bytecode_identity: target.link().callee_bytecode_identity(),
+                    entry: Some(target.entry() as usize),
+                },
+            );
+        }
+    }
+    let signature = request.feedback().bounded_specialization(key)?;
+    let (plan, code) =
+        super::native_call::lower(isa, request.snapshot(), &signature, control).ok()?;
+    for instruction in request.snapshot().instructions() {
+        if !is_call_site(instruction.opcode().name()) {
+            continue;
+        }
+        let Some(link) = request.feedback().call_link_at(key, instruction.pc()) else {
+            continue;
+        };
+        if link.callee() != key {
+            continue;
+        }
+        specialization.native_calls.insert(
+            instruction.pc(),
+            NativeCallSite {
+                atom: plan.atom(),
+                arguments: plan.arguments().into(),
+                result: plan.result(),
+                callee_identity: link.callee_identity(),
+                callee_bytecode_identity: link.callee_bytecode_identity(),
+                entry: None,
+            },
+        );
+    }
+    Some((plan, code))
+}
+
 /// Call opcodes whose call-site feedback the runtime records at the
 /// instruction pc; tail calls are lowered as the equivalent call plus return.
 fn is_call_site(name: &str) -> bool {
@@ -11105,6 +11507,15 @@ impl Compiler for Tier2Compiler {
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::DirectDependencies, None);
+        let mut native_callee_dependencies = Vec::new();
+        let native_entry = prepare_native_calls(
+            &self.isa,
+            &request,
+            &mut specialization,
+            None,
+            &mut direct_dependencies,
+            &mut native_callee_dependencies,
+        );
         let code = match lower_optimized_machine(&self.isa, &ir, None, profile, &specialization) {
             Err(CompileFailure::InvalidArtifact)
                 if ir.scalar_graph().frame_inlined_calls() != 0 =>
@@ -11152,6 +11563,11 @@ impl Compiler for Tier2Compiler {
                 .values()
                 .map(|call| crate::code_cache::ArtifactDependency::new(call.callee())),
         );
+        dependencies.extend(
+            native_callee_dependencies
+                .into_iter()
+                .map(crate::code_cache::ArtifactDependency::new),
+        );
         if ir.scalar_graph().frame_inlined_calls() != 0 {
             dependencies.extend(
                 frame_inline_dependencies
@@ -11179,6 +11595,20 @@ impl Compiler for Tier2Compiler {
             artifact = artifact
                 .with_optimized_metadata(optimized)
                 .with_direct_call_relocatable(direct_code);
+        }
+        if let Some((plan, native_code)) = native_entry {
+            let optimized = tier2_stage(
+                key,
+                Tier2CompileStage::DirectMetadata,
+                artifact
+                    .optimized_metadata()
+                    .cloned()
+                    .ok_or(CompileFailure::InvalidArtifact),
+            )?
+            .with_native_call_plan(plan);
+            artifact = artifact
+                .with_optimized_metadata(optimized)
+                .with_native_call_relocatable(native_code);
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::Complete, None);
@@ -11319,6 +11749,15 @@ impl Compiler for Tier2Compiler {
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::DirectDependencies, None);
+        let mut native_callee_dependencies = Vec::new();
+        let native_entry = prepare_native_calls(
+            &self.isa,
+            &request,
+            &mut specialization,
+            Some(control),
+            &mut direct_dependencies,
+            &mut native_callee_dependencies,
+        );
         let code = match lower_optimized_machine(
             &self.isa,
             &ir,
@@ -11390,6 +11829,11 @@ impl Compiler for Tier2Compiler {
                 .values()
                 .map(|call| crate::code_cache::ArtifactDependency::new(call.callee())),
         );
+        dependencies.extend(
+            native_callee_dependencies
+                .into_iter()
+                .map(crate::code_cache::ArtifactDependency::new),
+        );
         if ir.scalar_graph().frame_inlined_calls() != 0 {
             dependencies.extend(
                 frame_inline_dependencies
@@ -11417,6 +11861,20 @@ impl Compiler for Tier2Compiler {
             artifact = artifact
                 .with_optimized_metadata(optimized)
                 .with_direct_call_relocatable(direct_code);
+        }
+        if let Some((plan, native_code)) = native_entry {
+            let optimized = tier2_stage(
+                key,
+                Tier2CompileStage::DirectMetadata,
+                artifact
+                    .optimized_metadata()
+                    .cloned()
+                    .ok_or(CompileFailure::InvalidArtifact),
+            )?
+            .with_native_call_plan(plan);
+            artifact = artifact
+                .with_optimized_metadata(optimized)
+                .with_native_call_relocatable(native_code);
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::Complete, None);
