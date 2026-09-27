@@ -98,6 +98,23 @@ fn error_stack_is_captured_at_the_throwing_pc() {
 }
 
 #[test]
+fn observable_backtrace_hooks_run_for_natively_caught_primitives() {
+    // The interpreter builds a backtrace for every caught primitive. It is
+    // skipped natively only when building it cannot run user code; these
+    // hooks make it observable and must fire exactly as in the interpreter.
+    same(
+        "var calls = 0; Error.prepareStackTrace = function(e, s) { calls++; return 'trace'; };\nfunction f(n){ let c = 0; for (let i = 0; i < n; i++) { try { if (i % 4 === 0) throw i; } catch (v) { c -= -v; } } return c + ':' + calls; }",
+        "f(40)",
+        "neg",
+    );
+    same(
+        "var calls = 0; Error.stackTraceLimit = { valueOf() { calls++; return 3; } };\nfunction f(n){ let c = 0; for (let i = 0; i < n; i++) { try { if (i % 4 === 0) throw {i}; } catch (v) { c -= -v.i; } } return c + ':' + calls; }",
+        "f(40)",
+        "neg",
+    );
+}
+
+#[test]
 fn rethrow_and_nested_regions_match_the_interpreter() {
     same(
         "function f(a){ let log = ''; try { try { throw a; } catch (e) { log += 'inner' + e; throw e + 1; } } catch (e) { log += ',outer' + e; } return log; }",

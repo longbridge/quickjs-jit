@@ -42,7 +42,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
 diff --git a/quickjs.c b/quickjs.c
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -20431,6 +20431,128 @@
+@@ -20431,6 +20431,151 @@
      return version == QJSJIT_INLINE_RECOVERY_VERSION ? &api : NULL;
  }
  
@@ -74,6 +74,24 @@ diff --git a/quickjs.c b/quickjs.c
 +    JS_Throw(frame->ctx, value);
 +    qjsjit_stress_gc_after_exception(frame);
 +    return JS_JIT_HELPER_EXCEPTION;
++}
++
++/* True when the interpreter's exception label would build a backtrace only
++ * to store it in ctx->error_back_trace, which catching releases unread:
++ * building it can neither call Error.prepareStackTrace nor convert a
++ * non-numeric Error.stackTraceLimit, and cannot define `stack` on `exc`. */
++static bool qjsjit_backtrace_is_discarded(JSContext *ctx, JSValueConst exc)
++{
++    int limit_tag = JS_VALUE_GET_TAG(ctx->error_stack_trace_limit);
++
++    if (ctx->rt->in_build_stack_trace)
++        return false;
++    if (can_add_backtrace(exc))
++        return false;
++    if (limit_tag != JS_TAG_INT && limit_tag != JS_TAG_FLOAT64)
++        return false;
++    return JS_IsNull(ctx->error_ctor) ||
++        !JS_IsFunction(ctx, ctx->error_prepare_stack);
 +}
 +
 +/* OP_throw_error; `type` uses the interpreter's JS_THROW_* numbering. */
@@ -141,9 +159,14 @@ diff --git a/quickjs.c b/quickjs.c
 +            return qjsjit_reject_helper(frame, "invalid JIT catch nesting");
 +    }
 +    /* Exception label prologue, in interpreter order: backtrace first (it
-+     * observes this frame's current pc), then catchability. */
++     * observes this frame's current pc), then catchability.  A backtrace that
++     * would only populate ctx->error_back_trace is released again below
++     * without ever being read; skip building it when doing so cannot run
++     * user code (no Error.prepareStackTrace, numeric Error.stackTraceLimit)
++     * and cannot define a `stack` property on the caught value. */
 +    if (needs_backtrace(rt->current_exception) ||
-+        JS_IsUndefined(ctx->error_back_trace)) {
++        (JS_IsUndefined(ctx->error_back_trace) &&
++         !qjsjit_backtrace_is_discarded(ctx, rt->current_exception))) {
 +        sf->cur_pc = (uint8_t *)frame->pc;
 +        build_backtrace(ctx, rt->current_exception, JS_UNDEFINED,
 +                        NULL, 0, 0, 0);
@@ -171,7 +194,7 @@ diff --git a/quickjs.c b/quickjs.c
  static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      JSValueConst this_obj, JSValueConst new_target, int argc,
      JSValueConst *argv, int flags)
-@@ -20691,12 +20813,25 @@
+@@ -20691,12 +20836,25 @@
              b->jit_feedback_disabled = 1;
          if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
              JSJitFunctionSnapshot *snapshot = NULL;

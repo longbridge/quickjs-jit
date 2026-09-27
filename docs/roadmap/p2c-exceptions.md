@@ -26,6 +26,12 @@ Branch `perf/p2c-exceptions`, based on `82d3808`. Roadmap item P2.3 in
   interrupts and invariant failures leave through the normal exception exit
   so the interpreter unwinds the published frame exactly.
 - `JS_JitThrowValue` / `JS_JitThrowError` implement `throw` / `throw_error`.
+- The interpreter builds a backtrace string for every caught primitive or
+  non-Error throw only to store it in `ctx->error_back_trace`, which the catch
+  releases unread. The native catch skips that build when it cannot run user
+  code (`Error.prepareStackTrace` unset, numeric `Error.stackTraceLimit`) and
+  cannot define `stack` on the caught value; a regression test checks both
+  hooks still fire exactly as in the interpreter.
 - The entry-domain analysis merges every exceptional edge (before, after and
   mid-store states) into handler inputs, so `get_loc_check` proofs stay sound.
 - Tier 2, bounded inlining, tagged direct links and inline snapshot retention
@@ -74,8 +80,6 @@ three-engine matrix, including `exceptions-sync`, is left to the integrator.
   the direct form is lowered; others reject the compile).
 - For-of/for-in iterator close offsets (`catch` offset 0) inside try regions:
   rejected until the iteration opcodes are admitted (P2.5).
-- Every native catch still performs the interpreter's backtrace build for
-  primitive throws (`ctx->error_back_trace`), which dominates throw-heavy
-  loops; skipping it when it is provably unobservable is a runtime-library
-  change, not a JIT one.
 - Helper-frame validation (P1 B1) is paid twice per native throw/catch.
+- The interpreter could skip the same unread backtrace build; that is a
+  runtime-library change outside this item.

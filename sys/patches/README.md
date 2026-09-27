@@ -66,9 +66,12 @@ points. `JS_JitThrowValue` and `JS_JitThrowError` raise exactly like
 interpreter's `exception:` label for the active root frame (backtrace at the
 throwing PC, then catchability) and, only after proving that unwinding would
 stop at the named catch-offset slot and handler PC, releases the operands
-above it and stores the caught value in that slot. Uncatchable exceptions are
-returned with the frame untouched so the ordinary native exception exit lets
-the interpreter unwind them. The patch also stops hot and feedback probes for
+above it and stores the caught value in that slot. A backtrace that would
+only populate `ctx->error_back_trace` (released unread by the catch) is not
+built when building it cannot run user code (`Error.prepareStackTrace`, a
+non-numeric `Error.stackTraceLimit`) or define `stack` on the caught value.
+Uncatchable exceptions are returned with the frame untouched so the ordinary
+native exception exit lets the interpreter unwind them. The patch also stops hot and feedback probes for
 generator, async, eval and `with` bytecode when the backend requests a
 snapshot the runtime must refuse; previously every later call, async resume
 and loop poll re-requested it.
