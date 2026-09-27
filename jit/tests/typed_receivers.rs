@@ -418,3 +418,73 @@ fn local_receiver_poll_case(detach_source: bool) {
     assert!(jit.metrics().tier2_entries > before.tier2_entries);
     assert_eq!(jit.metrics().native_entries, jit.metrics().native_exits);
 }
+
+#[test]
+fn packed_local_receivers_match_the_same_version_interpreter() {
+    const PACKED: &str = r#"
+        function sumSnapshot(o) {
+          const values = o.values;
+          let n = values.length, sum = 0;
+          for (let i = 0; i < n; i++) sum = (sum + (values[i] | 0)) | 0;
+          return sum;
+        }
+        function sumLive(o) {
+          const values = o.values;
+          let sum = 0;
+          for (let i = 0; i < values.length; i++) sum = (sum + (values[i] | 0)) | 0;
+          return sum;
+        }
+    "#;
+    const CASES: &str = r#"JSON.stringify([
+        sumSnapshot({values: []}), sumLive({values: []}),
+        sumSnapshot({values: [7]}), sumLive({values: [7]}),
+        sumSnapshot({values: [1,,3]}), sumLive({values: [1,,3]}),
+        sumSnapshot({values: new Int32Array([4,5])}), sumLive({values: new Int32Array([4,5])}),
+        sumSnapshot({values: [2147483647,1]}), sumLive({values: [2147483647,1]}),
+        (() => { const a = [1,2,3]; a.length = 10; return [sumSnapshot({values: a}), sumLive({values: a})]; })(),
+        sumSnapshot({values: [1.5, 'x', {}]}), sumLive({values: [1.5, 'x', {}]})
+    ])"#;
+    let expected = evaluate_without_jit(PACKED, CASES);
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(PACKED)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let before = jit.metrics();
+        assert_eq!(
+            context
+                .with(|ctx| ctx.eval::<i32, _>(
+                    "sumSnapshot({values: [1,2,3,4]}) + sumLive({values: [1,2,3,4]})"
+                ))
+                .unwrap(),
+            20
+        );
+        let after = jit.metrics();
+        if after.tier2_entries >= before.tier2_entries + 2 && after.pending_worker_jobs == 0 {
+            break;
+        }
+        jit.poll();
+        assert!(
+            Instant::now() < deadline,
+            "packed local traversals never reached Tier2: {after:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = jit.metrics();
+    let actual = context.with(|ctx| ctx.eval::<String, _>(CASES)).unwrap();
+    let after = jit.metrics();
+    assert_eq!(actual, expected);
+    assert_eq!(after.native_entries, after.native_exits);
+    assert!(after.tier2_entries > before.tier2_entries);
+}
