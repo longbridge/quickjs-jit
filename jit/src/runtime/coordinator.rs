@@ -1434,9 +1434,13 @@ impl Coordinator {
                     if budget.exhausted() {
                         break;
                     }
-                    if direct_call_targets.iter().any(|target| {
-                        target.pc() == instruction.pc() && target.inline_snapshot().is_some()
-                    }) {
+                    // A linked direct entry is a transaction with an exact
+                    // pre-effect miss to the generic CALL. It needs no shadow
+                    // frame, so it is always preferred over frame inlining.
+                    if direct_call_targets
+                        .iter()
+                        .any(|target| target.pc() == instruction.pc())
+                    {
                         continue;
                     }
                     if let Some(target) = self.retain_frame_inline_target(

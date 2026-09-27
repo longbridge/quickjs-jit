@@ -857,6 +857,7 @@ impl Compiler for BaselineCompiler {
                 &self.isa,
                 request.snapshot(),
                 signature,
+                Some(request.feedback()),
                 None,
             )
             .ok()
@@ -910,6 +911,7 @@ impl Compiler for BaselineCompiler {
                 &self.isa,
                 request.snapshot(),
                 signature,
+                Some(request.feedback()),
                 Some(control),
             )
             .ok()
