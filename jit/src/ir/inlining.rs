@@ -178,6 +178,14 @@ impl FrameInlineCallee {
             || instructions
                 .iter()
                 .any(|instruction| instruction.opcode().name().starts_with("tail_call"))
+            // A callee that instantiates closures may alias its shadow-frame
+            // locals through attached var refs; keep it out of frame inlining.
+            || instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "fclosure" | "fclosure8" | "close_loc"
+                )
+            })
         {
             return None;
         }

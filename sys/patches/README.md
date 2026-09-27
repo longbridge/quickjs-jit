@@ -60,6 +60,17 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0025-tier1-closures.patch` adds ABI 1.25 (runtime API 1.10) Tier 1 closure
+helpers as an append-only helper-table tail: `FCLOSURE`, `GET_VAR_REF`,
+`PUT_VAR_REF`, `CLOSE_LOC` and `SET_NAME`. Each mirrors its interpreter opcode
+on the validated current stack frame (`js_closure`, `*var_refs[idx]->pvalue`
+with the exact TDZ `ReferenceError`, `set_value`, `close_lexical_var`,
+`JS_DefineObjectName`). `PUT_VAR_REF` consumes its value slot on success and
+on exception; `JSJitVarRefMode` selects the plain, checked or
+checked-initialization form. Attached var refs alias the interpreter's
+argument/local storage, so generated code publishes those slots before every
+helper and reloads them afterwards in functions that create closures.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

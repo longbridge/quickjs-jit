@@ -180,6 +180,10 @@ name = "tier1_globals"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_closures"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "tier1_constructors"
 required-features = ["compiler", "test-support"]
 

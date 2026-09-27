@@ -33,7 +33,7 @@ use crate::{
     },
     ir::{
         BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, PollKind, StackOp,
-        TaggedValue, UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
+        TaggedValue, UnaryOp, VarRefMode, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
@@ -91,9 +91,29 @@ struct HelperLowering<'a> {
     signatures: &'a [cranelift_codegen::ir::SigRef],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    /// The function creates closures (`fclosure`), so attached var refs may
+    /// alias its argument and local slots. Any helper that can run JavaScript
+    /// may then write those slots through the closure, so the native copies
+    /// are reloaded from the interpreter frame after every helper returns.
+    reload_captured_slots: bool,
 }
 
 impl HelperLowering<'_> {
+    /// Refresh the native argument/local copies from the interpreter frame.
+    /// Every helper call first publishes all of them (`materialize_frame`),
+    /// so right after it returns the frame is the authoritative owner.
+    fn reload_captured_slots(&self, builder: &mut FunctionBuilder<'_>) {
+        if !self.reload_captured_slots {
+            return;
+        }
+        for (index, pair) in self.arguments.iter().copied().enumerate() {
+            reload_pair(builder, pair, self.arg_buf, index, self.layout);
+        }
+        for (index, pair) in self.locals.iter().copied().enumerate() {
+            reload_pair(builder, pair, self.var_buf, index, self.layout);
+        }
+    }
+
     fn invoke(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -123,7 +143,9 @@ impl HelperLowering<'_> {
             arguments,
             self.pointer_type,
             self.layout,
-        )
+        )?;
+        self.reload_captured_slots(builder);
+        Ok(())
     }
 
     fn set_depth(
@@ -2041,6 +2063,30 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 IrOp::GetGlobal(_) => {
                     frame.stack.push(AbstractValue::unknown());
                 }
+                IrOp::FClosure(_) => {
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                // Closure variables may hold any value, including the TDZ
+                // sentinel for the unchecked form; uses guard at run time.
+                IrOp::GetVarRef { .. } => {
+                    frame.stack.push(AbstractValue::unknown());
+                }
+                IrOp::PutVarRef { keep, .. } => {
+                    if *keep {
+                        frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
+                    } else {
+                        frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    }
+                }
+                IrOp::SetName(_) => {
+                    frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
+                }
+                IrOp::CloseLocal(index) => {
+                    frame
+                        .locals
+                        .get(usize::from(*index))
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                }
                 IrOp::NewObject => {
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
@@ -2586,6 +2632,7 @@ fn lower_function(
         signatures: &helper_signatures,
         pointer_type,
         layout,
+        reload_captured_slots: creates_closures(ir),
     };
 
     macro_rules! invoke_helper {
@@ -2674,6 +2721,7 @@ fn lower_function(
                         pointer_type,
                         layout,
                     );
+                    helper_lowering.reload_captured_slots(builder);
                     if let Some(continuation) = loop_continuation {
                         builder.ins().jump(continuation, &[]);
                         builder.seal_block(continuation);
@@ -2870,6 +2918,121 @@ fn lower_function(
                     )?;
                     depth = pattern_index + 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::FClosure(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FCLOSURE,
+                        state,
+                        depth,
+                        &[output, index]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::GetVarRef { index, checked } => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    let mode = if checked {
+                        qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK
+                    } else {
+                        qjs::JSJitVarRefMode_JS_JIT_VAR_REF_PLAIN
+                    };
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_GET_VAR_REF,
+                        state,
+                        depth,
+                        &[output, u32::from(index), mode]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::PutVarRef { index, mode, keep } => {
+                    let top = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let mode = match mode {
+                        VarRefMode::Plain => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_PLAIN,
+                        VarRefMode::Check => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK,
+                        VarRefMode::CheckInit => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT,
+                    };
+                    let value_index = if keep {
+                        // `set_var_ref*` keeps the value: store an owned
+                        // duplicate from the scratch slot above the stack.
+                        let dup_state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let source = use_pair(builder, stack[top]);
+                        lower_dup_if_refcounted(
+                            builder,
+                            &helper_lowering,
+                            dup_state,
+                            depth,
+                            depth,
+                            source,
+                            flat_stack_slot(ir, top)?,
+                            false,
+                        )?;
+                        depth
+                    } else {
+                        top
+                    };
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = flat_stack_slot(ir, value_index)?;
+                    // The helper consumes the value slot on success and on a
+                    // TDZ exception. The exception exit publishes only the
+                    // bytecode-visible stack below the consumed operand.
+                    helper_lowering.invoke(
+                        builder,
+                        qjs::JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF,
+                        state,
+                        value_index + 1,
+                        value_index,
+                        &[value, u32::from(index), mode],
+                    )?;
+                    clear_pair(builder, stack[value_index], stack_base, value_index, layout)?;
+                    if !keep {
+                        depth = top;
+                    }
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::SetName(atom) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let object = flat_stack_slot(
+                        ir,
+                        depth
+                            .checked_sub(1)
+                            .ok_or(CompileFailure::InvalidArtifact)?,
+                    )?;
+                    // The named object stays borrowed in its stack slot.
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_SET_NAME,
+                        state,
+                        depth,
+                        &[object, atom]
+                    );
+                }
+                IrOp::CloseLocal(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC,
+                        state,
+                        depth,
+                        &[u32::from(index)]
+                    );
                 }
                 IrOp::GetArgument(index) => {
                     let state = helper_states
@@ -3624,6 +3787,15 @@ fn lower_function(
     builder.switch_to_block(invariant_trap);
     builder.ins().trap(TrapCode::unwrap_user(1));
     Ok(())
+}
+
+/// Functions that instantiate closures may share argument/local storage with
+/// attached var refs (`JSVarRef.pvalue` points into the interpreter frame).
+pub(crate) fn creates_closures(ir: &BaselineIr) -> bool {
+    ir.blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| matches!(instruction.op, IrOp::FClosure(_)))
 }
 
 fn next_helper_state(
@@ -6496,6 +6668,11 @@ mod tests {
             IrOp::Call { .. } => "call",
             IrOp::CallConstructor(_) => "call_constructor",
             IrOp::Regexp => "regexp",
+            IrOp::FClosure(_) => "fclosure",
+            IrOp::GetVarRef { .. } => "get_var_ref",
+            IrOp::PutVarRef { .. } => "put_var_ref",
+            IrOp::CloseLocal(_) => "close_local",
+            IrOp::SetName(_) => "set_name",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",
@@ -6565,6 +6742,32 @@ mod tests {
                 IrOp::CallConstructor(0),
             ),
             linear_ir(vec![numeric_push(), numeric_push()], IrOp::Regexp),
+            linear_ir(Vec::new(), IrOp::FClosure(0)),
+            linear_ir(
+                Vec::new(),
+                IrOp::GetVarRef {
+                    index: 0,
+                    checked: true,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutVarRef {
+                    index: 0,
+                    mode: VarRefMode::Check,
+                    keep: false,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutVarRef {
+                    index: 0,
+                    mode: VarRefMode::Plain,
+                    keep: true,
+                },
+            ),
+            linear_ir(Vec::new(), IrOp::CloseLocal(0)),
+            linear_ir(vec![numeric_push()], IrOp::SetName(1)),
             linear_ir(Vec::new(), IrOp::GetArgument(0)),
             linear_ir(Vec::new(), IrOp::GetLocal(0)),
             linear_ir(Vec::new(), IrOp::GetLocalChecked(0)),
@@ -6739,7 +6942,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            33,
+            38,
             "every IrOp variant is represented: {seen:?}"
         );
     }

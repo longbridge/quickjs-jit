@@ -742,6 +742,11 @@ impl DifferentialRun {
                     rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_TO_PROPKEY
                 }
                 HelperId::GetGlobal => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_GLOBAL,
+                HelperId::FClosure => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FCLOSURE,
+                HelperId::GetVarRef => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GET_VAR_REF,
+                HelperId::PutVarRef => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF,
+                HelperId::CloseLocal => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC,
+                HelperId::SetName => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_NAME,
             };
             let expected_opcode = self
                 .expected_opcode
@@ -1161,6 +1166,14 @@ unsafe extern "C" fn synthetic_compare(
     0
 }
 
+unsafe extern "C" fn synthetic_map_in_unavailable(
+    _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
+    _stack_map_id: u32,
+    _input: u32,
+) -> i32 {
+    -1
+}
+
 unsafe extern "C" fn synthetic_map_out_in_unavailable(
     _frame: *mut rquickjs_core::qjs::JSJitExecFrame,
     _stack_map_id: u32,
@@ -1328,6 +1341,11 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         regexp: Some(synthetic_map_out_two_unavailable),
         binary_arith_slow: Some(synthetic_map_out_two_op_unavailable),
         unary_arith_slow: Some(synthetic_map_out_in_op_unavailable),
+        fclosure: Some(synthetic_map_out_in_unavailable),
+        get_var_ref: Some(synthetic_map_out_in_op_unavailable),
+        put_var_ref: Some(synthetic_map_out_in_op_unavailable),
+        close_loc: Some(synthetic_map_in_unavailable),
+        set_name: Some(synthetic_map_out_in_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

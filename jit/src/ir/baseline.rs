@@ -11,7 +11,7 @@ use crate::{
 
 use super::{
     BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, PollKind,
-    StackOp, TaggedValue, UnaryOp,
+    StackOp, TaggedValue, UnaryOp, VarRefMode,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -374,6 +374,31 @@ impl BaselineIr {
             });
         }
 
+        // Tier 1 proves `put_loc_check_init` statically from the entry
+        // analysis. Once this frame creates closures, a callee can initialize
+        // a captured lexical slot (for example a derived constructor's `this`
+        // through `put_var_ref_check_init`), which that proof cannot observe.
+        let ops = || {
+            blocks
+                .iter()
+                .flat_map(|block: &IrBlock| &block.instructions)
+        };
+        if ops().any(|instruction| matches!(instruction.op, IrOp::FClosure(_)))
+            && ops().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    IrOp::PutLocalChecked {
+                        initialize: true,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(CompileFailure::Tier1Rejected(
+                crate::bytecode::FallbackReason::ClosureFrame,
+            ));
+        }
+
         Ok(Self {
             blocks,
             frame_states: states,
@@ -439,6 +464,10 @@ fn operation_may_exit(operation: &IrOp) -> bool {
 fn operation_helper_call_count(operation: &IrOp) -> usize {
     match operation {
         IrOp::ResolveConstant(_) | IrOp::ResolveAtom(_) | IrOp::GetGlobal(_) | IrOp::NewObject => 1,
+        IrOp::FClosure(_) | IrOp::GetVarRef { .. } | IrOp::CloseLocal(_) | IrOp::SetName(_) => 1,
+        // `set_var_ref*` first duplicates the kept value into the operand
+        // slot above the stack, then the store consumes that duplicate.
+        IrOp::PutVarRef { keep, .. } => 1 + usize::from(*keep),
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
         IrOp::DefineProperty(_) => 1,
@@ -510,6 +539,7 @@ fn helper_stack_depth(
     let extra = match operation {
         IrOp::GetProperty(_) | IrOp::Call { .. } | IrOp::CallConstructor(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
+        IrOp::PutVarRef { keep: true, .. } => 1,
         IrOp::NewArrayFrom(count) if *count != 0 => 2,
         IrOp::DefineElement => 2,
         IrOp::NewArrayFrom(_) => 0,
@@ -627,6 +657,14 @@ fn constant_operand(instruction: &Instruction) -> Option<u32> {
     }
 }
 
+fn closure_operand(instruction: &Instruction) -> Option<u16> {
+    match instruction.opcode().format() {
+        OperandFormat::Closure => Some(instruction.operand_u16(1)),
+        OperandFormat::NoneClosure => short_index(instruction),
+        _ => None,
+    }
+}
+
 fn atom_operand(instruction: &Instruction) -> Option<u32> {
     matches!(instruction.opcode().format(), OperandFormat::Atom).then(|| instruction.operand_u32(1))
 }
@@ -698,6 +736,40 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         },
         "call_constructor" => IrOp::CallConstructor(instruction.operand_u16(1)),
         "regexp" => IrOp::Regexp,
+        "fclosure" | "fclosure8" => {
+            IrOp::FClosure(constant_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
+        "get_var_ref" | "get_var_ref0" | "get_var_ref1" | "get_var_ref2" | "get_var_ref3"
+        | "get_var_ref_check" => IrOp::GetVarRef {
+            index: closure_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+            checked: name == "get_var_ref_check",
+        },
+        "put_var_ref"
+        | "put_var_ref0"
+        | "put_var_ref1"
+        | "put_var_ref2"
+        | "put_var_ref3"
+        | "set_var_ref"
+        | "set_var_ref0"
+        | "set_var_ref1"
+        | "set_var_ref2"
+        | "set_var_ref3"
+        | "put_var_ref_check"
+        | "put_var_ref_check_init" => IrOp::PutVarRef {
+            index: closure_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+            mode: match name {
+                "put_var_ref_check" => VarRefMode::Check,
+                "put_var_ref_check_init" => VarRefMode::CheckInit,
+                _ => VarRefMode::Plain,
+            },
+            keep: name.starts_with("set_var_ref"),
+        },
+        "set_name" => {
+            IrOp::SetName(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
+        "close_loc" => {
+            IrOp::CloseLocal(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

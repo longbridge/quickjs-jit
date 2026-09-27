@@ -87,7 +87,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 24;
+pub const QJSJIT_ABI_MINOR: u32 = 25;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -114,7 +114,7 @@ pub const QJSJIT_HELPER_ABI_VERSION: u32 = 1;
 pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
 pub const QJSJIT_RUNTIME_API_MAJOR: u32 = 1;
-pub const QJSJIT_RUNTIME_API_MINOR: u32 = 9;
+pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;
 pub const QJSJIT_INLINE_RECOVERY_VERSION: u32 = 1;
 pub const JS_JIT_INLINE_CALL: u32 = 0;
 pub const JS_JIT_INLINE_CALL_METHOD: u32 = 1;
@@ -2761,6 +2761,10 @@ pub const JSJitCompareOp_JS_JIT_COMPARE_NEQ: JSJitCompareOp = 5;
 pub const JSJitCompareOp_JS_JIT_COMPARE_STRICT_EQ: JSJitCompareOp = 6;
 pub const JSJitCompareOp_JS_JIT_COMPARE_STRICT_NEQ: JSJitCompareOp = 7;
 pub type JSJitCompareOp = ::core::ffi::c_uint;
+pub const JSJitVarRefMode_JS_JIT_VAR_REF_PLAIN: JSJitVarRefMode = 0;
+pub const JSJitVarRefMode_JS_JIT_VAR_REF_CHECK: JSJitVarRefMode = 1;
+pub const JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT: JSJitVarRefMode = 2;
+pub type JSJitVarRefMode = ::core::ffi::c_uint;
 pub const JSJitHelperId_JS_JIT_HELPER_POLL: JSJitHelperId = 0;
 pub const JSJitHelperId_JS_JIT_HELPER_DUP: JSJitHelperId = 1;
 pub const JSJitHelperId_JS_JIT_HELPER_FREE: JSJitHelperId = 2;
@@ -2785,7 +2789,12 @@ pub const JSJitHelperId_JS_JIT_HELPER_REGEXP: JSJitHelperId = 20;
 pub const JSJitHelperId_JS_JIT_HELPER_ATOM_VALUE: JSJitHelperId = 21;
 pub const JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW: JSJitHelperId = 22;
 pub const JSJitHelperId_JS_JIT_HELPER_UNARY_ARITH_SLOW: JSJitHelperId = 23;
-pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 24;
+pub const JSJitHelperId_JS_JIT_HELPER_FCLOSURE: JSJitHelperId = 24;
+pub const JSJitHelperId_JS_JIT_HELPER_GET_VAR_REF: JSJitHelperId = 25;
+pub const JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF: JSJitHelperId = 26;
+pub const JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27;
+pub const JSJitHelperId_JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28;
+pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 29;
 pub type JSJitHelperId = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3028,6 +3037,47 @@ unsafe extern "C" {
     ) -> JSJitHelperStatus;
 }
 unsafe extern "C" {
+    pub fn JS_JitHelperFClosure(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        input: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitHelperGetVarRef(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        input: u32,
+        opcode: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitHelperPutVarRef(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        input: u32,
+        opcode: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitHelperCloseLoc(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        input: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitHelperSetName(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        input: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
     pub fn JS_JitGetHelperTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitHelperInfo;
 }
 #[repr(C)]
@@ -3241,10 +3291,51 @@ pub struct JSJitRuntimeAPI {
             opcode: u32,
         ) -> JSJitHelperStatus,
     >,
+    pub fclosure: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            input: u32,
+        ) -> JSJitHelperStatus,
+    >,
+    pub get_var_ref: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            input: u32,
+            opcode: u32,
+        ) -> JSJitHelperStatus,
+    >,
+    pub put_var_ref: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            input: u32,
+            opcode: u32,
+        ) -> JSJitHelperStatus,
+    >,
+    pub close_loc: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            input: u32,
+        ) -> JSJitHelperStatus,
+    >,
+    pub set_name: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            input: u32,
+        ) -> JSJitHelperStatus,
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 104usize];
+    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 124usize];
     ["Alignment of JSJitRuntimeAPI"][::core::mem::align_of::<JSJitRuntimeAPI>() - 4usize];
     ["Offset of field: JSJitRuntimeAPI::struct_size"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, struct_size) - 0usize];
@@ -3300,6 +3391,16 @@ const _: () = {
         [::core::mem::offset_of!(JSJitRuntimeAPI, binary_arith_slow) - 96usize];
     ["Offset of field: JSJitRuntimeAPI::unary_arith_slow"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, unary_arith_slow) - 100usize];
+    ["Offset of field: JSJitRuntimeAPI::fclosure"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, fclosure) - 104usize];
+    ["Offset of field: JSJitRuntimeAPI::get_var_ref"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, get_var_ref) - 108usize];
+    ["Offset of field: JSJitRuntimeAPI::put_var_ref"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, put_var_ref) - 112usize];
+    ["Offset of field: JSJitRuntimeAPI::close_loc"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, close_loc) - 116usize];
+    ["Offset of field: JSJitRuntimeAPI::set_name"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, set_name) - 120usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

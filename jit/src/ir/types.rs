@@ -73,10 +73,24 @@ pub enum BinaryOp {
     StrictNotEqual,
 }
 
+/// TDZ checking mode for closure-variable stores. Values match the native
+/// `JSJitVarRefMode` ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VarRefMode {
+    Plain,
+    Check,
+    CheckInit,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrOp {
-    Poll { state: FrameStateId, kind: PollKind },
-    OsrLabel { state: FrameStateId },
+    Poll {
+        state: FrameStateId,
+        kind: PollKind,
+    },
+    OsrLabel {
+        state: FrameStateId,
+    },
     Nop,
     Push(TaggedValue),
     ResolveConstant(u32),
@@ -92,26 +106,63 @@ pub enum IrOp {
     SetElement,
     DefineElement,
     ToPropertyKey,
-    Call { argc: u16, has_this: bool },
+    Call {
+        argc: u16,
+        has_this: bool,
+    },
     CallConstructor(u16),
     Regexp,
+    /// `fclosure`/`fclosure8`: instantiate the constant-pool bytecode as a
+    /// closure over the current frame's arguments, locals and var refs.
+    FClosure(u32),
+    /// `get_var_ref*`: load a closure variable, optionally with the TDZ check.
+    GetVarRef {
+        index: u16,
+        checked: bool,
+    },
+    /// `put_var_ref*`/`set_var_ref*`: store a closure variable. `keep` leaves
+    /// the stored value on the operand stack (`set_var_ref*`).
+    PutVarRef {
+        index: u16,
+        mode: VarRefMode,
+        keep: bool,
+    },
+    /// `close_loc`: detach the var ref capturing a lexical local.
+    CloseLocal(u16),
+    /// `set_name`: define the anonymous function/class name of the stack top.
+    SetName(u32),
     GetArgument(u16),
     GetLocal(u16),
     GetLocalChecked(u16),
     GetLocalPair,
-    PutArgument { index: u16, keep: bool },
-    PutLocal { index: u16, keep: bool },
-    PutLocalChecked { index: u16, initialize: bool },
+    PutArgument {
+        index: u16,
+        keep: bool,
+    },
+    PutLocal {
+        index: u16,
+        keep: bool,
+    },
+    PutLocalChecked {
+        index: u16,
+        initialize: bool,
+    },
     SetLocalUninitialized(u16),
     Drop,
     Stack(StackOp),
     Unary(UnaryOp),
     PostUnary(UnaryOp),
-    LocalUnary { index: u16, op: UnaryOp },
+    LocalUnary {
+        index: u16,
+        op: UnaryOp,
+    },
     AddLocal(u16),
     Binary(BinaryOp),
     Jump(u32),
-    Branch { target: u32, when_true: bool },
+    Branch {
+        target: u32,
+        when_true: bool,
+    },
     Return,
     ReturnUndefined,
 }

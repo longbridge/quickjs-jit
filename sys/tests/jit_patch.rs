@@ -56,6 +56,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0018-inline-frame-recovery.patch",
         "0019-array-feedback.patch",
         "0020-typed-array-guard.patch",
+        "0025-tier1-closures.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -114,7 +115,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 24u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 25u"));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -133,7 +134,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
             .count(),
         3
     );
-    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 9u"));
+    assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 10u"));
     assert!(jit_header.contains("#define QJSJIT_RUNTIME_FIELD_MAP_OUT_IN_OP(field)"));
     assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
@@ -149,9 +150,20 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(helper_header.contains("X(ATOM_VALUE, atom_value"));
     assert!(helper_header.contains("X(BINARY_ARITH_SLOW, binary_arith_slow"));
     assert!(helper_header.contains("X(UNARY_ARITH_SLOW, unary_arith_slow"));
+    assert!(helper_header.contains("X(FCLOSURE, fclosure"));
+    assert!(helper_header.contains("X(GET_VAR_REF, get_var_ref"));
+    assert!(helper_header.contains("X(PUT_VAR_REF, put_var_ref"));
+    assert!(helper_header.contains("X(CLOSE_LOC, close_loc"));
+    assert!(helper_header.contains("X(SET_NAME, set_name"));
+    assert!(helper_header.contains("JS_JIT_VAR_REF_CHECK_INIT = 2"));
     assert!(helper_header.contains("#define QJSJIT_DECLARE_MAP_OUT_IN_OP(name)"));
     assert!(quickjs.contains("JS_JitHelperBinaryArithSlow"));
     assert!(quickjs.contains("JS_JitHelperUnaryArithSlow"));
+    assert!(quickjs.contains("JS_JitHelperFClosure"));
+    assert!(quickjs.contains("JS_JitHelperGetVarRef"));
+    assert!(quickjs.contains("JS_JitHelperPutVarRef"));
+    assert!(quickjs.contains("JS_JitHelperCloseLoc"));
+    assert!(quickjs.contains("JS_JitHelperSetName"));
     assert!(quickjs.contains("#define QJSJIT_ABI_COUNT_MAP_OUT_IN_OP 6"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
@@ -255,7 +267,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 24;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 25;"),
             "{target}"
         );
         assert!(
@@ -299,15 +311,21 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
         assert!(
             binding.contains("JS_JIT_HELPER_BINARY_ARITH_SLOW: JSJitHelperId = 22")
                 && binding.contains("JS_JIT_HELPER_UNARY_ARITH_SLOW: JSJitHelperId = 23")
-                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 24"),
+                && binding.contains("JS_JIT_HELPER_FCLOSURE: JSJitHelperId = 24")
+                && binding.contains("JS_JIT_HELPER_GET_VAR_REF: JSJitHelperId = 25")
+                && binding.contains("JS_JIT_HELPER_PUT_VAR_REF: JSJitHelperId = 26")
+                && binding.contains("JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27")
+                && binding.contains("JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28")
+                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 29"),
             "{target}"
         );
         assert!(
-            binding.contains("pub const QJSJIT_RUNTIME_API_MINOR: u32 = 9;"),
+            binding.contains("pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;"),
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 200usize"),
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 240usize")
+                && binding.contains("pub close_loc: ::core::option::Option"),
             "{target}"
         );
     }
@@ -362,8 +380,14 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "pub const JS_JIT_FEEDBACK_ARRAY_IMMUTABLE: u32 = 4096;",
         "pub const JS_JIT_FEEDBACK_ARRAY_SHARED: u32 = 8192;",
         "pub const JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING: u32 = 16384;",
+        // ABI 1.25: Tier 1 closure helpers.
+        "pub const QJSJIT_ABI_MINOR: u32 = 25;",
+        "pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;",
+        "JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27",
+        "JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT: JSJitVarRefMode = 2;",
+        "size_of::<JSJitRuntimeAPI>() - 124usize",
+        "JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28",
         // ABI 1.24: typed-array continuing guard.
-        "pub const QJSJIT_ABI_MINOR: u32 = 24;",
         "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
         "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",
         "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_INVALID: JSJitArrayQueryStatus = -1;",

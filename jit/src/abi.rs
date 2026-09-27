@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 24;
+pub const ABI_MINOR: u16 = 25;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -698,6 +698,26 @@ fn runtime_api_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitRuntimeAPI, unary_arith_slow),
             mem::size_of::<usize>(),
         ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, fclosure),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, get_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, put_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, close_loc),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, set_name),
+            mem::size_of::<usize>(),
+        ),
     ] {
         hash = layout_field(hash, offset, size);
     }
@@ -1073,7 +1093,7 @@ mod inline_api_tests {
     fn inline_recovery_requires_the_matching_main_abi_minor() {
         let native = AbiInfo::query_linked().unwrap();
         assert_eq!(ABI_MINOR, native.minor());
-        assert_eq!(native.minor(), 24);
+        assert_eq!(native.minor(), 25);
         assert!(unsafe { qjs::JS_JitGetInlineAPI(0) }.is_null());
     }
 
