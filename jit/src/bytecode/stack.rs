@@ -71,7 +71,7 @@ pub(crate) struct StateProof {
     pub(crate) visited: BTreeSet<u32>,
 }
 
-fn effective_pop(instruction: &Instruction) -> usize {
+pub(crate) fn effective_pop(instruction: &Instruction) -> usize {
     let base = instruction.opcode().n_pop() as usize;
     match instruction.opcode().format() {
         OperandFormat::NPop | OperandFormat::NPopU16 => {

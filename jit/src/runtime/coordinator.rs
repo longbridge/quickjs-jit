@@ -340,6 +340,99 @@ fn artifact_matches_direct_call(artifact: &CompiledArtifact, call: &CallSpeciali
             })
 }
 
+/// Conservatively predicts whether a Tier 2 caller can take the linked direct
+/// entry at `pc`. `emit_opt_specialized_call` uses it only for a receiver-free
+/// call whose function operand and every HeapRef argument are frame reads
+/// (`get_arg*` / `get_loc*` / `get_loc_check`). Any other site (callee by
+/// global name, closure variable, method receiver, or a HeapRef argument from a
+/// global or an expression) falls back to the generic CALL there, so the
+/// planner must keep frame inlining it.
+///
+/// The prediction replays only the call's own basic block: values from
+/// earlier blocks, rearranged by stack shuffles, or read before any later
+/// frame write or nested call are unknown. It may under-approximate (the site
+/// then stays frame-inlined, the pre-linking behavior) but never admits a site
+/// whose operands the block does not visibly read from frame slots.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub(crate) fn tier2_direct_call_site_usable(
+    body: &VerifiedFunction,
+    pc: u32,
+    call: &CallSpecializationKey,
+) -> bool {
+    let instructions = body.instructions();
+    let Some(index) = instructions
+        .iter()
+        .position(|instruction| instruction.pc() == pc)
+    else {
+        return false;
+    };
+    let instruction = &instructions[index];
+    if !matches!(
+        instruction.opcode().name(),
+        "call" | "call0" | "call1" | "call2" | "call3"
+    ) {
+        return false;
+    }
+    let argc = crate::bytecode::effective_pop(instruction).saturating_sub(1);
+    if argc != call.arguments().len() {
+        return false;
+    }
+    let Some(block) = body
+        .control_flow_graph()
+        .blocks()
+        .iter()
+        .find(|block| block.instruction_range().contains(&index))
+    else {
+        return false;
+    };
+    // `true` marks a value pushed by a frame read that is still current.
+    let mut stack: Vec<bool> = Vec::new();
+    for instruction in &instructions[block.instruction_range().start..index] {
+        let name = instruction.opcode().name();
+        let frame_read = name != "get_loc0_loc1"
+            && (name.starts_with("get_arg")
+                || name.starts_with("get_loc")
+                    && (name == "get_loc_check"
+                        || name
+                            .strip_prefix("get_loc")
+                            .is_some_and(|rest| rest.bytes().all(|byte| byte.is_ascii_digit()))));
+        if frame_read {
+            stack.push(true);
+            continue;
+        }
+        // A frame write, closure-variable write, or nested call may change a
+        // slot after it was read; forget every earlier frame read.
+        if name.contains("_loc")
+            || name.contains("_arg")
+            || name.contains("var_ref")
+            || name.starts_with("call")
+            || name.starts_with("tail_call")
+            || name.starts_with("apply")
+            || name.starts_with("eval")
+        {
+            stack.iter_mut().for_each(|known| *known = false);
+        }
+        let pop = crate::bytecode::effective_pop(instruction);
+        stack.truncate(stack.len().saturating_sub(pop));
+        stack.extend(std::iter::repeat_n(
+            false,
+            usize::from(instruction.opcode().n_push()),
+        ));
+    }
+    let Some(function_index) = stack.len().checked_sub(argc + 1) else {
+        return false;
+    };
+    stack[function_index]
+        && call
+            .arguments()
+            .iter()
+            .enumerate()
+            .all(|(argument, representation)| {
+                *representation != FeedbackRepresentation::HeapRef
+                    || stack[function_index + 1 + argument]
+            })
+}
+
 impl CompiledCallTarget {
     pub const fn identity(&self) -> ArtifactVersionIdentity {
         self.identity
@@ -1434,8 +1527,19 @@ impl Coordinator {
                     if budget.exhausted() {
                         break;
                     }
+                    // Pure inlining owns its site. A linked direct entry is a
+                    // transaction with an exact pre-effect miss to the generic
+                    // CALL and needs no shadow frame, so it is preferred over
+                    // frame inlining, but only where the Tier 2 caller can
+                    // take it. Elsewhere the site would reach the generic CALL.
                     if direct_call_targets.iter().any(|target| {
-                        target.pc() == instruction.pc() && target.inline_snapshot().is_some()
+                        target.pc() == instruction.pc()
+                            && (target.inline_snapshot().is_some()
+                                || tier2_direct_call_site_usable(
+                                    &snapshot,
+                                    instruction.pc(),
+                                    target.call(),
+                                ))
                     }) {
                         continue;
                     }

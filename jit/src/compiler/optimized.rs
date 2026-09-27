@@ -4936,6 +4936,7 @@ pub(crate) fn lower_direct_call_machine(
     isa: &cranelift_codegen::isa::OwnedTargetIsa,
     function: &VerifiedFunction,
     signature: &crate::runtime::BoundedSpecializationSignature,
+    feedback: Option<&crate::runtime::FeedbackSnapshot>,
     control: Option<&CompileControl>,
 ) -> Result<super::baseline::RelocatableCode, CompileFailure> {
     use crate::runtime::FeedbackRepresentation;
@@ -4954,7 +4955,7 @@ pub(crate) fn lower_direct_call_machine(
         .contains(&FeedbackRepresentation::HeapRef)
     {
         return super::tagged_call_link::lower_target_only_linked_leaf(
-            isa, function, signature, control,
+            isa, function, signature, feedback, control,
         );
     }
     if signature
@@ -10553,7 +10554,7 @@ impl Tier2Compiler {
         let signature = feedback
             .bounded_specialization(key)
             .ok_or(CompileFailure::InvalidArtifact)?;
-        lower_direct_call_machine(&self.isa, function, &signature, None)
+        lower_direct_call_machine(&self.isa, function, &signature, Some(feedback), None)
             .map(|code| code.clif().to_owned())
     }
 
@@ -10630,9 +10631,10 @@ impl Tier2Compiler {
         {
             return Err(CompileFailure::InvalidArtifact);
         }
-        let published = lower_direct_call_machine(&self.isa, function, &signature, None)?
-            .publish()
-            .map_err(|_| CompileFailure::InvalidArtifact)?;
+        let published =
+            lower_direct_call_machine(&self.isa, function, &signature, Some(feedback), None)?
+                .publish()
+                .map_err(|_| CompileFailure::InvalidArtifact)?;
         // The match above proves the exact arity and representation of the
         // scalar-only ABI before converting the executable entry.
         let mut output = 0i32;
@@ -11114,7 +11116,13 @@ impl Compiler for Tier2Compiler {
             tier2_stage(
                 key,
                 Tier2CompileStage::DirectLower,
-                lower_direct_call_machine(&self.isa, request.snapshot(), signature, None),
+                lower_direct_call_machine(
+                    &self.isa,
+                    request.snapshot(),
+                    signature,
+                    Some(request.feedback()),
+                    None,
+                ),
             )
             .ok()
         });
@@ -11336,7 +11344,13 @@ impl Compiler for Tier2Compiler {
             tier2_stage(
                 key,
                 Tier2CompileStage::DirectLower,
-                lower_direct_call_machine(&self.isa, request.snapshot(), signature, Some(control)),
+                lower_direct_call_machine(
+                    &self.isa,
+                    request.snapshot(),
+                    signature,
+                    Some(request.feedback()),
+                    Some(control),
+                ),
             )
             .ok()
         });
