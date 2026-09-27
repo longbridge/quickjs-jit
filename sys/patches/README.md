@@ -60,6 +60,20 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0021-helper-boundary.patch` makes helper-boundary PC validation O(1). Each
+bytecode lazily builds an instruction-boundary bitmap (`byte_code_len / 8 + 1`
+bytes, runtime-allocated, freed with the bytecode and reported in
+`JS_ComputeMemoryUsage`) using exactly the linear scan's decoding rules; if
+the allocation fails the previous validated-PC scan answers instead. Helper
+frame validation keeps every identity, ABI and stack check but inlines the
+pending-exception test and moves rejection out of line.
+`JS_JitInlineEnter` no longer rescans the call and continuation PCs (the frame
+PC is already a proven boundary and the continuation is proven as the next
+one) and reserves shadow frames from a runtime-owned LIFO arena (grown only
+while empty, at most the 1 MiB inline budget plus alignment, released with the
+runtime) with heap fallback; sanitizer builds always use the heap. No public
+ABI or struct layout visible to the bindings changes.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes
