@@ -14,7 +14,7 @@
 
 use rquickjs::{Context, Runtime};
 use rquickjs_jit::test_support::{differential, forced_baseline};
-use rquickjs_jit::{Jit, JitConfig, JitMetrics};
+use rquickjs_jit::{Jit, JitConfig, JitMetrics, JitTierPolicy};
 
 fn same(definition: &str, expression: &str, opcode: &str) {
     differential(definition, expression)
@@ -179,9 +179,18 @@ fn throw_error_raises_the_interpreter_error() {
 /// Runs `source` then evaluates `expression` `rounds` times with and without
 /// the production JIT, returning both results and the JIT metrics.
 fn production(source: &str, expression: &str, rounds: usize) -> (String, String, JitMetrics) {
+    production_with(JitConfig::default(), source, expression, rounds)
+}
+
+fn production_with(
+    config: JitConfig,
+    source: &str,
+    expression: &str,
+    rounds: usize,
+) -> (String, String, JitMetrics) {
     let run = |jit: bool| {
         let runtime = Runtime::new().unwrap();
-        let attached = jit.then(|| Jit::attach(&runtime, JitConfig::default()).unwrap());
+        let attached = jit.then(|| Jit::attach(&runtime, config.clone()).unwrap());
         let context = Context::full(&runtime).unwrap();
         let mut result = String::new();
         context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
@@ -261,4 +270,69 @@ fn interrupts_inside_try_regions_stay_uncatchable() {
     forced_baseline("function f(n){ let c = 0; for (;;) { try { c++; } finally { c--; } } } f(1)")
         .interrupt_after(3)
         .assert_uncatchable_interrupt();
+}
+
+#[test]
+fn handlers_without_helper_edges_still_compile_natively() {
+    // QuickJS wraps a catch body in an inner region whose only instruction
+    // is its own rethrow. Nothing in that region can raise, so its landing
+    // pad and handler are unreachable native code and Cranelift removes
+    // their safepoints; the function must still compile.
+    same(
+        "function f(o){ try { return o.x.y; } catch (e) { return -1; } }",
+        "[f({x:{y:5}}), f({}), f({x:null})].join()",
+        "catch",
+    );
+    same(
+        "function f(a){ let r = 0; try { r = a + 1; } catch (e) { r = -2; } finally { r *= 3; } return r; }",
+        "f(4)",
+        "gosub",
+    );
+}
+
+#[test]
+fn refcounted_local_stores_inside_try_regions_keep_exact_ownership() {
+    // Every store releases the previous heap value through FREE inside the
+    // region; the handler then reads and overwrites the same locals.
+    same(
+        "function f(n, o){ let a = {v: 0}, b = [n]; for (let i = 0; i < n; i++) { try { a = {v: i}; b = [a, i]; if (i % 3 === 0) a = o.missing.x; } catch (e) { b = [b, a.v]; a = {v: -i}; } } return a.v + ':' + b.length; }",
+        "f(12, {})",
+        "catch",
+    );
+}
+
+#[test]
+fn throws_from_handlers_without_an_enclosing_region_leave_exactly() {
+    same(
+        "function f(n){ try { throw 'a'; } catch (e) { throw e + n; } }",
+        "(function(){ try { f(3); } catch (e) { return 'outer:' + e; } })()",
+        "throw",
+    );
+    // Recursive catch and rethrow across native frames.
+    same(
+        "function f(n){ if (n <= 0) throw 'bottom'; try { return f(n - 1) + 1; } catch (e) { throw e + n; } }",
+        "(function(){ try { return f(6); } catch (e) { return 'outer:' + e; } })()",
+        "throw",
+    );
+}
+
+#[test]
+fn production_tiering_installs_common_try_catch_shapes() {
+    // Tier 1 only: every compile outcome counted here is a Tier 1 outcome.
+    let (interpreted, compiled, metrics) = production_with(
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .build()
+            .unwrap(),
+        "function f(n){ if (n <= 0) return 0; try { return f(n - 1) + 1; } catch (e) { return -1; } }\n\
+         function g(o){ try { return o.x.y; } catch (e) { return -1; } }\n\
+         function run(){ let t = 0; for (let i = 0; i < 400; i++) { t += f(i & 31); t += g((i & 7) ? {x:{y:i}} : {}); } return String(t); }",
+        "run()",
+        40,
+    );
+    assert_eq!(compiled, interpreted);
+    // f, g and run all install; none fails as an invalid artifact.
+    assert!(metrics.installed >= 3, "{metrics:?}");
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert_eq!(metrics.invalid_artifacts, 0, "{metrics:?}");
 }

@@ -616,6 +616,7 @@ impl BaselineCompiler {
             control.check_ir_bytes(clif_text.len())?;
         }
         let function_parameters = clif.params.clone();
+        let reachable_locations = reachable_source_locations(&clif);
         let mut context = Context::for_function(clif);
         context.set_disasm(cfg!(feature = "test-support"));
         let compiled = context
@@ -711,6 +712,15 @@ impl BaselineCompiler {
                             return None;
                         }
                         if osr_start.is_some() && matching_ranges.is_empty() {
+                            return None;
+                        }
+                        // A state lowered only into blocks the CLIF control
+                        // flow graph cannot reach (for example the handler of
+                        // a try region with no exceptional edge) is removed
+                        // with its block; no machine code can observe it.
+                        if matching_ranges.is_empty()
+                            && !reachable_locations.contains(&source_location)
+                        {
                             return None;
                         }
                         return Some(Err(CompileFailure::InvalidArtifact));
@@ -1822,6 +1832,34 @@ fn frame_state_source_loc(state: FrameStateId) -> Result<SourceLoc, CompileFailu
         .filter(|bits| *bits != u32::MAX)
         .ok_or(CompileFailure::ResourceLimit)?;
     Ok(SourceLoc::new(bits))
+}
+
+/// Source locations of every instruction in a block reachable from the CLIF
+/// entry block. Cranelift's unreachable-code elimination uses the same
+/// control flow graph, so a frame state whose location is absent here was
+/// only lowered into code that is removed before emission.
+fn reachable_source_locations(function: &Function) -> BTreeSet<u32> {
+    let mut locations = BTreeSet::new();
+    let Some(entry) = function.layout.entry_block() else {
+        return locations;
+    };
+    let cfg = cranelift_codegen::flowgraph::ControlFlowGraph::with_function(function);
+    let mut visited = BTreeSet::from([entry]);
+    let mut worklist = vec![entry];
+    while let Some(block) = worklist.pop() {
+        for instruction in function.layout.block_insts(block) {
+            let location = function.srcloc(instruction);
+            if !location.is_default() {
+                locations.insert(location.bits());
+            }
+        }
+        for successor in cfg.succ_iter(block) {
+            if visited.insert(successor) {
+                worklist.push(successor);
+            }
+        }
+    }
+    locations
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4080,14 +4118,26 @@ fn lower_free_if_refcounted(
     builder.ins().brif(refcounted, slow, &[], continuation, &[]);
     builder.seal_block(slow);
     builder.switch_to_block(slow);
-    helpers.invoke(
+    // FREE consumes its slot before it can fail (stress collection only).
+    // A local or argument slot is then undefined in the frame while its SSA
+    // variable still names the released value; a native handler would resume
+    // with that stale alias. Such an edge exits instead, and the interpreter
+    // unwinds from the frame itself. Operand slots are safe: the landing pad
+    // resets every operand above the catch offset.
+    let exception_target = helpers.exception_target.get();
+    if backing_base != helpers.stack_base {
+        helpers.exception_target.set(None);
+    }
+    let result = helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
         state,
         live_depth,
         live_depth,
         &[value_slot],
-    )?;
+    );
+    helpers.exception_target.set(exception_target);
+    result?;
     reload_pair(
         builder,
         variables,

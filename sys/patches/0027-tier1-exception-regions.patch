@@ -42,7 +42,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
 diff --git a/quickjs.c b/quickjs.c
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -20431,6 +20431,151 @@
+@@ -20431,6 +20431,155 @@
      return version == QJSJIT_INLINE_RECOVERY_VERSION ? &api : NULL;
  }
  
@@ -175,6 +175,10 @@ diff --git a/quickjs.c b/quickjs.c
 +        qjsjit_is_uncatchable_sentinel(rt, rt->current_exception) ||
 +        JS_IsUncatchableError(rt->current_exception))
 +        return JS_JIT_HELPER_EXCEPTION;
++    /* Stress collection runs before any frame mutation: a failure leaves the
++     * catch offset in place for the interpreter's own unwinding. */
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
 +    /* Release operands above the catch offset from the top, like the
 +     * interpreter, then replace the offset with the caught value. */
 +    for (sp = frame->stack_top; sp > catch_value + 1;) {
@@ -188,13 +192,13 @@ diff --git a/quickjs.c b/quickjs.c
 +    JS_FreeValueRT(rt, ctx->error_back_trace);
 +    ctx->error_back_trace = JS_UNDEFINED;
 +    frame->stack_top = catch_value + 1;
-+    return qjsjit_stress_gc(frame);
++    return JS_JIT_HELPER_OK;
 +}
 +
  static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      JSValueConst this_obj, JSValueConst new_target, int argc,
      JSValueConst *argv, int flags)
-@@ -20691,12 +20836,25 @@
+@@ -20691,12 +20840,25 @@
              b->jit_feedback_disabled = 1;
          if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
              JSJitFunctionSnapshot *snapshot = NULL;
