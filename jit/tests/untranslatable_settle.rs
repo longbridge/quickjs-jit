@@ -84,3 +84,59 @@ fn untranslatable_call_only_method_returns_to_the_interpreter() {
     let metrics = jit.metrics();
     assert!(metrics.generic_call_rejections > 0, "{metrics:?}");
 }
+
+/// Runs `call` repeatedly under automatic tiering and returns the
+/// `native_entries` metric sampled after each 1,000-round window.
+fn native_entry_windows(source: &str, call: &str, expected: &str) -> Vec<u64> {
+    let (_runtime, jit, context) = automatic_runtime();
+    context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
+    let mut entries = Vec::new();
+    for round in 0..4_000 {
+        let value = context.with(|ctx| ctx.eval::<String, _>(call).unwrap());
+        assert_eq!(value, expected);
+        jit.poll();
+        if round % 1_000 == 999 {
+            entries.push(jit.metrics().native_entries);
+        }
+    }
+    entries
+}
+
+#[test]
+fn untranslatable_loop_without_newly_admitted_opcodes_keeps_its_baseline() {
+    // Regression: the settle must not demote Tier 1 code that already ran
+    // natively at 82d3808. String literals (`push_atom_value`), object
+    // literals (`object`) and `new` (`call_constructor`) have no Tier 2
+    // classification, but these loops were Tier 1 functions before the
+    // GENERIC_OP opcodes were admitted and must keep entering native code.
+    let cases = [
+        (
+            "globalThis.f = function(n, z) { let sum = z; \
+               for (let i = z; i < n; i++) sum = sum + i * 0.5; return 'r' + sum; };",
+            "f(64, 0)",
+            "r1008",
+        ),
+        (
+            "globalThis.f = function(n) { let sum = 0; \
+               for (let i = 0; i < n; i++) { const o = { v: i }; sum = sum + o.v; } \
+               return '' + sum; };",
+            "f(64)",
+            "2016",
+        ),
+        (
+            "function P(v) { this.v = v; } \
+             globalThis.f = function(n) { let sum = 0; \
+               for (let i = 0; i < n; i++) { const p = new P(i); sum = sum + p.v; } \
+               return '' + sum; };",
+            "f(64)",
+            "2016",
+        ),
+    ];
+    for (source, call, expected) in cases {
+        let entries = native_entry_windows(source, call, expected);
+        assert!(
+            entries.windows(2).all(|pair| pair[1] > pair[0]),
+            "Tier 1 function stopped entering native code: {source} {entries:?}"
+        );
+    }
+}

@@ -602,6 +602,47 @@ const HOT_MAINTENANCE_INTERVAL: u32 = 64;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const UNTRANSLATABLE_SETTLE_EXECUTIONS: u64 = 16;
 
+/// Opcodes that Tier 1 admitted only through the P2b slice (82d3808 rejected
+/// each of them). A function containing one ran in the interpreter at
+/// 82d3808; the untranslatable settle returns it there. Every other function
+/// keeps the unchanged optimizing scan, so Tier 1-only code that already ran
+/// natively (string/object literals, `new`, ...) keeps its baseline.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const SETTLED_GENERIC_TIER1_OPCODES: &[&str] = &[
+    "push_this",
+    "special_object",
+    "dup1",
+    "dup2",
+    "perm4",
+    "swap2",
+    "rot3l",
+    "rot3r",
+    "get_var_undef",
+    "put_var",
+    "to_object",
+    "to_propkey2",
+    "typeof",
+    "delete",
+    "delete_var",
+    "pow",
+    "instanceof",
+    "in",
+    "typeof_is_undefined",
+    "typeof_is_function",
+];
+
+/// Whether the optimizing scan settles this generation into the interpreter
+/// instead of evaluating a Tier 2 trial: Tier 2 can never translate it and
+/// it contains an opcode from `SETTLED_GENERIC_TIER1_OPCODES`.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn settles_untranslatable_candidate(snapshot: &bytecode::VerifiedFunction) -> bool {
+    snapshot
+        .instructions()
+        .iter()
+        .any(|instruction| SETTLED_GENERIC_TIER1_OPCODES.contains(&instruction.opcode().name()))
+        && !ir::optimized_opcodes_supported(snapshot)
+}
+
 /// Feedback pc used for return types observed at native `DONE` exits.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
@@ -2188,17 +2229,17 @@ impl ProductionBackend {
         }
     }
 
-    /// Tier 2 translates the whole function, so a generation containing an
-    /// opcode without an optimized classification can never compile there.
-    /// The optimizing scan would otherwise revisit it at every maintenance,
-    /// rebuilding feedback snapshots whenever a property/call/numeric gate
-    /// defers the trial. Every other route ends in the interpreter: call-only
-    /// functions are demoted directly, five measured rejections demote the
-    /// baseline, and an approved trial fails its bounded Tier 2 attempts until
-    /// the optimizing tier is blacklisted, which disables the generation's
-    /// probes. Reach that terminal state at the first scan, without the
-    /// failing compilations or the slower baseline in between. The call-only
-    /// rule still runs first so its metric keeps its meaning.
+    /// Settles a generation that Tier 2 can never translate and whose Tier 1
+    /// code exists only because of the opcodes in
+    /// `SETTLED_GENERIC_TIER1_OPCODES` (see `settles_untranslatable_candidate`).
+    /// Such a function ran in the interpreter at 82d3808, and its baseline is
+    /// dominated by exact slow-path helper calls: the optimizing scan would
+    /// otherwise revisit it at every maintenance, rebuilding feedback
+    /// snapshots whenever a property/call/numeric gate defers the trial, and
+    /// the new `methods-dynamic` kernel ran 5.4x slower that way. After a short
+    /// baseline warmup it returns to the interpreter with its probes off, the
+    /// state it had at 82d3808. The call-only rule runs first so that its
+    /// metric keeps its meaning.
     fn settle_untranslatable_tier2_candidate(&mut self, key: runtime::FunctionKey) {
         let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
             return;
@@ -2207,9 +2248,9 @@ impl ProductionBackend {
             self.retire_untranslatable_to_interpreter(key);
             return;
         }
-        // Like the bounded Tier 2 retries this replaces, let the installed
-        // baseline serve a short warmup (and any OSR it enabled) first. The
-        // deferral is a map lookup; no feedback snapshot is built.
+        // Let the installed baseline serve a short warmup (and any OSR it
+        // enabled) first. The deferral is a map lookup; no feedback snapshot
+        // is built.
         if self
             .execution_profiles
             .get(&key)
@@ -2222,10 +2263,11 @@ impl ProductionBackend {
                 .control_flow_graph()
                 .is_loop_header(block.start_pc())
         });
-        let call_pcs = snapshot
-            .instructions()
-            .iter()
-            .filter(|instruction| {
+        // Both outcomes retire to the interpreter; only the call-only
+        // demotion metric differs.
+        if !has_loop {
+            let observed = self.feedback.snapshot(self.clock.max(1));
+            let generic_call = snapshot.instructions().iter().any(|instruction| {
                 matches!(
                     instruction.opcode().name(),
                     "call"
@@ -2237,15 +2279,8 @@ impl ProductionBackend {
                         | "tail_call"
                         | "tail_call_method"
                         | "call_constructor"
-                )
-            })
-            .map(|instruction| instruction.pc())
-            .collect::<Vec<_>>();
-        if !has_loop && !call_pcs.is_empty() {
-            let observed = self.feedback.snapshot(self.clock.max(1));
-            let generic_call = call_pcs.iter().any(|pc| {
-                !observed
-                    .call_specialization_at(key, *pc)
+                ) && !observed
+                    .call_specialization_at(key, instruction.pc())
                     .is_some_and(|call| {
                         call.callee() != key && self.coordinator.direct_call_ready(&call)
                     })
@@ -2253,8 +2288,6 @@ impl ProductionBackend {
             if generic_call {
                 self.cold_metrics_dirty = true;
                 self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
-                self.retire_untranslatable_to_interpreter(key);
-                return;
             }
         }
         self.retire_untranslatable_to_interpreter(key);
@@ -2369,7 +2402,7 @@ impl ProductionBackend {
             let forced_trial = self.config.force_optimized();
             #[cfg(not(feature = "test-support"))]
             let forced_trial = false;
-            if !forced_trial && !ir::optimized_opcodes_supported(snapshot) {
+            if !forced_trial && settles_untranslatable_candidate(snapshot) {
                 self.settle_untranslatable_tier2_candidate(key);
                 continue;
             }

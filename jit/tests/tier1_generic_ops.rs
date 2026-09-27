@@ -136,6 +136,46 @@ fn global_reads_writes_and_deletes_match_the_interpreter() {
 }
 
 #[test]
+fn put_var_through_a_reentrant_global_setter() {
+    // The setter re-enters JS, allocates enough to trigger GC under stress
+    // mode, and throws on odd values while the stored value is still owned
+    // by the helper's operand slot.
+    generic(
+        "globalThis.setterLog = []; \
+         Object.defineProperty(globalThis, 'accessorGlobal', { configurable: true, \
+           get(){ return setterLog.length }, \
+           set(v){ const junk = []; for (let i = 0; i < 64; i++) junk.push({i, s: 'x' + i}); \
+                   if (typeof v === 'number' && v % 2) throw new TypeError('odd ' + v); \
+                   setterLog.push(v && v.tag ? v.tag : v); } }); \
+         function f(v){ accessorGlobal = v; return accessorGlobal }",
+        &format!(
+            "[{}, {}, {}, {}, setterLog.join('|')]",
+            guarded("f(2)"),
+            guarded("f(3)"),
+            guarded("f({tag:'obj'})"),
+            guarded("f('s')")
+        ),
+        "put_var",
+    );
+}
+
+#[test]
+fn sloppy_non_simple_parameters_use_unmapped_arguments() {
+    // Sloppy functions with default or destructured parameters get an
+    // unmapped arguments object, which Tier 1 admits.
+    generic(
+        "function f(a = 'd'){ arguments[0] = 'changed'; return a + ':' + arguments.length + ':' + arguments[0] }",
+        "[f(), f(5), f(5, 6), f(undefined, 7)]",
+        "special_object",
+    );
+    generic(
+        "function f({x}){ return x + ':' + arguments.length + ':' + typeof arguments[0] }",
+        &format!("[f({{x:1}}), f({{x:2}}, 3), {}]", guarded("f()")),
+        "special_object",
+    );
+}
+
+#[test]
 fn typeof_family_matches_every_tag() {
     let values = "[1, 1.5, -0, NaN, 's', '', null, undefined, {}, [], f, class {}, 1n, 2n**80n, Symbol(), true, new Proxy(function(){}, {}), new Proxy({}, {})]";
     generic(
