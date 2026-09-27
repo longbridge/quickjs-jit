@@ -84,6 +84,21 @@ remain, and still calls `JS_JitHelperFree` for the last reference and in
 stress-GC frames. No ABI table or structure changes, so the ABI minor version
 is unchanged; a library without this patch fails the fingerprint check.
 
+`0023-fast-native-entry.patch` adds the ABI 1.25 callback-free native entry.
+After a DONE exit whose pc=0 handle QuickJS caches, the optional
+`entry_fast_grant` callback may grant a bounded budget (at most 65536) and a
+backend-owned `JSJitFastEntryState`. While budget remains and the state epoch
+still equals the cached entry epoch, calls of that function reuse the cached
+handle without call feedback, `record_hot`, `entry_cache_epoch`,
+`native_enter` or `native_exit`; QuickJS counts the executions in the state
+and marks their frames `JS_JIT_FRAME_FAST_ENTRY`. A non-DONE exit still calls
+`native_exit`, tagged `JS_JIT_EXIT_FAST_UNPAIRED`, and is never re-cached.
+Suspension, feedback shutdown, a zero or changed epoch, or a malformed grant
+all return to the full callback path. Calls that never reach native code keep
+another function's still-admissible idle handle instead of evicting it. The
+runtime grows by two 32-bit fields and one pointer; the backend vtable gains
+one trailing member.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

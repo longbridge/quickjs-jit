@@ -87,10 +87,11 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 24;
+pub const QJSJIT_ABI_MINOR: u32 = 25;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
+pub const JS_JIT_FRAME_FAST_ENTRY: u32 = 8;
 pub const JS_JIT_SLOT_NONE: u32 = 4294967295;
 pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
 pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;
@@ -115,6 +116,9 @@ pub const QJSJIT_HELPER_MAX_ABI_TYPES: u32 = 8;
 pub const QJSJIT_HELPER_MAX_VALUES: u32 = 4;
 pub const QJSJIT_RUNTIME_API_MAJOR: u32 = 1;
 pub const QJSJIT_RUNTIME_API_MINOR: u32 = 9;
+pub const JS_JIT_FAST_ENTRY_OPTIMIZED: u32 = 1;
+pub const JS_JIT_EXIT_FAST_UNPAIRED: u32 = 2147483648;
+pub const JS_JIT_FAST_ENTRY_MAX_BUDGET: u32 = 65536;
 pub const QJSJIT_INLINE_RECOVERY_VERSION: u32 = 1;
 pub const JS_JIT_INLINE_CALL: u32 = 0;
 pub const JS_JIT_INLINE_CALL_METHOD: u32 = 1;
@@ -3613,6 +3617,57 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct JSJitFastEntryState {
+    pub struct_size: u32,
+    pub reserved: u32,
+    pub epoch: u64,
+    pub entries: u64,
+    pub exits: u64,
+    pub optimized_entries: u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitFastEntryState"][::core::mem::size_of::<JSJitFastEntryState>() - 40usize];
+    ["Alignment of JSJitFastEntryState"][::core::mem::align_of::<JSJitFastEntryState>() - 8usize];
+    ["Offset of field: JSJitFastEntryState::struct_size"]
+        [::core::mem::offset_of!(JSJitFastEntryState, struct_size) - 0usize];
+    ["Offset of field: JSJitFastEntryState::reserved"]
+        [::core::mem::offset_of!(JSJitFastEntryState, reserved) - 4usize];
+    ["Offset of field: JSJitFastEntryState::epoch"]
+        [::core::mem::offset_of!(JSJitFastEntryState, epoch) - 8usize];
+    ["Offset of field: JSJitFastEntryState::entries"]
+        [::core::mem::offset_of!(JSJitFastEntryState, entries) - 16usize];
+    ["Offset of field: JSJitFastEntryState::exits"]
+        [::core::mem::offset_of!(JSJitFastEntryState, exits) - 24usize];
+    ["Offset of field: JSJitFastEntryState::optimized_entries"]
+        [::core::mem::offset_of!(JSJitFastEntryState, optimized_entries) - 32usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitFastEntryGrant {
+    pub struct_size: u32,
+    pub budget: u32,
+    pub flags: u32,
+    pub reserved: u32,
+    pub state: *mut JSJitFastEntryState,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitFastEntryGrant"][::core::mem::size_of::<JSJitFastEntryGrant>() - 20usize];
+    ["Alignment of JSJitFastEntryGrant"][::core::mem::align_of::<JSJitFastEntryGrant>() - 4usize];
+    ["Offset of field: JSJitFastEntryGrant::struct_size"]
+        [::core::mem::offset_of!(JSJitFastEntryGrant, struct_size) - 0usize];
+    ["Offset of field: JSJitFastEntryGrant::budget"]
+        [::core::mem::offset_of!(JSJitFastEntryGrant, budget) - 4usize];
+    ["Offset of field: JSJitFastEntryGrant::flags"]
+        [::core::mem::offset_of!(JSJitFastEntryGrant, flags) - 8usize];
+    ["Offset of field: JSJitFastEntryGrant::reserved"]
+        [::core::mem::offset_of!(JSJitFastEntryGrant, reserved) - 12usize];
+    ["Offset of field: JSJitFastEntryGrant::state"]
+        [::core::mem::offset_of!(JSJitFastEntryGrant, state) - 16usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct JSJitBackendVTable {
     pub struct_size: u32,
     pub record_hot: ::core::option::Option<
@@ -3660,10 +3715,18 @@ pub struct JSJitBackendVTable {
     >,
     pub entry_cache_epoch:
         ::core::option::Option<unsafe extern "C" fn(opaque: *mut ::core::ffi::c_void) -> u64>,
+    pub entry_fast_grant: ::core::option::Option<
+        unsafe extern "C" fn(
+            opaque: *mut ::core::ffi::c_void,
+            id: u64,
+            generation: u64,
+            grant: *mut JSJitFastEntryGrant,
+        ),
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 48usize];
+    ["Size of JSJitBackendVTable"][::core::mem::size_of::<JSJitBackendVTable>() - 52usize];
     ["Alignment of JSJitBackendVTable"][::core::mem::align_of::<JSJitBackendVTable>() - 4usize];
     ["Offset of field: JSJitBackendVTable::struct_size"]
         [::core::mem::offset_of!(JSJitBackendVTable, struct_size) - 0usize];
@@ -3689,6 +3752,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitBackendVTable, record_feedback) - 40usize];
     ["Offset of field: JSJitBackendVTable::entry_cache_epoch"]
         [::core::mem::offset_of!(JSJitBackendVTable, entry_cache_epoch) - 44usize];
+    ["Offset of field: JSJitBackendVTable::entry_fast_grant"]
+        [::core::mem::offset_of!(JSJitBackendVTable, entry_fast_grant) - 48usize];
 };
 pub const JS_JIT_BACKEND_OK: _bindgen_ty_4 = 0;
 pub const JS_JIT_BACKEND_INVALID_ARGUMENT: _bindgen_ty_4 = -1;

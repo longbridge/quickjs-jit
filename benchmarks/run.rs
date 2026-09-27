@@ -1753,6 +1753,17 @@ mod tests {
             }
             std::thread::sleep(Duration::from_micros(50));
         }
+        // Forced Tier 2 publishes the caller before its leaf's direct entry,
+        // so its first artifact goes through the generic CALL bridge. The
+        // timed Tier-2 trial (eight optimized caller entries) compares that
+        // artifact with baseline samples whose leaf calls may already use
+        // callback-free granted entries, and can demote it once; the
+        // replacement then captures the direct edge. Let the trial decide
+        // before settling so the steady window measures the final artifact.
+        for _ in 0..16 {
+            invoke_workload(&context).unwrap();
+            jit.poll();
+        }
         let (before, settled) =
             settle_compilation(&context, &jit, Duration::from_secs(60)).unwrap();
         assert!(

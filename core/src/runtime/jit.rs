@@ -327,6 +327,23 @@ pub unsafe trait JitBackend: Send + 'static {
         0
     }
 
+    /// Grants callback-free executions to the idle handle QuickJS just cached
+    /// after a `DONE` exit (ABI 1.25). Leaving `grant.budget` zero keeps every
+    /// call on the full callback path. A nonzero budget must point
+    /// `grant.state` at backend-owned state that stays at a fixed address until
+    /// `runtime_detach`; its epoch follows the [`Self::entry_cache_epoch`]
+    /// rules. Granted executions skip call feedback, hot probes, the epoch
+    /// query and `native_enter`, carry `JS_JIT_FRAME_FAST_ENTRY`, and report
+    /// `native_exit` only for non-`DONE` exits, tagged with
+    /// `JS_JIT_EXIT_FAST_UNPAIRED`. This query must not reenter JavaScript.
+    fn entry_fast_grant(
+        &mut self,
+        _id: u64,
+        _generation: u64,
+        _grant: &mut qjs::JSJitFastEntryGrant,
+    ) {
+    }
+
     /// Records the exact boundary immediately before a published native entry.
     fn native_enter(&mut self, _id: u64, _generation: u64, _pc: u32) {}
 
@@ -429,6 +446,21 @@ unsafe extern "C" fn entry_cache_epoch(opaque: *mut c_void) -> u64 {
     state.backend.entry_cache_epoch()
 }
 
+unsafe extern "C" fn entry_fast_grant(
+    opaque: *mut c_void,
+    id: u64,
+    generation: u64,
+    grant: *mut qjs::JSJitFastEntryGrant,
+) {
+    if grant.is_null() {
+        return;
+    }
+    let state = unsafe { BackendState::from_opaque(opaque) };
+    state
+        .backend
+        .entry_fast_grant(id, generation, unsafe { &mut *grant });
+}
+
 unsafe extern "C" fn native_enter(opaque: *mut c_void, id: u64, generation: u64, pc: u32) {
     let state = unsafe { BackendState::from_opaque(opaque) };
     state.backend.native_enter(id, generation, pc);
@@ -479,6 +511,7 @@ static BACKEND_VTABLE: qjs::JSJitBackendVTable = qjs::JSJitBackendVTable {
     native_exit: Some(native_exit),
     record_feedback: Some(record_feedback),
     entry_cache_epoch: Some(entry_cache_epoch),
+    entry_fast_grant: Some(entry_fast_grant),
 };
 
 /// Owns the token for one backend allocation stored by the raw runtime.

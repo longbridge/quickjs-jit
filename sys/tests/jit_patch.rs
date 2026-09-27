@@ -58,6 +58,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0020-typed-array-guard.patch",
         "0021-helper-boundary.patch",
         "0022-inline-refcount.patch",
+        "0023-fast-native-entry.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -116,7 +117,11 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 24u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 25u"));
+    assert!(jit_header.contains("#define JS_JIT_FRAME_FAST_ENTRY (1U << 3)"));
+    assert!(jit_header.contains("JSJitFastEntryGrant *grant);\n} JSJitBackendVTable;"));
+    assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT |\n        JS_JIT_FRAME_FAST_ENTRY;"));
+    assert!(quickjs.contains("static inline bool qjsjit_fast_entry_ready("));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -257,7 +262,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 24;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 25;"),
             "{target}"
         );
         assert!(
@@ -265,6 +270,12 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(binding.contains("pub struct JSJitArrayAPI"), "{target}");
+        assert!(
+            binding.contains("pub struct JSJitFastEntryGrant")
+                && binding.contains("offset_of!(JSJitBackendVTable, entry_fast_grant) - 96usize")
+                && binding.contains("size_of::<JSJitBackendVTable>() - 104usize"),
+            "{target}"
+        );
         assert!(
             binding.contains("receiver: *const JSValue")
                 && binding.contains("pub fn JS_JitGetArrayAPI"),
@@ -364,8 +375,18 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "pub const JS_JIT_FEEDBACK_ARRAY_IMMUTABLE: u32 = 4096;",
         "pub const JS_JIT_FEEDBACK_ARRAY_SHARED: u32 = 8192;",
         "pub const JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING: u32 = 16384;",
+        // ABI 1.25: callback-free native entry.
+        "pub const QJSJIT_ABI_MINOR: u32 = 25;",
+        "pub const JS_JIT_FRAME_FAST_ENTRY: u32 = 8;",
+        "pub const JS_JIT_FAST_ENTRY_OPTIMIZED: u32 = 1;",
+        "pub const JS_JIT_EXIT_FAST_UNPAIRED: u32 = 2147483648;",
+        "pub const JS_JIT_FAST_ENTRY_MAX_BUDGET: u32 = 65536;",
+        "size_of::<JSJitFastEntryState>() - 40usize",
+        "size_of::<JSJitFastEntryGrant>() - 20usize",
+        "offset_of!(JSJitFastEntryGrant, state) - 16usize",
+        "size_of::<JSJitBackendVTable>() - 52usize",
+        "offset_of!(JSJitBackendVTable, entry_fast_grant) - 48usize",
         // ABI 1.24: typed-array continuing guard.
-        "pub const QJSJIT_ABI_MINOR: u32 = 24;",
         "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
         "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",
         "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_INVALID: JSJitArrayQueryStatus = -1;",
