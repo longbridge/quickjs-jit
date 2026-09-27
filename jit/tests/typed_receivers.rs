@@ -795,3 +795,55 @@ fn loop_header_guard_exit_republishes_an_empty_stack() {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+/// `const a = arg` keeps the entry argument's SSA identity, so the planner
+/// can name `Argument` as the receiver while the operand provenance is
+/// `Local`. A hoist-covered load must then keep its own bounds check (the
+/// cached tuple, if any, is keyed by another slot). Out-of-range reads and
+/// shrunk receivers must match the interpreter in whichever tier runs them.
+#[test]
+fn argument_aliased_local_receiver_loads_match_the_interpreter() {
+    const SOURCE: &str = r#"
+        function aliasSum(seed, values) {
+          const a = values;
+          let sum = seed;
+          for (let i = 0; i < values.length; i++) sum = (sum + a[i]) | 0;
+          return sum;
+        }
+        globalThis.A = new Int32Array(64).fill(3);
+    "#;
+    const CASES: &str = r#"JSON.stringify([
+        aliasSum(0, A), aliasSum(0.5, A), aliasSum(1, new Int32Array(3).fill(5)),
+        aliasSum(0, new Float64Array([1.5, 2.5])), aliasSum(1, [1, 2, 3]),
+        (() => { const b = new Int32Array(8).fill(2); Object.defineProperty(b, 'length', {value: 12}); return aliasSum(0, b); })(),
+        (() => { const b = new Int32Array(8).fill(1); b.buffer.transfer(); return aliasSum(0, b); })()
+    ])"#;
+    let expected = evaluate_without_jit(SOURCE, CASES);
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(SOURCE)).unwrap();
+    // Today this shape is rejected by Tier 2 (fail-closed) and runs in a
+    // lower tier; warm it without requiring a Tier 2 entry so the probes
+    // stay exact whichever tier ends up executing them.
+    for _ in 0..64 {
+        context
+            .with(|ctx| ctx.eval::<i32, _>("aliasSum(0, A)"))
+            .unwrap();
+        jit.poll();
+    }
+    let actual = context.with(|ctx| ctx.eval::<String, _>(CASES)).unwrap();
+    assert_eq!(actual, expected);
+    let after = jit.metrics();
+    assert_eq!(after.native_entries, after.native_exits);
+}

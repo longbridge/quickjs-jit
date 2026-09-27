@@ -2804,8 +2804,14 @@ fn lower_optimized_machine(
                                     block.start_pc(),
                                     &mut guarded_element_source,
                                     expected_mode,
-                                    planned_access
-                                        .is_some_and(|access| access.bounds_covered_by_hoist),
+                                    // The hoist proved bounds for the planned
+                                    // receiver only. When the operand's
+                                    // provenance does not name that receiver,
+                                    // any cached tuple belongs to another slot:
+                                    // keep the per-access bounds check.
+                                    expected_mode.is_some()
+                                        && planned_access
+                                            .is_some_and(|access| access.bounds_covered_by_hoist),
                                 )?;
                             }
                             "get_length" => {

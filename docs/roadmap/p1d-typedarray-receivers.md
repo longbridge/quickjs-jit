@@ -175,6 +175,28 @@ exit use the entry `stack_base` SSA value. That build was about 7% slower
 on int32array-traversal, because it kept the value live across the loop.
 The exit now reloads the base from the frame and is marked cold.
 
+### r1 follow-up (fail-closed bounds hoist use)
+
+- A `get_array_el` skips its bounds check for a hoist only when the operand's
+  provenance names the planned receiver, which is when `expected_mode` is
+  kept. When the provenances differ, a cached tuple for the operand's slot
+  belongs to another receiver, so the load keeps its own bounds check. Test:
+  `argument_aliased_local_receiver_loads_match_the_interpreter`. Today Tier 2
+  rejects the `const a = arg` shape as an unsupported opcode and fails
+  closed, so the test checks interpreter equality in whichever tier runs it.
+- `outer_loop_hoists_are_revalidated_by_inner_loop_polls` was checked
+  against a build that revalidated only the innermost loop's tuples. That
+  build fails the test, so the test covers the blocking review defect.
+- Noisy diagnostic after this change, 7 alternating runs against the `82d3808`
+  `jit-bench`: float64array-traversal 1.0985 ms to 0.1693 ms, 6.49x the
+  baseline speed; arrays-typed 2.9716 ms to 2.0081 ms, 1.48x; the
+  int32array-traversal control 0.0497 ms to 0.0501 ms, 0.99x, which is a tie.
+  Checksums match the interpreter mode.
+- `mixed_direct_calls::tier2_mixed_edge_eliminates_helper_and_preserves_guard_misses`
+  is flaky under load. It failed 6 of 30 runs on an `82d3808` build and 5 of
+  30 on this branch. The failure is timing dependent and predates this
+  branch.
+
 ## Remaining work
 
 - float64array-traversal takes about 7.9 ns per iteration against about
