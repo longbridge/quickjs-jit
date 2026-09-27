@@ -865,6 +865,18 @@ fn optimized_block_depths(
     Ok(depths)
 }
 
+/// Whether every instruction has an optimized-IR classification. Tier 2
+/// translates the whole function, so a single unclassified opcode (exact
+/// generic helpers, literal allocation, ...) makes every attempt fail.
+pub(crate) fn optimized_opcodes_supported(function: &VerifiedFunction) -> bool {
+    function.instructions().iter().all(|instruction| {
+        matches!(
+            instruction.opcode().name(),
+            "tail_call" | "tail_call_method"
+        ) || classify_optimized_opcode(instruction.opcode().name()).is_ok()
+    })
+}
+
 fn classify_optimized_opcode(
     name: &str,
 ) -> Result<(ValueRepresentation, OptimizedEffect), CompileFailure> {

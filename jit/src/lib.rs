@@ -597,6 +597,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for NoopBackend {}
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const HOT_MAINTENANCE_INTERVAL: u32 = 64;
 
+/// Baseline executions an untranslatable generation serves before it is
+/// settled into the interpreter (see `settle_untranslatable_tier2_candidate`).
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const UNTRANSLATABLE_SETTLE_EXECUTIONS: u64 = 16;
+
 /// Feedback pc used for return types observed at native `DONE` exits.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
@@ -691,6 +696,9 @@ struct ProductionBackend {
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
     profitability_blacklisted: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Generations whose bytecode Tier 2 can never translate and whose
+    /// baseline decision is settled; they leave the optimizing scan.
+    tier2_untranslatable: rustc_hash::FxHashSet<runtime::FunctionKey>,
     /// Immutable generations for which neither tier can ever produce code.
     /// `record_hot` reports these to QuickJS so it can turn off all probes and
     /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
@@ -2116,6 +2124,7 @@ impl ProductionBackend {
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
+            tier2_untranslatable: rustc_hash::FxHashSet::default(),
             feedback_disabled: rustc_hash::FxHashSet::default(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
@@ -2176,6 +2185,87 @@ impl ProductionBackend {
         // an old handle become admissible again through wraparound.
         if self.entry_cache_epoch != 0 {
             self.entry_cache_epoch = self.entry_cache_epoch.checked_add(1).unwrap_or(0);
+        }
+    }
+
+    /// Tier 2 translates the whole function, so a generation containing an
+    /// opcode without an optimized classification can never compile there.
+    /// The optimizing scan would otherwise revisit it at every maintenance,
+    /// rebuilding feedback snapshots whenever a property/call/numeric gate
+    /// defers the trial. Every other route ends in the interpreter: call-only
+    /// functions are demoted directly, five measured rejections demote the
+    /// baseline, and an approved trial fails its bounded Tier 2 attempts until
+    /// the optimizing tier is blacklisted, which disables the generation's
+    /// probes. Reach that terminal state at the first scan, without the
+    /// failing compilations or the slower baseline in between. The call-only
+    /// rule still runs first so its metric keeps its meaning.
+    fn settle_untranslatable_tier2_candidate(&mut self, key: runtime::FunctionKey) {
+        let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
+            return;
+        };
+        if self.profitability_blacklisted.contains(&key) {
+            self.retire_untranslatable_to_interpreter(key);
+            return;
+        }
+        // Like the bounded Tier 2 retries this replaces, let the installed
+        // baseline serve a short warmup (and any OSR it enabled) first. The
+        // deferral is a map lookup; no feedback snapshot is built.
+        if self
+            .execution_profiles
+            .get(&key)
+            .is_none_or(|profile| profile.baseline_executions < UNTRANSLATABLE_SETTLE_EXECUTIONS)
+        {
+            return;
+        }
+        let has_loop = snapshot.control_flow_graph().blocks().iter().any(|block| {
+            snapshot
+                .control_flow_graph()
+                .is_loop_header(block.start_pc())
+        });
+        let call_pcs = snapshot
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "call"
+                        | "call0"
+                        | "call1"
+                        | "call2"
+                        | "call3"
+                        | "call_method"
+                        | "tail_call"
+                        | "tail_call_method"
+                        | "call_constructor"
+                )
+            })
+            .map(|instruction| instruction.pc())
+            .collect::<Vec<_>>();
+        if !has_loop && !call_pcs.is_empty() {
+            let observed = self.feedback.snapshot(self.clock.max(1));
+            let generic_call = call_pcs.iter().any(|pc| {
+                !observed
+                    .call_specialization_at(key, *pc)
+                    .is_some_and(|call| {
+                        call.callee() != key && self.coordinator.direct_call_ready(&call)
+                    })
+            });
+            if generic_call {
+                self.cold_metrics_dirty = true;
+                self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
+                self.retire_untranslatable_to_interpreter(key);
+                return;
+            }
+        }
+        self.retire_untranslatable_to_interpreter(key);
+    }
+
+    fn retire_untranslatable_to_interpreter(&mut self, key: runtime::FunctionKey) {
+        self.optimizing_snapshots.remove(&key);
+        self.feedback_disabled.insert(key);
+        self.tier2_untranslatable.insert(key);
+        if self.profitability_blacklisted.insert(key) {
+            self.coordinator.demote_baseline_to_interpreter(key);
         }
     }
 
@@ -2243,7 +2333,7 @@ impl ProductionBackend {
             .keys()
             .copied()
             .filter(|key| {
-                if self.feedback_disabled.contains(key) {
+                if self.feedback_disabled.contains(key) || self.tier2_untranslatable.contains(key) {
                     return false;
                 }
                 if self
@@ -2275,6 +2365,14 @@ impl ProductionBackend {
             let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
                 continue;
             };
+            #[cfg(feature = "test-support")]
+            let forced_trial = self.config.force_optimized();
+            #[cfg(not(feature = "test-support"))]
+            let forced_trial = false;
+            if !forced_trial && !ir::optimized_opcodes_supported(snapshot) {
+                self.settle_untranslatable_tier2_candidate(key);
+                continue;
+            }
             let observed = self
                 .feedback
                 .snapshot(self.clock.max(1))
@@ -3419,6 +3517,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_requested.remove(&key);
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
+        self.tier2_untranslatable.remove(&key);
         self.tier2_sources.remove(&key);
         self.entry_tiers.remove(&key);
         self.coordinator.retire(key);

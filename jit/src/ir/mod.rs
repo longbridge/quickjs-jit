@@ -44,4 +44,5 @@ pub use scalar::{
 };
 pub use types::{BinaryOp, GenericOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp};
 
+pub(crate) use optimized::optimized_opcodes_supported;
 pub(crate) use scalar::stack_permutation;
