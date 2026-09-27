@@ -2536,6 +2536,11 @@ impl ProductionBackend {
                 .snapshot(self.clock.max(1))
                 .with_properties(self.shape_feedback.snapshot(key));
             let mut direct_call_pending = false;
+            // The callee-compile wait below depends on another function's
+            // optimizing state, which `Tier2ScanInputs` does not capture: a
+            // callee compile that fails or goes stale changes no scan input.
+            // Such a deferral is transient and must not be cached.
+            let mut callee_compile_wait = false;
             for instruction in snapshot.instructions() {
                 let Some(call) = observed.call_specialization_at(key, instruction.pc()) else {
                     continue;
@@ -2587,6 +2592,7 @@ impl ProductionBackend {
                         && runtime::tier2_direct_call_site_usable(snapshot, instruction.pc(), &call)
                     {
                         direct_call_pending = true;
+                        callee_compile_wait = true;
                     }
                     continue;
                 }
@@ -2601,7 +2607,11 @@ impl ProductionBackend {
              * the first Tier2 artifact. Self-recursive and non-specializable
              * calls keep their existing generic lowering. */
             if direct_call_pending {
-                self.tier2_deferred.insert(key, scan_inputs);
+                if callee_compile_wait {
+                    self.tier2_deferred.remove(&key);
+                } else {
+                    self.tier2_deferred.insert(key, scan_inputs);
+                }
                 continue;
             }
             // A stable call link can fund a bounded optimizing trial before
