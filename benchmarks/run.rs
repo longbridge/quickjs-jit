@@ -265,6 +265,13 @@ const WORKLOADS: &[Workload] = &[
         designated: false,
         file: "exceptions-promises-async.js",
     },
+    Workload {
+        name: "methods-dynamic",
+        suite: "rquickjs-jit matrix",
+        group: "methods-dynamic",
+        designated: false,
+        file: "methods-dynamic.js",
+    },
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1620,6 +1627,7 @@ mod tests {
             ("json-codec", "json-codec"),
             ("map-set-bigint", "map-set-bigint"),
             ("exceptions-promises-async", "exceptions-promises-async"),
+            ("methods-dynamic", "methods-dynamic"),
         ] {
             let workload = WORKLOADS.iter().find(|w| w.name == name).unwrap();
             assert_eq!(workload.group, group);

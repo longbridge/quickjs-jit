@@ -148,10 +148,13 @@ impl VerifiedFunction {
         }
         let mut unsupported = None;
         for instruction in &self.instructions {
-            if let super::Tier1Policy::Reject(reason) =
-                super::tier1_policy(instruction.opcode().id())
-                    .expect("verified opcode belongs to the generated table")
-            {
+            let policy = super::tier1_policy(instruction.opcode().id())
+                .expect("verified opcode belongs to the generated table");
+            let policy = match special_object_rejection(instruction) {
+                Some(reason) => super::Tier1Policy::Reject(reason),
+                None => policy,
+            };
+            if let super::Tier1Policy::Reject(reason) = policy {
                 let rejection = super::Tier1Rejection::new(instruction.pc(), reason);
                 if reason == super::FallbackReason::UnsupportedOpcode {
                     unsupported.get_or_insert(rejection);
@@ -161,6 +164,29 @@ impl VerifiedFunction {
             }
         }
         unsupported.map_or(Ok(()), Err)
+    }
+}
+
+/// QuickJS `OP_SPECIAL_OBJECT_MAPPED_ARGUMENTS`: sloppy-mode `arguments`
+/// aliases argument slots through variable references, which native code
+/// keeps in registers, so it remains an extended-frame rejection.
+pub(crate) const SPECIAL_OBJECT_MAPPED_ARGUMENTS: u8 = 1;
+/// QuickJS `OP_SPECIAL_OBJECT_IMPORT_META`: module state is interpreter-only.
+pub(crate) const SPECIAL_OBJECT_IMPORT_META: u8 = 6;
+/// QuickJS `OP_SPECIAL_OBJECT_NULL_PROTO`, the largest kind this ABI knows.
+pub(crate) const SPECIAL_OBJECT_MAX: u8 = 7;
+
+/// Operand-sensitive rejections for opcodes whose policy is otherwise a
+/// helper: only `special_object` kinds that copy frame state are admitted.
+fn special_object_rejection(instruction: &Instruction) -> Option<super::FallbackReason> {
+    if instruction.opcode().name() != "special_object" {
+        return None;
+    }
+    match instruction.operand_u8(1) {
+        SPECIAL_OBJECT_MAPPED_ARGUMENTS => Some(super::FallbackReason::ExtendedFrame),
+        SPECIAL_OBJECT_IMPORT_META => Some(super::FallbackReason::UnsupportedOpcode),
+        kind if kind > SPECIAL_OBJECT_MAX => Some(super::FallbackReason::UnsupportedOpcode),
+        _ => None,
     }
 }
 

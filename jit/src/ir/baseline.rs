@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, PollKind,
-    StackOp, TaggedValue, UnaryOp, VarRefMode,
+    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, GenericOp,
+    IrOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -482,6 +482,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
         IrOp::Regexp => 1,
+        IrOp::Generic(_) => 1,
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
         IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
@@ -770,6 +771,35 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "close_loc" => {
             IrOp::CloseLocal(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
+        "push_this" => IrOp::Generic(GenericOp::PushThis),
+        "special_object" => match instruction.operand_u8(1) {
+            crate::bytecode::SPECIAL_OBJECT_MAPPED_ARGUMENTS
+            | crate::bytecode::SPECIAL_OBJECT_IMPORT_META => {
+                return Err(CompileFailure::UnsupportedOpcode)
+            }
+            kind if kind > crate::bytecode::SPECIAL_OBJECT_MAX => {
+                return Err(CompileFailure::UnsupportedOpcode)
+            }
+            kind => IrOp::Generic(GenericOp::SpecialObject(kind)),
+        },
+        "get_var_undef" => IrOp::Generic(GenericOp::GetVarUndef(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "delete_var" => IrOp::Generic(GenericOp::DeleteVar(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "put_var" => IrOp::Generic(GenericOp::PutVar(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "typeof" => IrOp::Generic(GenericOp::TypeOf),
+        "typeof_is_undefined" => IrOp::Generic(GenericOp::TypeOfIsUndefined),
+        "typeof_is_function" => IrOp::Generic(GenericOp::TypeOfIsFunction),
+        "to_object" => IrOp::Generic(GenericOp::ToObject),
+        "to_propkey2" => IrOp::Generic(GenericOp::ToPropertyKey2),
+        "in" => IrOp::Generic(GenericOp::In),
+        "instanceof" => IrOp::Generic(GenericOp::InstanceOf),
+        "delete" => IrOp::Generic(GenericOp::Delete),
+        "pow" => IrOp::Generic(GenericOp::Pow),
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

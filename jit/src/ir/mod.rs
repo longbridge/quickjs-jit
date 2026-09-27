@@ -42,6 +42,7 @@ pub use scalar::{
     ScalarGraph, ScalarInlineRegion, ScalarInlineStep, ScalarNumericMode, ScalarPhiInput,
     ScalarValue, ScalarValueId,
 };
-pub use types::{BinaryOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode};
+pub use types::{BinaryOp, GenericOp, IrOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode};
 
+pub(crate) use optimized::optimized_opcodes_supported;
 pub(crate) use scalar::stack_permutation;

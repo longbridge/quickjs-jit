@@ -2798,7 +2798,8 @@ pub const JSJitHelperId_JS_JIT_HELPER_GET_VAR_REF: JSJitHelperId = 25;
 pub const JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF: JSJitHelperId = 26;
 pub const JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27;
 pub const JSJitHelperId_JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28;
-pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 29;
+pub const JSJitHelperId_JS_JIT_HELPER_GENERIC_OP: JSJitHelperId = 29;
+pub const JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 30;
 pub type JSJitHelperId = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3082,6 +3083,16 @@ unsafe extern "C" {
     ) -> JSJitHelperStatus;
 }
 unsafe extern "C" {
+    pub fn JS_JitHelperGenericOp(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        output: u32,
+        left: u32,
+        right: u32,
+        operation: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
     pub fn JS_JitGetHelperTable(count: *mut u32, fingerprint: *mut u64) -> *const JSJitHelperInfo;
 }
 #[repr(C)]
@@ -3336,10 +3347,20 @@ pub struct JSJitRuntimeAPI {
             input: u32,
         ) -> JSJitHelperStatus,
     >,
+    pub generic_op: ::core::option::Option<
+        unsafe extern "C" fn(
+            frame: *mut JSJitExecFrame,
+            stack_map_id: u32,
+            output: u32,
+            left: u32,
+            right: u32,
+            operation: u32,
+        ) -> JSJitHelperStatus,
+    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 124usize];
+    ["Size of JSJitRuntimeAPI"][::core::mem::size_of::<JSJitRuntimeAPI>() - 128usize];
     ["Alignment of JSJitRuntimeAPI"][::core::mem::align_of::<JSJitRuntimeAPI>() - 4usize];
     ["Offset of field: JSJitRuntimeAPI::struct_size"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, struct_size) - 0usize];
@@ -3405,6 +3426,8 @@ const _: () = {
         [::core::mem::offset_of!(JSJitRuntimeAPI, close_loc) - 116usize];
     ["Offset of field: JSJitRuntimeAPI::set_name"]
         [::core::mem::offset_of!(JSJitRuntimeAPI, set_name) - 120usize];
+    ["Offset of field: JSJitRuntimeAPI::generic_op"]
+        [::core::mem::offset_of!(JSJitRuntimeAPI, generic_op) - 124usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

@@ -32,8 +32,8 @@ use crate::{
         Relocation, RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
     ir::{
-        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, PollKind, StackOp,
-        TaggedValue, UnaryOp, VarRefMode, MAX_HELPER_SCRATCH_SLOTS,
+        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, GenericOp, IrOp, PollKind,
+        StackOp, TaggedValue, UnaryOp, VarRefMode, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
@@ -2508,6 +2508,30 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
                 }
+                IrOp::Generic(operation) => {
+                    let (pop, push) = operation.stack_effect();
+                    let start = frame
+                        .stack
+                        .len()
+                        .checked_sub(pop)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    if *operation == GenericOp::ToPropertyKey2 {
+                        // The object stays in place; only the key changes.
+                        frame.stack.truncate(start + 1);
+                        frame.stack.push(AbstractValue::unknown());
+                    } else {
+                        frame.stack.truncate(start);
+                        for _ in 0..push {
+                            frame.stack.push(if operation.produces_boolean() {
+                                AbstractValue::known(KnownKind::Boolean)
+                            } else if *operation == GenericOp::ToObject {
+                                AbstractValue::known(KnownKind::Other)
+                            } else {
+                                AbstractValue::unknown()
+                            });
+                        }
+                    }
+                }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
                         .arguments
@@ -2796,6 +2820,7 @@ fn binary_returns_boolean(operation: BinaryOp) -> bool {
 fn ir_op_produces_boolean(operation: &IrOp) -> bool {
     match operation {
         IrOp::Binary(operation) => binary_returns_boolean(*operation),
+        IrOp::Generic(operation) => operation.produces_boolean(),
         _ => false,
     }
 }
@@ -3358,6 +3383,13 @@ fn lower_function(
                         &[u32::from(index)]
                     );
                 }
+                IrOp::Generic(operation) => lower_generic(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    operation,
+                )?,
                 IrOp::GetArgument(index) => {
                     let state = helper_states
                         .next()
@@ -4128,6 +4160,236 @@ fn next_helper_state(
     states: &mut impl Iterator<Item = FrameStateId>,
 ) -> Result<FrameStateId, CompileFailure> {
     states.next().ok_or(CompileFailure::InvalidArtifact)
+}
+
+/// `GENERIC_OP` packs the QuickJS opcode in bits 0..7 and the bytecode's
+/// 8-bit immediate in bits 8..15.
+fn generic_operation(name: &str, immediate: u8) -> Result<u32, CompileFailure> {
+    Ok(quickjs_opcode_id(name)? | (u32::from(immediate) << 8))
+}
+
+/// Lowers an opcode whose semantics are executed exactly by `GENERIC_OP`
+/// (or `BINARY_ARITH_SLOW` for `pow`). Every operand stays in its frame slot
+/// across the helper; the helper clears consumed slots on success and on a
+/// language exception, so the exception depth is the pre-instruction depth.
+fn lower_generic(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    operation: GenericOp,
+) -> Result<(), CompileFailure> {
+    const NONE: u32 = qjs::JS_JIT_SLOT_NONE;
+    let live = *depth;
+    let (pop, push) = operation.stack_effect();
+    let base = live
+        .checked_sub(pop)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let slot = |index: usize| flat_stack_slot(helpers.ir, index);
+    let state = next_helper_state(states)?;
+    let generic = qjs::JSJitHelperId_JS_JIT_HELPER_GENERIC_OP;
+    match operation {
+        GenericOp::PushThis
+        | GenericOp::SpecialObject(_)
+        | GenericOp::GetVarUndef(_)
+        | GenericOp::DeleteVar(_) => {
+            let (name, immediate, atom) = match operation {
+                GenericOp::PushThis => ("push_this", 0, NONE),
+                GenericOp::SpecialObject(kind) => ("special_object", kind, NONE),
+                GenericOp::GetVarUndef(atom) => ("get_var_undef", 0, atom),
+                GenericOp::DeleteVar(atom) => ("delete_var", 0, atom),
+                _ => unreachable!(),
+            };
+            let output = slot(live)?;
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[output, NONE, atom, generic_operation(name, immediate)?],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[live],
+                helpers.stack_base,
+                live,
+                helpers.layout,
+            );
+        }
+        GenericOp::PutVar(atom) => {
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[NONE, slot(base)?, atom, generic_operation("put_var", 0)?],
+            )?;
+            clear_pair(
+                builder,
+                helpers.stack[base],
+                helpers.stack_base,
+                base,
+                helpers.layout,
+            )?;
+        }
+        GenericOp::ToPropertyKey2 => {
+            // The interpreter leaves an object-coercible receiver and an
+            // Int32/string/symbol key untouched; everything else (including
+            // the TypeError) takes the exact helper.
+            let object = use_pair(builder, helpers.stack[base]);
+            let key = use_pair(builder, helpers.stack[base + 1]);
+            let undefined = tag_is(builder, object.tag, qjs::JS_TAG_UNDEFINED);
+            let null = tag_is(builder, object.tag, qjs::JS_TAG_NULL);
+            let not_coercible = builder.ins().bor(undefined, null);
+            let int_key = tag_is(builder, key.tag, qjs::JS_TAG_INT);
+            let string_key = tag_is(builder, key.tag, qjs::JS_TAG_STRING);
+            let symbol_key = tag_is(builder, key.tag, qjs::JS_TAG_SYMBOL);
+            let key_ready = builder.ins().bor(int_key, string_key);
+            let key_ready = builder.ins().bor(key_ready, symbol_key);
+            let slow_needed = builder.ins().bxor_imm(key_ready, 1);
+            let slow_needed = builder.ins().bor(slow_needed, not_coercible);
+            let slow = builder.create_block();
+            let continuation = builder.create_block();
+            builder
+                .ins()
+                .brif(slow_needed, slow, &[], continuation, &[]);
+            builder.seal_block(slow);
+            builder.switch_to_block(slow);
+            builder.set_cold_block(slow);
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[
+                    slot(base + 1)?,
+                    slot(base)?,
+                    NONE,
+                    generic_operation("to_propkey2", 0)?,
+                ],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[base + 1],
+                helpers.stack_base,
+                base + 1,
+                helpers.layout,
+            );
+            builder.ins().jump(continuation, &[]);
+            builder.seal_block(continuation);
+            builder.switch_to_block(continuation);
+        }
+        GenericOp::TypeOf
+        | GenericOp::TypeOfIsUndefined
+        | GenericOp::TypeOfIsFunction
+        | GenericOp::ToObject => {
+            let name = match operation {
+                GenericOp::TypeOf => "typeof",
+                GenericOp::TypeOfIsUndefined => "typeof_is_undefined",
+                GenericOp::TypeOfIsFunction => "typeof_is_function",
+                _ => "to_object",
+            };
+            let input = slot(base)?;
+            let arguments = [input, input, NONE, generic_operation(name, 0)?];
+            if matches!(
+                operation,
+                GenericOp::TypeOfIsUndefined | GenericOp::TypeOfIsFunction
+            ) {
+                // Non-negative tags are neither objects nor reference counted:
+                // their `typeof` never names a function and only `undefined`
+                // names itself, so the answer needs no helper or release.
+                let value = use_pair(builder, helpers.stack[base]);
+                let primitive =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::SignedGreaterThanOrEqual, value.tag, 0);
+                let fast = builder.create_block();
+                let slow = builder.create_block();
+                let continuation = builder.create_block();
+                builder.ins().brif(primitive, fast, &[], slow, &[]);
+                builder.seal_block(fast);
+                builder.switch_to_block(fast);
+                let result = if operation == GenericOp::TypeOfIsUndefined {
+                    tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED)
+                } else {
+                    builder.ins().iconst(types::I8, 0)
+                };
+                let result = pair_from_bool(builder, result);
+                define_pair(builder, helpers.stack[base], result);
+                builder.ins().jump(continuation, &[]);
+                builder.seal_block(slow);
+                builder.switch_to_block(slow);
+                builder.set_cold_block(slow);
+                helpers.invoke(builder, generic, state, live, live, &arguments)?;
+                reload_pair(
+                    builder,
+                    helpers.stack[base],
+                    helpers.stack_base,
+                    base,
+                    helpers.layout,
+                );
+                builder.ins().jump(continuation, &[]);
+                builder.seal_block(continuation);
+                builder.switch_to_block(continuation);
+            } else {
+                helpers.invoke(builder, generic, state, live, live, &arguments)?;
+                reload_pair(
+                    builder,
+                    helpers.stack[base],
+                    helpers.stack_base,
+                    base,
+                    helpers.layout,
+                );
+            }
+        }
+        GenericOp::In | GenericOp::InstanceOf | GenericOp::Delete | GenericOp::Pow => {
+            let left = slot(base)?;
+            let right = slot(base + 1)?;
+            if operation == GenericOp::Pow {
+                helpers.invoke(
+                    builder,
+                    qjs::JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW,
+                    state,
+                    live,
+                    live,
+                    &[left, left, right, quickjs_opcode_id("pow")?],
+                )?;
+            } else {
+                let name = match operation {
+                    GenericOp::In => "in",
+                    GenericOp::InstanceOf => "instanceof",
+                    _ => "delete",
+                };
+                helpers.invoke(
+                    builder,
+                    generic,
+                    state,
+                    live,
+                    live,
+                    &[left, left, right, generic_operation(name, 0)?],
+                )?;
+            }
+            reload_pair(
+                builder,
+                helpers.stack[base],
+                helpers.stack_base,
+                base,
+                helpers.layout,
+            );
+            clear_pair(
+                builder,
+                helpers.stack[base + 1],
+                helpers.stack_base,
+                base + 1,
+                helpers.layout,
+            )?;
+        }
+    }
+    *depth = base + push;
+    helpers.set_depth(builder, *depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7203,6 +7465,7 @@ mod tests {
             IrOp::PutVarRef { .. } => "put_var_ref",
             IrOp::CloseLocal(_) => "close_local",
             IrOp::SetName(_) => "set_name",
+            IrOp::Generic(_) => "generic",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",

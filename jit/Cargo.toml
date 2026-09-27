@@ -196,5 +196,13 @@ name = "tier1_regexp"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_generic_ops"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "untranslatable_settle"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "test262"
 required-features = ["compiler", "test-support"]

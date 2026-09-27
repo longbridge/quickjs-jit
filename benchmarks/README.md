@@ -204,6 +204,7 @@ fallback-only result as proof that a JIT tier supports the feature.
 | `json-codec` | Repeated nested JSON encoding and decoding |
 | `map-set-bigint` | Map and Set mutation/iteration plus bounded BigInt arithmetic |
 | `exceptions-promises-async` | Throw/catch, Promise jobs, async functions, and continuations |
+| `methods-dynamic` | Prototype methods using `this`, `typeof`/`in`/`instanceof` dispatch, object destructuring, `**`, and compound element updates |
 
 Select the matrix with `JIT_BENCH_WORKLOADS` for smoke or publishable runs; the
 sample/warmup/window rules above remain unchanged.

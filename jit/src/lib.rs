@@ -720,6 +720,52 @@ struct Tier2ScanInputs {
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const FAST_ENTRY_BUDGET: u32 = 255;
 
+/// Baseline executions an untranslatable generation serves before it is
+/// settled into the interpreter (see `settle_untranslatable_tier2_candidate`).
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const UNTRANSLATABLE_SETTLE_EXECUTIONS: u64 = 16;
+
+/// Opcodes that Tier 1 admitted only through the P2b slice (82d3808 rejected
+/// each of them). A function containing one ran in the interpreter at
+/// 82d3808; the untranslatable settle returns it there. Every other function
+/// keeps the unchanged optimizing scan, so Tier 1-only code that already ran
+/// natively (string/object literals, `new`, ...) keeps its baseline.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const SETTLED_GENERIC_TIER1_OPCODES: &[&str] = &[
+    "push_this",
+    "special_object",
+    "dup1",
+    "dup2",
+    "perm4",
+    "swap2",
+    "rot3l",
+    "rot3r",
+    "get_var_undef",
+    "put_var",
+    "to_object",
+    "to_propkey2",
+    "typeof",
+    "delete",
+    "delete_var",
+    "pow",
+    "instanceof",
+    "in",
+    "typeof_is_undefined",
+    "typeof_is_function",
+];
+
+/// Whether the optimizing scan settles this generation into the interpreter
+/// instead of evaluating a Tier 2 trial: Tier 2 can never translate it and
+/// it contains an opcode from `SETTLED_GENERIC_TIER1_OPCODES`.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn settles_untranslatable_candidate(snapshot: &bytecode::VerifiedFunction) -> bool {
+    snapshot
+        .instructions()
+        .iter()
+        .any(|instruction| SETTLED_GENERIC_TIER1_OPCODES.contains(&instruction.opcode().name()))
+        && !ir::optimized_opcodes_supported(snapshot)
+}
+
 /// Feedback pc used for return types observed at native `DONE` exits.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 const NATIVE_RETURN_FEEDBACK_PC: u32 = u32::MAX;
@@ -824,6 +870,9 @@ struct ProductionBackend {
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
     profitability_blacklisted: rustc_hash::FxHashSet<runtime::FunctionKey>,
+    /// Generations whose bytecode Tier 2 can never translate and whose
+    /// baseline decision is settled; they leave the optimizing scan.
+    tier2_untranslatable: rustc_hash::FxHashSet<runtime::FunctionKey>,
     /// Immutable generations for which neither tier can ever produce code.
     /// `record_hot` reports these to QuickJS so it can turn off all probes and
     /// feedback at the bytecode object, avoiding a permanent C -> Rust tax.
@@ -1278,8 +1327,12 @@ impl TrustedFrameBuffers {
         let value_size = core::mem::size_of::<rquickjs_core::qjs::JSValue>();
         let stack = stack_base as usize;
         let capacity = stack_capacity as usize;
-        if arg_buf.is_null()
-            || var_buf.is_null()
+        // QuickJS aliases `arg_buf` to the caller's `argv` when no argument
+        // copy is needed, and a zero-argument call may pass a null `argv`
+        // (the baseline CALL helper does for `argc == 0`). An empty argument
+        // or local area therefore may be null; it is never dereferenced.
+        if (arg_buf.is_null() && argument_capacity != 0)
+            || (var_buf.is_null() && local_capacity != 0)
             || stack_base.is_null()
             || stack_capacity.is_null()
             || stack > capacity
@@ -1417,9 +1470,11 @@ fn validate_production_frame(
     let value_size = core::mem::size_of::<qjs::JSValue>();
     let expected_top = (frame.stack_base as usize)
         .checked_add(usize::from(map.stack_depth()).saturating_mul(value_size));
+    // An empty argument/local area may be null (a zero-argument call can
+    // pass a null `argv`); it is never read below.
     if expected_top != Some(frame.stack_top as usize)
-        || frame.arg_buf.is_null()
-        || frame.var_buf.is_null()
+        || (frame.arg_buf.is_null() && map.argument_count() != 0)
+        || (frame.var_buf.is_null() && map.local_count() != 0)
         || map.live_slots().len()
             != usize::from(map.argument_count())
                 + usize::from(map.local_count())
@@ -1609,14 +1664,18 @@ fn observed_deopt_type(
     shape: ir::OptimizedFrameShape,
 ) -> Option<runtime::ObservedType> {
     use rquickjs_core::qjs;
-    let values = unsafe {
-        core::slice::from_raw_parts(buffers.arg_buf, usize::from(shape.arguments()))
-            .iter()
-            .chain(core::slice::from_raw_parts(
-                buffers.var_buf,
-                usize::from(shape.locals()),
-            ))
+    // Empty areas may be null (see `TrustedFrameBuffers::capture_raw`), and a
+    // slice may not be built from a null pointer even when it is empty.
+    let area = |pointer: *mut qjs::JSValue, count: u16| -> &[qjs::JSValue] {
+        if count == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(pointer, usize::from(count)) }
+        }
     };
+    let values = area(buffers.arg_buf, shape.arguments())
+        .iter()
+        .chain(area(buffers.var_buf, shape.locals()));
     values
         .filter_map(|value| {
             let tag = unsafe { qjs::JS_VALUE_GET_TAG(*value) };
@@ -2282,6 +2341,7 @@ impl ProductionBackend {
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
+            tier2_untranslatable: rustc_hash::FxHashSet::default(),
             feedback_disabled: rustc_hash::FxHashSet::default(),
             benefit_recordings: 0,
             measured_benefit_ns: 0,
@@ -2386,6 +2446,79 @@ impl ProductionBackend {
             .store(self.entry_cache_epoch, Ordering::Relaxed);
     }
 
+    /// Settles a generation that Tier 2 can never translate and whose Tier 1
+    /// code exists only because of the opcodes in
+    /// `SETTLED_GENERIC_TIER1_OPCODES` (see `settles_untranslatable_candidate`).
+    /// Such a function ran in the interpreter at 82d3808, and its baseline is
+    /// dominated by exact slow-path helper calls: the optimizing scan would
+    /// otherwise revisit it at every maintenance, rebuilding feedback
+    /// snapshots whenever a property/call/numeric gate defers the trial, and
+    /// the new `methods-dynamic` kernel ran 5.4x slower that way. After a short
+    /// baseline warmup it returns to the interpreter with its probes off, the
+    /// state it had at 82d3808. The call-only rule runs first so that its
+    /// metric keeps its meaning.
+    fn settle_untranslatable_tier2_candidate(&mut self, key: runtime::FunctionKey) {
+        let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
+            return;
+        };
+        if self.profitability_blacklisted.contains(&key) {
+            self.retire_untranslatable_to_interpreter(key);
+            return;
+        }
+        // Let the installed baseline serve a short warmup (and any OSR it
+        // enabled) first. The deferral is a map lookup; no feedback snapshot
+        // is built.
+        if self
+            .execution_profiles
+            .get(&key)
+            .is_none_or(|profile| profile.baseline_executions < UNTRANSLATABLE_SETTLE_EXECUTIONS)
+        {
+            return;
+        }
+        let has_loop = snapshot.control_flow_graph().blocks().iter().any(|block| {
+            snapshot
+                .control_flow_graph()
+                .is_loop_header(block.start_pc())
+        });
+        // Both outcomes retire to the interpreter; only the call-only
+        // demotion metric differs.
+        if !has_loop {
+            let observed = self.feedback.snapshot(self.clock.max(1));
+            let generic_call = snapshot.instructions().iter().any(|instruction| {
+                matches!(
+                    instruction.opcode().name(),
+                    "call"
+                        | "call0"
+                        | "call1"
+                        | "call2"
+                        | "call3"
+                        | "call_method"
+                        | "tail_call"
+                        | "tail_call_method"
+                        | "call_constructor"
+                ) && !observed
+                    .call_specialization_at(key, instruction.pc())
+                    .is_some_and(|call| {
+                        call.callee() != key && self.coordinator.direct_call_ready(&call)
+                    })
+            });
+            if generic_call {
+                self.cold_metrics_dirty = true;
+                self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
+            }
+        }
+        self.retire_untranslatable_to_interpreter(key);
+    }
+
+    fn retire_untranslatable_to_interpreter(&mut self, key: runtime::FunctionKey) {
+        self.optimizing_snapshots.remove(&key);
+        self.feedback_disabled.insert(key);
+        self.tier2_untranslatable.insert(key);
+        if self.profitability_blacklisted.insert(key) {
+            self.coordinator.demote_baseline_to_interpreter(key);
+        }
+    }
+
     fn maintenance(&mut self) {
         // Maintenance owns installation, demotion, feedback-epoch updates,
         // and reclamation. Invalidate before touching any of those states.
@@ -2453,6 +2586,27 @@ impl ProductionBackend {
                     });
                     !admitted
                 });
+                // P2b x P4c: a generation that contains an opcode Tier 1 first
+                // admitted in P2b and that Tier 2 cannot translate was
+                // interpreter-only at 82d3808, and the optimizing scan settles
+                // it back into the interpreter; its terminal tier is not
+                // baseline, so it never takes a terminal refresh. Refreshing
+                // it would race that demotion (an in-flight refresh leaves no
+                // installed baseline to demote, and its later install keeps
+                // the function native). Forced-trial test runs skip the
+                // settle but still skip the refresh: recompiling such a
+                // callee (for example an accessor reached from a frame-inlined
+                // caller) re-publishes it mid-warmup and was observed to leave
+                // the caller's Tier 2 artifact deoptimizing on an
+                // object-typed guard until its side-path trial failed.
+                let untranslatable = &self.tier2_untranslatable;
+                keys.retain(|key| {
+                    !untranslatable.contains(key)
+                        && !snapshots
+                            .get(key)
+                            .or_else(|| sources.get(key))
+                            .is_some_and(settles_untranslatable_candidate)
+                });
                 keys
             };
             let refreshes = candidates
@@ -2497,7 +2651,7 @@ impl ProductionBackend {
             .keys()
             .copied()
             .filter(|key| {
-                if self.feedback_disabled.contains(key) {
+                if self.feedback_disabled.contains(key) || self.tier2_untranslatable.contains(key) {
                     return false;
                 }
                 if self
@@ -2546,6 +2700,14 @@ impl ProductionBackend {
             let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
                 continue;
             };
+            #[cfg(feature = "test-support")]
+            let forced_trial = self.config.force_optimized();
+            #[cfg(not(feature = "test-support"))]
+            let forced_trial = false;
+            if !forced_trial && settles_untranslatable_candidate(snapshot) {
+                self.settle_untranslatable_tier2_candidate(key);
+                continue;
+            }
             let scan_inputs = Tier2ScanInputs {
                 feedback: self.feedback.version(),
                 shapes: self.shape_feedback.version(),
@@ -3778,6 +3940,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimizing_hotness.remove(&key);
         self.optimizing_snapshots.remove(&key);
         self.tier2_deferred.remove(&key);
+        self.tier2_untranslatable.remove(&key);
         self.tier2_sources.remove(&key);
         self.optimized_vocabulary.remove(&key);
         self.baseline_property_refreshed.remove(&key);

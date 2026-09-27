@@ -111,6 +111,21 @@ checked-initialization form. Attached var refs alias the interpreter's
 argument/local storage, so generated code publishes those slots before every
 helper and reloads them afterwards in functions that create closures.
 
+`0026-tier1-generic-ops.patch` adds ABI 1.25 / runtime API 1.10 helper
+`GENERIC_OP` (append-only helper ID 29 after the 0025 closure tail,
+`MAP_OUT_TWO_OP`; runtime API offset 240, size 248 on 64-bit targets). It executes
+`push_this`, `special_object` (arguments, this function, `new.target`, home
+object, variable object and null-prototype objects), `get_var_undef`,
+`delete_var`, `put_var`, the `typeof` family, `to_object`, `to_propkey2`,
+`in`, `instanceof` and `delete` with the interpreter's own C routines. The
+operation word packs the opcode and its 8-bit immediate; atoms travel in the
+right operand and are validated. Each root native entry publishes a private
+stack-allocated call context (receiver, `new.target`, caller `argc`/`argv`) that
+is saved and restored around the pinned entry call; `push_this` and
+`special_object` reject any frame that is not that root (for example an inline
+view). Mapped (sloppy) `arguments` and `import.meta` stay interpreter-only.
+On a language exception every named slot is released and cleared.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

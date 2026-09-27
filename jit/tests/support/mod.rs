@@ -747,6 +747,7 @@ impl DifferentialRun {
                 HelperId::PutVarRef => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF,
                 HelperId::CloseLocal => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC,
                 HelperId::SetName => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_NAME,
+                HelperId::GenericOp => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GENERIC_OP,
             };
             let expected_opcode = self
                 .expected_opcode
@@ -1346,6 +1347,7 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         put_var_ref: Some(synthetic_map_out_in_op_unavailable),
         close_loc: Some(synthetic_map_in_unavailable),
         set_name: Some(synthetic_map_out_in_unavailable),
+        generic_op: Some(synthetic_map_out_two_op_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.

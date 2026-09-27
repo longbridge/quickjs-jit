@@ -60,6 +60,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0022-inline-refcount.patch",
         "0023-fast-native-entry.patch",
         "0025-tier1-closures.patch",
+        "0026-tier1-generic-ops.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -142,6 +143,9 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
         3
     );
     assert!(jit_header.contains("QJSJIT_RUNTIME_API_MINOR 10u"));
+    assert!(helper_header.contains("X(GENERIC_OP, generic_op, JS_JitHelperGenericOp"));
+    assert!(quickjs.contains("JSJitHelperStatus JS_JitHelperGenericOp("));
+    assert!(quickjs.contains("rt->jit_active_root = root_call.previous;"));
     assert!(jit_header.contains("#define QJSJIT_RUNTIME_FIELD_MAP_OUT_IN_OP(field)"));
     assert!(helper_header.contains("JS_JIT_HELPER_MATERIALIZED = 2"));
     assert!(helper_header.contains("JS_JIT_OWNER_SOURCE_ARGUMENT = 0"));
@@ -329,7 +333,10 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
                 && binding.contains("JS_JIT_HELPER_PUT_VAR_REF: JSJitHelperId = 26")
                 && binding.contains("JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27")
                 && binding.contains("JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28")
-                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 29"),
+                && binding.contains("JS_JIT_HELPER_GENERIC_OP: JSJitHelperId = 29")
+                && binding.contains("pub generic_op: ::core::option::Option")
+                && binding.contains("pub fn JS_JitHelperGenericOp(")
+                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 30"),
             "{target}"
         );
         assert!(
@@ -337,7 +344,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 240usize")
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 248usize")
                 && binding.contains("pub close_loc: ::core::option::Option"),
             "{target}"
         );
@@ -408,8 +415,12 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;",
         "JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27",
         "JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT: JSJitVarRefMode = 2;",
-        "size_of::<JSJitRuntimeAPI>() - 124usize",
+        "size_of::<JSJitRuntimeAPI>() - 128usize",
         "JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28",
+        // ABI 1.25: exact generic-opcode helper (appended after the closure tail).
+        "JS_JIT_HELPER_GENERIC_OP: JSJitHelperId = 29;",
+        "pub fn JS_JitHelperGenericOp(",
+        "offset_of!(JSJitRuntimeAPI, generic_op) - 124usize",
         // ABI 1.24: typed-array continuing guard.
         "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
         "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",

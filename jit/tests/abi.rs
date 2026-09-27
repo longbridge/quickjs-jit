@@ -424,7 +424,8 @@ fn interrupt_runtime_api_is_a_versioned_exec_frame_tail_extension() {
     assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, put_var_ref), 216);
     assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, close_loc), 224);
     assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, set_name), 232);
-    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 240);
+    assert_eq!(std::mem::offset_of!(qjs::JSJitRuntimeAPI, generic_op), 240);
+    assert_eq!(std::mem::size_of::<qjs::JSJitRuntimeAPI>(), 248);
     assert_eq!(qjs::JS_JIT_HELPER_GUARD_MISS, 1);
 }
 
@@ -559,6 +560,11 @@ fn helper_abi_is_one_canonical_versioned_table_in_c_bindgen_and_rust() {
             "SET_NAME",
             1,
             qjs::JSJitHelperOwnership_JS_JIT_HELPER_NONE as u8,
+        ),
+        (
+            "GENERIC_OP",
+            3,
+            qjs::JSJitHelperOwnership_JS_JIT_HELPER_OWNED as u8,
         ),
     ];
 

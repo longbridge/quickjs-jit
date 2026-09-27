@@ -69,6 +69,7 @@ enum ManifestHelper {
     PutVarRef,
     CloseLocal,
     SetName,
+    GenericOp,
 }
 
 impl ManifestHelper {
@@ -100,6 +101,7 @@ impl ManifestHelper {
             Self::PutVarRef => HelperId::PutVarRef,
             Self::CloseLocal => HelperId::CloseLocal,
             Self::SetName => HelperId::SetName,
+            Self::GenericOp => HelperId::GenericOp,
         }
     }
 }
@@ -260,8 +262,8 @@ fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() 
 #[test]
 fn rejected_programs_have_exact_fallback_and_interpreter_semantics() {
     assert_tier1_rejected(
-        "function f(a){ return typeof a }",
-        "f(86)",
+        "function f(a){ return a ? 1n : 2n }",
+        "String(f(86))",
         FallbackReason::UnsupportedOpcode,
     );
 }

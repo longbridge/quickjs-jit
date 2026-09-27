@@ -186,3 +186,12 @@ subdirectory = "benchmarks/scripts/generic-call-fallback.js"
 license = "workspace"
 upstream_sha256 = "not-applicable-local-workload"
 adapted_sha256 = "af1c8b8d3eb97968c1924927bdb5744c1678a2c9d82dec6f8b3f772451f12596"
+
+[[suite]]
+name = "rquickjs-jit-matrix-methods-dynamic"
+repository = "local"
+commit = "local"
+subdirectory = "benchmarks/scripts/methods-dynamic.js"
+license = "workspace"
+upstream_sha256 = "not-applicable-local-workload"
+adapted_sha256 = "f358b173509f6aaa9f4f74b7d39b1e23391af24222829507e7da8a6347a4734d"

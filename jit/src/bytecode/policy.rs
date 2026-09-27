@@ -37,6 +37,7 @@ pub enum HelperId {
     PutVarRef,
     CloseLocal,
     SetName,
+    GenericOp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
