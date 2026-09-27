@@ -1027,7 +1027,18 @@ impl ScalarGraph {
         numeric: &[Option<ScalarNumericMode>],
         guarded_heap: impl Fn(u32) -> bool,
     ) -> bool {
-        nodes.iter().all(|node| {
+        self.permits_amortized_poll_for(nodes.iter(), numeric, guarded_heap)
+    }
+
+    /// As [`Self::permits_amortized_poll_with_guarded_heap`], restricted to
+    /// the given nodes (for example the members of one natural loop).
+    pub(crate) fn permits_amortized_poll_for<'a>(
+        &self,
+        mut nodes: impl Iterator<Item = &'a OptimizedNode>,
+        numeric: &[Option<ScalarNumericMode>],
+        guarded_heap: impl Fn(u32) -> bool,
+    ) -> bool {
+        nodes.all(|node| {
             // Legacy optimized effects classify several property/element
             // opcodes as FrameWrite because their result replaces operands.
             // A concrete guarded leaf-or-exit lowering is nevertheless a

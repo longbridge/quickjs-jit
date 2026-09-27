@@ -771,6 +771,16 @@ impl BaselineCompiler {
             machine_disassembly: compiled.vcode.clone(),
             osr_codes: Vec::new(),
         };
+        #[cfg(feature = "test-support")]
+        dump_code_for_diagnostics(
+            if osr_start.is_some() {
+                "tier1-osr"
+            } else {
+                "tier1"
+            },
+            &code.clif,
+            code.machine_disassembly(),
+        );
         if osr_start.is_none() && matches!(policy, CompilePolicy::AdvertisedOnly) {
             for point in function.osr_points() {
                 let Some(map) =
@@ -953,13 +963,65 @@ pub(crate) fn finalize_optimized_machine(
     control: Option<&CompileControl>,
     requires_helper_stack_map: bool,
 ) -> Result<RelocatableCode, CompileFailure> {
+    finalize_optimized_machine_with_lowered_text(
+        isa,
+        clif,
+        control,
+        requires_helper_stack_map,
+        None,
+    )
+}
+
+/// As [`finalize_optimized_machine`]. `lowered_text` is the builder's CLIF
+/// before any post-lowering cleanup; it becomes the artifact's `clif()` text so
+/// lowering-structure evidence is independent of the machine-level cleanups
+/// (constant canonicalization, constant-branch folding, exit
+/// rematerialization) that only change register pressure and dead code.
+pub(crate) fn finalize_optimized_machine_with_lowered_text(
+    isa: &OwnedTargetIsa,
+    clif: Function,
+    control: Option<&CompileControl>,
+    requires_helper_stack_map: bool,
+    lowered_text: Option<String>,
+) -> Result<RelocatableCode, CompileFailure> {
+    let clif_text = lowered_text.unwrap_or_else(|| clif.display().to_string());
     if let Some(control) = control {
         control.check()?;
-        control.check_ir_bytes(clif.display().to_string().len())?;
+        control.check_ir_bytes(clif_text.len())?;
     }
-    let clif_text = clif.display().to_string();
+    let mut clif = clif;
+    canonicalize_integer_constants(&mut clif);
+    fold_constant_branches(&mut clif);
     let function_parameters = clif.params.clone();
     let mut context = Context::for_function(clif);
+    // With shared constants, loop-invariant tags and values become constant
+    // block parameters. Remove those first so guards on them fold to jumps
+    // too; `compile` below reruns the complete Cranelift pipeline.
+    context.compute_cfg();
+    context.compute_domtree();
+    context
+        .eliminate_unreachable_code(&**isa)
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    context
+        .remove_constant_phis(&**isa)
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    context.func.dfg.resolve_all_aliases();
+    fold_bitcast_round_trips(&mut context.func);
+    fold_constant_branches(&mut context.func);
+    // Folding can remove the only helper call (for example one guarded by a
+    // proven check); an artifact without calls publishes no helper map.
+    let requires_helper_stack_map = requires_helper_stack_map
+        && context.func.layout.blocks().any(|block| {
+            context
+                .func
+                .layout
+                .block_insts(block)
+                .any(|inst| context.func.dfg.insts[inst].opcode().is_call())
+        });
+    #[cfg(feature = "test-support")]
+    let final_text = diagnostics_directory()
+        .is_some()
+        .then(|| context.func.display().to_string());
     context.set_disasm(cfg!(feature = "test-support"));
     let compiled = context
         .compile(&**isa, &mut ControlPlane::default())
@@ -1020,6 +1082,14 @@ pub(crate) fn finalize_optimized_machine(
     } else {
         (Vec::new(), Vec::new())
     };
+    #[cfg(feature = "test-support")]
+    if let Some(final_text) = final_text {
+        dump_code_for_diagnostics(
+            "tier2",
+            &final_text,
+            compiled.vcode.as_deref().unwrap_or(""),
+        );
+    }
     Ok(RelocatableCode {
         bytes,
         relocations,
@@ -1034,6 +1104,332 @@ pub(crate) fn finalize_optimized_machine(
         machine_disassembly: compiled.vcode.clone(),
         osr_codes: Vec::new(),
     })
+}
+
+/// Rewrites every `iconst` to one canonical definition per (type, value) at
+/// the top of the entry block.
+///
+/// The optimizing lowering materializes tag and payload constants where they
+/// are needed, so SSA construction turns loop-invariant constants such as the
+/// Int32 tag into block parameters whose incoming values are distinct `iconst`
+/// instructions. Cranelift's constant-phi removal compares value identity and
+/// runs before GVN, so those parameters otherwise survive into register
+/// allocation and cost a register (and moves) per loop-carried slot. Constants
+/// are pure and the entry block dominates every block, so sharing one
+/// definition preserves semantics exactly.
+pub(crate) fn canonicalize_integer_constants(function: &mut Function) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    use cranelift_codegen::ir::{InstructionData, Opcode};
+    let Some(entry) = function.layout.entry_block() else {
+        return;
+    };
+    function.dfg.resolve_all_aliases();
+    let mut constants = Vec::new();
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            if let InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } = function.dfg.insts[inst]
+            {
+                let value = function.dfg.first_result(inst);
+                constants.push((inst, value, function.dfg.value_type(value), imm.bits()));
+            }
+        }
+    }
+    if constants.len() < 2 {
+        return;
+    }
+    let mut canonical = std::collections::HashMap::new();
+    let mut cursor = FuncCursor::new(function);
+    cursor.goto_first_insertion_point(entry);
+    for &(_, _, ty, bits) in &constants {
+        canonical
+            .entry((ty, bits))
+            .or_insert_with(|| cursor.ins().iconst(ty, bits));
+    }
+    let mut replacements = std::collections::HashMap::new();
+    for &(inst, value, ty, bits) in &constants {
+        cursor.func.layout.remove_inst(inst);
+        replacements.insert(value, canonical[&(ty, bits)]);
+    }
+    let function = cursor.func;
+    let blocks = function.layout.blocks().collect::<Vec<_>>();
+    for block in blocks {
+        let mut next = function.layout.first_inst(block);
+        while let Some(inst) = next {
+            next = function.layout.next_inst(inst);
+            function.dfg.map_inst_values(inst, |value| {
+                replacements.get(&value).copied().unwrap_or(value)
+            });
+        }
+    }
+}
+
+/// Forwards `bitcast.T (bitcast.U x)` to `x` when `x` already has type `T`.
+///
+/// The optimizing lowering keeps Float64 payloads in 64-bit integer frame
+/// variables, so each arithmetic step converts its operands back to `f64`
+/// and its result to `i64`. Without this rewrite every chained Float64
+/// operation pays a GPR/XMM move pair on its dependency chain. Only scalar
+/// bitcasts are forwarded; a round trip through another type of the same
+/// width is the identity on the bits.
+pub(crate) fn fold_bitcast_round_trips(function: &mut Function) {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let mut replacements = std::collections::HashMap::new();
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            let InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                arg,
+                ..
+            } = function.dfg.insts[inst]
+            else {
+                continue;
+            };
+            let ValueDef::Result(source, 0) = function.dfg.value_def(arg) else {
+                continue;
+            };
+            let InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                arg: original,
+                ..
+            } = function.dfg.insts[source]
+            else {
+                continue;
+            };
+            let result = function.dfg.first_result(inst);
+            let ty = function.dfg.value_type(result);
+            let middle = function.dfg.value_type(arg);
+            if ty.is_vector() || middle.is_vector() || function.dfg.value_type(original) != ty {
+                continue;
+            }
+            replacements.insert(result, original);
+        }
+    }
+    if replacements.is_empty() {
+        return;
+    }
+    let blocks = function.layout.blocks().collect::<Vec<_>>();
+    for block in blocks {
+        let mut next = function.layout.first_inst(block);
+        while let Some(inst) = next {
+            next = function.layout.next_inst(inst);
+            function.dfg.map_inst_values(inst, |value| {
+                replacements.get(&value).copied().unwrap_or(value)
+            });
+        }
+    }
+}
+
+/// Evaluates `value` when it is a compile-time integer built only from
+/// constants, integer width conversions, bitwise operations and integer
+/// comparisons. Results are normalized to the value's type width.
+fn constant_integer_value(
+    function: &Function,
+    value: cranelift_codegen::ir::Value,
+    memo: &mut std::collections::HashMap<cranelift_codegen::ir::Value, Option<i64>>,
+    depth: u32,
+) -> Option<i64> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstructionData, Opcode, ValueDef};
+    if let Some(&known) = memo.get(&value) {
+        return known;
+    }
+    if depth > 64 {
+        return None;
+    }
+    let ty = function.dfg.value_type(value);
+    if !ty.is_int() || ty.bits() > 64 {
+        return None;
+    }
+    let bits = ty.bits();
+    let wrap = |raw: i64| -> i64 {
+        if bits == 64 {
+            raw
+        } else {
+            let shift = 64 - bits;
+            (raw << shift) >> shift
+        }
+    };
+    let ValueDef::Result(inst, 0) = function.dfg.value_def(value) else {
+        return None;
+    };
+    let mut operand = |value| constant_integer_value(function, value, memo, depth + 1);
+    let compare = |cond: IntCC, lhs: i64, rhs: i64, width: u32| -> i64 {
+        let unsigned = |raw: i64| -> u64 {
+            if width == 64 {
+                raw as u64
+            } else {
+                (raw as u64) & ((1u64 << width) - 1)
+            }
+        };
+        let result = match cond {
+            IntCC::Equal => lhs == rhs,
+            IntCC::NotEqual => lhs != rhs,
+            IntCC::SignedLessThan => lhs < rhs,
+            IntCC::SignedGreaterThanOrEqual => lhs >= rhs,
+            IntCC::SignedGreaterThan => lhs > rhs,
+            IntCC::SignedLessThanOrEqual => lhs <= rhs,
+            IntCC::UnsignedLessThan => unsigned(lhs) < unsigned(rhs),
+            IntCC::UnsignedGreaterThanOrEqual => unsigned(lhs) >= unsigned(rhs),
+            IntCC::UnsignedGreaterThan => unsigned(lhs) > unsigned(rhs),
+            IntCC::UnsignedLessThanOrEqual => unsigned(lhs) <= unsigned(rhs),
+        };
+        i64::from(result)
+    };
+    let result = match function.dfg.insts[inst] {
+        InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            imm,
+        } => Some(wrap(imm.bits())),
+        InstructionData::Unary { opcode, arg } => {
+            let arg_ty = function.dfg.value_type(arg);
+            let raw = operand(arg);
+            match (opcode, raw) {
+                (Opcode::Ireduce | Opcode::Sextend, Some(raw)) => Some(wrap(raw)),
+                (Opcode::Uextend, Some(raw)) if arg_ty.bits() < 64 => {
+                    Some(wrap(raw & ((1i64 << arg_ty.bits()) - 1)))
+                }
+                (Opcode::Bnot, Some(raw)) => Some(wrap(!raw)),
+                _ => None,
+            }
+        }
+        InstructionData::Binary { opcode, args } => {
+            match (opcode, operand(args[0]), operand(args[1])) {
+                (Opcode::Band, Some(lhs), Some(rhs)) => Some(wrap(lhs & rhs)),
+                (Opcode::Bor, Some(lhs), Some(rhs)) => Some(wrap(lhs | rhs)),
+                (Opcode::Bxor, Some(lhs), Some(rhs)) => Some(wrap(lhs ^ rhs)),
+                // An and with a known zero, or an or with a known all-ones
+                // operand, is constant whatever the other operand is.
+                (Opcode::Band, Some(0), _) | (Opcode::Band, _, Some(0)) => Some(0),
+                (Opcode::Bor, Some(-1), _) | (Opcode::Bor, _, Some(-1)) => Some(wrap(-1)),
+                _ => None,
+            }
+        }
+        InstructionData::BinaryImm64 { opcode, arg, imm } => {
+            let imm = wrap(imm.bits());
+            match (opcode, operand(arg)) {
+                (Opcode::BandImm, Some(raw)) => Some(wrap(raw & imm)),
+                (Opcode::BorImm, Some(raw)) => Some(wrap(raw | imm)),
+                (Opcode::BxorImm, Some(raw)) => Some(wrap(raw ^ imm)),
+                _ => None,
+            }
+        }
+        InstructionData::IntCompare { cond, args, .. } => {
+            let width = function.dfg.value_type(args[0]).bits();
+            match (operand(args[0]), operand(args[1])) {
+                (Some(lhs), Some(rhs)) if width <= 64 => Some(compare(cond, lhs, rhs, width)),
+                _ => None,
+            }
+        }
+        InstructionData::IntCompareImm { cond, arg, imm, .. } => {
+            let width = function.dfg.value_type(arg).bits();
+            let rhs = if width == 64 {
+                imm.bits()
+            } else {
+                let shift = 64 - width;
+                (imm.bits() << shift) >> shift
+            };
+            operand(arg)
+                .filter(|_| width <= 64)
+                .map(|lhs| compare(cond, lhs, rhs, width))
+        }
+        _ => None,
+    };
+    memo.insert(value, result);
+    result
+}
+
+/// Replaces `brif` on a compile-time constant condition with a jump.
+///
+/// Guards whose checks the specializer has already proven (for example a tag
+/// comparison against the canonical Int32 tag constant) reach Cranelift as
+/// branches on folded constants, which its mid-end does not turn into jumps.
+/// The dead deopt blocks then keep values live for register allocation and
+/// the hot path executes a materialize/test/branch per proven guard. The
+/// untaken successor is unreachable and is removed by Cranelift's
+/// unreachable-code elimination.
+pub(crate) fn fold_constant_branches(function: &mut Function) {
+    use cranelift_codegen::ir::{InstBuilder, InstructionData, Opcode};
+    let mut memo = std::collections::HashMap::new();
+    let mut folds = Vec::new();
+    for block in function.layout.blocks() {
+        let Some(inst) = function.layout.last_inst(block) else {
+            continue;
+        };
+        let InstructionData::Brif {
+            opcode: Opcode::Brif,
+            arg,
+            blocks,
+        } = function.dfg.insts[inst]
+        else {
+            continue;
+        };
+        let Some(condition) = constant_integer_value(function, arg, &mut memo, 0) else {
+            continue;
+        };
+        let taken = blocks[usize::from(condition == 0)];
+        let target = taken.block(&function.dfg.value_lists);
+        let arguments = taken.args_slice(&function.dfg.value_lists).to_vec();
+        folds.push((inst, target, arguments));
+    }
+    if folds.is_empty() {
+        return;
+    }
+    for (inst, target, arguments) in folds {
+        function.dfg.replace(inst).jump(target, &arguments);
+    }
+    // Drop the blocks the folded branches made unreachable, so callers that
+    // inspect the finalized IR (for example to decide whether a helper call
+    // remains) see exactly the code that will be emitted.
+    let Some(entry) = function.layout.entry_block() else {
+        return;
+    };
+    let mut reachable = std::collections::HashSet::new();
+    let mut worklist = vec![entry];
+    while let Some(block) = worklist.pop() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        for inst in function.layout.block_insts(block) {
+            for successor in function.dfg.insts[inst].branch_destination(&function.dfg.jump_tables)
+            {
+                worklist.push(successor.block(&function.dfg.value_lists));
+            }
+        }
+    }
+    let unreachable = function
+        .layout
+        .blocks()
+        .filter(|block| !reachable.contains(block))
+        .collect::<Vec<_>>();
+    for block in unreachable {
+        while let Some(inst) = function.layout.first_inst(block) {
+            function.layout.remove_inst(inst);
+        }
+        function.layout.remove_block(block);
+    }
+}
+
+/// Test-support diagnostic: when `QJSJIT_DUMP_CODE` names a directory, write
+/// each finalized function's Cranelift IR and machine disassembly there so
+/// benchmark kernels can be inspected under production tiering.
+#[cfg(feature = "test-support")]
+fn diagnostics_directory() -> Option<std::ffi::OsString> {
+    std::env::var_os("QJSJIT_DUMP_CODE")
+}
+
+#[cfg(feature = "test-support")]
+fn dump_code_for_diagnostics(kind: &str, clif: &str, machine: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let Some(directory) = diagnostics_directory() else {
+        return;
+    };
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = std::path::Path::new(&directory)
+        .join(format!("{}-{sequence:04}-{kind}.txt", std::process::id()));
+    let _ = std::fs::write(path, format!("{clif}\n;; machine code\n{machine}"));
 }
 
 pub(crate) fn artifact_from_relocatable(
@@ -6742,5 +7138,238 @@ mod tests {
             33,
             "every IrOp variant is represented: {seen:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod post_lowering_tests {
+    use super::{canonicalize_integer_constants, fold_bitcast_round_trips, fold_constant_branches};
+    use cranelift_codegen::ir::{
+        condcodes::IntCC, types, AbiParam, Function, InstBuilder, Signature,
+    };
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+
+    fn verify(function: &Function) {
+        cranelift_codegen::verify_function(
+            function,
+            &cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder()),
+        )
+        .unwrap_or_else(|errors| panic!("{errors}: {}", function.display()));
+    }
+
+    fn signature(params: &[types::Type], returns: &[types::Type]) -> Signature {
+        let mut signature = Signature::new(CallConv::SystemV);
+        signature
+            .params
+            .extend(params.iter().map(|&ty| AbiParam::new(ty)));
+        signature
+            .returns
+            .extend(returns.iter().map(|&ty| AbiParam::new(ty)));
+        signature
+    }
+
+    /// A loop whose `tag` variable is redefined to a fresh `iconst 0` on the
+    /// backedge, as the lowering does for Int32 tags.
+    #[test]
+    fn loop_invariant_constants_share_one_definition() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let exit = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        let counter = Variable::from_u32(0);
+        let tag = Variable::from_u32(1);
+        builder.declare_var(counter, types::I64);
+        builder.declare_var(tag, types::I64);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        builder.def_var(counter, x);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.def_var(tag, zero);
+        builder.ins().jump(header, &[]);
+        builder.switch_to_block(header);
+        let current = builder.use_var(counter);
+        let done = builder.ins().icmp_imm(IntCC::Equal, current, 0);
+        builder.ins().brif(done, exit, &[], body, &[]);
+        builder.switch_to_block(body);
+        let next = builder.ins().iadd_imm(current, -1);
+        builder.def_var(counter, next);
+        let again = builder.ins().iconst(types::I64, 0);
+        builder.def_var(tag, again);
+        builder.ins().jump(header, &[]);
+        builder.switch_to_block(exit);
+        let result = builder.use_var(tag);
+        builder.ins().return_(&[result]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        canonicalize_integer_constants(&mut function);
+        verify(&function);
+        let text = function.display().to_string();
+        assert_eq!(text.matches("iconst.i64 0").count(), 1, "{text}");
+        // Every edge into the header now passes the same zero, which is what
+        // lets Cranelift's constant-phi removal delete the tag parameter.
+        let jumps = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("jump block1"))
+            .collect::<Vec<_>>();
+        assert_eq!(jumps.len(), 2, "{text}");
+        let zero = text
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.ends_with("iconst.i64 0")
+                    .then(|| line.split_whitespace().next().unwrap().to_owned())
+            })
+            .unwrap();
+        assert!(
+            jumps.iter().all(|jump| jump.contains(&format!("{zero})"))),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn constant_conditions_become_jumps_and_drop_dead_exits() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let pass = builder.create_block();
+        let deopt = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.append_block_param(pass, types::I64);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        let tag = builder.ins().iconst(types::I64, 0);
+        let int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+        let float = builder.ins().icmp_imm(IntCC::Equal, tag, 8);
+        let one = builder.ins().iconst(types::I8, 1);
+        let numeric = builder.ins().bor(int, float);
+        let numeric = builder.ins().band(one, numeric);
+        builder.ins().brif(numeric, pass, &[x], deopt, &[]);
+        builder.switch_to_block(pass);
+        let value = builder.block_params(pass)[0];
+        builder.ins().return_(&[value]);
+        builder.switch_to_block(deopt);
+        let marker = builder.ins().iconst(types::I64, -1);
+        builder.ins().return_(&[marker]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        canonicalize_integer_constants(&mut function);
+        fold_constant_branches(&mut function);
+        verify(&function);
+        let folded = function.display().to_string();
+        assert!(!folded.contains("brif"), "{folded}");
+        assert!(folded.contains("jump block1(v0)"), "{folded}");
+        assert!(!folded.contains("block2"), "dead exit removed: {folded}");
+    }
+
+    #[test]
+    fn runtime_conditions_are_left_alone() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let left = builder.create_block();
+        let right = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        let small = builder.ins().icmp_imm(IntCC::UnsignedLessThan, x, 8);
+        let zero = builder.ins().iconst(types::I8, 0);
+        // `small | 0` still depends on x; `x & 0` would not.
+        let condition = builder.ins().bor(small, zero);
+        builder.ins().brif(condition, left, &[], right, &[]);
+        builder.switch_to_block(left);
+        builder.ins().return_(&[x]);
+        builder.switch_to_block(right);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[zero]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_constant_branches(&mut function);
+        verify(&function);
+        assert!(function.display().to_string().contains("brif"));
+    }
+
+    #[test]
+    fn narrow_comparisons_fold_with_their_type_width() {
+        let mut function =
+            Function::with_name_signature(Default::default(), signature(&[], &[types::I32]));
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let taken = builder.create_block();
+        let other = builder.create_block();
+        builder.switch_to_block(entry);
+        // -1 as i32 is below zero signed but the largest value unsigned, and
+        // its zero extension is positive.
+        let minus_one = builder.ins().iconst(types::I32, -1);
+        let wide = builder.ins().uextend(types::I64, minus_one);
+        let unsigned_big = builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, minus_one, 7);
+        let signed_negative = builder.ins().icmp_imm(IntCC::SignedLessThan, minus_one, 0);
+        let widened_positive = builder.ins().icmp_imm(IntCC::SignedGreaterThan, wide, 0);
+        let both = builder.ins().band(unsigned_big, widened_positive);
+        let all = builder.ins().band(both, signed_negative);
+        builder.ins().brif(all, taken, &[], other, &[]);
+        builder.switch_to_block(taken);
+        let one = builder.ins().iconst(types::I32, 1);
+        builder.ins().return_(&[one]);
+        builder.switch_to_block(other);
+        let two = builder.ins().iconst(types::I32, 2);
+        builder.ins().return_(&[two]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_constant_branches(&mut function);
+        verify(&function);
+        let folded = function.display().to_string();
+        assert!(folded.contains("jump block1"), "{folded}");
+        assert!(!folded.contains("block2"), "{folded}");
+    }
+
+    #[test]
+    fn float_payload_round_trips_forward_the_original_value() {
+        use cranelift_codegen::ir::MemFlags;
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::F64, types::I64], &[types::F64, types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let float = builder.block_params(entry)[0];
+        let bits = builder.block_params(entry)[1];
+        let payload = builder.ins().bitcast(types::I64, MemFlags::new(), float);
+        let back = builder.ins().bitcast(types::F64, MemFlags::new(), payload);
+        let sum = builder.ins().fadd(back, back);
+        // An integer payload viewed as f64 and back is also the identity.
+        let viewed = builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+        let raw = builder.ins().bitcast(types::I64, MemFlags::new(), viewed);
+        builder.ins().return_(&[sum, raw]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_bitcast_round_trips(&mut function);
+        verify(&function);
+        let text = function.display().to_string();
+        assert!(text.contains("fadd v0, v0"), "{text}");
+        assert!(text.contains("return v4, v1"), "{text}");
     }
 }

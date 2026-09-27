@@ -1612,47 +1612,67 @@ fn lower_optimized_machine(
     // Array feedback only proposes candidates. Poll amortization is enabled
     // after the concrete plan has proved that every heap site on the native
     // path is a guarded leaf-or-exit operation.
+    let guarded_heap = |id: u32| {
+        if array_plan.guarded_leaf(id) || property_plan.access(id).is_some() {
+            return true;
+        }
+        let Some(node) = ir.nodes().get(id as usize) else {
+            return false;
+        };
+        let crate::ir::OptimizedNodeKind::Bytecode { opcode } = node.kind() else {
+            return false;
+        };
+        if matches!(opcode.as_ref(), "get_field" | "put_field")
+            && specialization.properties.contains_key(&node.pc())
+        {
+            return true;
+        }
+        (matches!(
+            opcode.as_ref(),
+            "add" | "sub" | "mul" | "div" | "or" | "and" | "xor" | "shl" | "sar" | "shr"
+        ) && ir.scalar_graph().binary_operation(id).is_some())
+            || (matches!(
+                opcode.as_ref(),
+                "or" | "and" | "xor" | "shl" | "sar" | "shr"
+            ) && ir.scalar_graph().bitwise_operation(id).is_some())
+            || (matches!(opcode.as_ref(), "lt" | "lte" | "gt" | "gte")
+                && ir.scalar_graph().comparison(id).is_some())
+    };
     let amortized_poll = int32_loop
         || (side_path.is_none()
             && ir.scalar_graph().permits_amortized_poll_with_guarded_heap(
                 ir.nodes(),
                 &scalar_numeric,
-                |id| {
-                    if array_plan.guarded_leaf(id) || property_plan.access(id).is_some() {
-                        return true;
-                    }
-                    let Some(node) = ir.nodes().get(id as usize) else {
-                        return false;
-                    };
-                    let crate::ir::OptimizedNodeKind::Bytecode { opcode } = node.kind() else {
-                        return false;
-                    };
-                    if matches!(opcode.as_ref(), "get_field" | "put_field")
-                        && specialization.properties.contains_key(&node.pc())
-                    {
-                        return true;
-                    }
-                    (matches!(
-                        opcode.as_ref(),
-                        "add"
-                            | "sub"
-                            | "mul"
-                            | "div"
-                            | "or"
-                            | "and"
-                            | "xor"
-                            | "shl"
-                            | "sar"
-                            | "shr"
-                    ) && ir.scalar_graph().binary_operation(id).is_some())
-                        || (matches!(
-                            opcode.as_ref(),
-                            "or" | "and" | "xor" | "shl" | "sar" | "shr"
-                        ) && ir.scalar_graph().bitwise_operation(id).is_some())
-                        || (matches!(opcode.as_ref(), "lt" | "lte" | "gt" | "gte")
-                            && ir.scalar_graph().comparison(id).is_some())
-                },
+                guarded_heap,
             ));
+    // A function whose other code (for example a call before or after the
+    // loops) rules out whole-function amortization can still count down the
+    // poll of an individual loop whose own nodes pass the same proof. Unlike
+    // the whole-function mode, frame locals keep their immediate stores and
+    // the header's numeric guard, hoisted-call and property revalidation all
+    // still run on every iteration; only the runtime poll call is amortized,
+    // exactly as it already is for raw Int32 loops.
+    let amortized_loop_headers =
+        if amortized_poll || side_path.is_some() || !array_loops.is_complete() {
+            std::collections::BTreeSet::new()
+        } else {
+            array_loops
+                .loops()
+                .iter()
+                .filter(|loop_| {
+                    ir.scalar_graph().permits_amortized_poll_for(
+                        ir.blocks()
+                            .iter()
+                            .filter(|block| loop_.contains_block(block.start_pc()))
+                            .flat_map(|block| block.nodes().iter())
+                            .filter_map(|&id| ir.nodes().get(id as usize)),
+                        &scalar_numeric,
+                        guarded_heap,
+                    )
+                })
+                .map(|loop_| loop_.header())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
     let loop_forwarded_property_sites = ir
         .nodes()
         .iter()
@@ -1722,6 +1742,7 @@ fn lower_optimized_machine(
     signature.params.push(AbiParam::new(pointer_type));
     let mut clif = Function::with_name_signature(Default::default(), signature);
     let mut context = FunctionBuilderContext::new();
+    let frame_buffers;
     {
         let mut builder = FunctionBuilder::new(&mut clif, &mut context);
         let generated_signatures = super::helpers::generated_signatures(&**isa)?;
@@ -1755,6 +1776,15 @@ fn lower_optimized_machine(
         let stack_base = builder
             .ins()
             .load(pointer_type, flags, frame, layout.stack_base);
+        frame_buffers = FrameBufferLoads {
+            sret,
+            frame,
+            loads: [
+                (arg_buf, layout.arg_buf),
+                (var_buf, layout.var_buf),
+                (stack_base, layout.stack_base),
+            ],
+        };
         let mut next_var = 0u32;
         let mut alloc = || {
             let pair = OptVars {
@@ -1824,16 +1854,13 @@ fn lower_optimized_machine(
             builder.declare_var(vars.payload, payload_type);
             builder.declare_var(vars.tag, types::I64);
         }
-        let poll_budget =
-            builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                8,
-                3,
-            ));
-        let initial_poll_budget = builder.ins().iconst(types::I64, 64);
-        builder
-            .ins()
-            .stack_store(initial_poll_budget, poll_budget, 0);
+        // The amortized poll countdown is an SSA variable so the register
+        // allocator can keep it in a register across the loop instead of a
+        // load/decrement/store through a stack slot on every iteration.
+        let poll_budget = Variable::from_u32(next_var);
+        builder.declare_var(poll_budget, types::I32);
+        let initial_poll_budget = builder.ins().iconst(types::I32, 64);
+        builder.def_var(poll_budget, initial_poll_budget);
         for (index, vars) in arguments.iter().enumerate() {
             let mut pair = opt_load(&mut builder, arg_buf, index);
             if int32_loop {
@@ -2106,15 +2133,28 @@ fn lower_optimized_machine(
                                 },
                             )?;
                         } else if *mid_loop {
-                            emit_opt_poll(
-                                &mut builder,
-                                frame,
-                                sret,
-                                poll_signature,
-                                pointer_type,
-                                layout,
-                                node.pc(),
-                            );
+                            if amortized_loop_headers.contains(&block.start_pc()) {
+                                emit_opt_countdown_poll(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    poll_signature,
+                                    pointer_type,
+                                    layout,
+                                    node.pc(),
+                                    poll_budget,
+                                );
+                            } else {
+                                emit_opt_poll(
+                                    &mut builder,
+                                    frame,
+                                    sret,
+                                    poll_signature,
+                                    pointer_type,
+                                    layout,
+                                    node.pc(),
+                                );
+                            }
                             let pass = builder.create_block();
                             emit_opt_numeric_guard(
                                 &mut builder,
@@ -3784,6 +3824,18 @@ fn lower_optimized_machine(
         builder.seal_all_blocks();
         builder.finalize();
     }
+    let lowered_text = clif.display().to_string();
+    if ir.blocks().iter().any(|block| block.is_loop_header()) {
+        let explicit_sret_return = isa.triple().architecture
+            == target_lexicon::Architecture::X86_64
+            && isa.default_call_conv() == cranelift_codegen::isa::CallConv::SystemV;
+        rematerialize_invariants_in_exits(
+            &mut clif,
+            &frame_buffers,
+            pointer_type,
+            explicit_sret_return,
+        );
+    }
     // Helpers that validate a stack map (CALL, GET_GLOBAL, GET_PROPERTY, ...)
     // are always invoked with map 0, so an artifact that calls anything must
     // publish the single helper stack map the runtime checks that id against.
@@ -3792,7 +3844,164 @@ fn lower_optimized_machine(
             .block_insts(block)
             .any(|inst| clif.dfg.insts[inst].opcode().is_call())
     });
-    super::baseline::finalize_optimized_machine(isa, clif, control, calls_helpers)
+    super::baseline::finalize_optimized_machine_with_lowered_text(
+        isa,
+        clif,
+        control,
+        calls_helpers,
+        Some(lowered_text),
+    )
+}
+
+/// The activation's invariant pointers: the `sret` exit record, the root
+/// `JSJitExecFrame`, and its buffer pointers loaded once in the prologue.
+struct FrameBufferLoads {
+    sret: cranelift_codegen::ir::Value,
+    frame: cranelift_codegen::ir::Value,
+    loads: [(cranelift_codegen::ir::Value, i32); 3],
+}
+
+/// Keeps activation-invariant pointers out of loop register pressure.
+///
+/// Exit blocks (`return`: deopt, interrupt and normal exits) reload the root
+/// frame's `arg_buf`/`var_buf`/`stack_base` from the frame and `sret` from a
+/// prologue stash slot, instead of keeping the prologue values live across
+/// every loop that can exit.
+///
+/// All four values are fixed for the whole activation: `sret` is an entry
+/// parameter, `JSJitExecFrame` buffers are initialized before entry and no
+/// helper rewrites them (the lowering itself already reuses the prologue
+/// values after arbitrary helper calls). A reload therefore yields exactly the
+/// prologue value. Exits run at most once per activation; only functions with
+/// a loop are rewritten, since the stash costs one store per entry.
+///
+/// Exit blocks are outside every loop, so Cranelift cannot hoist the reload
+/// back into a loop preheader. The stash is read through a distinct
+/// `stack_addr` (slot offset 8, load offset -8) so GVN cannot merge it with
+/// the prologue store's address and keep that address live instead.
+///
+/// With `explicit_sret_return` (x86-64 System V only), the exit record is
+/// additionally passed as an ordinary pointer argument and every exit returns
+/// the reloaded pointer explicitly. The machine-level contract is unchanged:
+/// the caller's hidden pointer still arrives in the first integer argument
+/// register and is returned in `rax`, as the ABI requires for
+/// `JSJitExit (*)(JSJitExecFrame *)`. Cranelift's `StructReturn` purpose
+/// would instead keep the incoming parameter live until every return.
+fn rematerialize_invariants_in_exits(
+    function: &mut cranelift_codegen::ir::Function,
+    invariants: &FrameBufferLoads,
+    pointer_type: cranelift_codegen::ir::Type,
+    explicit_sret_return: bool,
+) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    use cranelift_codegen::ir::{
+        AbiParam, ArgumentPurpose, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,
+    };
+    let Some(entry) = function.layout.entry_block() else {
+        return;
+    };
+    let explicit_sret_return = explicit_sret_return
+        && function.signature.returns.is_empty()
+        && function
+            .signature
+            .params
+            .first()
+            .is_some_and(|param| param.purpose == ArgumentPurpose::StructReturn)
+        && function.dfg.block_params(entry).first() == Some(&invariants.sret)
+        && function.layout.blocks().all(|block| {
+            function.layout.block_insts(block).all(|inst| {
+                function.dfg.insts[inst].opcode() != Opcode::Return
+                    || function.dfg.inst_args(inst).is_empty()
+            })
+        });
+    function.dfg.resolve_all_aliases();
+    let exits = function
+        .layout
+        .blocks()
+        .filter(|&block| {
+            block != entry
+                && function
+                    .layout
+                    .last_inst(block)
+                    .is_some_and(|inst| function.dfg.insts[inst].opcode() == Opcode::Return)
+        })
+        .collect::<Vec<_>>();
+    let pointer_bytes = pointer_type.bytes();
+    let Ok(stash_offset) = i32::try_from(pointer_bytes) else {
+        return;
+    };
+    let mut sret_slot = None;
+    for block in exits {
+        let insts = function.layout.block_insts(block).collect::<Vec<_>>();
+        let uses = |value| {
+            insts
+                .iter()
+                .any(|&inst| function.dfg.inst_values(inst).any(|arg| arg == value))
+        };
+        let buffers = invariants.loads.map(|(value, _)| uses(value));
+        let sret_used = explicit_sret_return || uses(invariants.sret);
+        if !sret_used && !buffers.iter().any(|&used| used) {
+            continue;
+        }
+        let slot = if sret_used {
+            Some(*sret_slot.get_or_insert_with(|| {
+                let align = u8::try_from(pointer_bytes.trailing_zeros()).unwrap_or(3);
+                let slot = function.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    pointer_bytes * 2,
+                    align,
+                ));
+                let mut cursor = FuncCursor::new(function);
+                cursor.goto_first_insertion_point(entry);
+                cursor.ins().stack_store(invariants.sret, slot, 0);
+                slot
+            }))
+        } else {
+            None
+        };
+        let mut cursor = FuncCursor::new(function);
+        cursor.goto_first_insertion_point(block);
+        let sret = slot.map(|slot| {
+            let address = cursor.ins().stack_addr(pointer_type, slot, stash_offset);
+            cursor
+                .ins()
+                .load(pointer_type, MemFlags::trusted(), address, -stash_offset)
+        });
+        let mut replacements = vec![(invariants.sret, sret)];
+        for (index, &(original, offset)) in invariants.loads.iter().enumerate() {
+            let reload = buffers[index].then(|| {
+                cursor
+                    .ins()
+                    .load(pointer_type, MemFlags::new(), invariants.frame, offset)
+            });
+            replacements.push((original, reload));
+        }
+        for &inst in &insts {
+            function.dfg.map_inst_values(inst, |value| {
+                replacements
+                    .iter()
+                    .find_map(|&(original, replacement)| {
+                        (original == value).then_some(replacement).flatten()
+                    })
+                    .unwrap_or(value)
+            });
+        }
+        if let (true, Some(sret), Some(&last)) = (explicit_sret_return, sret, insts.last()) {
+            function.dfg.replace(last).return_(&[sret]);
+        }
+    }
+    if explicit_sret_return {
+        let entry_returns = function
+            .layout
+            .block_insts(entry)
+            .filter(|&inst| function.dfg.insts[inst].opcode() == Opcode::Return)
+            .collect::<Vec<_>>();
+        for inst in entry_returns {
+            function.dfg.replace(inst).return_(&[invariants.sret]);
+        }
+        function.signature.params[0] = AbiParam::new(pointer_type);
+        function.signature.returns.push(AbiParam::new(pointer_type));
+    }
 }
 
 /// Emit an admitted effect-free region. Every failure reconstructs the
@@ -5337,7 +5546,12 @@ fn emit_opt_guarded_int_binary(
             }
         }
     };
-    let result = if operation == ScalarBitwiseOp::Shr {
+    // `x >>> c` with a constant count whose low five bits are non-zero is
+    // below 2^31, so it is always an Int32 and needs neither a guard nor a
+    // Float64 alternative.
+    let shr_always_int32 = operation == ScalarBitwiseOp::Shr
+        && opt_constant(builder, ri).is_some_and(|count| count & 31 != 0);
+    let result = if operation == ScalarBitwiseOp::Shr && !shr_always_int32 {
         let fits_int32 = builder
             .ins()
             .icmp_imm(IntCC::SignedGreaterThanOrEqual, value, 0);
@@ -5366,6 +5580,32 @@ fn emit_opt_guarded_int_binary(
     provenance[output] = OptProvenance::ImmediatePrimitive;
     provenance[output + 1] = OptProvenance::Unknown;
     Ok(output + 1)
+}
+
+/// The integer constant `value` is defined as, looking through the integer
+/// width conversions the lowering inserts between payloads and operands.
+fn opt_constant(
+    builder: &cranelift_frontend::FunctionBuilder<'_>,
+    value: cranelift_codegen::ir::Value,
+) -> Option<i64> {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let mut value = builder.func.dfg.resolve_aliases(value);
+    loop {
+        let ValueDef::Result(inst, 0) = builder.func.dfg.value_def(value) else {
+            return None;
+        };
+        match builder.func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => return Some(imm.bits()),
+            InstructionData::Unary {
+                opcode: Opcode::Ireduce | Opcode::Sextend | Opcode::Uextend,
+                arg,
+            } => value = builder.func.dfg.resolve_aliases(arg),
+            _ => return None,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8680,6 +8920,38 @@ fn emit_opt_poll(
     builder.switch_to_block(continuation);
 }
 
+/// Calls the runtime poll once every 64 executions of this point. The frame
+/// is already synchronized here (callers use it only where the regular poll
+/// would run), so only the call frequency changes. The poll block keeps its
+/// layout position: moving calls changes which call return publishes the
+/// artifact's helper stack map.
+#[allow(clippy::too_many_arguments)] // Poll ABI parameters mirror the generated helper signature.
+fn emit_opt_countdown_poll(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    signature: cranelift_codegen::ir::SigRef,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+    pc: u32,
+    budget: cranelift_frontend::Variable,
+) {
+    use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
+    let remaining = builder.use_var(budget);
+    let remaining = builder.ins().iadd_imm(remaining, -1);
+    builder.def_var(budget, remaining);
+    let due = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
+    let poll = builder.create_block();
+    let continuation = builder.create_block();
+    builder.ins().brif(due, poll, &[], continuation, &[]);
+    builder.switch_to_block(poll);
+    let reset = builder.ins().iconst(types::I32, 64);
+    builder.def_var(budget, reset);
+    emit_opt_poll(builder, frame, sret, signature, pointer_type, layout, pc);
+    builder.ins().jump(continuation, &[]);
+    builder.switch_to_block(continuation);
+}
+
 #[allow(clippy::too_many_arguments)] // Poll ABI parameters mirror the generated helper signature.
 fn emit_opt_amortized_poll(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
@@ -8689,15 +8961,15 @@ fn emit_opt_amortized_poll(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
     pc: u32,
-    budget: cranelift_codegen::ir::StackSlot,
+    budget: cranelift_frontend::Variable,
     cold_poll: bool,
     before_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>),
     after_poll: impl FnOnce(&mut cranelift_frontend::FunctionBuilder<'_>) -> Result<(), CompileFailure>,
 ) -> Result<(), CompileFailure> {
     use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
-    let remaining = builder.ins().stack_load(types::I64, budget, 0);
+    let remaining = builder.use_var(budget);
     let remaining = builder.ins().iadd_imm(remaining, -1);
-    builder.ins().stack_store(remaining, budget, 0);
+    builder.def_var(budget, remaining);
     let due = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
     let poll = builder.create_block();
     // Preserve the established raw-i32 loop layout. The new mixed scalar
@@ -8711,8 +8983,8 @@ fn emit_opt_amortized_poll(
     before_poll(builder);
     emit_opt_poll(builder, frame, sret, signature, pointer_type, layout, pc);
     after_poll(builder)?;
-    let reset = builder.ins().iconst(types::I64, 64);
-    builder.ins().stack_store(reset, budget, 0);
+    let reset = builder.ins().iconst(types::I32, 64);
+    builder.def_var(budget, reset);
     builder.ins().jump(continuation, &[]);
     builder.switch_to_block(continuation);
     Ok(())

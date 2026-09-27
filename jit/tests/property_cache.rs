@@ -397,16 +397,29 @@ fn guarded_property_loop_uses_a_cold_amortized_poll() {
             line.contains("iadd_imm") && line.ends_with(", -1")
         })
         .expect("guarded scalar/property leaves must have a poll countdown");
-    let load = lines[decrement - 1].trim();
-    let store = lines[decrement + 1].trim();
-    let slot = load
-        .split_whitespace()
-        .last()
-        .filter(|slot| slot.starts_with("ss"))
-        .expect("countdown must load a function-local stack slot");
+    // The countdown is an SSA value carried by a loop-header block
+    // parameter, so it stays in a register instead of a stack-slot
+    // load/decrement/store on every iteration.
+    let operand = lines[decrement]
+        .split("  ;")
+        .next()
+        .and_then(|line| line.split("iadd_imm").nth(1))
+        .and_then(|rest| rest.split(',').next())
+        .map(str::trim)
+        .expect("countdown decrement operand");
+    let header = lines[..decrement]
+        .iter()
+        .rev()
+        .find(|line| line.trim_start().starts_with("block"))
+        .expect("countdown decrement inside a block");
     assert!(
-        load.contains("stack_load.i64") && store.contains("stack_store") && store.ends_with(slot),
-        "countdown decrement must be bracketed by an explicit stack-slot load/store: {load}; {store}"
+        header.contains(&format!("{operand}: i32")),
+        "countdown must be a loop-header block parameter, not memory: {header}; {}",
+        lines[decrement]
+    );
+    assert!(
+        !clif.contains("stack_load") && !clif.contains("stack_store"),
+        "countdown must not round-trip through a stack slot: {clif}"
     );
 
     assert_eq!(
@@ -426,7 +439,10 @@ fn continuing_property_loop_check_rejects_an_injected_field_access() {
     assert_eq!(continuing_property_loop_is_field_free(&clif), Ok(()));
     let countdown = clif
         .lines()
-        .find(|line| line.contains("stack_load.i64"))
+        .find(|line| {
+            let line = line.split("  ;").next().unwrap_or(line).trim();
+            line.contains("iadd_imm") && line.ends_with(", -1")
+        })
         .expect("fixture must contain the loop countdown");
     let mutated = clif.replacen(
         countdown,
