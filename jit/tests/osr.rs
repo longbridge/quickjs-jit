@@ -516,7 +516,7 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
 #[test]
 fn production_ineligible_loop_is_rejected_once_before_queueing() {
     let failure_fixture =
-        SnapshotFixture::compile("(function f(n,z){let i=z;while(i<n)i++;return typeof i})");
+        SnapshotFixture::compile("(function f(n,z){let i=z;while(i<n)i++;return String(1n)})");
     let verified = failure_fixture
         .snapshot()
         .verify(Default::default())
@@ -532,10 +532,12 @@ fn production_ineligible_loop_is_rejected_once_before_queueing() {
     let jit = rquickjs_jit::Jit::attach(&runtime, config).unwrap();
     let context = Context::full(&runtime).unwrap();
     let value = context.with(|ctx| {
-        ctx.eval::<String, _>("function f(n,z){let i=z;while(i<n)i++;return typeof i} f(1000000,0)")
-            .unwrap()
+        ctx.eval::<String, _>(
+            "function f(n,z){let i=z;while(i<n)i++;return String(1n)} f(1000000,0)",
+        )
+        .unwrap()
     });
-    assert_eq!(value, "number");
+    assert_eq!(value, "1");
     let metrics = jit.metrics();
     assert_eq!(metrics.queued, 0, "ineligible work was queued: {metrics:?}");
     assert_eq!(metrics.compile_failures, 1, "{metrics:?}");

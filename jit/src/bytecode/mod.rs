@@ -20,6 +20,9 @@ pub use policy::{
 };
 pub use stack::SlotKind;
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
+pub(crate) use verify::{
+    SPECIAL_OBJECT_IMPORT_META, SPECIAL_OBJECT_MAPPED_ARGUMENTS, SPECIAL_OBJECT_MAX,
+};
 
 /// Numeric opcode constants generated from QuickJS's authoritative macro table.
 pub mod opcode {

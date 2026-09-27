@@ -73,6 +73,72 @@ pub enum BinaryOp {
     StrictNotEqual,
 }
 
+/// Opcodes executed with exact interpreter semantics by the `GENERIC_OP`
+/// helper (or `BINARY_ARITH_SLOW` for `pow`). Atoms and 8-bit immediates are
+/// the verified bytecode operands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenericOp {
+    /// `push_this`: pushes the (possibly boxed) receiver.
+    PushThis,
+    /// `special_object`: pushes the frame object selected by the immediate.
+    SpecialObject(u8),
+    /// `get_var_undef`: pushes a global or `undefined` when it is missing.
+    GetVarUndef(u32),
+    /// `delete_var`: pushes the boolean result of deleting a global binding.
+    DeleteVar(u32),
+    /// `put_var`: pops a value into a global binding.
+    PutVar(u32),
+    /// `typeof`: replaces the top value with its type string.
+    TypeOf,
+    /// `typeof_is_undefined`: replaces the top value with a boolean.
+    TypeOfIsUndefined,
+    /// `typeof_is_function`: replaces the top value with a boolean.
+    TypeOfIsFunction,
+    /// `to_object`: converts the top value to an object in place.
+    ToObject,
+    /// `to_propkey2`: checks that `sp[-2]` is object-coercible and converts
+    /// the key at `sp[-1]` to a property key in place.
+    ToPropertyKey2,
+    /// `in`: `key in object`, producing a boolean.
+    In,
+    /// `instanceof`: `value instanceof constructor`, producing a boolean.
+    InstanceOf,
+    /// `delete`: `delete object[key]`, producing a boolean.
+    Delete,
+    /// `pow`: exponentiation through the exact arithmetic slow path.
+    Pow,
+}
+
+impl GenericOp {
+    /// Values consumed from the operand stack and values pushed back.
+    pub const fn stack_effect(self) -> (usize, usize) {
+        match self {
+            Self::PushThis | Self::SpecialObject(_) | Self::GetVarUndef(_) | Self::DeleteVar(_) => {
+                (0, 1)
+            }
+            Self::PutVar(_) => (1, 0),
+            Self::TypeOf | Self::TypeOfIsUndefined | Self::TypeOfIsFunction | Self::ToObject => {
+                (1, 1)
+            }
+            Self::ToPropertyKey2 => (2, 2),
+            Self::In | Self::InstanceOf | Self::Delete | Self::Pow => (2, 1),
+        }
+    }
+
+    /// Whether the single result is always a JS boolean.
+    pub const fn produces_boolean(self) -> bool {
+        matches!(
+            self,
+            Self::TypeOfIsUndefined
+                | Self::TypeOfIsFunction
+                | Self::In
+                | Self::InstanceOf
+                | Self::Delete
+                | Self::DeleteVar(_)
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrOp {
     Poll { state: FrameStateId, kind: PollKind },
@@ -95,6 +161,7 @@ pub enum IrOp {
     Call { argc: u16, has_this: bool },
     CallConstructor(u16),
     Regexp,
+    Generic(GenericOp),
     GetArgument(u16),
     GetLocal(u16),
     GetLocalChecked(u16),

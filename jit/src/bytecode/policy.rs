@@ -32,6 +32,7 @@ pub enum HelperId {
     NewObject,
     CallConstructor,
     Regexp,
+    GenericOp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

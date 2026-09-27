@@ -64,6 +64,7 @@ enum ManifestHelper {
     Regexp,
     NewArray,
     NewObject,
+    GenericOp,
 }
 
 impl ManifestHelper {
@@ -90,6 +91,7 @@ impl ManifestHelper {
             Self::Regexp => HelperId::Regexp,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
+            Self::GenericOp => HelperId::GenericOp,
         }
     }
 }
@@ -250,8 +252,8 @@ fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() 
 #[test]
 fn rejected_programs_have_exact_fallback_and_interpreter_semantics() {
     assert_tier1_rejected(
-        "function f(a){ return typeof a }",
-        "f(86)",
+        "function f(a){ return a ? 1n : 2n }",
+        "String(f(86))",
         FallbackReason::UnsupportedOpcode,
     );
 }
