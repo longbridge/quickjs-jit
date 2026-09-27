@@ -2341,7 +2341,11 @@ impl ProductionBackend {
                             | runtime::CompileState::Compiling(_)
                             | runtime::CompileState::Ready(_)
                     );
-                    if callee_optimizing && observed.bounded_specialization(call.callee()).is_some()
+                    // Only a site the Tier 2 caller can link is worth the
+                    // wait; any other site is frame-inlined regardless.
+                    if callee_optimizing
+                        && observed.bounded_specialization(call.callee()).is_some()
+                        && runtime::tier2_direct_call_site_usable(snapshot, instruction.pc(), &call)
                     {
                         direct_call_pending = true;
                     }

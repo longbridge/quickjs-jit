@@ -416,3 +416,100 @@ fn tier2_effectful_link_commits_field_stores_and_misses_exactly() {
 fn tier2_effectful_link_is_exact_under_gc_stress() {
     exercise_effectful(JitTierPolicy::Automatic, true, true);
 }
+
+/// Production tiering. `setup` defines `caller`; `run` calls it. Warm until
+/// Tier 2 is entered and one complete run makes no generic CALL. For sites
+/// the Tier 2 caller cannot link (callee by global name, closure variable,
+/// method receiver, or a HeapRef argument read from a global) this proves the
+/// effectful callee stays frame-inlined instead of reaching the generic CALL.
+fn exercise_production_site(setup: &str, run: &str, expected: &str) {
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(&runtime, JitConfig::builder().build().unwrap()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let source = format!(
+        "function leaf(v,e,s){{s.calls=s.calls+1; if(e) return v+1; return v}}
+         globalThis.st={{calls:0}};
+         {setup}"
+    );
+    context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
+    let eval = |source: &str| -> String {
+        context.with(|ctx| {
+            ctx.eval::<String, _>(format!("String({source})"))
+                .unwrap_or_else(|error| {
+                    let exception = ctx.catch();
+                    panic!("{source}: {error:?}: {exception:?}")
+                })
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let before = call_count(&context);
+        assert_eq!(eval(run), expected);
+        let calls = call_count(&context) - before;
+        jit.poll();
+        let metrics = jit.metrics();
+        if metrics.tier2_entries > 0 && metrics.pending_worker_jobs == 0 && calls == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{run}: {calls} generic CALLs per run after warmup: {metrics:?}"
+        );
+    }
+    // Still exact after the edge is compiled: effects and results.
+    assert_eq!(eval(run), expected);
+    assert_eq!(eval("st.calls"), "2000");
+    let metrics = jit.metrics();
+    assert_eq!(metrics.native_entries, metrics.native_exits);
+}
+
+#[test]
+fn production_effectful_callee_by_global_name_avoids_generic_call() {
+    exercise_production_site(
+        "function caller(n,s){s.calls=0; let v=0; \
+         for(let i=0;i<n;i++) v=leaf(v,true,s); return v+s.calls}",
+        "caller(2000, st)",
+        "4000",
+    );
+}
+
+#[test]
+fn production_effectful_callee_by_closure_avoids_generic_call() {
+    exercise_production_site(
+        "globalThis.caller=(function(){const f=leaf; return function(n,s){s.calls=0; \
+         let v=0; for(let i=0;i<n;i++) v=f(v,true,s); return v+s.calls}})()",
+        "caller(2000, st)",
+        "4000",
+    );
+}
+
+#[test]
+fn production_effectful_callee_as_method_avoids_generic_call() {
+    exercise_production_site(
+        "globalThis.holder={leaf};
+         function caller(n,o,s){s.calls=0; let v=0; \
+         for(let i=0;i<n;i++) v=o.leaf(v,true,s); return v+s.calls}",
+        "caller(2000, holder, st)",
+        "4000",
+    );
+}
+
+#[test]
+fn production_effectful_callee_with_global_heap_argument_avoids_generic_call() {
+    exercise_production_site(
+        "function caller(n,f){st.calls=0; let v=0; \
+         for(let i=0;i<n;i++) v=f(v,true,st); return v+st.calls}",
+        "caller(2000, leaf)",
+        "4000",
+    );
+}
+
+#[test]
+fn production_effectful_callee_from_argument_avoids_generic_call() {
+    exercise_production_site(
+        "function caller(n,f,s){s.calls=0; let v=0; \
+         for(let i=0;i<n;i++) v=f(v,true,s); return v+s.calls}",
+        "caller(2000, leaf, st)",
+        "4000",
+    );
+}

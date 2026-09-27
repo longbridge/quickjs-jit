@@ -67,10 +67,23 @@ paths, plus the test hooks).
 ### Coordinator preference
 
 `Coordinator` previously skipped frame-inline planning at a call PC only when
-the direct target also carried an inline snapshot. A direct target now always
-wins over frame inlining at that PC: the linked entry needs no shadow frame,
-and the old preference would otherwise route `incrementAndRecord` through
-`JS_JitInlineEnter`, as it did before this slice.
+the direct target also carried an inline snapshot. It now also skips it when
+the Tier 2 caller can actually take the linked entry there: the linked entry
+needs no shadow frame, and the old preference would otherwise route
+`incrementAndRecord` through `JS_JitInlineEnter`, as it did before this slice.
+
+`emit_opt_specialized_call` takes a linked entry only for a receiver-free
+`call` whose function operand and every HeapRef argument come from frame
+reads. `tier2_direct_call_site_usable` (coordinator.rs) predicts that
+conservatively by replaying the call's own basic block: only `get_arg*`,
+`get_loc*` and `get_loc_check` pushes that no later frame write, closure
+variable write or nested call could have changed count as frame reads. Every
+other site (callee by global name, closure variable, `obj.fn(...)`, or a HeapRef
+argument read from a global) keeps frame inlining; an earlier revision of this
+branch sent those sites to the generic CALL (review r1, regression tests
+`production_effectful_callee_*` in `jit/tests/tagged_call_link.rs`). The
+prediction can under-approximate, which only keeps the pre-linking frame
+inline.
 
 ### Tier 2 queueing order (`jit/src/lib.rs`)
 
@@ -86,7 +99,9 @@ of 7 processes stayed on the old ~9 ms path. Two changes fix this:
 - a caller whose loop call site is frame-inline-ready but not yet
   direct-ready waits while the callee's optimizing compile is `Queued`,
   `Compiling` or `Ready` and the callee has a bounded signature. The wait
-  ends when that compile installs or fails, so it is bounded.
+  ends when that compile installs or fails, so it is bounded. The wait also
+  requires `tier2_direct_call_site_usable`, because other sites are
+  frame-inlined anyway.
 
 After this, 12 of 12 processes linked the edge.
 
@@ -130,6 +145,15 @@ After this, 12 of 12 processes linked the edge.
   plus alias checks), heap-valued fields and heap results (needs ownership
   transfer), locals, loops (needs polls), nested calls, `this`, Float64
   comparisons, and polymorphic property sites.
+- Known divergence (shared with the earlier effect-free leaf): the linked leaf
+  skips the interpreter's call-entry stack-overflow and interrupt checks. An
+  effectful leaf can therefore commit its field writes where the interpreter
+  would have thrown `RangeError` at call entry. The leaf is bounded and
+  loop-free, so the window is one call deep.
+- The scheduler wait still covers callees that can never publish a linked
+  entry (they use `this`, locals, loops or calls); gating it on the linked-leaf
+  admission prepass would avoid delaying those callers. Transitive chains
+  (A -> B -> leaf) and mutual recursion under the wait are not tested.
 - A real native calling convention (P3 proper) with lazily materialized frames
   is still required for recursion and general callees. This slice avoids any
   frame by keeping the callee transactional.

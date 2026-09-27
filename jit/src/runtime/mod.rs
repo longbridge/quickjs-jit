@@ -15,6 +15,8 @@ pub use array_feedback::{
     ArrayAccess, ArrayFeedbackSnapshot, ArrayFeedbackTable, ArrayHazards, ArrayMode,
 };
 pub use background::{BackgroundCompiler, BackgroundCompilerError};
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub(crate) use coordinator::tier2_direct_call_site_usable;
 #[cfg(feature = "test-support")]
 pub use coordinator::CompletionDisposition;
 pub use coordinator::{
