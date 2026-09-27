@@ -1939,6 +1939,66 @@
         "normal",
         "exception-or-nonthrow"
       ]
+    },
+    {
+      "opcode": "for_of_start",
+      "definition": "function f(values){ let sum=0; for(const value of values) sum+=value; return sum }",
+      "expression": "(()=>{const events=[];return [f([1,2,3]),f(new Set([4,5])),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}}),events,(()=>{try{return f(42)}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_of_next",
+      "definition": "function f(values){ let out=''; for(const value of values) out+=value; return out }",
+      "expression": "(()=>{const events=[];return [f(['a','b',{toString(){events.push('str');return 'c'}}]),f('xyz'),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}}),events,(()=>{try{return f({[Symbol.iterator](){return {next(){return 1}}}})}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "iterator_close",
+      "definition": "function f(values,stop){ let sum=0; for(const value of values){ if(value===stop) break; sum+=value } return sum }",
+      "expression": "(()=>{const events=[];return [f([1,2,3],2),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}},1),events,(()=>{try{return f({[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){throw new RangeError('close')}}}},1)}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_in_start",
+      "definition": "function f(o){ let keys=''; for(const key in o) keys+=key; return keys }",
+      "expression": "(()=>{const events=[];return [f({a:1,b:2}),f([7,8]),f(null),f(new Proxy({p:1},{ownKeys(t){events.push('keys');return Reflect.ownKeys(t)}})),events,(()=>{try{return f(new Proxy({},{ownKeys(){throw new EvalError('keys')}}))}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_in_next",
+      "definition": "function f(o,g){ let keys=''; for(const key in o){ keys+=key; g(o) } return keys }",
+      "expression": "(()=>{const events=[];return [f({a:1,b:2,c:3},o=>{delete o.c;events.push('g')}),f('xy',()=>{}),events,(()=>{try{return f(new Proxy({a:1},{getOwnPropertyDescriptor(){throw new URIError('d')}}),()=>{})}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
     }
   ]
 }

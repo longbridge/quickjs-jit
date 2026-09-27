@@ -62,6 +62,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0025-tier1-closures.patch",
         "0026-tier1-generic-ops.patch",
         "0027-tier1-exception-regions.patch",
+        "0028-tier1-iteration.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -130,6 +131,9 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(quickjs.contains("JSJitHelperStatus JS_JitThrowError("));
     assert!(quickjs.contains("JSJitHelperStatus JS_JitCatchException("));
     assert!(quickjs.contains("b->func_kind != JS_FUNC_NORMAL ?"));
+    assert!(jit_header.contains("JS_JitGetIteratorAPI(uint32_t version)"));
+    assert!(quickjs.contains("JSJitHelperStatus JS_JitHelperIteratorOp("));
+    assert!(quickjs.contains("qjsjit_array_values_next"));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -173,6 +177,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(helper_header.contains("X(CLOSE_LOC, close_loc"));
     assert!(helper_header.contains("X(SET_NAME, set_name"));
     assert!(helper_header.contains("JS_JIT_VAR_REF_CHECK_INIT = 2"));
+    assert!(helper_header.contains("X(ITERATOR_OP, iterator_op"));
     assert!(helper_header.contains("#define QJSJIT_DECLARE_MAP_OUT_IN_OP(name)"));
     assert!(quickjs.contains("JS_JitHelperBinaryArithSlow"));
     assert!(quickjs.contains("JS_JitHelperUnaryArithSlow"));
@@ -331,7 +336,8 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
                 && binding.contains("pub regexp: ::core::option::Option")
                 && binding.contains("pub atom_value: ::core::option::Option")
                 && binding.contains("pub binary_arith_slow: ::core::option::Option")
-                && binding.contains("pub unary_arith_slow: ::core::option::Option"),
+                && binding.contains("pub unary_arith_slow: ::core::option::Option")
+                && binding.contains("pub iterator_op: ::core::option::Option"),
             "{target}"
         );
         assert!(
@@ -345,7 +351,9 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
                 && binding.contains("JS_JIT_HELPER_GENERIC_OP: JSJitHelperId = 29")
                 && binding.contains("pub generic_op: ::core::option::Option")
                 && binding.contains("pub fn JS_JitHelperGenericOp(")
-                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 30"),
+                && binding.contains("JS_JIT_HELPER_ITERATOR_OP: JSJitHelperId = 30")
+                && binding.contains("pub fn JS_JitHelperIteratorOp(")
+                && binding.contains("JS_JIT_HELPER_COUNT: JSJitHelperId = 31"),
             "{target}"
         );
         assert!(
@@ -353,15 +361,19 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(
-            binding.contains("size_of::<JSJitRuntimeAPI>() - 248usize")
-                && binding.contains("pub close_loc: ::core::option::Option"),
+            binding.contains("size_of::<JSJitRuntimeAPI>() - 256usize")
+                && binding.contains("offset_of!(JSJitRuntimeAPI, iterator_op) - 248usize")
+                && binding.contains("pub close_loc: ::core::option::Option")
+                && binding.contains(
+                    "pub fn JS_JitGetIteratorAPI(version: u32) -> *const JSJitIteratorAPI;"
+                ),
             "{target}"
         );
     }
 }
 
 #[test]
-fn bundled_wasm_jit_binding_matches_exception_abi_1_25() {
+fn bundled_wasm_jit_binding_matches_iteration_abi_1_25() {
     let binding = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bindings/wasm32-wasip1.rs"),
     )
@@ -424,7 +436,7 @@ fn bundled_wasm_jit_binding_matches_exception_abi_1_25() {
         "pub const QJSJIT_RUNTIME_API_MINOR: u32 = 10;",
         "JS_JIT_HELPER_CLOSE_LOC: JSJitHelperId = 27",
         "JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT: JSJitVarRefMode = 2;",
-        "size_of::<JSJitRuntimeAPI>() - 128usize",
+        "size_of::<JSJitRuntimeAPI>() - 132usize",
         "JS_JIT_HELPER_SET_NAME: JSJitHelperId = 28",
         // ABI 1.25: exact generic-opcode helper (appended after the closure tail).
         "JS_JIT_HELPER_GENERIC_OP: JSJitHelperId = 29;",
@@ -445,6 +457,17 @@ fn bundled_wasm_jit_binding_matches_exception_abi_1_25() {
         "receiver: *const JSValue",
         "pub struct JSJitArrayAPI",
         "pub fn JS_JitGetArrayAPI(",
+        // ABI 1.25: Tier 1 iteration helper (appended after GENERIC_OP) and
+        // Array values leaf.
+        "pub const QJSJIT_ITERATOR_API_VERSION: u32 = 1;",
+        "JSJitHelperId_JS_JIT_HELPER_ITERATOR_OP: JSJitHelperId = 30;",
+        "pub fn JS_JitHelperIteratorOp(",
+        "pub struct JSJitIteratorAPI",
+        "pub fn JS_JitGetIteratorAPI(",
+        "size_of::<JSJitIteratorAPI>() - 20usize",
+        "offset_of!(JSJitIteratorAPI, array_values_next) - 16usize",
+        "offset_of!(JSJitRuntimeAPI, iterator_op) - 128usize",
+        "JSJitHelperId_JS_JIT_HELPER_COUNT: JSJitHelperId = 31;",
         // CONFIG_JIT_TEST_SUPPORT declarations retained by the CI generator.
         "pub fn JS_JitGetHelperCount(",
         "pub fn JS_JitSetExecutionTrace(",

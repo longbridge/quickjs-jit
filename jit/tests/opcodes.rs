@@ -113,6 +113,19 @@ fn policies_are_semantic_and_categorized() {
         Tier1Policy::Helper(HelperId::CallConstructor)
     );
     assert_eq!(by_name("regexp"), Tier1Policy::Helper(HelperId::Regexp));
+    for iteration in [
+        "for_of_start",
+        "for_of_next",
+        "for_in_start",
+        "for_in_next",
+        "iterator_close",
+    ] {
+        assert_eq!(
+            by_name(iteration),
+            Tier1Policy::Helper(HelperId::IteratorOp),
+            "{iteration}"
+        );
+    }
     assert_eq!(
         by_name("eval"),
         Tier1Policy::Reject(FallbackReason::DirectEval)

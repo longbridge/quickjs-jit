@@ -2676,9 +2676,19 @@ fn lower_optimized_machine(
                                 if owned_locals[index] {
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
                                 }
-                                opt_define(&mut builder, locals[index], undefined);
+                                // Store the exact interpreter cell so a later
+                                // deopt/exit resumes with the binding still in
+                                // its TDZ. Checked reads of it are never
+                                // admitted (see `prove_lexical_checks`).
+                                let uninitialized = OptPair {
+                                    payload: builder.ins().iconst(payload_type, 0),
+                                    tag: builder
+                                        .ins()
+                                        .iconst(types::I64, i64::from(qjs::JS_TAG_UNINITIALIZED)),
+                                };
+                                opt_define(&mut builder, locals[index], uninitialized);
                                 if !int32_loop && !defer_scalar_locals {
-                                    opt_store(&mut builder, var_buf, index, undefined);
+                                    opt_store(&mut builder, var_buf, index, uninitialized);
                                 }
                             }
                             "push_i8" => {

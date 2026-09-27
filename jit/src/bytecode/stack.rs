@@ -31,6 +31,7 @@ pub(crate) struct AbstractState {
 pub struct ExceptionHandler {
     catch_index: u16,
     handler_pc: Option<u32>,
+    resumes_in_frame: bool,
 }
 
 impl ExceptionHandler {
@@ -43,6 +44,15 @@ impl ExceptionHandler {
     pub const fn handler_pc(self) -> Option<u32> {
         self.handler_pc
     }
+
+    /// Whether some live catch offset (this one or an enclosing one) resumes
+    /// a handler in this frame. `false` when every live catch offset is a
+    /// for-of iterator close offset: the interpreter then closes the
+    /// iterators and propagates the exception out of the frame, exactly what
+    /// an ordinary native exception exit leads to.
+    pub const fn resumes_in_frame(self) -> bool {
+        self.resumes_in_frame
+    }
 }
 
 impl AbstractState {
@@ -53,6 +63,7 @@ impl AbstractState {
             Some(ExceptionHandler {
                 catch_index: u16::try_from(*index).ok()?,
                 handler_pc: *handler_pc,
+                resumes_in_frame: self.innermost_handler().is_some(),
             })
         })
     }
@@ -134,7 +145,7 @@ pub(crate) fn effective_pop(instruction: &Instruction) -> usize {
     }
 }
 
-fn local_index(instruction: &Instruction) -> Option<usize> {
+pub(crate) fn local_index(instruction: &Instruction) -> Option<usize> {
     match instruction.opcode().format() {
         OperandFormat::Local => Some(instruction.operand_u16(1) as usize),
         OperandFormat::Local8 => Some(instruction.operand_u8(1) as usize),
@@ -279,6 +290,18 @@ fn transfer(
     }
     let popped = state.stack.split_off(state.stack.len() - pop);
     let popped_top = popped.last().copied().unwrap_or(SlotKind::Tagged);
+    if matches!(name, "for_of_next" | "for_in_next") {
+        // The nominal pops are only the window the interpreter reads in
+        // place: the enumeration record (including its catch offset) and any
+        // intervening values stay on the stack unchanged, and the opcode
+        // pushes `value` and the boolean `done` flag above them. This runs
+        // before the consumed-catch-offset trim below: the for-of catch
+        // offset stays live across `for_of_next`.
+        state.stack.extend(popped);
+        state.stack.extend([SlotKind::Tagged, SlotKind::Tagged]);
+        return check_stack_size(snapshot, instruction, state);
+    }
+
     // Any catch offset consumed by this instruction is no longer live.
     while state
         .catches
@@ -433,8 +456,21 @@ fn merge_state(
             | (SlotKind::Int32 | SlotKind::Float64, SlotKind::Tagged)
             | (SlotKind::Int32, SlotKind::Float64)
             | (SlotKind::Float64, SlotKind::Int32) => SlotKind::Tagged,
-            // Catch offsets and uninitialized cells are verifier-only states,
-            // not interchangeable JS value representations.
+            // A lexical binding declared in a loop body (for example the
+            // `for (const value of values)` binding) is uninitialized on loop
+            // entry and initialized on the backedge. The interpreter cell
+            // holds the JS_UNINITIALIZED tag in the first case, which is still
+            // a tagged value; the join only drops the proof, and every read
+            // of such a binding is a `get_loc_check`. Tier 1 keeps that
+            // runtime check; Tier 2 lowers it as a plain load and therefore
+            // separately proves definite initialization before admitting it
+            // (`ir::optimized::prove_lexical_checks`).
+            (SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64, SlotKind::Uninitialized)
+            | (SlotKind::Uninitialized, SlotKind::Tagged | SlotKind::Int32 | SlotKind::Float64) => {
+                SlotKind::Tagged
+            }
+            // Catch offsets are verifier-only states, not interchangeable JS
+            // value representations.
             _ => {
                 return Err(VerifyError::new(
                     pc,

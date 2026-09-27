@@ -70,6 +70,7 @@ enum ManifestHelper {
     CloseLocal,
     SetName,
     GenericOp,
+    IteratorOp,
 }
 
 impl ManifestHelper {
@@ -102,6 +103,7 @@ impl ManifestHelper {
             Self::CloseLocal => HelperId::CloseLocal,
             Self::SetName => HelperId::SetName,
             Self::GenericOp => HelperId::GenericOp,
+            Self::IteratorOp => HelperId::IteratorOp,
         }
     }
 }
@@ -161,6 +163,7 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::CallConstructor
                 | ManifestHelper::BinaryArithSlow
                 | ManifestHelper::UnaryArithSlow
+                | ManifestHelper::IteratorOp
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -568,6 +571,12 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "f(5)",
             "close_loc",
             HelperId::CloseLocal,
+        ),
+        (
+            "function f(values){ let sum=0; for(const value of values) sum+=value; return sum }",
+            "f(new Set([20,22]))",
+            "for_of_next",
+            HelperId::IteratorOp,
         ),
     ];
     for (definition, expression, opcode, helper) in cases {

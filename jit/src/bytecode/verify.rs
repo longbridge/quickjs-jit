@@ -138,8 +138,10 @@ impl VerifiedFunction {
         self.exception_handlers.get(&pc).copied()
     }
 
-    /// True when any instruction executes with a live catch offset or the
-    /// bytecode contains a try/finally transfer. Consumers that cannot model
+    /// True when any instruction executes with a live catch offset that
+    /// resumes a handler in this frame, or the bytecode contains a
+    /// try/finally transfer (a for-of iterator close offset alone is not a
+    /// region). Consumers that cannot model
     /// exceptional control flow (inlining, direct leaf calls) must reject it.
     /// Computed once at verification: maintenance consults it on every scan.
     pub fn has_exception_regions(&self) -> bool {
@@ -477,7 +479,13 @@ pub(crate) fn verify(
         })
         .collect::<Result<Vec<_>, VerifyError>>()?
         .into_boxed_slice();
-    let exception_regions = !proof.handlers.is_empty()
+    // A for-of iterator close offset alone is not an exception region: an
+    // exception raised under it leaves the frame through the ordinary exit,
+    // where the interpreter closes the iterator exactly.
+    let exception_regions = proof
+        .handlers
+        .values()
+        .any(|handler| handler.resumes_in_frame())
         || instructions.iter().any(|instruction| {
             matches!(
                 instruction.opcode().name(),

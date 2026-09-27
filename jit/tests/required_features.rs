@@ -43,6 +43,7 @@ fn native_semantics_targets_require_their_execution_features() {
         "tier1_calls_properties",
         "tier1_constructors",
         "tier1_globals",
+        "tier1_iteration",
         "tier1_regexp",
     ] {
         let target = package["targets"]

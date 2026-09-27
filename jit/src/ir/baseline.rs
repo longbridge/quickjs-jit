@@ -11,7 +11,7 @@ use crate::{
 
 use super::{
     BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, GenericOp,
-    IrOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode,
+    IrOp, IteratorOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -112,10 +112,14 @@ impl BaselineIr {
                 continue;
             };
             // An iterator-close offset is unwound by the interpreter itself;
-            // native dispatch only resumes ordinary catch handlers.
-            let handler_pc = handler
-                .handler_pc()
-                .ok_or(CompileFailure::UnsupportedOpcode)?;
+            // native dispatch only resumes ordinary catch handlers. An
+            // exception raised under a for-of close offset takes the ordinary
+            // exception exit, which publishes the exact frame: the
+            // interpreter closes the iterator with a throw completion and,
+            // inside a try region, then resumes the enclosing handler itself.
+            let Some(handler_pc) = handler.handler_pc() else {
+                continue;
+            };
             exception_handlers.insert(
                 instruction.pc(),
                 IrExceptionHandler {
@@ -319,10 +323,12 @@ impl BaselineIr {
                     // Values between the kept operand and its catch offset
                     // would need ordered releases; only the direct form is
                     // lowered.
+                    // The innermost catch offset may also be a for-of
+                    // iterator close offset (`return` inside for-of).
                     "nip_catch"
-                        if exception_handlers
-                            .get(&pc)
-                            .map(|handler| usize::from(handler.catch_index) + 2)
+                        if function
+                            .exception_handler(pc)
+                            .map(|handler| usize::from(handler.catch_index()) + 2)
                             == Some(depth) =>
                     {
                         IrOp::NipCatch
@@ -575,6 +581,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
         IrOp::Regexp => 1,
         IrOp::Generic(_) => 1,
+        IrOp::Iterator(_) => 1,
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
         IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
@@ -899,6 +906,11 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         "instanceof" => IrOp::Generic(GenericOp::InstanceOf),
         "delete" => IrOp::Generic(GenericOp::Delete),
         "pow" => IrOp::Generic(GenericOp::Pow),
+        "for_of_start" => IrOp::Iterator(IteratorOp::ForOfStart),
+        "for_of_next" => IrOp::Iterator(IteratorOp::ForOfNext(instruction.operand_u8(1))),
+        "for_in_start" => IrOp::Iterator(IteratorOp::ForInStart),
+        "for_in_next" => IrOp::Iterator(IteratorOp::ForInNext),
+        "iterator_close" => IrOp::Iterator(IteratorOp::Close),
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }

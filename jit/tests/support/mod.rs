@@ -510,6 +510,7 @@ pub struct DifferentialRun {
     expected_opcode: Option<String>,
     expected_helper: Option<HelperId>,
     expected_ownership_helper_counts: Option<(u64, u64)>,
+    expected_helper_count: Option<(u32, u64)>,
     stress_gc: bool,
     expect_deopt: bool,
 }
@@ -523,6 +524,7 @@ pub fn differential(definition: &str, expression: &str) -> DifferentialRun {
         expected_opcode: None,
         expected_helper: None,
         expected_ownership_helper_counts: None,
+        expected_helper_count: None,
         stress_gc: false,
         expect_deopt: false,
     }
@@ -585,6 +587,13 @@ impl DifferentialRun {
         self
     }
 
+    /// Exact number of calls of one runtime helper (by generated helper ID)
+    /// while evaluating the expression.
+    pub fn expect_helper_call_count(mut self, helper_id: u32, count: u64) -> Self {
+        self.expected_helper_count = Some((helper_id, count));
+        self
+    }
+
     /// The native body is expected to hand the frame back to the
     /// interpreter mid-function (a use-site guard failed) at least once.
     pub fn expect_deopt(mut self) -> Self {
@@ -633,6 +642,15 @@ impl DifferentialRun {
                 (counters.dup_count, counters.free_count),
                 (expected_dup, expected_free)
             );
+        }
+
+        if let Some((helper_id, expected_count)) = self.expected_helper_count {
+            let mut count = 0_u64;
+            assert_eq!(
+                unsafe { rquickjs_core::qjs::JS_JitGetHelperCount(rt, helper_id, &mut count) },
+                0
+            );
+            assert_eq!(count, expected_count, "helper {helper_id} call count");
         }
 
         let mut trace_len = 0;
@@ -750,6 +768,7 @@ impl DifferentialRun {
                 HelperId::CloseLocal => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC,
                 HelperId::SetName => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_SET_NAME,
                 HelperId::GenericOp => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_GENERIC_OP,
+                HelperId::IteratorOp => rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_ITERATOR_OP,
             };
             let expected_opcode = self
                 .expected_opcode
@@ -1350,6 +1369,7 @@ static SYNTHETIC_RUNTIME_API: rquickjs_core::qjs::JSJitRuntimeAPI =
         close_loc: Some(synthetic_map_in_unavailable),
         set_name: Some(synthetic_map_out_in_unavailable),
         generic_op: Some(synthetic_map_out_two_op_unavailable),
+        iterator_op: Some(synthetic_map_out_two_op_unavailable),
     };
 
 /// Result observed after invoking a generated aggregate-return entry point.
@@ -1689,11 +1709,12 @@ pub enum AbiMismatchFixture {
     ElementLayout,
     InlineApi,
     ArrayApi,
+    IteratorApi,
     BackendVTableLayout,
 }
 
 impl AbiMismatchFixture {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::SourceRevision,
         Self::OpcodeFingerprint,
         Self::ValueLayout,
@@ -1712,6 +1733,7 @@ impl AbiMismatchFixture {
         Self::ElementLayout,
         Self::InlineApi,
         Self::ArrayApi,
+        Self::IteratorApi,
         Self::BackendVTableLayout,
     ];
 
@@ -1737,6 +1759,7 @@ impl AbiMismatchFixture {
             Self::ElementLayout => AbiMismatch::StructureLayout(AbiStructure::ElementLayout),
             Self::InlineApi => AbiMismatch::StructureLayout(AbiStructure::InlineApi),
             Self::ArrayApi => AbiMismatch::StructureLayout(AbiStructure::ArrayApi),
+            Self::IteratorApi => AbiMismatch::StructureLayout(AbiStructure::IteratorApi),
             Self::BackendVTableLayout => AbiMismatch::StructureLayout(AbiStructure::BackendVTable),
         }
     }

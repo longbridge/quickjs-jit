@@ -38,6 +38,7 @@ pub enum HelperId {
     CloseLocal,
     SetName,
     GenericOp,
+    IteratorOp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

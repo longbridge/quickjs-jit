@@ -204,5 +204,13 @@ name = "untranslatable_settle"
 required-features = ["compiler", "test-support"]
 
 [[test]]
+name = "tier1_iteration"
+required-features = ["compiler", "test-support"]
+
+[[test]]
+name = "tier2_tdz"
+required-features = ["compiler", "test-support"]
+
+[[test]]
 name = "test262"
 required-features = ["compiler", "test-support"]

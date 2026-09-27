@@ -154,6 +154,13 @@ const WORKLOADS: &[Workload] = &[
         file: "collections.js",
     },
     Workload {
+        name: "for-of-array",
+        suite: "rquickjs-jit focused",
+        group: "compute",
+        designated: false,
+        file: "for-of-array.js",
+    },
+    Workload {
         name: "strings-json",
         suite: "rquickjs-jit",
         group: "compute",
