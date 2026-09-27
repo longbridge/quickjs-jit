@@ -13,6 +13,9 @@ enum Identity {
     #[default]
     Unreached,
     Argument(u16),
+    /// The defining SSA value after resolving agreeing Phis and preserved
+    /// frame reads. Only equality is meaningful; it never names an argument.
+    Value(u32),
     Unknown,
 }
 
@@ -188,7 +191,7 @@ impl Identity {
     fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Unreached, value) | (value, Self::Unreached) => value,
-            (Self::Argument(a), Self::Argument(b)) if a == b => self,
+            (a, b) if a == b => a,
             _ => Self::Unknown,
         }
     }
@@ -267,7 +270,9 @@ impl KnownFacts {
                             })
                             .map_or(Identity::Unknown, |source| identities[source.index()])
                     }
-                    _ => Identity::Unknown,
+                    // Every other producer defines its own identity. An
+                    // unpreserved frame read is a fresh definition as well.
+                    _ => u32::try_from(index).map_or(Identity::Unknown, Identity::Value),
                 };
                 let next = identities[index].join(next);
                 changed |= identities[index] != next;
@@ -303,6 +308,20 @@ impl KnownFacts {
         match self.identities.get(value.index())? {
             Identity::Argument(argument) => Some(*argument),
             _ => None,
+        }
+    }
+
+    /// Both SSA values denote the same definition on every path: an entry
+    /// argument, or one producer reached only through agreeing Phis and frame
+    /// reads preserved by the caller's emitted-guard contract.
+    pub(crate) fn same_value(&self, left: ScalarValueId, right: ScalarValueId) -> bool {
+        match (
+            self.identities.get(left.index()),
+            self.identities.get(right.index()),
+        ) {
+            (Some(Identity::Argument(a)), Some(Identity::Argument(b))) => a == b,
+            (Some(Identity::Value(a)), Some(Identity::Value(b))) => a == b,
+            _ => false,
         }
     }
 
