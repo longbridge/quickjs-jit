@@ -912,11 +912,21 @@ fn element_layout_fingerprint() -> u64 {
     hash
 }
 
+/// Byte offset of `JSRefCountHeader::ref_count` in every payload addressed by
+/// a JSValue with `JS_VALUE_HAS_REF_COUNT`. Generated code updates the count
+/// in place; the linked QuickJS pins this value in its value-layout
+/// fingerprint (`0022-inline-refcount.patch`), so a mismatch fails closed.
+pub(crate) const REF_COUNT_OFFSET: i32 = 0;
+/// Width in bytes of the C `int` reference count.
+pub(crate) const REF_COUNT_BYTES: u64 = 4;
+
 fn value_layout_fingerprint() -> u64 {
     let mut hash = layout_start::<qjs::JSValue>();
     hash = hash_u64(hash, (qjs::JS_TAG_FIRST as i64) as u64);
     hash = hash_u64(hash, (qjs::JS_TAG_FLOAT64 as i64) as u64);
-    hash_u64(hash, u64::from(cfg!(target_pointer_width = "32")))
+    hash = hash_u64(hash, u64::from(cfg!(target_pointer_width = "32")));
+    hash = hash_u64(hash, REF_COUNT_OFFSET as u64);
+    hash_u64(hash, REF_COUNT_BYTES)
 }
 
 fn expected_build_fingerprint() -> u64 {

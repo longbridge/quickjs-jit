@@ -59,6 +59,8 @@ mod helpers;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod optimized;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+mod refcount;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod tagged_call_link;
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]

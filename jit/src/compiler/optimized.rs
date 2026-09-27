@@ -3340,14 +3340,14 @@ fn lower_optimized_machine(
                                     property_cache.flush(&mut builder);
                                     property_cache.invalidate(&mut builder);
                                     let source = opt_flat_stack_slot(&env, start)?;
-                                    depth = emit_opt_owned_helper_push(
+                                    depth = emit_opt_owned_dup(
                                         &mut builder,
                                         &env,
                                         &mut stack_provenance,
+                                        start,
                                         depth,
                                         node.pc(),
-                                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP as usize,
-                                        &[source],
+                                        source,
                                     )?;
                                     continue;
                                 }
@@ -3694,7 +3694,7 @@ fn lower_optimized_machine(
                                     );
                                     let pc = builder.ins().iadd_imm(start, i64::from(node.pc()));
                                     builder.ins().store(MemFlags::new(), pc, frame, layout.pc);
-                                    opt_own_stack_for_exit(
+                                    opt_own_stack_for_helper(
                                         &mut builder,
                                         frame,
                                         sret,
@@ -5796,7 +5796,7 @@ fn emit_opt_array_length(
     builder
         .ins()
         .store(MemFlags::new(), current_pc, env.frame, env.layout.pc);
-    opt_own_stack_for_exit(
+    opt_own_stack_for_helper(
         builder,
         env.frame,
         env.sret,
@@ -6815,7 +6815,7 @@ fn emit_opt_guarded_property(
         builder
             .ins()
             .store(MemFlags::new(), current_pc, frame, layout.pc);
-        opt_own_stack_for_exit(
+        opt_own_stack_for_helper(
             builder,
             frame,
             sret,
@@ -7162,7 +7162,6 @@ fn opt_release_materialized_aliases(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
 ) -> Result<(), CompileFailure> {
-    use rquickjs_core::qjs;
     for index in range {
         if !matches!(
             provenance.get(index),
@@ -7174,15 +7173,16 @@ fn opt_release_materialized_aliases(
             .checked_add(index)
             .and_then(|slot| u32::try_from(slot).ok())
             .ok_or(CompileFailure::ResourceLimit)?;
-        emit_opt_helper(
+        emit_opt_free_slot(
             builder,
             frame,
             sret,
             stack_base,
             exception_depth,
             signatures,
-            qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
-            &[0, slot],
+            stack_base,
+            index,
+            slot,
             pointer_type,
             layout,
         )?;
@@ -7203,21 +7203,21 @@ fn opt_release_owned_stack(
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
 ) -> Result<(), CompileFailure> {
-    use rquickjs_core::qjs;
     for index in start..end {
         let slot = flat_stack_base
             .checked_add(index)
             .and_then(|slot| u32::try_from(slot).ok())
             .ok_or(CompileFailure::ResourceLimit)?;
-        emit_opt_helper(
+        emit_opt_free_slot(
             builder,
             frame,
             sret,
             stack_base,
             end,
             signatures,
-            qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
-            &[0, slot],
+            stack_base,
+            index,
+            slot,
             pointer_type,
             layout,
         )?;
@@ -7226,8 +7226,70 @@ fn opt_release_owned_stack(
     Ok(())
 }
 
+/// Turns borrowed argument/local aliases on the operand stack into real
+/// interpreter owners before a deopt or exception exit, using the audited
+/// MATERIALIZE_OWNER helper (these exits are rare).
 #[allow(clippy::too_many_arguments)]
 fn opt_own_stack_for_exit(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    depth: usize,
+    flat_stack_base: usize,
+    provenance: &[OptProvenance],
+    signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<(), CompileFailure> {
+    opt_own_stack(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        flat_stack_base,
+        provenance,
+        signatures,
+        pointer_type,
+        layout,
+        false,
+    )
+}
+
+/// The same ownership transition on paths that continue into a helper or
+/// runtime call and may run every iteration: outside stress GC each owner is
+/// taken with an inline `js_dup` instead of a MATERIALIZE_OWNER helper call.
+#[allow(clippy::too_many_arguments)]
+fn opt_own_stack_for_helper(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    depth: usize,
+    flat_stack_base: usize,
+    provenance: &[OptProvenance],
+    signatures: &[cranelift_codegen::ir::SigRef],
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<(), CompileFailure> {
+    opt_own_stack(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        depth,
+        flat_stack_base,
+        provenance,
+        signatures,
+        pointer_type,
+        layout,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opt_own_stack(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
     frame: cranelift_codegen::ir::Value,
     sret: cranelift_codegen::ir::Value,
@@ -7238,6 +7300,7 @@ fn opt_own_stack_for_exit(
     signatures: &[cranelift_codegen::ir::SigRef],
     pointer_type: cranelift_codegen::ir::Type,
     layout: super::helpers::FrameLayout,
+    inline_owner: bool,
 ) -> Result<(), CompileFailure> {
     use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder, MemFlags};
     const MATERIALIZE_OWNER_HELPER: usize =
@@ -7253,6 +7316,9 @@ fn opt_own_stack_for_exit(
             .iconst(types::I64, i64::from(rquickjs_core::qjs::JS_TAG_UNDEFINED)),
     };
     opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
+    let cold = builder
+        .current_block()
+        .is_some_and(|block| builder.func.layout.is_cold(block));
     for index in 0..depth {
         if matches!(
             provenance.get(index),
@@ -7267,6 +7333,43 @@ fn opt_own_stack_for_exit(
             _ => return Err(CompileFailure::InvalidArtifact),
         };
         opt_store(builder, stack_base, index, undefined);
+        let materialized = inline_owner.then(|| builder.create_block());
+        if let Some(materialized) = materialized {
+            // Outside stress GC the owner is an exact inline `js_dup` of the
+            // published argument/local slot; stress GC keeps the helper and
+            // its collection points out of line.
+            let inline = builder.create_block();
+            let helper_block = builder.create_block();
+            let heap = builder.create_block();
+            let copied = builder.create_block();
+            builder.set_cold_block(helper_block);
+            let no_stress = super::refcount::emit_no_stress(builder, frame, layout.flags);
+            builder
+                .ins()
+                .brif(no_stress, inline, &[], helper_block, &[]);
+            builder.switch_to_block(inline);
+            let source_buffer = builder.ins().load(
+                pointer_type,
+                MemFlags::new(),
+                frame,
+                if source_kind == SOURCE_ARGUMENT {
+                    layout.arg_buf
+                } else {
+                    layout.var_buf
+                },
+            );
+            let source = opt_load(builder, source_buffer, source_index);
+            let refcounted = super::refcount::emit_has_ref_count(builder, source.tag);
+            builder.ins().brif(refcounted, heap, &[], copied, &[]);
+            builder.switch_to_block(heap);
+            super::refcount::emit_increment(builder, source.payload);
+            builder.ins().jump(copied, &[]);
+            builder.switch_to_block(copied);
+            opt_store(builder, stack_base, index, source);
+            opt_set_stack_top(builder, frame, stack_base, index + 1, pointer_type, layout);
+            builder.ins().jump(materialized, &[]);
+            builder.switch_to_block(helper_block);
+        }
         let signature = *signatures
             .get(MATERIALIZE_OWNER_HELPER)
             .ok_or(CompileFailure::InvalidArtifact)?;
@@ -7302,6 +7405,12 @@ fn opt_own_stack_for_exit(
         let ok = builder.ins().icmp_imm(IntCC::Equal, status, MATERIALIZED);
         let continuation = builder.create_block();
         let exception = builder.create_block();
+        // The helper call is out of line whenever the bridge itself is (a
+        // cold deopt path) or the inline owner path makes it stress-only.
+        if inline_owner || cold {
+            builder.set_cold_block(continuation);
+            builder.set_cold_block(exception);
+        }
         builder.ins().brif(ok, continuation, &[], exception, &[]);
         builder.switch_to_block(exception);
         emit_opt_exit(
@@ -7313,6 +7422,10 @@ fn opt_own_stack_for_exit(
             0,
         );
         builder.switch_to_block(continuation);
+        if let Some(materialized) = materialized {
+            builder.ins().jump(materialized, &[]);
+            builder.switch_to_block(materialized);
+        }
     }
     Ok(())
 }
@@ -7422,6 +7535,7 @@ fn emit_opt_specialized_call(
         let signature = builder.create_block();
         let invoke = builder.create_block();
         let deopt = builder.create_block();
+        builder.set_cold_block(deopt);
         super::emit_guarded_direct_callee_identity(
             builder,
             function.tag,
@@ -7616,7 +7730,7 @@ fn emit_opt_specialized_call(
             .and_then(|value| u32::try_from(value).ok())
             .ok_or(CompileFailure::ResourceLimit)
     };
-    opt_own_stack_for_exit(
+    opt_own_stack_for_helper(
         builder,
         frame,
         sret,
@@ -7703,6 +7817,24 @@ fn emit_opt_specialized_call(
         opt_define(builder, stack[index], undefined);
         builder.ins().jump(cleaned, &[]);
         builder.switch_to_block(release);
+        // Shared heap owners drop one reference inline and then take the
+        // primitive path's exact post-state; the last reference and every
+        // stress-mode operand keep the FREE helper.
+        let refcounted = super::refcount::emit_has_ref_count(builder, consumed.tag);
+        let heap = builder.create_block();
+        let helper = builder.create_block();
+        builder.set_cold_block(helper);
+        builder.ins().brif(refcounted, heap, &[], helper, &[]);
+        builder.switch_to_block(heap);
+        super::refcount::emit_release_refcounted(
+            builder,
+            frame,
+            layout.flags,
+            consumed.payload,
+            primitive,
+            helper,
+        );
+        builder.switch_to_block(helper);
         emit_opt_helper(
             builder,
             frame,
@@ -8177,15 +8309,16 @@ fn emit_opt_free_stack_slot(
         env.pointer_type,
         env.layout,
     );
-    emit_opt_helper(
+    emit_opt_free_slot(
         builder,
         env.frame,
         env.sret,
         env.stack_base,
         index + 1,
         env.helper_signatures,
-        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
-        &[0, opt_flat_stack_slot(env, index)?],
+        env.stack_base,
+        index,
+        opt_flat_stack_slot(env, index)?,
         env.pointer_type,
         env.layout,
     )
@@ -8202,15 +8335,16 @@ fn emit_opt_free_local_slot(
     }
     let pair = opt_use(builder, env.locals[index]);
     opt_store(builder, env.var_buf, index, pair);
-    emit_opt_helper(
+    emit_opt_free_slot(
         builder,
         env.frame,
         env.sret,
         env.stack_base,
         0,
         env.helper_signatures,
-        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
-        &[0, opt_flat_local_slot(env, index)?],
+        env.var_buf,
+        index,
+        opt_flat_local_slot(env, index)?,
         env.pointer_type,
         env.layout,
     )
@@ -8267,7 +8401,7 @@ fn emit_opt_owned_helper_push(
     builder
         .ins()
         .store(MemFlags::new(), current_pc, env.frame, env.layout.pc);
-    opt_own_stack_for_exit(
+    opt_own_stack_for_helper(
         builder,
         env.frame,
         env.sret,
@@ -8314,6 +8448,88 @@ fn emit_opt_owned_helper_push(
     Ok(depth + 1)
 }
 
+/// DUP of an interpreter-owned stack slot. Outside stress GC the second
+/// reference is taken inline (`ref_count++` for heap values) and published in
+/// its own owning slot. When no borrowed argument/local alias is live below
+/// the operand, the helper path would not change any provenance, so stress-GC
+/// frames branch to the exact DUP helper (with its collection points) and both
+/// paths join with identical ownership. Otherwise the helper is used always.
+fn emit_opt_owned_dup(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: &mut [OptProvenance],
+    source_index: usize,
+    depth: usize,
+    pc: u32,
+    source_slot: u32,
+) -> Result<usize, CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let has_borrowed_alias = provenance[..depth]
+        .iter()
+        .any(|slot| matches!(slot, OptProvenance::Argument(_) | OptProvenance::Local(_)));
+    if env.int32_loop || has_borrowed_alias || depth >= env.stack.len() {
+        return emit_opt_owned_helper_push(
+            builder,
+            env,
+            provenance,
+            depth,
+            pc,
+            rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_DUP as usize,
+            &[source_slot],
+        );
+    }
+    let inline = builder.create_block();
+    let stress = builder.create_block();
+    let joined = builder.create_block();
+    builder.set_cold_block(stress);
+    let no_stress = super::refcount::emit_no_stress(builder, env.frame, env.layout.flags);
+    builder.ins().brif(no_stress, inline, &[], stress, &[]);
+
+    builder.switch_to_block(stress);
+    let mut helper_provenance = provenance.to_vec();
+    let helper_depth = emit_opt_owned_helper_push(
+        builder,
+        env,
+        &mut helper_provenance,
+        depth,
+        pc,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_DUP as usize,
+        &[source_slot],
+    )?;
+    builder.ins().jump(joined, &[]);
+
+    builder.switch_to_block(inline);
+    let value = opt_use(builder, env.stack[source_index]);
+    if builder.func.dfg.value_type(value.payload) == types::I64 {
+        let heap = builder.create_block();
+        let copied = builder.create_block();
+        let refcounted = super::refcount::emit_has_ref_count(builder, value.tag);
+        builder.ins().brif(refcounted, heap, &[], copied, &[]);
+        builder.switch_to_block(heap);
+        super::refcount::emit_increment(builder, value.payload);
+        builder.ins().jump(copied, &[]);
+        builder.switch_to_block(copied);
+    }
+    opt_define(builder, env.stack[depth], value);
+    opt_store(builder, env.stack_base, depth, value);
+    opt_set_stack_top(
+        builder,
+        env.frame,
+        env.stack_base,
+        depth + 1,
+        env.pointer_type,
+        env.layout,
+    );
+    builder.ins().jump(joined, &[]);
+    builder.switch_to_block(joined);
+
+    provenance[depth] = OptProvenance::OwnedSlot;
+    if helper_depth != depth + 1 || helper_provenance != provenance {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    Ok(depth + 1)
+}
+
 /// Executes GetField through the audited owning helper when IC feedback says
 /// the result is a heap object. The helper keeps the receiver, so release it
 /// after the owned result has been published, then move that result into the
@@ -8343,15 +8559,16 @@ fn emit_opt_owned_property_replace(
         &[receiver_slot, atom],
     )?;
     debug_assert_eq!(result_depth, depth + 1);
-    emit_opt_helper(
+    emit_opt_free_slot(
         builder,
         env.frame,
         env.sret,
         env.stack_base,
         result_depth,
         env.helper_signatures,
-        qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
-        &[0, receiver_slot],
+        env.stack_base,
+        receiver,
+        receiver_slot,
         env.pointer_type,
         env.layout,
     )?;
@@ -8447,6 +8664,73 @@ fn emit_opt_helper(
         0,
     );
     builder.switch_to_block(continuation);
+    Ok(())
+}
+
+/// `JS_JitHelperFree` of the owner stored at `base[index]` (flat helper slot
+/// `flat_slot`). Primitives and shared heap references are released inline
+/// with the helper's exact post-state (an undefined slot); the last heap
+/// reference and stress-GC frames keep the helper call.
+#[allow(clippy::too_many_arguments)]
+fn emit_opt_free_slot(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    frame: cranelift_codegen::ir::Value,
+    sret: cranelift_codegen::ir::Value,
+    stack_base: cranelift_codegen::ir::Value,
+    exception_depth: usize,
+    signatures: &[cranelift_codegen::ir::SigRef],
+    base: cranelift_codegen::ir::Value,
+    index: usize,
+    flat_slot: u32,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: super::helpers::FrameLayout,
+) -> Result<(), CompileFailure> {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let value = opt_load(builder, base, index);
+    let heap = builder.create_block();
+    let primitive = builder.create_block();
+    let clear = builder.create_block();
+    let helper = builder.create_block();
+    let done = builder.create_block();
+    builder.set_cold_block(helper);
+    let refcounted = super::refcount::emit_has_ref_count(builder, value.tag);
+    builder.ins().brif(refcounted, heap, &[], primitive, &[]);
+    builder.switch_to_block(primitive);
+    let no_stress = super::refcount::emit_no_stress(builder, frame, layout.flags);
+    builder.ins().brif(no_stress, clear, &[], helper, &[]);
+    builder.switch_to_block(heap);
+    super::refcount::emit_release_refcounted(
+        builder,
+        frame,
+        layout.flags,
+        value.payload,
+        clear,
+        helper,
+    );
+    builder.switch_to_block(clear);
+    let undefined = OptPair {
+        payload: builder.ins().iconst(types::I64, 0),
+        tag: builder
+            .ins()
+            .iconst(types::I64, i64::from(rquickjs_core::qjs::JS_TAG_UNDEFINED)),
+    };
+    opt_store(builder, base, index, undefined);
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(helper);
+    emit_opt_helper(
+        builder,
+        frame,
+        sret,
+        stack_base,
+        exception_depth,
+        signatures,
+        rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_FREE as usize,
+        &[0, flat_slot],
+        pointer_type,
+        layout,
+    )?;
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(done);
     Ok(())
 }
 

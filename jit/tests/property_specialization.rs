@@ -437,7 +437,14 @@ fn guarded_property_path(clif: &str, shape: i64, store_offset: Option<i32>) -> R
             .then_some(value)
         })
         .collect();
-    if roots.len() != 2 {
+    // Cold owner-materialization paths may reload a root buffer pointer from
+    // the frame (inline `js_dup` of an argument/local), so every such load is
+    // a root; both buffers must be present.
+    if !root_loads.iter().all(|address| {
+        definitions
+            .values()
+            .any(|definition| definition.starts_with("load") && definition.ends_with(address))
+    }) {
         return Err("missing argument/local root buffers".into());
     }
     let mut edges = BTreeMap::<&str, Vec<&str>>::new();
