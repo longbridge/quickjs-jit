@@ -31,7 +31,27 @@ The following remain rejected (`ClosureFrame`):
 
 The C side is `sys/patches/0025-tier1-closures.patch`: ABI 1.25 and runtime
 API 1.10, with five helpers appended to the end of the helper table (IDs
-24-28).
+24-28). FCLOSURE, GET_VAR_REF and SET_NAME carry `THROWING | ALLOCATING |
+REENTRANT`, like every other allocating helper. CLOSE_LOC carries no flags,
+like DUP: outside the test-only stress-GC points it neither allocates, throws
+nor frees.
+
+## Automatic tiering gate (review round 1)
+
+Production automatic tiering (`JitTierPolicy::Automatic`) does **not**
+compile a function that contains `fclosure`/`fclosure8`. In `submit_snapshot`,
+such a function gets a Tier 1 `ClosureFrame` rejection and stays in the
+interpreter (`automatic_closure_creation_unprofitable` in `jit/src/lib.rs`).
+Tier 2 rejects the closure opcodes, so a closure-creating function would stay
+in the helper-bridge Tier 1 for good, and that tier measured at 0.74x the
+interpreter's speed on `calls-recursion-closures`. Explicit policies
+(`BaselineOnly`, `Optimize`) and forced test tiers still compile these
+functions, so the lowering stays exercised. Functions that only read or write
+var refs (the created closures themselves) remain eligible, and the existing
+profitability trial and blacklist still govern them. On `82d3808` every
+`fclosure` function was already rejected, so the gate cannot regress any
+function that was compiled before. Remove the gate once P1/P3 make the bridge
+cheaper, or once Tier 2 admits var refs.
 
 ## Semantic safety argument
 
@@ -45,18 +65,23 @@ API 1.10, with five helpers appended to the end of the helper table (IDs
   `make_*_ref` and `define_class` are all still rejected. Native arithmetic
   keeps its use-site tag guards, so a closure that changes a slot's type
   deoptimizes; the regression test for this passes.
-- **TDZ proofs.** Tier 1 proves `get_loc_check`, `put_loc_check` and
-  `put_loc_check_init` statically. A closure can only move a lexical slot from
-  uninitialized to initialized (through `put_var_ref_check_init`), never back.
-  The proofs for `get_loc_check` and `put_loc_check` therefore stay sound: a
-  slot the analysis believes uninitialized can only make the function retry.
-  A function that combines `fclosure` with `put_loc_check_init` is rejected
-  with `ClosureFrame`.
+- **TDZ checks.** `get_loc_check` is still checked at run time
+  (`lower_dup_if_refcounted(checked = true)`). `put_loc_check` relies on the
+  static initialization proof. A closure can only move a lexical slot from
+  uninitialized to initialized (through `put_var_ref_check_init`), never back,
+  so that proof stays sound. `put_loc_check_init` is rejected by the policy
+  table (`UnsupportedOpcode`) before translation. The `ClosureFrame`
+  rejection for `fclosure` + `put_loc_check_init` in
+  `BaselineIr::translate_with_policy` is therefore defense in depth. The
+  production path cannot reach it; only `translate_implemented_for_test` can.
 - **Ownership.** FCLOSURE and GET_VAR_REF write an owned value to an empty
   output slot. PUT_VAR_REF consumes its input on success and on a TDZ
   exception. After a failed PUT_VAR_REF, the exception exit publishes only the
   bytecode-visible stack below the consumed operand. SET_NAME borrows. Every
-  helper runs the stress-GC points.
+  helper runs the stress-GC points. A PUT_VAR_REF *invariant* reject (invalid
+  index or slot) does not consume its input. SET_PROPERTY and the other
+  consuming helpers behave the same way. The error is uncatchable and cannot
+  happen for compiler-validated operands.
 - **Other tiers.** Tier 2's opcode classifier still rejects all of these
   opcodes. Frame inlining rejects callees that contain `fclosure` or
   `close_loc`. Scalar or tagged leaf entries and effect-free inlining still
@@ -65,7 +90,14 @@ API 1.10, with five helpers appended to the end of the helper table (IDs
 
 Evidence:
 
-- `jit/tests/tier1_closures.rs` has 13 tests.
+- `jit/tests/tier1_closures.rs` has 17 tests. Round 1 added these:
+  closure writes during GET_PROPERTY (an accessor) and ADD_SLOW/COMPARE_SLOW
+  (`valueOf`), each changing the slot's type; a PUT_VAR_REF TDZ error with
+  live operands that unwinds to an interpreter caller's `catch`; OSR into a
+  closure-creating loop whose closure changes the captured local from Int32
+  to Float64 to string; and the automatic-tiering gate, contrasted with
+  `BaselineOnly`. With the reload disabled, the accessor/valueOf test and the
+  OSR test fail. With the gate disabled, the gate test fails.
 - `opcode-cases.json` has 21 new cases, each executed at its native PC under
   stress GC.
 - The helper-family cases are in `differential.rs`.
@@ -88,6 +120,26 @@ Setup:
 - Checksums match interpreter mode for every run.
 
 Speed is base/new, so values above 1.00x mean this branch is faster.
+
+### After the automatic-tiering gate (round 1, current)
+
+Same protocol and host, with 9 alternating base/new processes and 3
+interpreter-mode processes. Checksums are identical in the baseline,
+branch and interpreter runs. These are noisy diagnostics with no confidence
+intervals, and the publishable three-engine README matrix is still pending.
+
+| Workload | Base ms | New ms | Speed vs base | New vs interpreter |
+| --- | ---: | ---: | ---: | ---: |
+| calls-closures | 3.309 | 3.193 | 1.04x (within noise) | 1.04x |
+| calls-recursion-closures | 6.453 | 6.498 | 0.99x (tied) | 0.99x |
+| exceptions-promises-async | 3.670 | 3.656 | 1.00x (tied) | 0.64x (unchanged `catch` blocker) |
+| call-heavy (control) | 0.060 | 0.061 | 0.99x (tied) | 21.1x |
+
+A separate 15-pair run of `calls-recursion-closures` gave 6.615 ms against
+6.514 ms, 1.02x (tied). The 0.74x regression below is gone: `workload` stays
+in the interpreter, as it does on `82d3808`.
+
+### Before the gate (original slice, superseded)
 
 | Workload | Base ms | New ms | Speed vs base | New vs interpreter |
 | --- | ---: | ---: | ---: | ---: |
@@ -144,3 +196,10 @@ function workload(iterations, seed) {
    admitted.
 5. Make the generic call bridge (P1/P3) cheaper before expecting the ≥1.5x
    interpreter-speed P2 acceptance on the closure workloads.
+6. Remove the automatic-tiering gate for closure-creating functions once
+   items 1 or 5 make Tier 1 (or Tier 2) faster than the interpreter on
+   `calls-recursion-closures`. Re-measure with the full three-engine matrix
+   before removing it.
+7. Publishable evidence: the integrator must refresh the README
+   QuickJS/Bun/quickjs-jit matrix with confidence intervals for this branch.
+   Per the task rules, this branch does not edit README.md.

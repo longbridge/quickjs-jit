@@ -21,7 +21,7 @@ const EXPECTED_PATCHES: [(&str, u64); 20] = [
     ("0018-inline-frame-recovery.patch", 0xb971d61edccde229),
     ("0019-array-feedback.patch", 0x11c3cb13a8297dd4),
     ("0020-typed-array-guard.patch", 0x5d10_38a3_8bc9_9821),
-    ("0025-tier1-closures.patch", 0x3894_d14c_2378_dfa2),
+    ("0025-tier1-closures.patch", 0xe667_12ea_93d3_2533),
 ];
 pub(crate) const BASELINE_FILES: [&str; 19] = [
     "api-test.c",
@@ -63,7 +63,7 @@ const PATCHED_FILE_FINGERPRINTS: [(&str, u64); 21] = [
     ("quickjs-c-atomics.h", 0x490b_0f29_f631_3fc0),
     ("quickjs.c", 0xbad9_ea86_12ab_0678),
     ("quickjs-jit.h", 0xfafa_4511_21a6_ffb4),
-    ("quickjs-jit-helpers.h", 0x3703_05f2_7534_2073),
+    ("quickjs-jit-helpers.h", 0xffda_7a03_38b3_32ae),
     ("quickjs-opcode.h", 0x3d05_cfdf_5cf7_2930),
     ("quickjs.h", 0x4831_2cde_9c2f_a5ee),
 ];

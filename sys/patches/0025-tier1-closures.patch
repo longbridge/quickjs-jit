@@ -26,16 +26,16 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
 -      THROWING | ALLOCATING | REENTRANT | FINALIZING)
 +      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
 +    X(FCLOSURE, fclosure, JS_JitHelperFClosure, MAP_OUT_INDEX, 1, OWNED,    \
-+      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING)                       \
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)           \
 +    X(GET_VAR_REF, get_var_ref, JS_JitHelperGetVarRef, MAP_OUT_IN_OP, 1,   \
-+      OWNED, NONE, NONE, NONE, OWNED, THROWING | ALLOCATING)                \
++      OWNED, NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)    \
 +    X(PUT_VAR_REF, put_var_ref, JS_JitHelperPutVarRef, MAP_OUT_IN_OP, 1,   \
 +      CONSUMED, NONE, NONE, NONE, NONE,                                     \
 +      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
 +    X(CLOSE_LOC, close_loc, JS_JitHelperCloseLoc, MAP_IN, 0, NONE, NONE,    \
 +      NONE, NONE, NONE, 0)                                                  \
 +    X(SET_NAME, set_name, JS_JitHelperSetName, MAP_OUT_INDEX, 1, BORROWED,  \
-+      NONE, NONE, NONE, NONE, THROWING | ALLOCATING)
++      NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)
  
  typedef enum JSJitHelperId {
  #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \

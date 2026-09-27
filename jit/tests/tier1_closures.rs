@@ -168,7 +168,7 @@ fn derived_constructor_this_initialization_through_arrows_stays_rejected() {
 }
 
 #[test]
-fn automatic_tiering_runs_closure_creating_loops_natively() {
+fn baseline_only_tiering_runs_closure_creating_loops_natively() {
     let runtime = Runtime::new().unwrap();
     let jit = Jit::attach(
         &runtime,
@@ -201,4 +201,130 @@ fn automatic_tiering_runs_closure_creating_loops_natively() {
     assert!(jit.metrics().native_entries > 0, "{:?}", jit.metrics());
     let after = context.with(|ctx| ctx.eval::<i32, _>("kernel(200)").unwrap());
     assert_eq!(after, expected);
+}
+
+#[test]
+fn closure_writes_during_getters_and_value_of_are_reloaded() {
+    // The closures write the captured `c` from inside GET_PROPERTY (an
+    // accessor), ADD_SLOW and COMPARE_SLOW (`valueOf`), not only from CALL.
+    // Each write also changes the slot's type, so the native copy must be
+    // reloaded after every one of those helpers.
+    differential(
+        "function f(n){ let c = 0; const o = {}; Object.defineProperty(o, 'p', { get: () => { c = c + 0.5; return 1 } }); const v = { valueOf: () => { c = 'v' + c; return 2 } }; let s = 0; for (let i = 0; i < n; i++) { s += o.p; c++ } const t = s + v; const lt = s < v; c += '!'; return t + ':' + lt + ':' + c }",
+        "f(6)",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("get_field")
+    .expect_helper(HelperId::GetProperty)
+    .assert_same();
+}
+
+#[test]
+fn closure_tdz_write_error_unwinds_live_operands_to_the_callers_handler() {
+    // `x = v` raises the TDZ ReferenceError from PUT_VAR_REF while the array,
+    // its `concat` method and `v` are live operands. The native frame must
+    // release exactly those values and let the interpreter caller catch the
+    // error; stress GC detects a missing or doubled release.
+    differential(
+        "var f = (function(){ if (globalThis) return function f(v){ const r = [1, 2]; return r.concat(v, (x = v, 3)).length }; let x = 1 })()",
+        "(() => { const out = []; for (let i = 0; i < 3; i++) { try { out.push(f({ i })) } catch (e) { out.push(e.name + ':' + e.message) } } return out.join('|') })()",
+    )
+    .force_baseline()
+    .stress_gc()
+    .expect_executed_opcode("put_var_ref_check")
+    .expect_helper(HelperId::PutVarRef)
+    .assert_same();
+}
+
+fn run_until_native(jit: &Jit, context: &Context, source: &str) -> (i32, u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut result = 0;
+    while Instant::now() < deadline {
+        result = context.with(|ctx| ctx.eval::<i32, _>(source).unwrap());
+        jit.poll();
+        if jit.metrics().native_entries > 0 {
+            break;
+        }
+    }
+    (result, jit.metrics().native_entries)
+}
+
+#[test]
+fn automatic_tiering_keeps_closure_creating_functions_in_the_interpreter() {
+    // Tier 2 rejects closure opcodes, so a closure-creating function would be
+    // stuck in the helper-bridge Tier 1, which measured slower than the
+    // interpreter on `calls-recursion-closures`. Production automatic tiering
+    // therefore leaves it in the interpreter, while an explicit Tier 1 policy
+    // still compiles it. The closure is never called, so no other function can
+    // account for a native entry.
+    let kernel = "globalThis.kernel = function kernel(n){ let s = 0; let keep = null; for (let i = 0; i < n; i++) { keep = () => s; s = (s + i) | 0 } return keep === null ? -1 : s }";
+    let expected = (0..200).fold(0_i32, |s, i| s.wrapping_add(i));
+    for (policy, native) in [
+        (JitTierPolicy::Automatic, false),
+        (JitTierPolicy::BaselineOnly, true),
+    ] {
+        let runtime = Runtime::new().unwrap();
+        let jit = Jit::attach(
+            &runtime,
+            JitConfig::builder()
+                .tier_policy(policy)
+                .call_threshold(1)
+                .loop_threshold(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| ctx.eval::<(), _>(kernel).unwrap());
+        let (result, entries) = if native {
+            run_until_native(&jit, &context, "kernel(200)")
+        } else {
+            let mut result = 0;
+            for _ in 0..200 {
+                result = context.with(|ctx| ctx.eval::<i32, _>("kernel(200)").unwrap());
+                jit.poll();
+            }
+            (result, jit.metrics().native_entries)
+        };
+        assert_eq!(result, expected, "{policy:?}");
+        let metrics = jit.metrics();
+        if native {
+            assert!(entries > 0, "{metrics:?}");
+        } else {
+            assert_eq!(entries, 0, "{metrics:?}");
+            assert_eq!(metrics.osr_entries, 0, "{metrics:?}");
+            assert!(metrics.tier1_rejections >= 1, "{metrics:?}");
+        }
+    }
+}
+
+#[test]
+fn osr_into_a_closure_creating_loop_observes_closure_type_changes() {
+    // A long first invocation enters the Tier 1 loop through OSR. The
+    // function creates closures but captures nothing itself
+    // (`closure_count == 0`), so OSR is allowed. Late in the loop the closure
+    // turns the captured Int32 into a Float64 and then into a string; the OSR
+    // code must reload the slot after the call and keep the interpreter's
+    // result.
+    let source = "function f(n){ let x = 0; const bump = v => { x = v }; let s = 0; for (let i = 0; i < n; i++) { if (i === n - 1000) bump(x + 0.5); else if (i === n - 10) bump('s'); s = (s + i) | 0; x = x + 1 } return s + ':' + x } f(3000000)";
+    let expected = {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| ctx.eval::<String, _>(source).unwrap())
+    };
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .tier_policy(JitTierPolicy::BaselineOnly)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    let actual = context.with(|ctx| ctx.eval::<String, _>(source).unwrap());
+    assert_eq!(actual, expected);
+    assert!(expected.ends_with("s1111111111"), "{expected}");
+    assert!(jit.metrics().osr_entries >= 1, "{:?}", jit.metrics());
 }
