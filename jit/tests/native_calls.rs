@@ -463,3 +463,263 @@ fn float64_self_recursion_runs_natively_and_guards_its_signature() {
         ],
     );
 }
+
+/// Evaluates `expression` and returns the error text, clearing the pending
+/// (possibly uncatchable) exception so later evaluations start clean.
+fn eval_error(harness: &Harness, expression: &str) -> Result<i32, String> {
+    harness.context.with(|ctx| {
+        ctx.eval::<i32, _>(expression).map_err(|error| {
+            let exception = ctx.catch();
+            format!("{error}: {exception:?}")
+        })
+    })
+}
+
+#[test]
+fn native_recursion_delivers_a_one_shot_interrupt() {
+    // A host handler that answers `true` exactly once: the chain's poll
+    // consumes that answer, so the retried CALL must deliver it instead of
+    // asking the handler again (which would now answer `false`).
+    for force in [false, true] {
+        let harness = Harness::new(FIBONACCI, force);
+        harness.warm_native("fib(15)", "610");
+        let armed = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        harness._runtime.set_interrupt_handler(Some(Box::new({
+            let armed = Arc::clone(&armed);
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                armed.swap(false, Ordering::SeqCst)
+            }
+        })));
+        let error = eval_error(&harness, "fib(27)")
+            .expect_err("a one-shot interrupt was lost (force_tier2={force})");
+        assert!(error.contains("interrupted"), "{error}");
+        assert!(!armed.load(Ordering::SeqCst));
+        assert!(calls.load(Ordering::SeqCst) > 0);
+        // The delivered interrupt is not delivered a second time.
+        assert_eq!(harness.eval_string("fib(20)"), "6765");
+        harness._runtime.set_interrupt_handler(None);
+        assert_eq!(harness.eval_string("fib(20)"), "6765");
+        let metrics = harness.jit.metrics();
+        assert_eq!(metrics.native_entries, metrics.native_exits);
+    }
+}
+
+/// Like [`check_after_warmup`], with every expectation computed by a plain
+/// interpreter runtime without a JIT.
+fn check_against_interpreter(source: &str, warm: &[&str], probes: &[&str]) {
+    let interpreter = Runtime::new().unwrap();
+    let context = Context::full(&interpreter).unwrap();
+    let expect = |expression: &str| -> String {
+        context.with(|ctx| {
+            ctx.eval::<(), _>(source).unwrap();
+            ctx.eval::<String, _>(format!("String({expression})"))
+                .unwrap()
+        })
+    };
+    let warm: Vec<(&str, String)> = warm.iter().map(|w| (*w, expect(w))).collect();
+    let probes: Vec<(&str, String)> = probes.iter().map(|p| (*p, expect(p))).collect();
+    let warm: Vec<(&str, &str)> = warm.iter().map(|(e, r)| (*e, r.as_str())).collect();
+    let probes: Vec<(&str, &str)> = probes.iter().map(|(e, r)| (*e, r.as_str())).collect();
+    check_after_warmup(source, &warm, &probes);
+}
+
+#[test]
+fn native_tail_self_calls_return_the_callee_result() {
+    check_against_interpreter(
+        "function count(n,acc){if(n<=0)return acc;return count(n-1,acc+1);}\n\
+         function down(a,b){return a<=b?a:down(a-b,b);}",
+        &["count(30,0)", "down(1000,7)"],
+        &[
+            "count(100,5)",
+            // Overflow of the tail-call argument deep in the chain.
+            "count(20,2147483640)",
+            "down(1071,462)",
+            "down(10,10)",
+            "down(-2147483648,1)",
+        ],
+    );
+}
+
+#[test]
+fn native_recursion_resumes_after_a_caught_range_error() {
+    // Both chains start from exactly the same stack height: the same
+    // wrapper, called from the same global code.
+    let source = "function depth(n){return n<=0?0:1+depth(n-1);}\n\
+                  function run(n){try{return depth(n)}catch(e){return -1}}";
+    let harness = Harness::new(source, false);
+    harness.warm_native("run(200)", "200");
+    assert_eq!(harness.eval_string("run(1e6)"), "-1");
+    // A later chain from that height runs natively again instead of being
+    // refused (and deoptimized) at every call.
+    harness.warm_native("run(300)", "300");
+    let metrics = harness.jit.metrics();
+    assert_eq!(metrics.native_entries, metrics.native_exits);
+}
+
+#[test]
+fn native_float64_comparisons_match_the_interpreter() {
+    check_against_interpreter(
+        // Results stay non-integral (0.1 plus quarters) so the baseline tier
+        // never re-tags them as Int32.
+        "function cmp(x){if(x>0.5){if(x>1.5)return 0.5+cmp(x-1.125);return 0.75+cmp(x-1.125);}return 0.1;}",
+        &["cmp(20.3)"],
+        &[
+            // NaN fails every ordered comparison and ends the recursion.
+            "cmp(NaN)",
+            "cmp(5.5+NaN)",
+            "Object.is(cmp(-0),0.1)",
+            "cmp(2)",
+            "cmp(1.5)",
+            "cmp(0.5)",
+        ],
+    );
+}
+
+#[test]
+fn native_int32_lnot_matches_the_interpreter() {
+    check_against_interpreter(
+        "function inv(n){if(!n)return 0;return 1+inv(n-1);}",
+        &["inv(30)"],
+        &[
+            // `!n` on Int32 zero and non-zero, and on non-Int32 arguments.
+            "inv(0)",
+            "inv(-0)",
+            "inv(3)",
+            "inv(true)",
+        ],
+    );
+}
+
+#[test]
+fn a_linked_caller_follows_an_aliased_callee_binding() {
+    // The caller reaches the callee through a parameter, not through the
+    // callee's own global name, so the chain must still prove that name.
+    let source = format!(
+        "{FIBONACCI}\nfunction caller(n,g){{let s=0;for(let i=0;i<n;i++){{s+=g(12);}}return s;}}"
+    );
+    for force in [false, true] {
+        let harness = Harness::new(&source, force);
+        harness.warm_native("fib(15)", "610");
+        for _ in 0..64 {
+            assert_eq!(harness.eval_string("caller(8,fib)"), "1152");
+            harness.jit.poll();
+        }
+        // `old` passes the caller's identity guard, but its self calls now
+        // resolve to the new global binding: old(12) = 1 + 1.
+        assert_eq!(
+            harness.eval_string(
+                "(()=>{const old=fib;fib=function(n){return 1};const r=caller(2,old);fib=old;return r})()"
+            ),
+            "4"
+        );
+        assert_eq!(harness.eval_string("caller(2,fib)"), "288");
+        let metrics = harness.jit.metrics();
+        assert_eq!(metrics.native_entries, metrics.native_exits);
+    }
+}
+
+#[test]
+fn a_replaced_callee_invalidates_its_linked_caller() {
+    // The caller guards raw callee identities. When the callee is freed and a
+    // different function with the same name takes its place, possibly at the
+    // same addresses, the caller must not run the old native body.
+    let source = format!(
+        "{FIBONACCI}\nfunction caller(n){{let s=0;for(let i=0;i<n;i++){{s+=fib(12);}}return s;}}"
+    );
+    fn reference(n: i64, k: i64) -> i64 {
+        if n < 2 {
+            n + k
+        } else {
+            reference(n - 1, k) + reference(n - 2, k)
+        }
+    }
+    for force in [false, true] {
+        let harness = Harness::new(&source, force);
+        harness.warm_native("fib(15)", "610");
+        for _ in 0..64 {
+            assert_eq!(harness.eval_string("caller(8)"), "1152");
+            harness.jit.poll();
+        }
+        for round in 0..16i64 {
+            harness
+                .context
+                .with(|ctx| {
+                    ctx.eval::<(), _>(format!(
+                        "fib=(0,eval)('(function fib(n){{if(n<2)return n+{round};return fib(n-1)+fib(n-2);}})');"
+                    ))
+                })
+                .unwrap();
+            harness._runtime.run_gc();
+            harness.jit.poll();
+            assert_eq!(
+                harness.eval_string("caller(3)"),
+                (reference(12, round) * 3).to_string(),
+                "round {round} (force_tier2={force})"
+            );
+        }
+        let metrics = harness.jit.metrics();
+        assert_eq!(metrics.native_entries, metrics.native_exits);
+    }
+}
+
+#[test]
+fn native_call_sites_release_the_global_callee_on_every_edge() {
+    // `acc` is loaded by get_var (an owned stack slot). The native site
+    // frees that reference after success and hands it to the interpreter on
+    // every deopt edge; a leak keeps the replaced callee alive and an extra
+    // release frees it early.
+    let source = "function acc(n,k){return n<=0?k:1+acc(n-1,k);}\n\
+                  function caller(n,x,k){let s=0;for(let i=0;i<n;i++){s+=acc(x,k);}return s;}";
+    for force in [false, true] {
+        let harness = Harness::new(source, force);
+        harness.warm_native("acc(40,1)", "41");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let calls = generic_calls(&harness.context);
+            let before = harness.jit.metrics();
+            assert_eq!(harness.eval_string("caller(64,20,1)"), "1344");
+            let after = harness.jit.metrics();
+            harness.jit.poll();
+            if after.native_entries - before.native_entries == 1
+                && generic_calls(&harness.context) == calls
+                && after.pending_worker_jobs == 0
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "caller never linked (force_tier2={force}): {after:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Tag miss, chain retry (Int32 overflow), identity miss, success.
+        assert_eq!(harness.eval_string("caller(2,3.5,1)"), "10");
+        assert_eq!(harness.eval_string("caller(1,20,2147483640)"), "2147483660");
+        assert_eq!(
+            harness.eval_string(
+                "(()=>{const old=acc;acc=function(n,k){return k};const r=caller(2,5,7);acc=old;return r})()"
+            ),
+            "14"
+        );
+        assert_eq!(harness.eval_string("caller(4,20,1)"), "84");
+        assert_eq!(
+            harness.eval_string(
+                "(globalThis.weak=new WeakRef(acc),acc=function(n,k){return 0},caller(3,20,1))"
+            ),
+            "0"
+        );
+        harness._runtime.run_gc();
+        harness.jit.poll();
+        harness._runtime.run_gc();
+        assert_eq!(
+            harness.eval_string("weak.deref()===undefined"),
+            "true",
+            "the replaced callee leaked (force_tier2={force})"
+        );
+        let metrics = harness.jit.metrics();
+        assert_eq!(metrics.native_entries, metrics.native_exits);
+    }
+}

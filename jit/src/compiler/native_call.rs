@@ -25,7 +25,6 @@ use cranelift_codegen::ir::{
     StackSlotData, StackSlotKind, UserExternalName, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use super::{CompileControl, CompileFailure};
@@ -77,9 +76,10 @@ unsafe extern "C" {
         function: *mut core::ffi::c_void,
         atom: u32,
         nc: *mut NativeCallContext,
+        sp: usize,
     ) -> core::ffi::c_int;
     fn JS_JitNativeCallPoll(nc: *mut NativeCallContext) -> core::ffi::c_int;
-    fn JS_JitNativeCallEnd(nc: *mut NativeCallContext);
+    fn JS_JitNativeCallEnd(nc: *mut NativeCallContext, sp: usize);
     fn JS_JitNativeCallContextLayout(offsets: *mut usize, count: usize) -> usize;
 }
 
@@ -127,14 +127,6 @@ fn measure_interpreter_frame() -> Option<u32> {
     })
 }
 
-thread_local! {
-    /// Stack address of the outermost caller whose chain ran out of stack.
-    /// While the thread executes at or below it, native chains are not
-    /// attempted, so exhausted recursion continues on real interpreter
-    /// frames instead of retrying a native chain at every level.
-    static EXHAUSTED_FLOOR: Cell<usize> = const { Cell::new(0) };
-}
-
 /// True when the C context layout matches the offsets generated code uses.
 pub(crate) fn context_layout_matches() -> bool {
     let mut offsets = [0usize; 4];
@@ -153,6 +145,13 @@ pub(crate) fn context_layout_matches() -> bool {
 /// Admits one outermost native chain. `sp` is the caller's stack pointer.
 /// Returns zero when the chain may run.
 ///
+/// While the interpreter retries a chain that ran out of stack, chains
+/// started below that chain's caller are refused, so the doomed recursion is
+/// not retried natively at every level. The runtime-owned floor is cleared by
+/// the retry's own stack overflow error, by a chain at or above the floor, or
+/// after a refusal budget bounded by the remaining stack (patch 0029), so one
+/// caught `RangeError` never disables native calls for a stack height.
+///
 /// # Safety
 /// `ctx` must be the live context of the calling frame, `function` a live
 /// object guarded by the caller, and `nc` writable for the whole chain.
@@ -163,14 +162,7 @@ pub(crate) unsafe extern "C" fn qjsjit_native_call_begin(
     nc: *mut NativeCallContext,
     sp: usize,
 ) -> i32 {
-    let floor = EXHAUSTED_FLOOR.with(Cell::get);
-    if floor != 0 {
-        if sp <= floor {
-            return 1;
-        }
-        EXHAUSTED_FLOOR.with(|cell| cell.set(0));
-    }
-    if unsafe { JS_JitNativeCallBegin(ctx, function, atom, nc) } != 0 {
+    if unsafe { JS_JitNativeCallBegin(ctx, function, atom, nc, sp) } != 0 {
         1
     } else {
         0
@@ -182,10 +174,7 @@ pub(crate) unsafe extern "C" fn qjsjit_native_call_begin(
 /// # Safety
 /// `nc` must have been admitted by [`qjsjit_native_call_begin`].
 pub(crate) unsafe extern "C" fn qjsjit_native_call_end(nc: *mut NativeCallContext, sp: usize) {
-    unsafe { JS_JitNativeCallEnd(nc) };
-    if unsafe { (*nc).flags } & FLAG_STACK_EXHAUSTED != 0 {
-        EXHAUSTED_FLOOR.with(|cell| cell.set(sp));
-    }
+    unsafe { JS_JitNativeCallEnd(nc, sp) };
 }
 
 /// Validated description of a function's native entry.

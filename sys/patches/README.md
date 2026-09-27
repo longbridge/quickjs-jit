@@ -68,10 +68,19 @@ so the runtime API/helper ABI version and the bundled bindings are unchanged.
 global self reference resolves, as `OP_get_var` would in the callee realm, to a
 plain data binding holding exactly the callee, and loads the stack limit and
 interrupt budget into a caller-owned `JSJitNativeCallContext`.
-`JS_JitNativeCallPoll` is `__js_poll_interrupts` without throwing (an
-interrupt makes the chain retry in the interpreter), and `JS_JitNativeCallEnd`
-publishes the chain's interrupt accounting. `JS_JitNativeCallContextLayout`
-lets the compiler verify the context layout before generating code.
+`JS_JitNativeCallPoll` is `__js_poll_interrupts` without throwing: an
+interrupt request is recorded in the new internal `JSRuntime` field
+`jit_interrupt_pending` and makes the chain retry in the interpreter, whose
+next `__js_poll_interrupts` delivers it without calling the handler again, so
+a handler's single `true` is never lost. `JS_JitNativeCallEnd` publishes the
+chain's interrupt accounting and, after stack exhaustion, records the
+caller's stack pointer in `jit_native_floor`; `Begin` refuses chains strictly
+below it while the interpreter retries, and the floor clears on the next
+stack overflow error, on a chain at or above it, or after a refusal budget
+derived from the remaining stack. `JS_JitNativeCallContextLayout` lets the
+compiler verify the context layout before generating code. The new
+`JSRuntime` fields are internal (the bundled bindings keep `JSRuntime`
+opaque), so neither the ABI version nor the bindings change.
 
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.

@@ -50,6 +50,13 @@ status = entry(nc: *mut JSJitNativeCallContext, out: *mut Scalar, args...)
 
 未命中 IC 时走原来的 generic CALL 路径（或在 CALL 处 deopt），绝不猜测。
 
+第一切片的实现：运行时守卫只比较对象指针和字节码指针（没有独立的
+generation/epoch 比较字）。generation 通过依赖实现：每个链接到其他函数
+native entry 的调用点都把被调方 `FunctionKey` 加入调用方 artifact 的
+`ArtifactDependency`，被调方被回收（retire）时调用方 artifact 随之失效，
+因此被释放的地址被另一个同名函数复用时不会命中旧的原始指针守卫（ABA）。
+epoch 就是上面的发布 pin。
+
 ### 2.3 原生帧与惰性 `JSStackFrame` 物化
 
 原生 callee 不压 `JSStackFrame`。它的帧由 Cranelift 管理，并为每个可能
@@ -77,17 +84,22 @@ status = entry(nc: *mut JSJitNativeCallContext, out: *mut Scalar, args...)
   `ctx->interrupt_counter`。原生入口同样按调用递减 `nc->budget`（从
   `ctx->interrupt_counter` 读入，退出时写回）。预算耗尽时：没有安装
   interrupt handler 就只重置预算（与 `__js_poll_interrupts` 相同）；安装了
-  handler 则调用 handler，返回 0 时继续原生执行，返回非零时把
-  `ctx->interrupt_counter` 置 0 并返回 status 1，由解释器重试这次调用、在
-  它自己的 poll 点抛出不可捕获的 `interrupted`（异常与 backtrace 与解释器
-  完全一致；handler 会多被调用一次，这只对宿主可见）。
+  handler 则调用 handler，返回 0 时继续原生执行，返回非零时在运行时上记录
+  `rt->jit_interrupt_pending`、把 `ctx->interrupt_counter` 置 0 并返回
+  status 1。解释器重试这次调用，它的下一个 poll（重试 CALL 的入口 poll）
+  看到 pending 后直接抛出不可捕获的 `interrupted`，**不会再次调用 handler**，
+  所以 handler 的一次 `true` 不会丢失（只返回一次 `true` 的 handler 也能
+  中断）。pending 期间 `Begin` 拒绝新链。
 - **栈溢出**：解释器用 `js_check_stack_overflow(rt, alloca_size)` 比较栈指针
   和 `rt->stack_limit`。原生入口在序言里做同样的比较，并且按"解释器帧的
   保守开销"累计虚拟栈深度（见 3.4），保证原生递归不会在解释器会抛
   `RangeError` 的深度之后才失败。失败返回 status 1，由解释器以真实帧
   重新执行并在同样的检查处抛出 `RangeError`。为避免每一层解释器帧重复一次
-  原生递归（二次复杂度），失败时记录一个线程局部的栈水位；在更深的位置
-  不再尝试原生调用，回到更浅的位置后自动清除。
+  原生递归（二次复杂度），失败时在运行时上记录栈水位
+  `rt->jit_native_floor`；严格更深的位置不再尝试原生调用。水位在以下任一
+  情况清除：重试到达真实栈限并抛出 stack overflow `RangeError`
+  （`JS_ThrowStackOverflow`）；某条链在水位或更浅处开始；或者拒绝次数超过
+  按剩余栈估计的上限（`(sp - stack_limit) / 256 + 64`）。
 - **GC 根**：原生参数只有标量和借用引用；借用引用的根由最外层调用方持有
   （参数/局部或 owned 栈槽）。第一切片不传堆参数。
 
@@ -173,7 +185,8 @@ interrupt handler 被原生链轮询并能中断；单态调用方链接到 nati
 - native entry 调用自身使用 colocated 用户名（`NATIVE_SELF_NAMESPACE`），
   最终重定位解析为自身基址（x86_64 `X86CallPCRel4`，aarch64 `Arm64Call`）。
 - 跨函数调用方把被调方 native entry 的发布 pin 放入
-  `direct_call_dependencies`，与现有叶直调一致。native entry 只依赖字节码，
+  `direct_call_dependencies`，与现有叶直调一致；同时把被调方
+  `FunctionKey` 加入 artifact 依赖（r1），被调方 retire 时调用方失效。native entry 只依赖字节码，
   被调方 artifact 被替换后旧 entry 仍然正确，调用点的身份保护负责选择。
 - native entry 有 unwind 信息，但没有 stack map 或 frame state；它从不在
   helper、GC 或异常中出现在栈遍历器面前。
@@ -185,9 +198,15 @@ interrupt handler 被原生链轮询并能中断；单态调用方链接到 nati
   调用递减一次（对应 `JS_CallInternal` 入口的 poll）。预算耗尽时调用
   `JS_JitNativeCallPoll`：handler 返回 0 就重置预算继续；返回非零则标记
   `INTERRUPT_DUE` 并让整条链重试，`End` 把 `ctx->interrupt_counter` 置 0，
-  重试的 CALL 进入 `JS_CallInternal` 时立即 poll，由解释器抛出不可捕获的
-  `interrupted`（异常和 backtrace 与解释器一致；handler 因此多被调用一次，
-  这只对宿主可见）。
+  并设置 `rt->jit_interrupt_pending`。重试的 CALL 进入 `JS_CallInternal`
+  时立即 poll，`__js_poll_interrupts` 看到 pending 就清除它并抛出不可捕获
+  的 `interrupted`，不再调用 handler。r1 之前重试会再次调用 handler，
+  只返回一次 `true` 的 handler 的中断因此丢失（审查发现，已有回归测试）。
+  仍然存在的差异只涉及 handler 的调用时机：原生链每次调用轮询一次，而
+  解释器还在每个 `goto`/`if_true`/`if_false` 上轮询；因其他原因
+  （溢出、`-0`、栈）重试的链会让解释器重新消耗预算，handler 可能比纯解释器
+  多被调用（返回 0 的调用）。这些只影响中断延迟和 handler 调用次数，不会
+  丢失或重复一次中断。
 - **栈深度**：native entry 的第三个参数是"虚拟栈指针"，最外层取调用点的
   真实栈指针，每层减去 `frame_charge`：`16 × (参数 + 局部 + 栈 + 4)` 加上
   **本构建实测**的解释器单层开销（`interpreter_frame_bytes`：在一个无 JIT 的
@@ -195,9 +214,14 @@ interrupt handler 被原生链轮询并能中断；单态调用方链接到 nati
   余量；x86_64 release 实测约 1984 字节/层，取 2480）。检查条件等价于
   解释器的 `js_check_stack_overflow`（`vsp - charge < rt->stack_limit`）。
   因为每层至少按解释器开销计费，原生链总在解释器会抛 `RangeError` 的深度
-  之前失败，然后由解释器以真实帧复现。失败时 `End` 在线程局部记录最外层
-  调用点的栈地址；在这个地址及更深处不再尝试原生链（否则每一层解释器帧都
-  会重新跑一次接近栈限的原生递归，变成二次复杂度），回到更浅处自动清除。
+  之前失败，然后由解释器以真实帧复现。失败时 `End` 在运行时
+  （`rt->jit_native_floor`）记录最外层调用点的栈地址；严格更深处不再尝试
+  原生链（否则每一层解释器帧都会重新跑一次接近栈限的原生递归，变成二次
+  复杂度）。重试抛出 stack overflow `RangeError`、同一高度或更浅处开始新链、
+  或拒绝次数超过剩余栈对应的层数上限时清除，因此一次被捕获的
+  `RangeError` 不会让同一调用高度永久失去原生调用（r1 之前的线程局部水位
+  只在严格更浅处清除，而同一个包装函数换了执行层级后帧高度会变化，导致
+  永久拒绝并反复 deopt，最终被降级）。
 - **GC**：链中没有分配，也没有堆值；借用的函数对象由调用方 owned 栈槽和
   全局绑定共同持有。
 
@@ -252,3 +276,58 @@ checksum 与解释器一致。按第 2 节的稳态口径，Bun 的 `fibonacci-r
   （偶尔 0.06 ms），基线二进制同样如此。
 - frame 内联一个递归被调方时，调用方每次求值 deopt 一次；有 native target
   的调用点现在不再内联，因此不受影响。
+
+## 6. 审查修复（`perf/p3a-native-calls-r1`）
+
+阻塞项：
+
+1. **中断丢失**（已修复）。patch 0029 在 `JSRuntime` 上新增
+   `jit_interrupt_pending`：`JS_JitNativeCallPoll` 在 handler 返回非零时设置它，
+   `__js_poll_interrupts` 先检查它并直接抛出 `interrupted`，`Begin` 在
+   pending 时拒绝。回归测试
+   `native_recursion_delivers_a_one_shot_interrupt`（handler 只返回一次
+   `true`，自动分层和强制 Tier 2 都必须得到 `interrupted`）；修复前失败。
+2. **README 三引擎矩阵与发布级证据**：按本次工作流的环境规则（16 个 agent
+   共享机器，"do NOT run the full benchmark matrix and do NOT edit the README
+   matrix"），发布级 QuickJS / Bun / quickjs-jit 矩阵由集成者在合并前统一
+   测量并写入 README。本分支只提供第 4 节和最终报告里的噪声诊断，
+   因此在集成者刷新矩阵之前，这个优化**不算完成**（AGENTS.md）。
+
+非阻塞项中已修复的：
+
+- 粘性栈水位：改为运行时字段，并增加 stack overflow 清除和拒绝预算
+  （回归测试 `native_recursion_resumes_after_a_caught_range_error`，修复前
+  失败）。
+- 非自调用 native 调用点缺少被调方依赖（ABA）：已加入
+  `ArtifactDependency`（测试 `a_replaced_callee_invalidates_its_linked_caller`
+  是尽力而为的回归测试，地址复用无法被确定性地构造）。
+- 设计文档与实现的 IC 描述不一致：2.2 已更新。
+
+新增测试覆盖：tail call 自调用（`native_tail_self_calls_return_the_callee_result`）、
+Float64 比较中的 NaN / `-0`（`native_float64_comparisons_match_the_interpreter`）、
+Int32 `lnot`（`native_int32_lnot_matches_the_interpreter`）、调用方通过别名
+（参数）调用被调方而全局名已重绑定（`a_linked_caller_follows_an_aliased_callee_binding`）、
+get_var 取得的被调方在成功和各 deopt 边上的引用计数（用 `WeakRef` 检查被
+替换的函数确实被回收，`native_call_sites_release_the_global_callee_on_every_edge`）。
+
+仍未处理（记录为后续工作）：
+
+- 进入 `native_recursive` 后 `tier2_trial_decided` 被强制为 true：每次都重试
+  的链（例如 Int32 反馈但实际溢出）不会被度量或降级。应改为按链重试率
+  （native fallback / Tier 2 entry）降级。
+- 调用方在 native_recursive 被调方处于 Cold/Queued/Compiling/Ready 时一直
+  等待；被调方如果因回退永远停留在 Cold，调用方就不会升级。应给等待加上
+  次数或时间上限。维护逻辑也把 `native_call_ready` 的调用点都算作已覆盖，
+  但 `obj.fib(n)` 等带 `this` 的形状仍走 generic call。
+- 三元表达式把 Float64 值留在操作数栈上再调用自身（例如
+  `(x>1.5?0.5:0.75)+cmp(x-1.125)`）时 Tier 2 编译返回 `InvalidArtifact`，
+  失败是关闭的（留在低层级），但这个形状没有得到 native 调用。
+- 第 3.5 节列出的范围（Bool / 堆参数、链内调用其他函数、惰性帧物化）以及
+  `calls-recursion-closures` 的 `recursiveSum` 和 `call-heavy` 目标仍然未完成。
+
+r1 噪声诊断（同一台负载机器，交替运行 7 次，最后 16 个预热批次中位数的
+中位数，automatic；速度 = `82d3808` / r1，>1 更快；非发布数据）：
+`fibonacci-recursive` 9.839 → 0.360 ms（27.3x；同一基线二进制的解释器
+9.830 ms）；`calls-recursion-closures` 6.426 → 6.436 ms（1.00x，持平）；
+`call-heavy` 0.0598 → 0.0603 ms（0.99x，持平）；`quickjs-fibonacci`
+0.365 → 0.364 ms（1.00x，持平）。四个场景的 checksum 都与解释器一致。

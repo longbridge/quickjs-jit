@@ -9568,12 +9568,17 @@ fn tier2_stage<T>(
 /// and compiles this artifact's own native entry when the function is a pure
 /// self-recursive Int32 function, routing its self-call sites to it. Other
 /// sites keep their existing lowering.
+///
+/// Every linked callee is added to `callee_dependencies`: the site guards raw
+/// object and bytecode addresses, so retiring the callee must invalidate this
+/// artifact before a different function can reuse those addresses (ABA).
 fn prepare_native_calls(
     isa: &cranelift_codegen::isa::OwnedTargetIsa,
     request: &CompileRequest,
     specialization: &mut NumericSpecialization,
     control: Option<&CompileControl>,
     direct_dependencies: &mut Vec<super::baseline::PublishedBaselineCode>,
+    callee_dependencies: &mut Vec<crate::runtime::FunctionKey>,
 ) -> Option<(
     super::native_call::NativeCallPlan,
     super::baseline::RelocatableCode,
@@ -9585,6 +9590,7 @@ fn prepare_native_calls(
     for instruction in request.snapshot().instructions() {
         if let Some(target) = request.native_call_target(instruction.pc()) {
             direct_dependencies.push(target.publication());
+            callee_dependencies.push(target.link().callee());
             specialization.native_calls.insert(
                 instruction.pc(),
                 NativeCallSite {
@@ -9741,12 +9747,14 @@ impl Compiler for Tier2Compiler {
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::DirectDependencies, None);
+        let mut native_callee_dependencies = Vec::new();
         let native_entry = prepare_native_calls(
             &self.isa,
             &request,
             &mut specialization,
             None,
             &mut direct_dependencies,
+            &mut native_callee_dependencies,
         );
         let code = match lower_optimized_machine(&self.isa, &ir, None, profile, &specialization) {
             Err(CompileFailure::InvalidArtifact)
@@ -9788,6 +9796,11 @@ impl Compiler for Tier2Compiler {
                 .calls
                 .values()
                 .map(|call| crate::code_cache::ArtifactDependency::new(call.callee())),
+        );
+        dependencies.extend(
+            native_callee_dependencies
+                .into_iter()
+                .map(crate::code_cache::ArtifactDependency::new),
         );
         if ir.scalar_graph().frame_inlined_calls() != 0 {
             dependencies.extend(
@@ -9961,12 +9974,14 @@ impl Compiler for Tier2Compiler {
         }
         #[cfg(feature = "test-support")]
         record_tier2_stage(key, Tier2CompileStage::DirectDependencies, None);
+        let mut native_callee_dependencies = Vec::new();
         let native_entry = prepare_native_calls(
             &self.isa,
             &request,
             &mut specialization,
             Some(control),
             &mut direct_dependencies,
+            &mut native_callee_dependencies,
         );
         let code = match lower_optimized_machine(
             &self.isa,
@@ -10032,6 +10047,11 @@ impl Compiler for Tier2Compiler {
                 .calls
                 .values()
                 .map(|call| crate::code_cache::ArtifactDependency::new(call.callee())),
+        );
+        dependencies.extend(
+            native_callee_dependencies
+                .into_iter()
+                .map(crate::code_cache::ArtifactDependency::new),
         );
         if ir.scalar_graph().frame_inlined_calls() != 0 {
             dependencies.extend(
