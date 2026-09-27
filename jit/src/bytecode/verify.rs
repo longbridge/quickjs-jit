@@ -121,6 +121,7 @@ pub struct VerifiedFunction {
     osr_points: Box<[super::OsrPoint]>,
     exception_handlers: std::collections::BTreeMap<u32, stack::ExceptionHandler>,
     unreachable: std::collections::BTreeSet<u32>,
+    exception_regions: bool,
 }
 
 impl VerifiedFunction {
@@ -140,14 +141,9 @@ impl VerifiedFunction {
     /// True when any instruction executes with a live catch offset or the
     /// bytecode contains a try/finally transfer. Consumers that cannot model
     /// exceptional control flow (inlining, direct leaf calls) must reject it.
+    /// Computed once at verification: maintenance consults it on every scan.
     pub fn has_exception_regions(&self) -> bool {
-        !self.exception_handlers.is_empty()
-            || self.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction.opcode().name(),
-                    "catch" | "nip_catch" | "gosub" | "ret" | "throw" | "throw_error"
-                )
-            })
+        self.exception_regions
     }
 
     pub fn snapshot(&self) -> &CompileSnapshot {
@@ -455,6 +451,13 @@ pub(crate) fn verify(
         })
         .collect::<Result<Vec<_>, VerifyError>>()?
         .into_boxed_slice();
+    let exception_regions = !proof.handlers.is_empty()
+        || instructions.iter().any(|instruction| {
+            matches!(
+                instruction.opcode().name(),
+                "catch" | "nip_catch" | "gosub" | "ret" | "throw" | "throw_error"
+            )
+        });
     Ok(VerifiedFunction {
         snapshot,
         instructions,
@@ -462,5 +465,6 @@ pub(crate) fn verify(
         osr_points,
         exception_handlers: proof.handlers,
         unreachable,
+        exception_regions,
     })
 }

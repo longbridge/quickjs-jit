@@ -2247,15 +2247,6 @@ impl ProductionBackend {
                 if self.feedback_disabled.contains(key) {
                     return false;
                 }
-                // Tier 2 has no exceptional control flow; exception regions
-                // stay on their Tier 1 code instead of failing admission.
-                if self
-                    .optimizing_snapshots
-                    .get(key)
-                    .is_some_and(bytecode::VerifiedFunction::has_exception_regions)
-                {
-                    return false;
-                }
                 if self
                     .profitability_backoff
                     .get(key)
@@ -2285,6 +2276,12 @@ impl ProductionBackend {
             let Some(snapshot) = self.optimizing_snapshots.get(&key) else {
                 continue;
             };
+            // Tier 2 has no exceptional control flow; exception regions stay
+            // on their Tier 1 code instead of failing admission. Checked only
+            // for ready candidates so the per-maintenance scan stays as is.
+            if snapshot.has_exception_regions() {
+                continue;
+            }
             let observed = self
                 .feedback
                 .snapshot(self.clock.max(1))
