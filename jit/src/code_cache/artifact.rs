@@ -659,6 +659,7 @@ impl CompiledArtifact {
         if function.instructions().len() <= 128
             && snapshot.retained_bytes() <= 16 * 1024
             && snapshot.exception_map().is_empty()
+            && !function.has_exception_regions()
             && snapshot.function_id() == self.key.function_id
             && snapshot.generation() == self.key.generation
             && snapshot.source_revision() == self.key.source_revision

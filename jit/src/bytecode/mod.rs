@@ -20,7 +20,7 @@ pub use policy::{
 };
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub(crate) use stack::effective_pop;
-pub use stack::SlotKind;
+pub use stack::{ExceptionHandler, SlotKind};
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
 pub(crate) use verify::{
     SPECIAL_OBJECT_IMPORT_META, SPECIAL_OBJECT_MAPPED_ARGUMENTS, SPECIAL_OBJECT_MAX,

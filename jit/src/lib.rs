@@ -1496,7 +1496,8 @@ fn validate_production_frame(
         };
         let valid = match kind {
             SlotKind::Tagged => true,
-            SlotKind::Int32 | SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::Int32 => value.tag == i64::from(qjs::JS_TAG_INT),
+            SlotKind::CatchOffset => value.tag == i64::from(qjs::JS_TAG_CATCH_OFFSET),
             SlotKind::Float64 => value.tag == i64::from(qjs::JS_TAG_FLOAT64),
             SlotKind::Uninitialized => value.tag == i64::from(qjs::JS_TAG_UNINITIALIZED),
         };
@@ -2706,6 +2707,15 @@ impl ProductionBackend {
             let forced_trial = false;
             if !forced_trial && settles_untranslatable_candidate(snapshot) {
                 self.settle_untranslatable_tier2_candidate(key);
+                continue;
+            }
+            // Tier 2 has no exceptional control flow; exception regions stay
+            // on their Tier 1 code instead of failing admission. Checked only
+            // for ready candidates so the per-maintenance scan stays as is.
+            // The P2b untranslatable settle above runs first, so a region
+            // that also uses a newly admitted generic opcode still returns to
+            // the interpreter exactly as that settle documents.
+            if snapshot.has_exception_regions() {
                 continue;
             }
             let scan_inputs = Tier2ScanInputs {

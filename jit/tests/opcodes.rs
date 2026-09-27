@@ -129,7 +129,7 @@ fn policies_are_semantic_and_categorized() {
 }
 
 #[test]
-fn unsupported_frame_and_exception_families_are_stable_rejects() {
+fn unsupported_frame_families_reject_and_exception_regions_are_native() {
     let by_name = |name| {
         let opcode = linked_opcode_table()
             .find(|opcode| opcode.name() == name)
@@ -151,10 +151,10 @@ fn unsupported_frame_and_exception_families_are_stable_rejects() {
         by_name("make_var_ref_ref"),
         Tier1Policy::Reject(FallbackReason::ClosureFrame)
     );
-    assert_eq!(
-        by_name("catch"),
-        Tier1Policy::Reject(FallbackReason::ExceptionRegion)
-    );
+    // Exception regions dispatch natively through the ABI 1.25 entry points.
+    for native in ["throw", "throw_error", "catch", "nip_catch", "gosub", "ret"] {
+        assert_eq!(by_name(native), Tier1Policy::Native, "{native}");
+    }
     assert_eq!(
         by_name("get_super"),
         Tier1Policy::Reject(FallbackReason::UnsupportedOpcode)

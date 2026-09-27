@@ -168,6 +168,7 @@ impl FrameInlineCallee {
             || snapshot.retained_bytes() > 16 * 1024
             || snapshot.closure_count() != 0
             || !snapshot.exception_map().is_empty()
+            || self.body.has_exception_regions()
             || self.body.control_flow_graph().blocks().len() > 16
             || self.body.control_flow_graph().blocks().iter().any(|block| {
                 block
@@ -335,6 +336,7 @@ impl InlineCallee {
             || snapshot.local_count() != 0
             || snapshot.closure_count() != 0
             || !snapshot.exception_map().is_empty()
+            || self.body.has_exception_regions()
             || self.body.instructions().len() > 128
         {
             return None;

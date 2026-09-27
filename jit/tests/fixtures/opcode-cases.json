@@ -1879,6 +1879,66 @@
         "normal",
         "exception-or-nonthrow"
       ]
+    },
+    {
+      "opcode": "throw",
+      "definition": "function f(a){ if (a) throw {code: a}; return 'none' }",
+      "expression": "(()=>{let caught;try{f(7)}catch(e){caught=e.code}return [f(0),caught]})()",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "throw_error",
+      "definition": "function f(a){ const k = a; if (a > 1) k = 2; return k }",
+      "expression": "(()=>{let caught;try{f(5)}catch(e){caught=e.name+':'+e.message}return [f(1),caught]})()",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "catch",
+      "definition": "function f(o){ let r; try { r = o.x.y } catch (e) { r = e.name } return r }",
+      "expression": "[f({x:{y:4}}),f({}),f({x:null})]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "nip_catch",
+      "definition": "function f(g){ try { return g(2) } catch (e) { return 'caught:' + e.name } }",
+      "expression": "[f(function(v){return v*21}),f(5)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "gosub",
+      "definition": "function f(a){ let log = ''; try { if (a) throw a; log += 'body'; } catch (e) { log += 'caught' + e; } finally { log += ',finally'; } return log }",
+      "expression": "[f(0),f(3)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "ret",
+      "definition": "function f(n){ let c = 0; for (let i = 0; i < n; i++) { try { if (i % 3 === 0) continue; c += i; } finally { c += 100; } } return c }",
+      "expression": "[f(10),f(0)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
     }
   ]
 }

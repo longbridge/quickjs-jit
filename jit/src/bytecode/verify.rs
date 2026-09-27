@@ -119,9 +119,33 @@ pub struct VerifiedFunction {
     instructions: Vec<Instruction>,
     cfg: ControlFlowGraph,
     osr_points: Box<[super::OsrPoint]>,
+    exception_handlers: std::collections::BTreeMap<u32, stack::ExceptionHandler>,
+    unreachable: std::collections::BTreeSet<u32>,
+    exception_regions: bool,
 }
 
 impl VerifiedFunction {
+    /// False for dead instructions the verifier admitted without a proof
+    /// (only after a finally block's `ret`).
+    pub fn is_reachable(&self, pc: u32) -> bool {
+        !self.unreachable.contains(&pc)
+    }
+
+    /// The innermost live catch offset when the instruction at `pc` starts,
+    /// i.e. where the interpreter's unwinding of an exception raised by that
+    /// instruction first stops. `None` outside every try region.
+    pub fn exception_handler(&self, pc: u32) -> Option<stack::ExceptionHandler> {
+        self.exception_handlers.get(&pc).copied()
+    }
+
+    /// True when any instruction executes with a live catch offset or the
+    /// bytecode contains a try/finally transfer. Consumers that cannot model
+    /// exceptional control flow (inlining, direct leaf calls) must reject it.
+    /// Computed once at verification: maintenance consults it on every scan.
+    pub fn has_exception_regions(&self) -> bool {
+        self.exception_regions
+    }
+
     pub fn snapshot(&self) -> &CompileSnapshot {
         &self.snapshot
     }
@@ -413,12 +437,21 @@ pub(crate) fn verify(
         limits.max_basic_blocks,
     )?;
     let proof = stack::prove(&snapshot, &instructions, &cfg, limits.max_work_units)?;
-    if let Some(instruction) = instructions
+    // QuickJS emits the enclosing loop's continuation after a finally block's
+    // `ret` even when every path leaves through the return points. Only
+    // functions with finally blocks may carry such dead code; it has no proof
+    // and consumers never translate it.
+    let has_subroutines = instructions
         .iter()
-        .find(|instruction| !proof.visited.contains(&instruction.pc()))
-    {
+        .any(|instruction| matches!(instruction.opcode().name(), "gosub" | "ret"));
+    let unreachable: std::collections::BTreeSet<u32> = instructions
+        .iter()
+        .map(Instruction::pc)
+        .filter(|pc| !proof.visited.contains(pc))
+        .collect();
+    if let Some(pc) = unreachable.first().copied().filter(|_| !has_subroutines) {
         return Err(VerifyError::new(
-            instruction.pc(),
+            pc,
             VerifyErrorKind::UnreachableInstruction,
         ));
     }
@@ -434,7 +467,7 @@ pub(crate) fn verify(
         .blocks()
         .iter()
         .map(|block| block.start_pc())
-        .filter(|pc| cfg.is_loop_header(*pc))
+        .filter(|pc| cfg.is_loop_header(*pc) && !unreachable.contains(pc))
         .map(|pc| {
             let state = proof
                 .before
@@ -444,10 +477,20 @@ pub(crate) fn verify(
         })
         .collect::<Result<Vec<_>, VerifyError>>()?
         .into_boxed_slice();
+    let exception_regions = !proof.handlers.is_empty()
+        || instructions.iter().any(|instruction| {
+            matches!(
+                instruction.opcode().name(),
+                "catch" | "nip_catch" | "gosub" | "ret" | "throw" | "throw_error"
+            )
+        });
     Ok(VerifiedFunction {
         snapshot,
         instructions,
         cfg,
         osr_points,
+        exception_handlers: proof.handlers,
+        unreachable,
+        exception_regions,
     })
 }

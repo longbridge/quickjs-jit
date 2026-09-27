@@ -361,7 +361,9 @@ unsafe impl JitBackend for ForcedBaselineBackend {
                 stress_gc: self.stress_gc,
             }))
             .cast(),
-            stack_map_count: u32::try_from(self.code.stack_maps().len()).unwrap_or(u32::MAX),
+            // Stack-map ids are frame-state source locations; states Cranelift
+            // removed leave gaps, so the count is the production bound.
+            stack_map_count: self.code.required_stack_map_count(),
             helper_abi_version: rquickjs_core::qjs::QJSJIT_HELPER_ABI_VERSION,
         }
     }

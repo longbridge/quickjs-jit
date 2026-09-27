@@ -148,6 +148,10 @@ impl GenericOp {
     }
 }
 
+/// Exception regions: `Catch` pushes the catch offset that resumes the
+/// handler at its PC, `NipCatch` is the direct `nip_catch` form, `Throw` and
+/// `ThrowError` raise, `Gosub` pushes the Int32 return offset and enters a
+/// finally block and `Ret` resumes at one of its static return points.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrOp {
     Poll {
@@ -232,6 +236,20 @@ pub enum IrOp {
     },
     Return,
     ReturnUndefined,
+    Catch(u32),
+    NipCatch,
+    Throw,
+    ThrowError {
+        atom: u32,
+        kind: u8,
+    },
+    Gosub {
+        target: u32,
+        return_pc: u32,
+    },
+    Ret {
+        targets: Box<[u32]>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

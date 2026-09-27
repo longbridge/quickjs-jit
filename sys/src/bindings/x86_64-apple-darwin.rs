@@ -4089,6 +4089,29 @@ const _: () = {
 unsafe extern "C" {
     pub fn JS_JitGetInlineAPI(version: u32) -> *const JSJitInlineAPI;
 }
+unsafe extern "C" {
+    pub fn JS_JitThrowValue(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        slot: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitThrowError(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        atom: u32,
+        type_: u32,
+    ) -> JSJitHelperStatus;
+}
+unsafe extern "C" {
+    pub fn JS_JitCatchException(
+        frame: *mut JSJitExecFrame,
+        stack_map_id: u32,
+        catch_slot: u32,
+        handler_pc: u32,
+    ) -> JSJitHelperStatus;
+}
 pub const __JS_ATOM_NULL: _bindgen_ty_7 = 0;
 pub const JS_ATOM_null: _bindgen_ty_7 = 1;
 pub const JS_ATOM_false: _bindgen_ty_7 = 2;
