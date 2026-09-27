@@ -2783,7 +2783,13 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
             assert_eq!(result, 7_000);
             jit.poll();
             let after = jit.metrics();
+            // The leaf's five baseline profitability retries are paced by
+            // the runtime clock, while the Tier1-rejection blacklist and the
+            // caller's first Tier2 entry can both happen earlier; faster
+            // native loops finish that race sooner. Wait for the leaf's
+            // retries to settle so the exact count below checks the caller.
             if after.blacklisted > 0
+                && after.profitability_rejected >= 5
                 && after.pending_worker_jobs == 0
                 && after.pending_snapshot_bytes == 0
                 && after.native_entries - before.native_entries == 1

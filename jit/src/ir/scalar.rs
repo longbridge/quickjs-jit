@@ -714,6 +714,7 @@ impl ScalarGraph {
     /// Representation facts valid after the caller-supplied entry guards.
     /// Poll aliases are enabled only when lowering preserves register bindings
     /// across its poll; arbitrary reentrant frame reads remain unknown.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn proven_numeric_values(
         &self,
         nodes: &[OptimizedNode],
@@ -721,7 +722,40 @@ impl ScalarGraph {
         preserve_poll_bindings: bool,
         work: usize,
     ) -> Vec<Option<ScalarNumericMode>> {
-        self.proven_numeric_values_with_preserved_frame_reads(
+        self.proven_numeric_values_with_constants(
+            nodes,
+            guarded_argument,
+            preserve_poll_bindings,
+            |_| None,
+            work,
+        )
+    }
+
+    /// As [`Self::proven_numeric_values`], additionally seeding the opaque
+    /// value pushed by node `constant(node)`: the caller certifies that its
+    /// lowering pushes a literal of exactly that representation (for example
+    /// a numeric constant-pool entry) or rejects compilation.
+    pub(crate) fn proven_numeric_values_with_constants(
+        &self,
+        nodes: &[OptimizedNode],
+        guarded_argument: impl Fn(u16) -> bool,
+        preserve_poll_bindings: bool,
+        constant: impl Fn(u32) -> Option<ScalarNumericMode>,
+        work: usize,
+    ) -> Vec<Option<ScalarNumericMode>> {
+        let mut seeds = vec![None; self.values.len()];
+        for node in nodes {
+            let Some(mode) = constant(node.id()) else {
+                continue;
+            };
+            let Some(value) = self.value_for_node(node.id()) else {
+                continue;
+            };
+            if matches!(self.values.get(value.index()), Some(ScalarValue::Opaque)) {
+                seeds[value.index()] = Some(mode);
+            }
+        }
+        self.proven_numeric_values_seeded(
             nodes,
             guarded_argument,
             |node| {
@@ -730,6 +764,7 @@ impl ScalarGraph {
                         matches!(node.kind(), OptimizedNodeKind::GuardNumeric { .. })
                     })
             },
+            &seeds,
             work,
         )
     }
@@ -739,11 +774,25 @@ impl ScalarGraph {
     /// revalidated poll, but never an arbitrary reentrant slow path. It only
     /// recovers the pre-operation identity of each frame slot: heap results do
     /// not become numeric, and arguments still require their own entry guards.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn proven_numeric_values_with_preserved_frame_reads(
         &self,
         nodes: &[OptimizedNode],
         guarded_argument: impl Fn(u16) -> bool,
         preserve: impl Fn(u32) -> bool,
+        work: usize,
+    ) -> Vec<Option<ScalarNumericMode>> {
+        self.proven_numeric_values_seeded(nodes, guarded_argument, preserve, &[], work)
+    }
+
+    /// `seeds[value]` gives the representation of an opaque value whose
+    /// producer the caller certified (see `proven_numeric_values_with_constants`).
+    fn proven_numeric_values_seeded(
+        &self,
+        nodes: &[OptimizedNode],
+        guarded_argument: impl Fn(u16) -> bool,
+        preserve: impl Fn(u32) -> bool,
+        seeds: &[Option<ScalarNumericMode>],
         mut work: usize,
     ) -> Vec<Option<ScalarNumericMode>> {
         // Zero is not-yet-reached evidence, not an unknown JS type. Union is
@@ -793,6 +842,12 @@ impl ScalarGraph {
                     ScalarValue::FrameRead { node, slot } => self
                         .preserved_frame_read_source(nodes, *node, *slot, &preserve)
                         .map_or(OTHER, |source| types[source.index()]),
+                    ScalarValue::Opaque => match seeds.get(index).copied().flatten() {
+                        Some(ScalarNumericMode::Int32) => INT,
+                        Some(ScalarNumericMode::Float64) => FLOAT,
+                        Some(ScalarNumericMode::Number) => INT | FLOAT,
+                        None => OTHER,
+                    },
                     _ => OTHER,
                 };
                 let next = next | types[index];

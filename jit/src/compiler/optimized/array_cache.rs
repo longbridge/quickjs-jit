@@ -39,13 +39,21 @@ pub(super) struct ArrayAccessPlan {
 /// Packed arrays require `logical_length == dense_count` in this guard. That
 /// equality makes the SSA `bound` used by range analysis an exact storage
 /// bound and rejects sparse/extended arrays before entering native loop code.
+///
+/// A typed-array candidate with element accesses but no `length` read in the
+/// loop may still hoist its storage guard (`length == None`): fixed,
+/// attached, nonshared backing cannot change without one of the reentrant
+/// effects the plan already excludes from the loop, and every poll
+/// revalidates `data`/`count`. Such a hoist removes the per-iteration
+/// metadata query but never a bounds check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArrayLoopHoist {
     pub candidate: usize,
     pub preheader: u32,
     pub header: u32,
-    pub bound: ScalarValueId,
-    pub length_node: u32,
+    /// The single observable length read whose exact result bounds the
+    /// covered loads: `(length_node, bound)`.
+    pub length: Option<(u32, ScalarValueId)>,
 }
 
 #[derive(Debug, Default)]
@@ -327,7 +335,7 @@ impl ArrayPlan {
             work,
         );
         let mut hoists = Vec::new();
-        for candidate in 0..candidates.len() {
+        for (candidate, candidate_info) in candidates.iter().enumerate() {
             for natural_loop in loops.loops() {
                 let Some(preheader) = natural_loop.preheader() else {
                     continue;
@@ -340,6 +348,23 @@ impl ArrayPlan {
                         .then_some((node as u32, access.result?))
                 });
                 let Some((length_node, bound)) = lengths.next() else {
+                    // No length read: a typed candidate may still carry its
+                    // storage metadata across iterations; bounds checks stay.
+                    let typed =
+                        matches!(candidate_info.mode, ArrayMode::Int32 | ArrayMode::Float64);
+                    let accessed = accesses.iter().flatten().any(|access| {
+                        access.candidate == candidate
+                            && access.loop_header == natural_loop.header()
+                            && access.access != ArrayAccess::Length
+                    });
+                    if typed && accessed {
+                        hoists.push(ArrayLoopHoist {
+                            candidate,
+                            preheader,
+                            header: natural_loop.header(),
+                            length: None,
+                        });
+                    }
                     continue;
                 };
                 // More than one observable length read does not identify one
@@ -370,8 +395,7 @@ impl ArrayPlan {
                         candidate,
                         preheader,
                         header: natural_loop.header(),
-                        bound,
-                        length_node,
+                        length: Some((length_node, bound)),
                     });
                 }
             }
@@ -422,7 +446,10 @@ impl ArrayPlan {
     pub(super) fn guarded_leaf(&self, node: u32) -> bool {
         self.access(node).is_some_and(|access| match access.access {
             ArrayAccess::Load | ArrayAccess::Store => true,
-            ArrayAccess::Length => self.hoists.iter().any(|hoist| hoist.length_node == node),
+            ArrayAccess::Length => self
+                .hoists
+                .iter()
+                .any(|hoist| hoist.length.is_some_and(|(length, _)| length == node)),
         })
     }
     pub(super) fn hoists(&self) -> &[ArrayLoopHoist] {
@@ -687,9 +714,10 @@ mod tests {
             panic!("canonical packed traversal must have one legal metadata hoist: {plan:#?}");
         };
         assert_ne!(hoist.preheader, hoist.header);
-        let length = plan.access(hoist.length_node).unwrap();
+        let (length_node, bound) = hoist.length.unwrap();
+        let length = plan.access(length_node).unwrap();
         assert_eq!(length.access, ArrayAccess::Length);
-        assert_eq!(length.result, Some(hoist.bound));
+        assert_eq!(length.result, Some(bound));
         let covered = ir
             .nodes()
             .iter()
@@ -750,6 +778,39 @@ mod tests {
                         && !access.bounds_covered_by_hoist),
                 "effectful loop removed a per-access bounds guard: {source}; {plan:#?}"
             );
+        }
+    }
+
+    #[test]
+    fn typed_loop_without_length_hoists_metadata_but_keeps_every_bounds_check() {
+        for mode in [ArrayMode::Int32, ArrayMode::Float64, ArrayMode::Packed] {
+            let (ir, feedback) = fixture(
+                "(function(a,n){let s=0;for(let i=0;i<n;i++)s=(s+a[i])|0;return s})",
+                mode,
+            );
+            let plan = plan(&ir, &feedback, true, 100_000);
+            let loads = ir
+                .nodes()
+                .iter()
+                .filter_map(|node| plan.access(node.id()))
+                .filter(|access| access.access == ArrayAccess::Load)
+                .collect::<Vec<_>>();
+            assert_eq!(loads.len(), 1, "{mode:?}: {plan:#?}");
+            assert!(
+                loads[0].requires_index_guard && !loads[0].bounds_covered_by_hoist,
+                "an unrelated loop bound can never delete a bounds check: {mode:?}"
+            );
+            if mode == ArrayMode::Packed {
+                // A packed guard would demand logical length == dense count,
+                // which an element-only loop never needed.
+                assert!(plan.hoists().is_empty(), "{plan:#?}");
+            } else {
+                let [hoist] = plan.hoists() else {
+                    panic!("typed element loop must hoist its storage metadata: {plan:#?}");
+                };
+                assert_eq!(hoist.length, None);
+                assert_ne!(hoist.preheader, hoist.header);
+            }
         }
     }
 }
