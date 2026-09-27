@@ -128,13 +128,17 @@ fn exercise_cleanup(force_tier2: bool, stress_gc: bool) {
     }
     // Four consumed operands: the function and object own references; Int32
     // and Bool need only slot clearing, except in helper-observable stress GC.
-    // Tier2 also frees two local/return slots outside CALL consumption; those
-    // transitions are unchanged by this optimization.
-    let expected_call_frees = if stress_gc { 4 } else { 2 };
+    // The function and object are also held by globals, so their consumed
+    // references are never the last ones: generated code decrements them
+    // inline and only a final release (or stress GC) reaches FREE. Tier2 also
+    // frees two local/return slots outside CALL consumption; those are
+    // primitives or shared owners here and likewise stay inline without
+    // stress GC.
+    let expected_call_frees = if stress_gc { 4 } else { 0 };
     assert_eq!(
         helper_count(qjs::JSJitHelperId_JS_JIT_HELPER_FREE) - frees,
-        expected_call_frees + if force_tier2 { 2 } else { 0 },
-        "primitive call operands still invoke FREE: {trace:?}"
+        expected_call_frees + if force_tier2 && stress_gc { 2 } else { 0 },
+        "shared or primitive call operands still invoke FREE: {trace:?}"
     );
     if !force_tier2 {
         assert_eq!(

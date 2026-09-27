@@ -2885,6 +2885,7 @@ fn lower_function(
                         source,
                         flat_argument_slot(index),
                         false,
+                        false,
                     )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -2902,6 +2903,7 @@ fn lower_function(
                         depth,
                         source,
                         flat_local_slot(ir, index),
+                        false,
                         false,
                     )?;
                     depth += 1;
@@ -2921,6 +2923,7 @@ fn lower_function(
                         source,
                         flat_local_slot(ir, index),
                         true,
+                        false,
                     )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -2931,20 +2934,18 @@ fn lower_function(
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
                         let output_index = depth + usize::from(local_index);
-                        let output = flat_stack_slot(ir, output_index)?;
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        let source = use_pair(builder, locals[usize::from(local_index)]);
+                        lower_dup_if_refcounted(
+                            builder,
+                            &helper_lowering,
                             state,
                             output_index,
-                            &[output, flat_local_slot(ir, local_index)]
-                        );
-                        reload_pair(
-                            builder,
-                            stack[output_index],
-                            stack_base,
                             output_index,
-                            layout,
-                        );
+                            source,
+                            flat_local_slot(ir, local_index),
+                            false,
+                            true,
+                        )?;
                     }
                     depth += 2;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -3157,22 +3158,18 @@ fn lower_function(
                             let state = helper_states
                                 .next()
                                 .ok_or(CompileFailure::InvalidArtifact)?;
-                            invoke_helper!(
-                                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                            let value = use_pair(builder, stack[start]);
+                            lower_free_always_in_stress(
+                                builder,
+                                &helper_lowering,
                                 state,
                                 depth,
-                                &[flat_stack_slot(ir, start)?]
-                            );
-                            for (offset, variables) in stack
-                                .get(start..depth)
-                                .ok_or(CompileFailure::InvalidArtifact)?
-                                .iter()
-                                .copied()
-                                .enumerate()
-                            {
-                                let index = start + offset;
-                                reload_pair(builder, variables, stack_base, index, layout);
-                            }
+                                value,
+                                flat_stack_slot(ir, start)?,
+                                stack[start],
+                                stack_base,
+                                start,
+                            )?;
                             apply_stack_operation(builder, &stack, &mut depth, operation);
                         }
                         StackOp::Dup
@@ -3210,6 +3207,7 @@ fn lower_function(
                                     output_index,
                                     source_pair,
                                     flat_stack_slot(ir, start + source)?,
+                                    false,
                                     false,
                                 )?;
                             }
@@ -3260,13 +3258,17 @@ fn lower_function(
                             UnaryOp::IsNull => tag_is(builder, value.tag, qjs::JS_TAG_NULL),
                             _ => unreachable!(),
                         };
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        lower_free_always_in_stress(
+                            builder,
+                            &helper_lowering,
                             state,
                             depth,
-                            &[slot]
-                        );
-                        reload_pair(builder, stack[index], stack_base, index, layout);
+                            value,
+                            slot,
+                            stack[index],
+                            stack_base,
+                            index,
+                        )?;
                         let boolean = pair_from_bool(builder, result);
                         define_pair(builder, stack[index], boolean);
                     } else if matches!(operation, UnaryOp::Plus | UnaryOp::LogicalNot) {
@@ -3642,17 +3644,21 @@ fn lower_dup_if_refcounted(
     source: Pair,
     source_slot: u32,
     checked: bool,
+    stress_primitives: bool,
 ) -> Result<(), CompileFailure> {
     let output_slot = flat_stack_slot(helpers.ir, output_index)?;
-    let mut needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
-    if checked {
-        let uninitialized = tag_is(builder, source.tag, qjs::JS_TAG_UNINITIALIZED);
-        needs_helper = builder.ins().bor(needs_helper, uninitialized);
-    }
     let primitive = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    emit_inline_dup_dispatch(
+        builder,
+        helpers,
+        source,
+        checked,
+        stress_primitives,
+        primitive,
+        slow,
+    );
     builder.seal_block(primitive);
     builder.switch_to_block(primitive);
     define_pair(builder, helpers.stack[output_index], source);
@@ -3680,6 +3686,54 @@ fn lower_dup_if_refcounted(
     Ok(())
 }
 
+/// Branches to `primitive` (after an inline `ref_count++` for heap values)
+/// when DUP needs no helper, else to `slow`. Checked locals send
+/// `JS_TAG_UNINITIALIZED` to the helper exactly as before.
+fn emit_inline_dup_dispatch(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    source: Pair,
+    checked: bool,
+    stress_primitives: bool,
+    primitive: Block,
+    slow: Block,
+) {
+    if checked {
+        let uninitialized = tag_is(builder, source.tag, qjs::JS_TAG_UNINITIALIZED);
+        let initialized = builder.create_block();
+        builder
+            .ins()
+            .brif(uninitialized, slow, &[], initialized, &[]);
+        builder.seal_block(initialized);
+        builder.switch_to_block(initialized);
+    }
+    let refcounted = super::refcount::emit_has_ref_count(builder, source.tag);
+    let duplicate = builder.create_block();
+    if stress_primitives {
+        let copy = builder.create_block();
+        builder.ins().brif(refcounted, duplicate, &[], copy, &[]);
+        builder.seal_block(copy);
+        builder.switch_to_block(copy);
+        let no_stress =
+            super::refcount::emit_no_stress(builder, helpers.frame, helpers.layout.flags);
+        builder.ins().brif(no_stress, primitive, &[], slow, &[]);
+    } else {
+        builder
+            .ins()
+            .brif(refcounted, duplicate, &[], primitive, &[]);
+    }
+    builder.seal_block(duplicate);
+    builder.switch_to_block(duplicate);
+    super::refcount::emit_dup_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        source.payload,
+        primitive,
+        slow,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_dup_local_if_refcounted(
     builder: &mut FunctionBuilder<'_>,
@@ -3693,11 +3747,10 @@ fn lower_dup_local_if_refcounted(
     output_base: Value,
     output_index: usize,
 ) -> Result<(), CompileFailure> {
-    let needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
     let primitive = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    emit_inline_dup_dispatch(builder, helpers, source, false, false, primitive, slow);
     builder.seal_block(primitive);
     builder.switch_to_block(primitive);
     define_pair(builder, output, source);
@@ -3731,10 +3784,104 @@ fn lower_free_if_refcounted(
     backing_base: Value,
     backing_index: usize,
 ) -> Result<(), CompileFailure> {
-    let refcounted = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
+    lower_free(
+        builder,
+        helpers,
+        state,
+        live_depth,
+        value,
+        value_slot,
+        variables,
+        backing_base,
+        backing_index,
+        false,
+    )
+}
+
+/// FREE for sites that historically invoked the helper for every value:
+/// outside stress GC primitives need no work, but stress-GC frames keep the
+/// helper (and its collection points) for primitives too.
+#[allow(clippy::too_many_arguments)]
+fn lower_free_always_in_stress(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    value: Pair,
+    value_slot: u32,
+    variables: PairVars,
+    backing_base: Value,
+    backing_index: usize,
+) -> Result<(), CompileFailure> {
+    lower_free(
+        builder,
+        helpers,
+        state,
+        live_depth,
+        value,
+        value_slot,
+        variables,
+        backing_base,
+        backing_index,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_free(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    value: Pair,
+    value_slot: u32,
+    variables: PairVars,
+    backing_base: Value,
+    backing_index: usize,
+    stress_primitives: bool,
+) -> Result<(), CompileFailure> {
+    let refcounted = super::refcount::emit_has_ref_count(builder, value.tag);
+    let release = builder.create_block();
+    let released = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(refcounted, slow, &[], continuation, &[]);
+    if stress_primitives {
+        let primitive = builder.create_block();
+        builder.ins().brif(refcounted, release, &[], primitive, &[]);
+        builder.seal_block(primitive);
+        builder.switch_to_block(primitive);
+        let no_stress =
+            super::refcount::emit_no_stress(builder, helpers.frame, helpers.layout.flags);
+        builder.ins().brif(no_stress, continuation, &[], slow, &[]);
+    } else {
+        builder
+            .ins()
+            .brif(refcounted, release, &[], continuation, &[]);
+    }
+    builder.seal_block(release);
+    builder.switch_to_block(release);
+    super::refcount::emit_release_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        value.payload,
+        released,
+        slow,
+    );
+    builder.seal_block(released);
+    builder.switch_to_block(released);
+    // Match the helper's post-state: the consumed slot holds undefined, in
+    // the SSA variables and in its backing frame memory.
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    define_pair(builder, variables, undefined);
+    store_jsvalue_slot(
+        builder,
+        backing_base,
+        backing_index,
+        undefined,
+        helpers.layout,
+    )?;
+    builder.ins().jump(continuation, &[]);
     builder.seal_block(slow);
     builder.switch_to_block(slow);
     helpers.invoke(
@@ -3983,6 +4130,7 @@ fn lower_get_property(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
         let value = use_pair(builder, helpers.stack[output_index]);
         builder.ins().jump(joined, &[value.payload, value.tag]);
         builder.switch_to_block(joined);
@@ -4011,6 +4159,7 @@ fn lower_get_property(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
     }
     move_stack_pair(
         builder,
@@ -5342,6 +5491,7 @@ fn lower_call(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
         let miss = builder.ins().iconst(types::I8, 0);
         builder.ins().jump(joined, &[miss]);
         builder.switch_to_block(joined);
@@ -5372,6 +5522,7 @@ fn lower_call(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
     }
     // CALL borrows every input. The bytecode stack effect is separate and is
     // implemented in QuickJS interpreter order, clearing primitive inputs
@@ -5411,13 +5562,19 @@ fn lower_call(
         // precisely one duplicate, so dropping that duplicate can never run a
         // finalizer and is the exact non-finalizing JS_FreeValue fast path.
         let function = use_pair(builder, helpers.stack[displaced_index]);
-        let ref_count = builder
-            .ins()
-            .load(types::I32, MemFlags::trusted(), function.payload, 0);
+        let ref_count = builder.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            function.payload,
+            crate::abi::REF_COUNT_OFFSET,
+        );
         let ref_count = builder.ins().iadd_imm(ref_count, -1);
-        builder
-            .ins()
-            .store(MemFlags::trusted(), ref_count, function.payload, 0);
+        builder.ins().store(
+            MemFlags::trusted(),
+            ref_count,
+            function.payload,
+            crate::abi::REF_COUNT_OFFSET,
+        );
         clear_pair(
             builder,
             helpers.stack[displaced_index],
@@ -5525,6 +5682,36 @@ fn lower_call_input_free(
     )?;
     builder.ins().jump(continuation, &[]);
     builder.switch_to_block(free);
+    // Heap owners, and every operand in stress mode, reach this block. A
+    // shared heap reference is released inline; the last one and stress mode
+    // keep the exact FREE helper.
+    let refcounted = super::refcount::emit_has_ref_count(builder, input.tag);
+    let release = builder.create_block();
+    let released = builder.create_block();
+    let helper = builder.create_block();
+    builder.ins().brif(refcounted, release, &[], helper, &[]);
+    builder.switch_to_block(release);
+    super::refcount::emit_release_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        input.payload,
+        released,
+        helper,
+    );
+    builder.switch_to_block(released);
+    // The slot may be a scratch owner that an earlier helper published; the
+    // FREE helper would leave undefined there, and exits require it.
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    store_jsvalue_slot(
+        builder,
+        helpers.stack_base,
+        index,
+        undefined,
+        helpers.layout,
+    )?;
+    builder.ins().jump(clear, &[]);
+    builder.switch_to_block(helper);
     let slot = flat_stack_slot(helpers.ir, index)?;
     helpers.invoke(
         builder,
@@ -5864,6 +6051,26 @@ fn move_stack_pair(
     define_pair(builder, stack[destination], value);
     let _ = (base, layout);
     clear_pair(builder, stack[source], base, source, layout)
+}
+
+/// After a helper publishes an owned output in frame memory and the value is
+/// reloaded into SSA, the SSA variable is the only owner the lowering tracks.
+/// A later inline FREE no longer rematerializes the frame, so clear the
+/// published copy: CALL/GET_PROPERTY outputs live in scratch slots, which must
+/// hold undefined at every exit.
+fn clear_reloaded_output(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    store_jsvalue_slot(
+        builder,
+        helpers.stack_base,
+        index,
+        undefined,
+        helpers.layout,
+    )
 }
 
 fn clear_pair(

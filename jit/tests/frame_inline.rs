@@ -380,7 +380,12 @@ fn duplicated_frame_inline_result_preserves_owners_through_gc_and_deopt() {
             "heap truthiness must resume with both owners: {after:?}"
         );
         assert_eq!(test.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL), calls);
-        assert!(test.count(qjs::JSJitHelperId_JS_JIT_HELPER_DUP) > duplicates);
+        // Outside stress GC the second owner is taken with an inline
+        // `ref_count++`; the surviving marker above is the ownership
+        // evidence. Stress GC keeps the helper and its collection points.
+        if stress {
+            assert!(test.count(qjs::JSJitHelperId_JS_JIT_HELPER_DUP) > duplicates);
+        }
         assert_eq!(after.native_entries, after.native_exits);
         assert_eq!(after.compile_failures, 0, "stress={stress}: {after:?}");
     }
