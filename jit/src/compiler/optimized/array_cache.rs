@@ -67,6 +67,12 @@ pub(super) struct ArrayLoopHoist {
 /// loop-entry edge. Accesses keep their per-access index guards; the hoist only
 /// removes the repeated leaf query for a loop-invariant receiver, like JSC's
 /// hoisted CheckStructure/GetButterfly for typed-array views.
+///
+/// Because the preheader runs even when no access does (a zero-trip loop),
+/// lowering emits this query without a side exit: a miss publishes an empty
+/// view (`count == 0`), so each retained index guard exits at the access that
+/// actually runs, exactly like the unhoisted query, and poll revalidation is
+/// skipped while the view is empty.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArrayStorageHoist {
     pub candidate: usize,
@@ -1127,5 +1133,43 @@ mod tests {
             .iter()
             .filter_map(|node| plan.access(node.id()))
             .all(|access| access.requires_index_guard));
+    }
+
+    #[test]
+    fn typed_loop_without_length_hoists_metadata_but_keeps_every_bounds_check() {
+        for mode in [ArrayMode::Int32, ArrayMode::Float64, ArrayMode::Packed] {
+            let (ir, feedback) = fixture(
+                "(function(a,n){let s=0;for(let i=0;i<n;i++)s=(s+a[i])|0;return s})",
+                mode,
+            );
+            let plan = plan(&ir, &feedback, true, 100_000);
+            let loads = ir
+                .nodes()
+                .iter()
+                .filter_map(|node| plan.access(node.id()))
+                .filter(|access| access.access == ArrayAccess::Load)
+                .collect::<Vec<_>>();
+            assert_eq!(loads.len(), 1, "{mode:?}: {plan:#?}");
+            assert!(
+                loads[0].requires_index_guard && !loads[0].bounds_covered_by_hoist,
+                "an unrelated loop bound can never delete a bounds check: {mode:?}"
+            );
+            // Element-only loops never get a length hoist.
+            assert!(plan.hoists().is_empty(), "{plan:#?}");
+            if mode == ArrayMode::Packed {
+                // A packed guard would demand logical length == dense count,
+                // which an element-only loop never needed.
+                assert!(plan.storage_hoists().is_empty(), "{plan:#?}");
+            } else {
+                let [hoist] = plan.storage_hoists() else {
+                    panic!("typed element loop must hoist its storage metadata: {plan:#?}");
+                };
+                assert!(matches!(
+                    plan.candidates()[hoist.candidate].receiver,
+                    ArrayReceiver::Argument(0)
+                ));
+                assert_ne!(hoist.preheader, hoist.header);
+            }
+        }
     }
 }

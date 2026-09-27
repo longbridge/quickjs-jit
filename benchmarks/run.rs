@@ -217,6 +217,13 @@ const WORKLOADS: &[Workload] = &[
         file: "float64array-traversal.js",
     },
     Workload {
+        name: "typed-convert-traversal",
+        suite: "rquickjs-jit array traversal diagnostics",
+        group: "arrays-typed",
+        designated: false,
+        file: "typed-convert-traversal.js",
+    },
+    Workload {
         name: "objects-polymorphic",
         suite: "rquickjs-jit matrix",
         group: "objects-polymorphic",
@@ -1533,6 +1540,7 @@ mod tests {
             "packed-array-traversal.js",
             "int32array-traversal.js",
             "float64array-traversal.js",
+            "typed-convert-traversal.js",
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
@@ -1637,6 +1645,11 @@ mod tests {
                 "arrays-typed",
                 "float64array-traversal.js",
             ),
+            (
+                "typed-convert-traversal",
+                "arrays-typed",
+                "typed-convert-traversal.js",
+            ),
         ] {
             let workload = WORKLOADS
                 .iter()
@@ -1661,6 +1674,7 @@ mod tests {
             ("packed-array-traversal.js", "number:41803450c0000000"),
             ("int32array-traversal.js", "number:41803450c0000000"),
             ("float64array-traversal.js", "number:416034cdc0000000"),
+            ("typed-convert-traversal.js", "number:416034cdc0000000"),
         ] {
             let runtime = Runtime::new().unwrap();
             let context = Context::full(&runtime).unwrap();
