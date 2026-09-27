@@ -87,7 +87,7 @@ pub const JS_DEF_ALIAS: u32 = 9;
 pub const JS_DEF_PROP_SYMBOL: u32 = 10;
 pub const JS_DEF_PROP_BOOL: u32 = 11;
 pub const QJSJIT_ABI_MAJOR: u32 = 1;
-pub const QJSJIT_ABI_MINOR: u32 = 24;
+pub const QJSJIT_ABI_MINOR: u32 = 25;
 pub const JS_JIT_FUNCTION_STRICT: u32 = 1;
 pub const JS_JIT_FRAME_STRESS_GC: u32 = 2;
 pub const JS_JIT_FRAME_SIDE_PATH_HIT: u32 = 4;
@@ -95,6 +95,10 @@ pub const JS_JIT_SLOT_NONE: u32 = 4294967295;
 pub const JS_JIT_HELPER_SCRATCH_SLOTS: u32 = 2;
 pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;
 pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;
+pub const QJSJIT_OBJECT_API_VERSION: u32 = 1;
+pub const JS_JIT_OBJECT_LITERAL_MAX_FIELDS: u32 = 16;
+pub const JS_JIT_OBJECT_EFFECT_ALLOCATE: u32 = 1;
+pub const JS_JIT_OBJECT_EFFECT_COLLECT: u32 = 2;
 pub const JS_JIT_FEEDBACK_ARRAY_STORE: u32 = 64;
 pub const JS_JIT_FEEDBACK_ARRAY_LENGTH: u32 = 128;
 pub const JS_JIT_FEEDBACK_ARRAY_EXOTIC: u32 = 256;
@@ -2243,6 +2247,87 @@ const _: () = {
 };
 unsafe extern "C" {
     pub fn JS_JitGetArrayAPI(version: u32) -> *const JSJitArrayAPI;
+}
+pub const JSJitObjectStatus_JS_JIT_OBJECT_INVALID: JSJitObjectStatus = -1;
+pub const JSJitObjectStatus_JS_JIT_OBJECT_MISS: JSJitObjectStatus = 0;
+pub const JSJitObjectStatus_JS_JIT_OBJECT_OK: JSJitObjectStatus = 1;
+pub type JSJitObjectStatus = ::core::ffi::c_int;
+pub type JSJitObjectLiteralFunc = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        atoms: *const u32,
+        values: *const JSValue,
+        count: u32,
+        out: *mut JSValue,
+    ) -> ::core::ffi::c_int,
+>;
+pub type JSJitObjectRetainShapeFunc = ::core::option::Option<
+    unsafe extern "C" fn(ctx: *mut JSContext, object: *const JSValue) -> ::core::ffi::c_int,
+>;
+pub type JSJitArrayMethodFunc = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        receiver: *const JSValue,
+        atom: u32,
+        out: *mut JSValue,
+    ) -> ::core::ffi::c_int,
+>;
+pub type JSJitArrayPushFunc = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        function: *const JSValue,
+        receiver: *const JSValue,
+        value: *const JSValue,
+        out: *mut JSValue,
+    ) -> ::core::ffi::c_int,
+>;
+pub type JSJitArrayPushMethodFunc = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        receiver: *const JSValue,
+        atom: u32,
+        value: *const JSValue,
+        out: *mut JSValue,
+    ) -> ::core::ffi::c_int,
+>;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JSJitObjectAPI {
+    pub struct_size: u32,
+    pub version: u32,
+    pub effects: u32,
+    pub max_literal_fields: u32,
+    pub literal: JSJitObjectLiteralFunc,
+    pub retain_shape: JSJitObjectRetainShapeFunc,
+    pub array_method: JSJitArrayMethodFunc,
+    pub array_push: JSJitArrayPushFunc,
+    pub array_push_method: JSJitArrayPushMethodFunc,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of JSJitObjectAPI"][::core::mem::size_of::<JSJitObjectAPI>() - 36usize];
+    ["Alignment of JSJitObjectAPI"][::core::mem::align_of::<JSJitObjectAPI>() - 4usize];
+    ["Offset of field: JSJitObjectAPI::struct_size"]
+        [::core::mem::offset_of!(JSJitObjectAPI, struct_size) - 0usize];
+    ["Offset of field: JSJitObjectAPI::version"]
+        [::core::mem::offset_of!(JSJitObjectAPI, version) - 4usize];
+    ["Offset of field: JSJitObjectAPI::effects"]
+        [::core::mem::offset_of!(JSJitObjectAPI, effects) - 8usize];
+    ["Offset of field: JSJitObjectAPI::max_literal_fields"]
+        [::core::mem::offset_of!(JSJitObjectAPI, max_literal_fields) - 12usize];
+    ["Offset of field: JSJitObjectAPI::literal"]
+        [::core::mem::offset_of!(JSJitObjectAPI, literal) - 16usize];
+    ["Offset of field: JSJitObjectAPI::retain_shape"]
+        [::core::mem::offset_of!(JSJitObjectAPI, retain_shape) - 20usize];
+    ["Offset of field: JSJitObjectAPI::array_method"]
+        [::core::mem::offset_of!(JSJitObjectAPI, array_method) - 24usize];
+    ["Offset of field: JSJitObjectAPI::array_push"]
+        [::core::mem::offset_of!(JSJitObjectAPI, array_push) - 28usize];
+    ["Offset of field: JSJitObjectAPI::array_push_method"]
+        [::core::mem::offset_of!(JSJitObjectAPI, array_push_method) - 32usize];
+};
+unsafe extern "C" {
+    pub fn JS_JitGetObjectAPI(version: u32) -> *const JSJitObjectAPI;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

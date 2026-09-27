@@ -56,6 +56,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0018-inline-frame-recovery.patch",
         "0019-array-feedback.patch",
         "0020-typed-array-guard.patch",
+        "0032-object-fast-paths.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -114,7 +115,7 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 24u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 25u"));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -154,6 +155,9 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     assert!(quickjs.contains("JS_JitHelperUnaryArithSlow"));
     assert!(quickjs.contains("#define QJSJIT_ABI_COUNT_MAP_OUT_IN_OP 6"));
     assert!(jit_header.contains("JSJitFeedbackEvent"));
+    assert!(jit_header.contains("JS_EXTERN const JSJitObjectAPI *JS_JitGetObjectAPI"));
+    assert!(quickjs.contains("static int qjsjit_object_literal("));
+    assert!(quickjs.contains("static int qjsjit_array_push("));
     assert!(destination.join("quickjs-jit-helpers.h").is_file());
     fs::remove_dir_all(destination).unwrap();
 }
@@ -255,7 +259,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 24;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 25;"),
             "{target}"
         );
         assert!(
@@ -263,6 +267,13 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
             "{target}"
         );
         assert!(binding.contains("pub struct JSJitArrayAPI"), "{target}");
+        assert!(
+            binding.contains("pub struct JSJitObjectAPI")
+                && binding.contains("pub fn JS_JitGetObjectAPI")
+                && binding.contains("pub const QJSJIT_OBJECT_API_VERSION: u32 = 1;")
+                && binding.contains("size_of::<JSJitObjectAPI>() - 56usize"),
+            "{target}"
+        );
         assert!(
             binding.contains("receiver: *const JSValue")
                 && binding.contains("pub fn JS_JitGetArrayAPI"),
@@ -363,7 +374,7 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "pub const JS_JIT_FEEDBACK_ARRAY_SHARED: u32 = 8192;",
         "pub const JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING: u32 = 16384;",
         // ABI 1.24: typed-array continuing guard.
-        "pub const QJSJIT_ABI_MINOR: u32 = 24;",
+        "pub const QJSJIT_ABI_MINOR: u32 = 25;",
         "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
         "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",
         "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_INVALID: JSJitArrayQueryStatus = -1;",
@@ -393,6 +404,19 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "offset_of!(JSJitArrayAPI, effects) - 8usize",
         "offset_of!(JSJitArrayAPI, reserved) - 12usize",
         "offset_of!(JSJitArrayAPI, query) - 16usize",
+        // ABI 1.25: object allocation and array-method fast paths.
+        "pub const QJSJIT_OBJECT_API_VERSION: u32 = 1;",
+        "pub const JS_JIT_OBJECT_LITERAL_MAX_FIELDS: u32 = 16;",
+        "JSJitObjectStatus_JS_JIT_OBJECT_MISS: JSJitObjectStatus = 0;",
+        "pub struct JSJitObjectAPI",
+        "pub fn JS_JitGetObjectAPI(",
+        "size_of::<JSJitObjectAPI>() - 36usize",
+        "align_of::<JSJitObjectAPI>() - 4usize",
+        "offset_of!(JSJitObjectAPI, literal) - 16usize",
+        "offset_of!(JSJitObjectAPI, retain_shape) - 20usize",
+        "offset_of!(JSJitObjectAPI, array_method) - 24usize",
+        "offset_of!(JSJitObjectAPI, array_push) - 28usize",
+        "offset_of!(JSJitObjectAPI, array_push_method) - 32usize",
     ] {
         assert!(
             binding.contains(declaration),
