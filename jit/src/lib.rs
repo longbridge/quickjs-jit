@@ -2266,6 +2266,23 @@ impl ProductionBackend {
                     }
             })
             .collect::<Vec<_>>();
+        let mut ready_for_tier2 = ready_for_tier2;
+        if ready_for_tier2.len() > 1 {
+            // Queue callees before their callers in one scan. A caller then
+            // observes its callee's optimizing compile as in flight (below)
+            // instead of freezing the callee's Baseline shape into its artifact.
+            let calls = self.feedback.snapshot(self.clock.max(1));
+            let ready = ready_for_tier2
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            ready_for_tier2.sort_by_cached_key(|key| {
+                calls
+                    .call_specializations_for(*key)
+                    .filter(|call| call.callee() != *key && ready.contains(&call.callee()))
+                    .count()
+            });
+        }
         self.last_scan_installed = self.coordinator.installed_count();
         for key in if self.config.tier_policy() == JitTierPolicy::BaselineOnly {
             Vec::new()
@@ -2307,7 +2324,27 @@ impl ProductionBackend {
                     &observed,
                 );
                 let resolved = self.coordinator.call_target_resolved(call.callee());
-                if direct_ready || frame_ready {
+                if direct_ready {
+                    continue;
+                }
+                if frame_ready {
+                    /* A linked entry is published only by an artifact compiled
+                     * with the callee's property feedback, which Baseline
+                     * usually lacks. While that optimizing compile is in
+                     * flight, wait for it rather than capture a frame inline
+                     * of the Baseline body: the caller would never re-link.
+                     * The wait ends when the compile installs or fails. */
+                    let callee_optimizing = matches!(
+                        self.coordinator
+                            .tier_state(call.callee(), runtime::Tier::Optimizing),
+                        runtime::CompileState::Queued(_)
+                            | runtime::CompileState::Compiling(_)
+                            | runtime::CompileState::Ready(_)
+                    );
+                    if callee_optimizing && observed.bounded_specialization(call.callee()).is_some()
+                    {
+                        direct_call_pending = true;
+                    }
                     continue;
                 }
                 if !resolved {
