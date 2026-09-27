@@ -60,6 +60,19 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0029-native-call-convention.patch` adds the P3a native-call support
+functions used by pure self-recursive Tier 2 native entries. They are plain
+exported functions appended to `quickjs.c`, outside the versioned helper table,
+so the runtime API/helper ABI version and the bundled bindings are unchanged.
+`JS_JitNativeCallBegin` proves once per native call chain that the callee's
+global self reference resolves, as `OP_get_var` would in the callee realm, to a
+plain data binding holding exactly the callee, and loads the stack limit and
+interrupt budget into a caller-owned `JSJitNativeCallContext`.
+`JS_JitNativeCallPoll` is `__js_poll_interrupts` without throwing (an
+interrupt makes the chain retry in the interpreter), and `JS_JitNativeCallEnd`
+publishes the chain's interrupt accounting. `JS_JitNativeCallContextLayout`
+lets the compiler verify the context layout before generating code.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes
