@@ -35,16 +35,16 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
 diff --git a/quickjs.c b/quickjs.c
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -376,6 +376,8 @@
-     uint64_t jit_next_frame_cookie;
-     uint64_t jit_active_frame_cookie;
-     JSJitExecFrame *jit_active_frame;
+@@ -393,6 +393,8 @@
+ #endif
+     /* Runtime-owned root; boundary throws always duplicate this value. */
+     JSValue jit_uncatchable_exception;
 +    /* Receiver/argument context of the innermost root native entry. */
 +    struct QJSJitRootCall *jit_active_root;
-     struct JSJitInlineState *jit_inline_top;
-     size_t jit_inline_bytes;
-     uint32_t jit_inline_depth;
-@@ -20098,6 +20100,285 @@
+ #endif
+ };
+ 
+@@ -20098,6 +20100,310 @@
      return qjsjit_finish_output(frame, out);
  }
  
@@ -327,36 +327,41 @@ diff --git a/quickjs.c b/quickjs.c
 +    return qjsjit_stress_gc(frame);
 +}
 +
++/* Publish the root call context for exactly one pinned native entry. Kept
++ * out of line so the interpreter loop's frame and code layout do not change;
++ * the context lives on this wrapper's stack for the duration of the call. */
++static no_inline JSJitExit qjsjit_call_root_entry(JSRuntime *rt,
++                                                  JSJitExecFrame *frame,
++                                                  JSValueConst this_obj,
++                                                  JSValueConst new_target,
++                                                  int argc,
++                                                  JSValueConst *argv)
++{
++    QJSJitRootCall root_call;
++    JSJitExit exit;
++
++    root_call.previous = rt->jit_active_root;
++    root_call.frame = frame;
++    root_call.this_obj = this_obj;
++    root_call.new_target = new_target;
++    root_call.argv = argv;
++    root_call.argc = argc;
++    rt->jit_active_root = &root_call;
++    exit = frame->entry.entry(frame);
++    rt->jit_active_root = root_call.previous;
++    return exit;
++}
++
  #endif
  
  #ifdef CONFIG_JIT_ABI
-@@ -20746,6 +21027,7 @@
-             rt->jit_backend_active_depth--;
-         } else {
-             JSJitExecFrame frame;
-+            QJSJitRootCall root_call;
-             JSJitExit jit_exit;
-             const uint8_t *resume_pc;
-             JSValue *resume_sp;
-@@ -20795,6 +21077,13 @@
-             rt->jit_active_frame_cookie = frame.frame_cookie;
-             rt->jit_active_stack_map_count = entry.stack_map_count;
-             rt->jit_active_helper_abi_version = entry.helper_abi_version;
-+            root_call.previous = rt->jit_active_root;
-+            root_call.frame = &frame;
-+            root_call.this_obj = this_obj;
-+            root_call.new_target = new_target;
-+            root_call.argv = argv;
-+            root_call.argc = argc;
-+            rt->jit_active_root = &root_call;
+@@ -20798,7 +21104,8 @@
              if (jit_vtable->native_enter)
                  jit_vtable->native_enter(jit_opaque, entry_function_id,
                                           entry_generation, entry_pc_offset);
-@@ -20815,6 +21104,7 @@
-             rt->jit_active_frame_cookie = previous_frame_cookie;
-             rt->jit_active_stack_map_count = previous_stack_map_count;
-             rt->jit_active_helper_abi_version = previous_helper_abi_version;
-+            rt->jit_active_root = root_call.previous;
-             if (!rt->jit_entry_cache_suppressed &&
-                 entry_pc_offset == 0 && entry_epoch != 0 &&
-                 b->jit_function_id == entry_function_id &&
+-            jit_exit = entry.entry(&frame);
++            jit_exit = qjsjit_call_root_entry(rt, &frame, this_obj, new_target,
++                                              argc, argv);
+             if (qjsjit_inline_abort_root(&frame)) {
+                 qjsjit_reject_exit(ctx, &frame.result,
+                                    "unconsumed inline activation at native exit");
