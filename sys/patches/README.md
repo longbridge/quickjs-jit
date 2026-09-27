@@ -60,6 +60,16 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0022-inline-refcount.patch` pins the reference-count header that generated
+code now updates in place. Static assertions require every payload a
+`JS_VALUE_HAS_REF_COUNT` value can address (objects, bytecode, strings, ropes,
+symbols, BigInts and modules) to start with the C `int` count, and the ABI
+value-layout fingerprint additionally hashes its offset and width. Native code
+increments the count for DUP, decrements it for FREE while other references
+remain, and still calls `JS_JitHelperFree` for the last reference and in
+stress-GC frames. No ABI table or structure changes, so the ABI minor version
+is unchanged; a library without this patch fails the fingerprint check.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

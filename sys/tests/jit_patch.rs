@@ -56,6 +56,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0018-inline-frame-recovery.patch",
         "0019-array-feedback.patch",
         "0020-typed-array-guard.patch",
+        "0022-inline-refcount.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
