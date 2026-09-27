@@ -1738,12 +1738,25 @@ fn lower_optimized_machine(
     // Array feedback only proposes candidates. Poll amortization is enabled
     // after the concrete plan has proved that every heap site on the native
     // path is a guarded leaf-or-exit operation.
-    // Every lowered get_field is a shape-guarded leaf-or-exit access (a
-    // missing guard fails compilation), as are the certified array, property
-    // key and constant sites. None of them runs script or writes the frame on
-    // its continuing path, so an argument or local read after one of them
-    // keeps its entry-guarded representation. This proof only decides poll
+    // The certified array, property key and constant sites, and primitive
+    // get_field sites (shape-guarded leaf-or-exit accesses; a missing guard
+    // fails compilation) run no script on their continuing path.
+    // Object-observed get_field sites are different: they lower through the
+    // generic GET_PROPERTY bridge, which can run a getter. Script can only
+    // write this frame's arguments or locals through a closure, a mapped
+    // `arguments` object or direct eval, so those sites preserve the frame
+    // only while the function contains none of the opcodes that create them
+    // (Tier 1 policy already rejects them; this is checked again here).
+    // An argument or local read after a frame-preserving site keeps its
+    // entry-guarded representation. This proof only decides poll
     // amortization; lowering keeps using `scalar_numeric`.
+    let script_cannot_write_frame = !ir.nodes().iter().any(|node| {
+        matches!(node.kind(), crate::ir::OptimizedNodeKind::Bytecode { opcode }
+        if matches!(
+            opcode.as_ref(),
+            "fclosure" | "fclosure8" | "special_object" | "eval" | "apply_eval"
+        ))
+    });
     let leaf_frame_preserving = |id: u32| {
         array_plan.guarded_leaf(id)
             || property_plan.access(id).is_some()
@@ -1757,7 +1770,15 @@ fn lower_optimized_machine(
                     ))
                     || (matches!(node.kind(), crate::ir::OptimizedNodeKind::Bytecode { opcode }
                         if opcode.as_ref() == "get_field")
-                        && specialization.properties.contains_key(&node.pc()))
+                        && specialization
+                            .properties
+                            .get(&node.pc())
+                            .is_some_and(|observations| {
+                                script_cannot_write_frame
+                                    || observations.iter().all(|observation| {
+                                        observation.value() != crate::runtime::ObservedType::Object
+                                    })
+                            }))
             })
     };
     let amortized_numeric = if side_path.is_none() && !int32_loop {
@@ -2215,6 +2236,25 @@ fn lower_optimized_machine(
                 }
                 match node.kind() {
                     crate::ir::OptimizedNodeKind::GuardNumeric { guard, mid_loop } => {
+                        if *mid_loop && depth != 0 {
+                            // The poll's numeric-guard exit republishes an
+                            // empty operand stack only.
+                            return Err(CompileFailure::UnsupportedOpcode);
+                        }
+                        // A poll that reaches the runtime can run the interrupt
+                        // handler, which may detach or replace storage of any
+                        // enclosing loop's hoisted receiver. Revalidate every
+                        // enclosing header's tuples, not only this block's:
+                        // an outer header re-seeds its tuples on each backedge.
+                        let poll_revalidations = if *mid_loop {
+                            opt_poll_revalidations(
+                                &array_plan,
+                                node.id(),
+                                &hoisted_element_sources,
+                            )?
+                        } else {
+                            Vec::new()
+                        };
                         if *mid_loop && amortized_poll {
                             emit_opt_amortized_poll(
                                 &mut builder,
@@ -2264,11 +2304,7 @@ fn lower_optimized_machine(
                                         node.pc(),
                                         *guard,
                                     )?;
-                                    for source in hoisted_element_sources
-                                        .get(&block.start_pc())
-                                        .into_iter()
-                                        .flatten()
-                                    {
+                                    for source in &poll_revalidations {
                                         emit_opt_packed_loop_revalidate(
                                             builder,
                                             &env,
@@ -2324,11 +2360,7 @@ fn lower_optimized_machine(
                             // amortized cold edge. A typed store can keep its
                             // numeric locals unproven, selecting this path;
                             // cached pointers/length must still be revalidated.
-                            for source in hoisted_element_sources
-                                .get(&block.start_pc())
-                                .into_iter()
-                                .flatten()
-                            {
+                            for source in &poll_revalidations {
                                 emit_opt_packed_loop_revalidate(
                                     &mut builder,
                                     &env,
@@ -5990,6 +6022,26 @@ fn emit_opt_array_loop_hoists(
     Ok(())
 }
 
+/// Every hoisted tuple that poll `node` must revalidate, from all loops that
+/// contain it. Fails closed when an enclosing header's tuples are not seeded
+/// exactly as planned (for example when lowering order would let a poll run
+/// before the enclosing preheader emitted its guards).
+fn opt_poll_revalidations(
+    plan: &array_cache::ArrayPlan,
+    node: u32,
+    sources: &std::collections::BTreeMap<u32, Vec<GuardedElementSource>>,
+) -> Result<Vec<GuardedElementSource>, CompileFailure> {
+    let mut revalidations = Vec::new();
+    for &header in plan.revalidating_headers(node) {
+        let seeded = sources.get(&header).map_or(&[][..], Vec::as_slice);
+        if seeded.len() != plan.hoisted_sources_at(header) {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+        revalidations.extend_from_slice(seeded);
+    }
+    Ok(revalidations)
+}
+
 fn opt_push_hoisted_source(
     sources: &mut std::collections::BTreeMap<u32, Vec<GuardedElementSource>>,
     header: u32,
@@ -8917,6 +8969,7 @@ fn emit_opt_numeric_guard(
         alternate_seen = builder.ins().bor(alternate_seen, float);
     }
     let deopt = builder.create_block();
+    builder.set_cold_block(deopt);
     if side_path.is_some_and(|profile| profile.observed() == crate::runtime::ObservedType::Float64)
     {
         let side_check = builder.create_block();
@@ -8943,6 +8996,17 @@ fn emit_opt_numeric_guard(
         builder.ins().brif(numeric, pass, &[], deopt, &[]);
     }
     builder.switch_to_block(deopt);
+    // Entry and loop-header guards resume with an empty operand stack (the
+    // lowering rejects a loop poll at a non-empty depth). An earlier helper
+    // call may have published a deeper stack top (for example the owned
+    // `get_field` that initialized a receiver local before the loop); the
+    // resume shape is validated against it, so republish the empty top.
+    // Reload the base here: keeping the entry SSA value live into this cold
+    // exit would extend it across the whole loop body.
+    let stack_base = builder
+        .ins()
+        .load(pointer_type, MemFlags::new(), frame, layout.stack_base);
+    opt_set_stack_top(builder, frame, stack_base, 0, pointer_type, layout);
     let start = builder
         .ins()
         .load(pointer_type, MemFlags::new(), frame, layout.bytecode_start);

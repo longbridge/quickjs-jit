@@ -488,3 +488,310 @@ fn packed_local_receivers_match_the_same_version_interpreter() {
     assert_eq!(after.native_entries, after.native_exits);
     assert!(after.tier2_entries > before.tier2_entries);
 }
+
+const NESTED: &str = r#"
+    function storeNested(n, m, buffers) {
+      const ints = buffers.ints;
+      const floats = buffers.floats;
+      let s = 0, t = 0;
+      for (let i = 0; i < ints.length; i++) {
+        floats[i] = ints[i] * 0.25 + 0.5;
+        s += floats[i];
+        for (let j = 0; j < m; j++) t = (t + 1) | 0;
+      }
+      return s;
+    }
+    function sumNested(f, m) {
+      let s = 0, t = 0;
+      for (let i = 0; i < f.length; i++) {
+        s += f[i];
+        for (let j = 0; j < m; j++) t = (t + 1) | 0;
+      }
+      return s;
+    }
+    function warmBuffers(n) {
+      return {ints: new Int32Array(n).fill(4), floats: new Float64Array(n).fill(1.25)};
+    }
+"#;
+
+/// A hoisted outer-loop tuple must be revalidated by every poll that can run
+/// the interrupt handler, including the poll of a nested inner loop. With an
+/// amortized countdown the inner loop consumes nearly every expiry, so a
+/// revalidation only at the outer header would miss a detach performed there.
+#[test]
+fn outer_loop_hoists_are_revalidated_by_inner_loop_polls() {
+    for (warm, call, target, detached_destination) in [
+        (
+            "storeNested(0, 2, warmBuffers(16))",
+            "storeNested(0, 2000, big)",
+            "big.floats.buffer",
+            true,
+        ),
+        (
+            "storeNested(0, 2, warmBuffers(16))",
+            "storeNested(0, 2000, big)",
+            "big.ints.buffer",
+            false,
+        ),
+        (
+            "sumNested(warmBuffers(16).floats, 2)",
+            "sumNested(big.floats, 2000)",
+            "big.floats.buffer",
+            false,
+        ),
+    ] {
+        nested_detach_case(warm, call, target, detached_destination);
+    }
+}
+
+fn nested_detach_case(warm: &str, call: &str, target: &str, detached_destination: bool) {
+    use rquickjs::qjs;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    const N: usize = 4000;
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(NESTED)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let before = jit.metrics();
+        context.with(|ctx| ctx.eval::<f64, _>(warm)).unwrap();
+        let after = jit.metrics();
+        if after.tier2_entries > before.tier2_entries
+            && after.deopts == before.deopts
+            && after.pending_worker_jobs == 0
+        {
+            break;
+        }
+        jit.poll();
+        assert!(
+            Instant::now() < deadline,
+            "{call}: nested traversal never reached Tier2: {after:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (raw_ctx, raw_buffer) = context.with(|ctx| {
+        ctx.eval::<(), _>(format!(
+            "globalThis.big = {{ints: new Int32Array({N}).fill(4), floats: new Float64Array({N}).fill(1.25)}}; globalThis.detachTarget = {target};"
+        ))
+        .unwrap();
+        let buffer: rquickjs::Object = ctx.globals().get("detachTarget").unwrap();
+        (
+            ctx.as_raw().as_ptr() as usize,
+            unsafe { qjs::JS_VALUE_GET_PTR(buffer.as_value().as_raw()) } as usize,
+        )
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    // Detach on the third observable poll, well inside the outer loop. The
+    // globally rooted buffer stays live; detaching runs no script.
+    runtime.set_interrupt_handler(Some(Box::new(move || unsafe {
+        if observed.fetch_add(1, Ordering::SeqCst) == 2 {
+            let ctx = raw_ctx as *mut qjs::JSContext;
+            let buffer = qjs::JS_MKPTR(qjs::JS_TAG_OBJECT, raw_buffer as *mut core::ffi::c_void);
+            qjs::JS_DetachArrayBuffer(ctx, buffer);
+        }
+        false
+    })));
+    let before = jit.metrics();
+    let result = context.with(|ctx| ctx.eval::<f64, _>(call));
+    runtime.set_interrupt_handler(None);
+    let result = result.unwrap();
+    let after = jit.metrics();
+    assert!(
+        calls.load(Ordering::SeqCst) > 2,
+        "{call}: the interrupt handler never detached"
+    );
+    assert!(
+        after.tier2_entries > before.tier2_entries,
+        "{call}: {after:?}"
+    );
+    assert_eq!(after.native_entries, after.native_exits);
+    let full = N as f64 * 1.25;
+    if detached_destination {
+        // Every read of a detached destination is undefined.
+        assert!(
+            result.is_nan(),
+            "{call}: stale destination storage used after detach: {result}"
+        );
+    } else {
+        // A detached source reports length 0, ending the outer loop early.
+        assert!(
+            result.is_finite() && result < full,
+            "{call}: stale source length used after detach: {result}"
+        );
+    }
+    assert!(
+        after.deopts > before.deopts,
+        "{call}: native code never observed the detach: {after:?}"
+    );
+}
+
+const CONDITIONAL_AND_WIDE: &str = r#"
+    function maybeStore(n, o) {
+      const src = o.src;
+      const out = o.out;
+      let s = 0;
+      for (let i = 0; i < src.length; i++) {
+        const v = src[i] * 0.5;
+        if (n > 0) out[i] = v;
+        s += v;
+      }
+      return s;
+    }
+    function fiveReceivers(n, o) {
+      const a = o.a, b = o.b, c = o.c, d = o.d, e = o.e;
+      let s = 0;
+      for (let i = 0; i < a.length; i++) {
+        s += a[i] + b[i] + c[i] + d[i];
+        e[i] = s;
+      }
+      return s;
+    }
+    function views(n) {
+      const f = (k) => new Float64Array(n).fill(k);
+      return {src: new Int32Array(n).fill(3), out: new Float64Array(n),
+              a: f(1), b: f(2), c: f(3), d: f(4), e: new Float64Array(n)};
+    }
+"#;
+
+/// Storage hoists guard their receiver on the loop-entry edge only when every
+/// iteration touches it, so an unused conditional destination stays native. More
+/// than `MAX_LIVE_SOURCES` receivers keep exact per-access guards.
+#[test]
+fn conditional_and_wide_receiver_loops_match_the_interpreter() {
+    const CASES: &str = r#"JSON.stringify([
+        maybeStore(1, views(8)), maybeStore(0, {src: views(8).src, out: null}),
+        maybeStore(1, {src: views(8).src, out: new Float64Array(3)}),
+        maybeStore(1, {src: views(8).src, out: new Int32Array(8)}),
+        fiveReceivers(0, views(8)),
+        (() => { const v = views(8); v.c = new Float64Array(2); return fiveReceivers(0, v); })(),
+        (() => { const v = views(8); v.e = v.a; return fiveReceivers(0, v); })()
+    ])"#;
+    let expected = evaluate_without_jit(CONDITIONAL_AND_WIDE, CASES);
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>(CONDITIONAL_AND_WIDE))
+        .unwrap();
+    context
+        .with(|ctx| ctx.eval::<(), _>("globalThis.W = views(64)"))
+        .unwrap();
+    for warm in ["maybeStore(1, W)", "fiveReceivers(0, W)"] {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let before = jit.metrics();
+            context.with(|ctx| ctx.eval::<f64, _>(warm)).unwrap();
+            let after = jit.metrics();
+            if after.tier2_entries > before.tier2_entries
+                && after.deopts == before.deopts
+                && after.pending_worker_jobs == 0
+            {
+                break;
+            }
+            jit.poll();
+            assert!(
+                Instant::now() < deadline,
+                "{warm} never reached Tier2: {after:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    // A destination that is not a typed array but is never stored to (the
+    // store is conditional) must not deopt on every loop entry.
+    context
+        .with(|ctx| ctx.eval::<(), _>("globalThis.plainOut = {src: views(64).src, out: {}}"))
+        .unwrap();
+    let before = jit.metrics();
+    for _ in 0..16 {
+        context
+            .with(|ctx| ctx.eval::<f64, _>("maybeStore(0, plainOut)"))
+            .unwrap();
+    }
+    let after = jit.metrics();
+    assert_eq!(after.tier2_entries - before.tier2_entries, 16, "{after:?}");
+    assert_eq!(after.deopts, before.deopts, "{after:?}");
+    let actual = context.with(|ctx| ctx.eval::<String, _>(CASES)).unwrap();
+    assert_eq!(actual, expected);
+    let after = jit.metrics();
+    assert_eq!(after.native_entries, after.native_exits);
+}
+
+/// Pre-existing at 82d3808: `const out = o.out` publishes a one-slot stack
+/// top through the owned property bridge. When the loop-header numeric guard
+/// then rejected the non-numeric `null` local, its exit resumed at the header
+/// (stack depth 0) with that stale top, and the runtime rejected the exit as
+/// "invalid native deoptimization metadata" (an uncatchable error).
+#[test]
+fn loop_header_guard_exit_republishes_an_empty_stack() {
+    const SOURCE: &str = r#"
+        function nullLocal(n, o) {
+          const src = o.src;
+          const out = o.out;
+          let s = 0;
+          for (let i = 0; i < src.length; i++) {
+            const v = src[i] * 0.5;
+            if (out) out[i] = v;
+            s += v;
+          }
+          return s;
+        }
+        globalThis.nullOut = {src: new Int32Array(64).fill(3), out: null};
+    "#;
+    let expected = evaluate_without_jit(SOURCE, "String(nullLocal(0, nullOut))");
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(
+        &runtime,
+        JitConfig::builder()
+            .call_threshold(2)
+            .loop_threshold(4)
+            .force_optimized_for_test(true)
+            .stress_gc(true)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| ctx.eval::<(), _>(SOURCE)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut entered = 0;
+    while entered < 8 {
+        let before = jit.metrics();
+        let actual = context
+            .with(|ctx| ctx.eval::<String, _>("String(nullLocal(0, nullOut))"))
+            .unwrap();
+        assert_eq!(actual, expected);
+        let after = jit.metrics();
+        entered += after.tier2_entries - before.tier2_entries;
+        assert_eq!(after.native_entries, after.native_exits);
+        jit.poll();
+        assert!(
+            Instant::now() < deadline,
+            "nullLocal never reached Tier2: {after:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}

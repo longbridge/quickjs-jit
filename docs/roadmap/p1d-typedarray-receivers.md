@@ -44,9 +44,23 @@ the loop called the poll helper on every iteration.
   in a loop, has no hoisted length, and passes the existing loop admission
   (no uncertified reentry and no write to its slot). An example is a store
   destination. For such a receiver:
+  - Some access of the receiver must dominate every latch of the loop, so
+    a conditionally used receiver (`if (c) out[i] = v`) is not guarded on
+    loop entry, where a mismatch would deopt on every entry.
   - The preheader runs one storage query, without the length flag.
-  - The query is revalidated on every poll, both amortized and regular.
   - Each access keeps its own index check.
+- **Poll revalidation of hoisted tuples (review fix r1).** Every loop poll
+  that reaches the runtime revalidates the hoisted tuples (length and
+  storage) of *every* loop that contains it, not only those of its own
+  header. An outer header re-seeds its preheader tuple on each backedge
+  and, with amortized polling, an inner loop consumes nearly every
+  countdown expiry. Before this fix, an interrupt handler that detached an
+  outer receiver's buffer at an inner poll let the outer loop keep reading
+  and writing the freed backing store. Loop admission now also rejects any
+  safepoint other than a loop poll, and lowering fails closed when an
+  enclosing header's tuples are not seeded exactly as planned. The length
+  hoist of an argument receiver had the same flaw at `82d3808`, and this
+  fix covers it too.
 - **Leaf certification.**
   - Numeric `push_const`/`push_const8` sites are treated as non-reentrant.
     Lowering can only emit immediates for them; any other constant fails
@@ -57,7 +71,11 @@ the loop called the poll helper on every iteration.
     natural loop is accepted. The loop-header representation guard already
     treats owned locals as `Any`.
   - The numeric proof used only for this decision keeps frame reads across
-    shape-guarded `get_field` and other certified leaf sites. Lowering still
+    shape-guarded `get_field` and other certified leaf sites. An
+    Object-observed `get_field` goes through the generic bridge, which can
+    run a getter. It counts as frame-preserving only when the function
+    contains no `fclosure`, `special_object` or direct `eval`: the only ways
+    script could write this frame. Lowering still
     uses the original proof.
 
 All exits remain exact deoptimizations at the original bytecode.
@@ -91,6 +109,30 @@ All exits remain exact deoptimizations at the original bytecode.
 - rejection of rebound, aliased and argument-aliased locals;
 - a storage-only hoist for a store destination.
 
+## Review fixes (r1)
+
+- The hoist-cap check now runs before any access is marked covered. When a
+  loop exceeds `MAX_LIVE_SOURCES` receivers, the extra receivers keep every
+  index guard; the rest of the plan is not discarded.
+- A pre-existing bug, reproduced at `82d3808`, is fixed. The numeric guard
+  at the loop header and at entry exited without republishing the stack top.
+  After `const out = o.out` had published a one-slot top through the owned
+  property bridge, a failing header guard (for example on a `null` local)
+  produced an exit that the runtime rejected as "invalid native
+  deoptimization metadata". That is an uncatchable error for the script.
+  The guard exit now republishes an empty stack. Lowering rejects a loop
+  poll at a non-empty depth.
+- New tests, in `typed_receivers.rs` unless noted:
+  - `outer_loop_hoists_are_revalidated_by_inner_loop_polls`: the
+    reviewer's store/UAF case with a detached destination or source, plus
+    the argument-receiver length hoist.
+  - `conditional_and_wide_receiver_loops_match_the_interpreter`: no
+    deopts on entry for an unused conditional destination, and more than
+    four receivers.
+  - `loop_header_guard_exit_republishes_an_empty_stack`.
+  - `array_cache` unit tests for enclosing-poll revalidation, conditional
+    storage hoists and the live-tuple cap.
+
 ## Noisy diagnostic (not publishable evidence)
 
 This was measured on a shared, loaded 24-core x86_64 host. Each row is 7
@@ -113,6 +155,25 @@ generic-call-entry and scalar-expressions were all within ±7%. Reruns of
 quickjs-bitops and host-compute with 7 runs were bimodal ties. The
 publishable three-engine matrix, with Bun and confidence intervals, is still
 pending and belongs to the integrator.
+
+### After the r1 review fixes
+
+The r1 run used the same method, with 9 rotated-order rounds. `prev` is
+the implementer's commit `e243f15`.
+
+| Workload | 82d3808 ms | e243f15 ms | r1 ms | Speed vs 82d3808 | Speed vs e243f15 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| float64array-traversal | 1.0940 | 0.1642 | 0.1690 | 6.47x | 0.97x |
+| arrays-typed | 2.9781 | 1.9978 | 1.9953 | 1.49x | 1.00x |
+| int32array-traversal (control) | 0.0498 | 0.0497 | 0.0500 | 1.00x | 0.99x |
+| float64-dense (control) | 0.1291 | 0.1305 | 0.1288 | 1.00x | 1.01x |
+
+float64array-traversal is sensitive to code layout. Across r1 builds that
+differ only in cold deopt blocks, it measured between 0.93x and 1.19x the
+speed of e243f15. One early build made the entry and header numeric-guard
+exit use the entry `stack_base` SSA value. That build was about 7% slower
+on int32array-traversal, because it kept the value live across the loop.
+The exit now reloads the base from the frame and is marked cold.
 
 ## Remaining work
 

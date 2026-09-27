@@ -80,6 +80,8 @@ pub(super) struct ArrayPlan {
     accesses: Vec<Option<ArrayAccessPlan>>,
     hoists: Vec<ArrayLoopHoist>,
     storage_hoists: Vec<ArrayStorageHoist>,
+    /// Loop headers whose hoisted tuples a poll node must revalidate.
+    poll_revalidations: Vec<(u32, Vec<u32>)>,
     invalidations: Vec<bool>,
 }
 
@@ -311,6 +313,18 @@ impl ArrayPlan {
                         return false;
                     }
                 }
+                // Lowering revalidates hoisted tuples only at loop polls
+                // (every such poll of an enclosing loop, see
+                // `revalidating_headers`). Any other safepoint could observe
+                // an interrupt without that revalidation.
+                if graph.effect_for_node(node.id()) == ScalarHeapEffect::Safepoint
+                    && !matches!(
+                        node.kind(),
+                        crate::ir::OptimizedNodeKind::GuardNumeric { mid_loop: true, .. }
+                    )
+                {
+                    return false;
+                }
                 if graph.effect_for_node(node.id()) != ScalarHeapEffect::Reentrant
                     || non_reentrant(node.id())
                     || proposed_nodes[node.id() as usize]
@@ -390,6 +404,16 @@ impl ArrayPlan {
                 if lengths.next().is_some() {
                     continue;
                 }
+                // Check the live-tuple cap before marking any access as
+                // covered: a capped loop keeps every per-access index guard.
+                if hoists
+                    .iter()
+                    .filter(|hoist: &&ArrayLoopHoist| hoist.header == natural_loop.header())
+                    .count()
+                    >= Self::MAX_LIVE_SOURCES
+                {
+                    continue;
+                }
                 let mut covered_any = false;
                 for (node, access) in accesses.iter_mut().enumerate() {
                     let Some(access) = access.as_mut() else {
@@ -408,13 +432,7 @@ impl ArrayPlan {
                         covered_any = true;
                     }
                 }
-                if covered_any
-                    && hoists
-                        .iter()
-                        .filter(|hoist: &&ArrayLoopHoist| hoist.header == natural_loop.header())
-                        .count()
-                        < Self::MAX_LIVE_SOURCES
-                {
+                if covered_any {
                     hoists.push(ArrayLoopHoist {
                         candidate,
                         preheader,
@@ -446,11 +464,31 @@ impl ArrayPlan {
                 {
                     continue;
                 }
-                let used = accesses.iter().flatten().any(|access| {
-                    access.candidate == candidate
-                        && access.loop_header == header
-                        && access.access != ArrayAccess::Length
-                });
+                // Guarding the receiver on the loop-entry edge is profitable
+                // only when every completed iteration performs one of its
+                // accesses anyway. A conditionally used receiver (for example
+                // `if (out) out[i] = v` with `out === null`) would otherwise
+                // deopt on every loop entry although the loop never touches it.
+                let latches: Vec<u32> = ir
+                    .blocks()
+                    .iter()
+                    .filter(|block| {
+                        natural_loop.contains_block(block.start_pc())
+                            && block.successors().contains(&header)
+                    })
+                    .map(|block| block.start_pc())
+                    .collect();
+                let used = !latches.is_empty()
+                    && accesses.iter().enumerate().any(|(node, access)| {
+                        access.as_ref().is_some_and(|access| {
+                            access.candidate == candidate
+                                && access.loop_header == header
+                                && access.access != ArrayAccess::Length
+                                && loops.block_for_node(node as u32).is_some_and(|block| {
+                                    latches.iter().all(|&latch| loops.dominates(block, latch))
+                                })
+                        })
+                    });
                 let live = hoists.iter().filter(|hoist| hoist.header == header).count()
                     + storage_hoists
                         .iter()
@@ -462,6 +500,36 @@ impl ArrayPlan {
                         preheader,
                         header,
                     });
+                }
+            }
+        }
+        // Every loop poll that can run the interrupt handler must revalidate
+        // the hoisted tuples of each loop enclosing it, not only those of its
+        // own header: an inner loop's poll can detach an outer receiver's
+        // buffer, and the outer header re-seeds its preheader tuple on every
+        // backedge while its own amortized countdown rarely expires.
+        let mut poll_revalidations = Vec::new();
+        if !hoists.is_empty() || !storage_hoists.is_empty() {
+            for node in nodes {
+                if graph.effect_for_node(node.id()) != ScalarHeapEffect::Safepoint {
+                    continue;
+                }
+                let Some(block) = loops.block_for_node(node.id()) else {
+                    continue;
+                };
+                let mut headers = Vec::new();
+                for natural_loop in loops.loops() {
+                    let header = natural_loop.header();
+                    if natural_loop.contains_block(block)
+                        && (hoists.iter().any(|hoist| hoist.header == header)
+                            || storage_hoists.iter().any(|hoist| hoist.header == header))
+                        && !headers.contains(&header)
+                    {
+                        headers.push(header);
+                    }
+                }
+                if !headers.is_empty() {
+                    poll_revalidations.push((node.id(), headers));
                 }
             }
         }
@@ -495,6 +563,7 @@ impl ArrayPlan {
             accesses,
             hoists,
             storage_hoists,
+            poll_revalidations,
             invalidations,
         }
     }
@@ -520,6 +589,27 @@ impl ArrayPlan {
     }
     pub(super) fn storage_hoists(&self) -> &[ArrayStorageHoist] {
         &self.storage_hoists
+    }
+    /// Headers of every loop containing poll `node` that owns hoisted
+    /// metadata. The poll's observable (runtime-calling) path must revalidate
+    /// all of their tuples before native code continues.
+    pub(super) fn revalidating_headers(&self, node: u32) -> &[u32] {
+        self.poll_revalidations
+            .iter()
+            .find(|(poll, _)| *poll == node)
+            .map_or(&[], |(_, headers)| headers.as_slice())
+    }
+    /// Hoisted tuples (length and storage-only) seeded at `header`.
+    pub(super) fn hoisted_sources_at(&self, header: u32) -> usize {
+        self.hoists
+            .iter()
+            .filter(|hoist| hoist.header == header)
+            .count()
+            + self
+                .storage_hoists
+                .iter()
+                .filter(|hoist| hoist.header == header)
+                .count()
     }
     pub(super) fn invalidates_before(&self, node: u32) -> bool {
         self.invalidations
@@ -914,6 +1004,105 @@ mod tests {
                 "{source}: {plan:#?}"
             );
         }
+    }
+
+    #[test]
+    fn inner_loop_polls_revalidate_outer_hoisted_tuples() {
+        let (ir, feedback) = fixture(
+            "(function(o,m){const f=o.f;let t=0;for(let i=0;i<f.length;i++){f[i]=i;for(let j=0;j<m;j++)t=(t+1)|0}return t})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        // The store-only destination gets one storage hoist on the outer loop.
+        assert!(plan.hoists().is_empty());
+        let [hoist] = plan.storage_hoists() else {
+            panic!("the outer storage hoist is expected: {plan:#?}");
+        };
+        let polls: Vec<_> = ir
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    OptimizedNodeKind::GuardNumeric { mid_loop: true, .. }
+                )
+            })
+            .collect();
+        assert_eq!(polls.len(), 2, "outer and inner loop polls expected");
+        // Both the outer header poll and the nested inner poll must
+        // revalidate the outer receiver's tuple.
+        for poll in polls {
+            assert!(
+                plan.revalidating_headers(poll.id()).contains(&hoist.header),
+                "poll {} does not revalidate the outer tuple: {plan:#?}",
+                poll.id()
+            );
+        }
+        assert_eq!(plan.hoisted_sources_at(hoist.header), 1);
+    }
+
+    #[test]
+    fn conditionally_used_typed_receiver_gets_no_storage_hoist() {
+        let (ir, feedback) = fixture(
+            "(function(o,n){const f=o.f;for(let i=0;i<n;i++){if(f)f[i]=i}return 0})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        assert!(
+            ir.nodes().iter().any(|node| plan
+                .access(node.id())
+                .is_some_and(|access| access.access == ArrayAccess::Store)),
+            "the conditional store is still a planned guarded leaf: {plan:#?}"
+        );
+        assert!(
+            plan.storage_hoists().is_empty(),
+            "a conditional store must not guard its receiver on loop entry: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn more_than_max_live_receivers_keep_exact_guards() {
+        let (ir, feedback) = fixture(
+            "(function(o){const a=o.a,b=o.b,c=o.c,d=o.d,e=o.e,f=o.f;let s=0;for(let i=0;i<a.length;i++){s=s+a[i]+b[i]+c[i]+d[i]+e[i];f[i]=s}return s})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        for natural_loop in LoopAnalysis::analyze(&ir, 100_000).loops() {
+            assert!(
+                plan.hoisted_sources_at(natural_loop.header()) <= ArrayPlan::MAX_LIVE_SOURCES,
+                "{plan:#?}"
+            );
+        }
+        // Accesses of an unhoisted receiver keep their own index guard and
+        // are never marked as covered by a hoist.
+        let hoisted: Vec<usize> = plan
+            .hoists()
+            .iter()
+            .map(|hoist| hoist.candidate)
+            .chain(plan.storage_hoists().iter().map(|hoist| hoist.candidate))
+            .collect();
+        let mut unhoisted = 0;
+        for node in ir.nodes() {
+            let Some(access) = plan.access(node.id()) else {
+                continue;
+            };
+            if access.bounds_covered_by_hoist {
+                assert!(
+                    plan.hoists()
+                        .iter()
+                        .any(|hoist| hoist.candidate == access.candidate),
+                    "{plan:#?}"
+                );
+            }
+            if access.access != ArrayAccess::Length && !hoisted.contains(&access.candidate) {
+                assert!(access.requires_index_guard, "{plan:#?}");
+                unhoisted += 1;
+            }
+        }
+        assert!(
+            unhoisted > 0,
+            "six receivers exceed the live-tuple cap: {plan:#?}"
+        );
     }
 
     #[test]
