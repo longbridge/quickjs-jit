@@ -15,7 +15,7 @@ use cranelift_codegen::{
     ir::{
         condcodes::{FloatCC, IntCC},
         types, AbiParam, ArgumentPurpose, Block, Function, InstBuilder, MemFlags, Signature,
-        SourceLoc, StackSlot, StackSlotData, StackSlotKind, TrapCode, Value,
+        SourceLoc, TrapCode, Value,
     },
     isa::{unwind::UnwindInfo as CraneliftUnwindInfo, OwnedTargetIsa, TargetIsa},
     settings::{self, Configurable},
@@ -199,67 +199,6 @@ impl HelperLowering<'_> {
         builder.switch_to_block(continuation);
         Ok(())
     }
-
-    fn shape_guard(
-        &self,
-        builder: &mut FunctionBuilder<'_>,
-        state: FrameStateId,
-        live_depth: usize,
-        object: u32,
-        shape: crate::runtime::ShapeToken,
-    ) -> Result<Value, CompileFailure> {
-        let frame_state = self.ir.frame_states.get(state);
-        let fixed_slots = usize::from(self.ir.argument_count) + usize::from(self.ir.local_count);
-        let visible_depth = frame_state
-            .slots
-            .len()
-            .checked_sub(fixed_slots)
-            .ok_or(CompileFailure::InvalidArtifact)?;
-        materialize_frame(
-            builder,
-            self.frame,
-            self.arg_buf,
-            self.var_buf,
-            self.stack_base,
-            self.arguments,
-            self.locals,
-            self.stack,
-            live_depth,
-            visible_depth,
-            frame_state.pc,
-            self.pointer_type,
-            self.layout,
-        )?;
-        let helper_id = qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize;
-        let helper = builder.ins().load(
-            self.pointer_type,
-            MemFlags::new(),
-            self.runtime_api,
-            self.layout.helper_offsets[helper_id],
-        );
-        let params = [
-            self.frame,
-            helper_u32(
-                builder,
-                u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
-            ),
-            helper_u32(builder, object),
-            helper_u32(builder, shape.identity() as u32),
-            helper_u32(builder, (shape.identity() >> 32) as u32),
-            helper_u32(builder, shape.generation() as u32),
-            helper_u32(builder, (shape.generation() >> 32) as u32),
-        ];
-        let call = emit_external_call(
-            builder,
-            self.signatures[helper_id],
-            helper,
-            &params,
-            self.pointer_type,
-            Some(self.frame),
-            None,
-        );
-        Ok(builder.inst_results(call)[0])
-    }
 }
 
 /// Cranelift compiler configured for one explicit target ISA.
@@ -301,16 +240,19 @@ fn baseline_property_sites(
             let observations = site.observations();
             let safe = site.state() != ShapeFeedbackState::Megamorphic
                 && !observations.is_empty()
-                && observations.len() <= 3
+                && observations.len() <= crate::runtime::POLYMORPHIC_PROPERTY_LIMIT
                 && observations.iter().all(|observation| {
-                    matches!(
-                        observation.value(),
-                        ObservedType::Int32
-                            | ObservedType::Float64
-                            | ObservedType::Bool
-                            | ObservedType::Null
-                            | ObservedType::Undefined
-                    ) && observation.prototype().identity() == 0
+                    observation.shape().identity() != 0
+                        && observation.shape().generation() != 0
+                        && matches!(
+                            observation.value(),
+                            ObservedType::Int32
+                                | ObservedType::Float64
+                                | ObservedType::Bool
+                                | ObservedType::Null
+                                | ObservedType::Undefined
+                        )
+                        && observation.prototype().identity() == 0
                         && observation.prototype().generation() == 0
                         && !observation
                             .attributes()
@@ -2865,21 +2807,6 @@ fn lower_function(
     }
     let sret = params[0];
     let frame = params[1];
-    let property_caches = properties
-        .iter()
-        .map(|property| {
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                0,
-            ));
-            (property.pc, slot)
-        })
-        .collect::<BTreeMap<_, _>>();
-    for slot in property_caches.values().copied() {
-        let zero = builder.ins().iconst(types::I64, 0);
-        builder.ins().stack_store(zero, slot, 0);
-    }
 
     if analysis.retry_before_entry {
         emit_exit(
@@ -3165,7 +3092,6 @@ fn lower_function(
                     properties
                         .iter()
                         .find(|site| site.pc == instruction.pc && !site.store),
-                    property_caches.get(&instruction.pc).copied(),
                 )?,
                 IrOp::GetPropertyKeep(atom) => lower_get_property_keep(
                     builder,
@@ -3183,7 +3109,6 @@ fn lower_function(
                     properties
                         .iter()
                         .find(|site| site.pc == instruction.pc && site.store),
-                    property_caches.get(&instruction.pc).copied(),
                 )?,
                 IrOp::DefineProperty(atom) => lower_define_property(
                     builder,
@@ -4413,7 +4338,6 @@ fn lower_get_property(
     depth: usize,
     atom: u32,
     property: Option<&BaselinePropertySite>,
-    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(1)
@@ -4423,72 +4347,31 @@ fn lower_get_property(
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let output = flat_stack_slot(helpers.ir, output_index)?;
     let get_state = next_helper_state(states)?;
-    if let Some((property, property_cache)) = property.zip(property_cache) {
+    if let Some(property) = property {
         let generic = builder.create_block();
         let joined = builder.create_block();
         builder.append_block_param(joined, types::I64);
         builder.append_block_param(joined, types::I64);
-        for (index, observation) in property.observations.iter().copied().enumerate() {
-            let access = builder.create_block();
-            let validate = builder.create_block();
-            let next = if index + 1 == property.observations.len() {
-                generic
-            } else {
-                builder.create_block()
-            };
-            let receiver = use_pair(builder, helpers.stack[object_index]);
-            let object_tag =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
-            let cached_check = builder.create_block();
-            builder
-                .ins()
-                .brif(object_tag, cached_check, &[], validate, &[]);
-            builder.switch_to_block(cached_check);
-            let current_shape = builder.ins().load(
-                helpers.pointer_type,
-                MemFlags::trusted(),
-                receiver.payload,
-                24,
-            );
-            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
-            let expected = observation.shape().identity();
-            let pointer_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
-            let cache_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, cached, expected as i64);
-            let validated = builder.ins().band(pointer_ok, cache_ok);
-            builder.ins().brif(validated, access, &[], validate, &[]);
-            builder.switch_to_block(validate);
-            let status =
-                helpers.shape_guard(builder, get_state, depth, object, observation.shape())?;
-            let matched =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
-            let cache = builder.create_block();
-            builder.ins().brif(matched, cache, &[], next, &[]);
-            builder.switch_to_block(cache);
-            let expected_value = builder.ins().iconst(types::I64, expected as i64);
-            builder.ins().stack_store(expected_value, property_cache, 0);
-            builder.ins().jump(access, &[]);
+        let receiver = use_pair(builder, helpers.stack[object_index]);
+        let accesses = emit_shape_dispatch(
+            builder,
+            helpers.pointer_type,
+            receiver,
+            &property.observations,
+            generic,
+        )?;
+        let layout = crate::abi::AbiInfo::linked()
+            .map_err(|_| CompileFailure::InvalidArtifact)?
+            .property_layout();
+        for (observation, access) in property.observations.iter().copied().zip(accesses) {
             builder.switch_to_block(access);
             let props = builder.ins().load(
                 helpers.pointer_type,
                 MemFlags::trusted(),
                 receiver.payload,
-                32,
+                layout.object_properties_offset,
             );
-            let offset = i32::try_from(
-                usize::try_from(observation.offset())
-                    .map_err(|_| CompileFailure::ResourceLimit)?
-                    .checked_mul(16)
-                    .ok_or(CompileFailure::ResourceLimit)?,
-            )
-            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let offset = property_slot_offset(observation)?;
             let value = Pair {
                 payload: builder
                     .ins()
@@ -4506,9 +4389,6 @@ fn lower_get_property(
             builder.ins().brif(tag_ok, direct, &[], generic, &[]);
             builder.switch_to_block(direct);
             builder.ins().jump(joined, &[value.payload, value.tag]);
-            if index + 1 != property.observations.len() {
-                builder.switch_to_block(next);
-            }
         }
         builder.switch_to_block(generic);
         helpers.invoke(
@@ -4589,6 +4469,95 @@ fn lower_get_property(
     helpers.set_depth(builder, depth)
 }
 
+/// Byte offset of an own-property slot in `JSObject::prop`.
+fn property_slot_offset(
+    observation: crate::runtime::ShapeObservation,
+) -> Result<i32, CompileFailure> {
+    usize::try_from(observation.offset())
+        .ok()
+        .and_then(|offset| offset.checked_mul(16))
+        .and_then(|offset| i32::try_from(offset).ok())
+        .filter(|offset| offset.checked_add(8).is_some())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// Inline polymorphic own-property dispatch: one pointer compare per observed
+/// shape, then the shape's monotonic layout generation. It is exactly the
+/// SHAPE_GUARD helper predicate (the generation is zeroed on any layout
+/// change and never reused), without a frame materialization or helper
+/// crossing. A non-object receiver, an unknown shape or a stale generation
+/// reaches `generic`. Returns one access block per observation, in feedback
+/// order; the current block is terminated.
+fn emit_shape_dispatch(
+    builder: &mut FunctionBuilder<'_>,
+    pointer_type: cranelift_codegen::ir::Type,
+    receiver: Pair,
+    observations: &[crate::runtime::ShapeObservation],
+    generic: Block,
+) -> Result<Vec<Block>, CompileFailure> {
+    if observations.is_empty() || observations.len() > crate::runtime::POLYMORPHIC_PROPERTY_LIMIT {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    for (index, observation) in observations.iter().enumerate() {
+        if observation.shape().identity() == 0
+            || observation.shape().generation() == 0
+            || observations[..index]
+                .iter()
+                .any(|prior| prior.shape().identity() == observation.shape().identity())
+        {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+    }
+    let layout = crate::abi::AbiInfo::linked()
+        .map_err(|_| CompileFailure::InvalidArtifact)?
+        .property_layout();
+    let is_object =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
+    let dispatch = builder.create_block();
+    builder.ins().brif(is_object, dispatch, &[], generic, &[]);
+    builder.switch_to_block(dispatch);
+    let shape = builder.ins().load(
+        pointer_type,
+        MemFlags::trusted(),
+        receiver.payload,
+        layout.object_shape_offset,
+    );
+    // A live object's shape is always valid; load its generation once.
+    let generation = builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        shape,
+        layout.shape_generation_offset,
+    );
+    let mut accesses = Vec::with_capacity(observations.len());
+    for (index, observation) in observations.iter().enumerate() {
+        let next = if index + 1 == observations.len() {
+            generic
+        } else {
+            builder.create_block()
+        };
+        let same_shape =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, shape, observation.shape().identity() as i64);
+        let current = builder.ins().icmp_imm(
+            IntCC::Equal,
+            generation,
+            observation.shape().generation() as i64,
+        );
+        let matches = builder.ins().band(same_shape, current);
+        let access = builder.create_block();
+        builder.ins().brif(matches, access, &[], next, &[]);
+        accesses.push(access);
+        if index + 1 != observations.len() {
+            builder.switch_to_block(next);
+        }
+    }
+    Ok(accesses)
+}
+
 fn property_value_tag(value: crate::runtime::ObservedType) -> Result<i32, CompileFailure> {
     Ok(match value {
         crate::runtime::ObservedType::Int32 => qjs::JS_TAG_INT,
@@ -4642,7 +4611,6 @@ fn lower_set_property(
     depth: &mut usize,
     atom: u32,
     property: Option<&BaselinePropertySite>,
-    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(2)
@@ -4651,70 +4619,29 @@ fn lower_set_property(
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let value = flat_stack_slot(helpers.ir, value_index)?;
     let set_state = next_helper_state(states)?;
-    if let Some((property, property_cache)) = property.zip(property_cache) {
+    if let Some(property) = property {
         let generic = builder.create_block();
         let joined = builder.create_block();
-        for (index, observation) in property.observations.iter().copied().enumerate() {
-            let access = builder.create_block();
-            let validate = builder.create_block();
-            let next = if index + 1 == property.observations.len() {
-                generic
-            } else {
-                builder.create_block()
-            };
-            let receiver = use_pair(builder, helpers.stack[object_index]);
-            let object_tag =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
-            let cached_check = builder.create_block();
-            builder
-                .ins()
-                .brif(object_tag, cached_check, &[], validate, &[]);
-            builder.switch_to_block(cached_check);
-            let current_shape = builder.ins().load(
-                helpers.pointer_type,
-                MemFlags::trusted(),
-                receiver.payload,
-                24,
-            );
-            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
-            let expected = observation.shape().identity();
-            let pointer_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
-            let cache_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, cached, expected as i64);
-            let validated = builder.ins().band(pointer_ok, cache_ok);
-            builder.ins().brif(validated, access, &[], validate, &[]);
-            builder.switch_to_block(validate);
-            let status =
-                helpers.shape_guard(builder, set_state, *depth, object, observation.shape())?;
-            let matched =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
-            let cache = builder.create_block();
-            builder.ins().brif(matched, cache, &[], next, &[]);
-            builder.switch_to_block(cache);
-            let expected_value = builder.ins().iconst(types::I64, expected as i64);
-            builder.ins().stack_store(expected_value, property_cache, 0);
-            builder.ins().jump(access, &[]);
+        let receiver = use_pair(builder, helpers.stack[object_index]);
+        let accesses = emit_shape_dispatch(
+            builder,
+            helpers.pointer_type,
+            receiver,
+            &property.observations,
+            generic,
+        )?;
+        let layout = crate::abi::AbiInfo::linked()
+            .map_err(|_| CompileFailure::InvalidArtifact)?
+            .property_layout();
+        for (observation, access) in property.observations.iter().copied().zip(accesses) {
             builder.switch_to_block(access);
             let props = builder.ins().load(
                 helpers.pointer_type,
                 MemFlags::trusted(),
                 receiver.payload,
-                32,
+                layout.object_properties_offset,
             );
-            let offset = i32::try_from(
-                usize::try_from(observation.offset())
-                    .map_err(|_| CompileFailure::ResourceLimit)?
-                    .checked_mul(16)
-                    .ok_or(CompileFailure::ResourceLimit)?,
-            )
-            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let offset = property_slot_offset(observation)?;
             let expected_tag = property_value_tag(observation.value())?;
             let current_tag =
                 builder
@@ -4746,9 +4673,6 @@ fn lower_set_property(
                 helpers.layout,
             )?;
             builder.ins().jump(joined, &[]);
-            if index + 1 != property.observations.len() {
-                builder.switch_to_block(next);
-            }
         }
         builder.switch_to_block(generic);
         helpers.invoke(

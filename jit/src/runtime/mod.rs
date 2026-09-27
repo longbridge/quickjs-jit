@@ -41,7 +41,7 @@ pub use invalidate::{DependencyError, DependencyGraph, DependencyKey};
 pub use osr::{OsrKey, OsrMap};
 pub use shape_feedback::{
     PropertyAttributes, PrototypeDependencyToken, ShapeFeedbackSite, ShapeFeedbackState,
-    ShapeFeedbackTable, ShapeObservation, ShapeToken,
+    ShapeFeedbackTable, ShapeObservation, ShapeToken, POLYMORPHIC_PROPERTY_LIMIT,
 };
 
 #[cfg(test)]

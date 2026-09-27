@@ -2,6 +2,12 @@ use std::collections::BTreeMap;
 
 use super::{FunctionKey, ObservedType};
 
+/// Maximum number of receiver shapes one property site may record before it
+/// becomes megamorphic. Both native tiers emit at most this many inline
+/// shape/generation compares per site; a megamorphic site uses the generic
+/// property helper instead of guarding (and deoptimizing) on a shape.
+pub const POLYMORPHIC_PROPERTY_LIMIT: usize = 4;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShapeToken {
     identity: u64,

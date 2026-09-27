@@ -769,7 +769,7 @@ fn bounded_polymorphic_primitive_store_emits_a_guard_chain_and_raw_stores() {
 }
 
 #[test]
-fn megamorphic_property_site_fails_closed_to_the_generic_tier() {
+fn megamorphic_property_site_uses_the_generic_helper_instead_of_guards() {
     let fixture = SnapshotFixture::compile("(function(o){return o.answer})");
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let pc = verified
@@ -793,13 +793,17 @@ fn megamorphic_property_site_fails_closed_to_the_generic_tier() {
             ),
         );
     }
-    assert!(Tier2Compiler::host(1)
+    // A megamorphic site has no shape contract to guard. It lowers to the
+    // owning GET_PROPERTY bridge rather than failing the whole function or
+    // deoptimizing on every unobserved layout.
+    let clif = Tier2Compiler::host(1)
         .lower_with_feedback_for_test(
             &verified,
             key,
             &FeedbackSnapshot::empty(1).with_properties(table.snapshot(key)),
         )
-        .is_err());
+        .expect("megamorphic site lowers through the generic helper");
+    assert!(clif.contains("call_indirect"), "{clif}");
 }
 
 #[test]
