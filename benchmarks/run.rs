@@ -17,6 +17,7 @@ use std::{
 
 const BATCH_DRIVER: &str = include_str!("batch-driver.js");
 const FIXED_WARMUP_BATCHES: usize = 64;
+const DEFAULT_TIMED_BATCHES: usize = 16;
 
 const DEFAULT_WARMUPS: usize = 5;
 const DEFAULT_SAMPLES: usize = 30;
@@ -468,12 +469,15 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     let start = Instant::now();
     let _first_checksum = timed_batch_count(&context, 1)?;
     phases.first_eval_ns = ns(start.elapsed());
+    let timed_batches = timed_batch_count_config()?;
     let mut protocol = model::ProtocolEvidence {
-        name: "shared-js-fixed-warmup-v2".into(),
+        name: model::PROTOCOL_MULTIBATCH_V3.into(),
         script_sha256: sha256_file(script),
         driver_sha256: sha256("batch-driver.js"),
         warmup_batches: FIXED_WARMUP_BATCHES as u32,
         calls_per_batch: 10,
+        timed_batches: timed_batches as u32,
+        outlier_ratio: model::OUTLIER_RATIO,
         ..Default::default()
     };
     for _ in 0..FIXED_WARMUP_BATCHES {
@@ -483,10 +487,29 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
             jit.poll();
         }
     }
-    let (fixed_elapsed, fixed_checksum, before_fixed, after_fixed) =
-        timed_batch_recorded(&context, 10, jit.as_ref())?;
-    protocol.fixed_metrics_before = before_fixed;
-    protocol.fixed_metrics_after = after_fixed;
+    // K consecutive timed batches continue the warmup regime exactly:
+    // checksum and JIT polling stay outside each timed region. The first
+    // one is the legacy v2 fixed batch, kept as a diagnostic.
+    protocol.timed_metrics_before = jit.as_ref().map(|j| metric_snapshot(&j.metrics()));
+    let mut fixed_checksum = String::new();
+    for index in 0..timed_batches {
+        let (elapsed, checksum, before, after) = timed_batch_recorded(&context, 10, jit.as_ref())?;
+        if index == 0 {
+            protocol.fixed_batch_ns = Some(elapsed);
+            protocol.fixed_metrics_before = before;
+            protocol.fixed_metrics_after = after;
+            fixed_checksum = checksum;
+        } else if checksum != fixed_checksum {
+            return Err(format!("checksum changed at timed batch {index}"));
+        }
+        protocol.timed_batch_ns.push(elapsed);
+        if let Some(jit) = &jit {
+            jit.poll();
+        }
+    }
+    protocol.timed_metrics_after = jit.as_ref().map(|j| metric_snapshot(&j.metrics()));
+    let (timed_median, outliers) = model::timed_batch_summary(&protocol.timed_batch_ns);
+    protocol.outlier_batches = outliers;
     let threshold_start = Instant::now();
     let threshold_deadline = threshold_start + threshold_timeout(mode);
     let mut install_poll = 0u64;
@@ -584,7 +607,7 @@ fn worker(mode: &str, script: &str) -> Result<(), String> {
     let abi = AbiInfo::linked().map_err(err)?;
     phases.total_ns = ns(total.elapsed());
     let result = WorkerResult {
-        elapsed_ns: fixed_elapsed,
+        elapsed_ns: timed_median,
         checksum: fixed_checksum,
         native_entries: metrics.native_entries,
         native_acquisitions: metrics.native_acquisitions,
@@ -729,6 +752,10 @@ fn sampling_config() -> Result<SamplingConfig, String> {
             positive_env("JIT_BENCH_WINDOW_MS", DEFAULT_WINDOW_MS)? as u64
         ),
     })
+}
+
+fn timed_batch_count_config() -> Result<usize, String> {
+    positive_env("JIT_BENCH_TIMED_BATCHES", DEFAULT_TIMED_BATCHES)
 }
 
 fn positive_env(name: &str, default: usize) -> Result<usize, String> {
@@ -953,12 +980,13 @@ fn child(executable: &Path, mode: &str, script: &Path) -> Result<WorkerResult, S
     }
     serde_json::from_slice(&output.stdout).map_err(err)
 }
-fn bun_child(script: &Path) -> Result<WorkerResult, String> {
-    let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
-    let wrapper = format!(
+/// Bun wrapper module shared by the file and eval launches. It never embeds
+/// the script path, so its SHA-256 identifies the exact timing protocol.
+fn bun_wrapper(timed_batches: usize) -> Result<String, String> {
+    Ok(format!(
         r#"
 import {{ readFileSync }} from 'node:fs';
-(0,eval)(readFileSync(process.argv[1],'utf8'));
+(0,eval)(readFileSync(process.argv.at(-1),'utf8'));
 (0,eval)({driver});
 let first=benchmarkBatch(1); if(first&&typeof first.then==='function') await first; benchmarkChecksum();
 const warmup_batch_ns=[];
@@ -969,35 +997,103 @@ async function measure() {{
  return [elapsed,benchmarkChecksum()];
 }}
 for(let i=0;i<{warmups};i++) warmup_batch_ns.push((await measure())[0]);
-const [elapsed_ns,checksum]=await measure();
-console.log(JSON.stringify({{elapsed_ns,checksum,warmup_batch_ns}}));
+const timed_batch_ns=[];
+let checksum;
+for(let i=0;i<{timed_batches};i++) {{
+ const [elapsed,batch_checksum]=await measure();
+ if(i===0) checksum=batch_checksum;
+ else if(batch_checksum!==checksum) throw new Error('checksum changed at timed batch '+i);
+ timed_batch_ns.push(elapsed);
+}}
+console.log(JSON.stringify({{checksum,warmup_batch_ns,timed_batch_ns}}));
 "#,
         driver = serde_json::to_string(BATCH_DRIVER).map_err(err)?,
-        warmups = FIXED_WARMUP_BATCHES
-    );
+        warmups = FIXED_WARMUP_BATCHES,
+    ))
+}
+
+/// A uniquely named wrapper file removed when the Bun child finishes.
+struct TempWrapper(PathBuf);
+impl TempWrapper {
+    fn create(contents: &str) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = env::temp_dir().join(format!(
+            "jit-bench-bun-{}-{}-{nonce}.mjs",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, contents.as_bytes()))
+            .map_err(|error| format!("cannot write Bun wrapper {}: {error}", path.display()))?;
+        Ok(Self(path))
+    }
+}
+impl Drop for TempWrapper {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// `file` (default) runs the wrapper from a temporary `.mjs` file. `eval`
+/// reproduces the historical `bun -e` launch and is only a control.
+fn bun_launch() -> Result<&'static str, String> {
+    match env::var("JIT_BENCH_BUN_LAUNCH").as_deref() {
+        Err(env::VarError::NotPresent) | Ok("file") => Ok("file"),
+        Ok("eval") => Ok("eval"),
+        Ok(other) => Err(format!(
+            "JIT_BENCH_BUN_LAUNCH must be file or eval, got {other}"
+        )),
+        Err(error) => Err(format!("cannot read JIT_BENCH_BUN_LAUNCH: {error}")),
+    }
+}
+
+fn bun_child(script: &Path) -> Result<WorkerResult, String> {
+    let bun = env::var("JIT_BENCH_BUN").unwrap_or_else(|_| "bun".into());
+    let timed_batches = timed_batch_count_config()?;
+    let launch = bun_launch()?;
+    let wrapper = bun_wrapper(timed_batches)?;
+    let temp = TempWrapper::create(&wrapper)?;
+    let wrapper_sha256 = sha256_file(&temp.0.to_string_lossy());
     let started = Instant::now();
-    let output = Command::new(&bun)
-        .args(["-e", &wrapper])
-        .arg(script)
-        .output()
-        .map_err(err)?;
+    let mut cmd = Command::new(&bun);
+    if launch == "eval" {
+        cmd.args(["-e", &wrapper]);
+    } else {
+        cmd.arg(&temp.0);
+    }
+    let output = cmd.arg(script).output().map_err(err)?;
+    drop(temp);
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     #[derive(Deserialize)]
     struct BunOut {
-        elapsed_ns: u64,
         checksum: String,
         warmup_batch_ns: Vec<u64>,
+        timed_batch_ns: Vec<u64>,
     }
     let out: BunOut = serde_json::from_slice(&output.stdout).map_err(err)?;
+    if out.warmup_batch_ns.len() != FIXED_WARMUP_BATCHES
+        || out.timed_batch_ns.len() != timed_batches
+    {
+        return Err("Bun wrapper returned an incomplete batch sequence".into());
+    }
+    let (elapsed_ns, outlier_batches) = model::timed_batch_summary(&out.timed_batch_ns);
     let phases = PhaseTiming {
-        steady_state_ns: out.elapsed_ns,
+        steady_state_ns: elapsed_ns,
         total_ns: ns(started.elapsed()),
         ..Default::default()
     };
     Ok(WorkerResult {
-        elapsed_ns: out.elapsed_ns,
+        elapsed_ns,
         checksum: out.checksum,
         native_entries: 0,
         native_acquisitions: 0,
@@ -1021,12 +1117,19 @@ console.log(JSON.stringify({{elapsed_ns,checksum,warmup_batch_ns}}));
         active_ir_bytes: 0,
         automatic_ready: true,
         protocol: model::ProtocolEvidence {
-            name: "shared-js-fixed-warmup-v2".into(),
+            name: model::PROTOCOL_MULTIBATCH_V3.into(),
             script_sha256: sha256_file(&script.to_string_lossy()),
             driver_sha256: sha256("batch-driver.js"),
             warmup_batches: FIXED_WARMUP_BATCHES as u32,
             calls_per_batch: 10,
             warmup_batch_ns: out.warmup_batch_ns,
+            timed_batches: timed_batches as u32,
+            fixed_batch_ns: out.timed_batch_ns.first().copied(),
+            timed_batch_ns: out.timed_batch_ns,
+            outlier_ratio: model::OUTLIER_RATIO,
+            outlier_batches,
+            bun_launch: Some(launch.into()),
+            bun_wrapper_sha256: Some(wrapper_sha256),
             ..Default::default()
         },
         phases,
@@ -1285,6 +1388,21 @@ mod tests {
         assert!(validate_sample("tier2", &r, true).is_err());
     }
     #[test]
+    fn bun_wrapper_is_script_independent_and_times_k_batches() {
+        let wrapper = bun_wrapper(16).unwrap();
+        assert!(wrapper.contains("process.argv.at(-1)"));
+        assert!(wrapper.contains(&format!("i<{FIXED_WARMUP_BATCHES};")));
+        assert!(wrapper.contains("i<16;"));
+        assert_eq!(wrapper, bun_wrapper(16).unwrap());
+        assert_ne!(wrapper, bun_wrapper(8).unwrap());
+        let temp = TempWrapper::create(&wrapper).unwrap();
+        let path = temp.0.clone();
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("mjs"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), wrapper);
+        drop(temp);
+        assert!(!path.exists(), "Bun wrapper must be removed after use");
+    }
+    #[test]
     fn rotation_interleaves_order() {
         let m = vec!["a".into(), "b".into(), "c".into()];
         assert_eq!(rotated(&m, 1).collect::<Vec<_>>(), vec!["b", "c", "a"]);
@@ -1421,6 +1539,26 @@ mod tests {
                 .join(script);
             let result = bun_child(&path).unwrap();
             validate_sample("bun", &result, true).unwrap();
+            let protocol = &result.protocol;
+            assert_eq!(protocol.name, model::PROTOCOL_MULTIBATCH_V3);
+            assert_eq!(protocol.warmup_batch_ns.len(), FIXED_WARMUP_BATCHES);
+            assert_eq!(
+                protocol.timed_batches as usize,
+                protocol.timed_batch_ns.len()
+            );
+            assert_eq!(
+                protocol.fixed_batch_ns,
+                protocol.timed_batch_ns.first().copied()
+            );
+            assert_eq!(
+                (result.elapsed_ns, protocol.outlier_batches),
+                model::timed_batch_summary(&protocol.timed_batch_ns)
+            );
+            assert_eq!(protocol.bun_launch.as_deref(), Some("file"));
+            assert_eq!(
+                protocol.bun_wrapper_sha256.as_ref().map(String::len),
+                Some(64)
+            );
             let sample = evidence_for_mode("bun", 0, result);
             assert!(sample.native_entries.is_none() && sample.native_exits.is_none());
             assert!(sample.tier1_entries.is_none() && sample.tier2_entries.is_none());
