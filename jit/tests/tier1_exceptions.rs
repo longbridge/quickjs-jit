@@ -12,7 +12,9 @@
     not(all(target_os = "windows", target_arch = "aarch64"))
 ))]
 
+use rquickjs::{Context, Runtime};
 use rquickjs_jit::test_support::{differential, forced_baseline};
+use rquickjs_jit::{Jit, JitConfig, JitMetrics};
 
 fn same(definition: &str, expression: &str, opcode: &str) {
     differential(definition, expression)
@@ -154,6 +156,81 @@ fn throw_error_raises_the_interpreter_error() {
         "function f(a){ const k = a; k = 2; }",
         "(function(){ try { f(1); } catch (e) { return e.name + ':' + e.message; } })()",
         "throw_error",
+    );
+}
+
+/// Runs `source` then evaluates `expression` `rounds` times with and without
+/// the production JIT, returning both results and the JIT metrics.
+fn production(source: &str, expression: &str, rounds: usize) -> (String, String, JitMetrics) {
+    let run = |jit: bool| {
+        let runtime = Runtime::new().unwrap();
+        let attached = jit.then(|| Jit::attach(&runtime, JitConfig::default()).unwrap());
+        let context = Context::full(&runtime).unwrap();
+        let mut result = String::new();
+        context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
+        for _ in 0..rounds {
+            result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
+            while runtime.is_job_pending() {
+                runtime.execute_pending_job().unwrap();
+            }
+            if let Some(jit) = &attached {
+                jit.poll();
+            }
+        }
+        (
+            result,
+            attached.map(|jit| jit.metrics()).unwrap_or_default(),
+        )
+    };
+    let (interpreted, _) = run(false);
+    let (compiled, metrics) = run(true);
+    (interpreted, compiled, metrics)
+}
+
+#[test]
+fn production_tiering_runs_hot_exception_loops_natively() {
+    let (interpreted, compiled, metrics) = production(
+        "function f(n){ let caught=0, finals=0; for(let i=0;i<n;i++){ try { if((i&15)===0) throw i; caught-=1; } catch (value) { caught+=value; } finally { finals++; } } return caught + ':' + finals; }",
+        "f(4000)",
+        40,
+    );
+    assert_eq!(compiled, interpreted);
+    assert!(metrics.native_entries > 0, "{metrics:?}");
+    assert_eq!(metrics.native_retries, 0, "{metrics:?}");
+    assert_eq!(metrics.invalid_artifacts, 0, "{metrics:?}");
+}
+
+#[test]
+fn osr_enters_a_loop_header_inside_a_try_region() {
+    // The first invocation is long enough to enter the loop through OSR with
+    // the catch offset live on the interpreter operand stack.
+    let (interpreted, compiled, metrics) = production(
+        "function f(n){ let s = 0; try { for (let i = 0; i < n; i++) { s = (s + i) | 0; if (i === n - 3) throw s; } } catch (e) { return 'caught:' + e; } return 'done:' + s; }",
+        "f(3000000)",
+        1,
+    );
+    assert_eq!(compiled, interpreted);
+    assert!(metrics.osr_entries >= 1, "{metrics:?}");
+    assert_eq!(metrics.native_retries, 0, "{metrics:?}");
+}
+
+#[test]
+fn async_functions_stop_requesting_refused_snapshots() {
+    // Async and generator frames can never compile. Their refusal is local to
+    // the bytecode, so hot probes must stop instead of re-requesting a
+    // snapshot at every call, resume and loop poll.
+    let (interpreted, compiled, metrics) = production(
+        "async function step(v){ return (await Promise.resolve(v + 1)) * 3; }\n\
+         async function g(n){ let s = 0; for (let i = 0; i < n; i++) { try { if ((i & 15) === 0) throw i; } catch (e) { s += e; } } for (let i = 0; i < 8; i++) s = await step(s & 0xffff); globalThis.out = String(s); }\n\
+         function* gen(n){ for (let i = 0; i < n; i++) yield i; }\n\
+         function h(){ let t = 0; for (const v of gen(500)) t += v; return t; }",
+        "(g(2000), String(h()))",
+        60,
+    );
+    assert_eq!(compiled, interpreted);
+    assert!(
+        metrics.snapshot_requests <= 8,
+        "refused async/generator snapshots were re-requested: {metrics:?}"
     );
 }
 

@@ -56,6 +56,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0018-inline-frame-recovery.patch",
         "0019-array-feedback.patch",
         "0020-typed-array-guard.patch",
+        "0027-tier1-exception-regions.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
@@ -114,7 +115,12 @@ fn pinned_public_quickjs_baseline_applies_cleanly_without_git() {
     let helper_header = fs::read_to_string(destination.join("quickjs-jit-helpers.h")).unwrap();
     assert!(quickjs.contains("JS_GetJitRuntimeId"));
     assert!(quickjs.contains("JS_JIT_FRAME_SIDE_PATH_HIT"));
-    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 24u"));
+    assert!(jit_header.contains("#define QJSJIT_ABI_MINOR 25u"));
+    assert!(jit_header.contains("JS_JitCatchException"));
+    assert!(quickjs.contains("JSJitHelperStatus JS_JitThrowValue("));
+    assert!(quickjs.contains("JSJitHelperStatus JS_JitThrowError("));
+    assert!(quickjs.contains("JSJitHelperStatus JS_JitCatchException("));
+    assert!(quickjs.contains("b->func_kind != JS_FUNC_NORMAL ?"));
     assert!(jit_header.contains("JSJitPropertyLayout property_layout;"));
     assert!(quickjs.contains("uint64_t jit_shape_generation;"));
     assert!(!quickjs.contains("QJSJIT_SHAPE_HASH"));
@@ -255,7 +261,10 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
     for target in targets {
         let binding = fs::read_to_string(bindings.join(target)).unwrap();
         assert!(
-            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 24;"),
+            binding.contains("pub const QJSJIT_ABI_MINOR: u32 = 25;")
+                && binding.contains("pub fn JS_JitThrowValue(")
+                && binding.contains("pub fn JS_JitThrowError(")
+                && binding.contains("pub fn JS_JitCatchException("),
             "{target}"
         );
         assert!(
@@ -314,7 +323,7 @@ fn bundled_jit_bindings_include_materialize_owner_tail() {
 }
 
 #[test]
-fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
+fn bundled_wasm_jit_binding_matches_exception_abi_1_25() {
     let binding = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bindings/wasm32-wasip1.rs"),
     )
@@ -362,8 +371,12 @@ fn bundled_wasm_jit_binding_matches_array_abi_1_24() {
         "pub const JS_JIT_FEEDBACK_ARRAY_IMMUTABLE: u32 = 4096;",
         "pub const JS_JIT_FEEDBACK_ARRAY_SHARED: u32 = 8192;",
         "pub const JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING: u32 = 16384;",
+        // ABI 1.25: Tier 1 exception regions.
+        "pub fn JS_JitThrowValue(",
+        "pub fn JS_JitThrowError(",
+        "pub fn JS_JitCatchException(",
         // ABI 1.24: typed-array continuing guard.
-        "pub const QJSJIT_ABI_MINOR: u32 = 24;",
+        "pub const QJSJIT_ABI_MINOR: u32 = 25;",
         "pub const QJSJIT_ARRAY_API_VERSION: u32 = 1;",
         "pub const JS_JIT_ARRAY_QUERY_LENGTH: u32 = 1;",
         "JSJitArrayQueryStatus_JS_JIT_ARRAY_QUERY_INVALID: JSJitArrayQueryStatus = -1;",

@@ -60,6 +60,19 @@ data pointer before returning `{ data, count, mode }`. The table advertises
 zero effects and the receiver is passed by pointer so generated calls do not
 depend on platform-specific aggregate argument classification.
 
+`0027-tier1-exception-regions.patch` adds the ABI 1.25 Tier 1 exception entry
+points. `JS_JitThrowValue` and `JS_JitThrowError` raise exactly like
+`OP_throw` and `OP_throw_error`. `JS_JitCatchException` replays the
+interpreter's `exception:` label for the active root frame (backtrace at the
+throwing PC, then catchability) and, only after proving that unwinding would
+stop at the named catch-offset slot and handler PC, releases the operands
+above it and stores the caught value in that slot. Uncatchable exceptions are
+returned with the frame untouched so the ordinary native exception exit lets
+the interpreter unwind them. The patch also stops hot and feedback probes for
+generator, async, eval and `with` bytecode when the backend requests a
+snapshot the runtime must refuse; previously every later call, async resume
+and loop poll re-requested it.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes
