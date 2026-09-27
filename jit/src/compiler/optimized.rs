@@ -739,7 +739,7 @@ mod provenance_merge_tests {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct GuardedElementSource {
     provenance: OptProvenance,
     block_pc: u32,
@@ -754,6 +754,100 @@ struct GuardedElementSource {
     /// `exact_length` separately records whether it guarded the intrinsic
     /// lookup. Both facts are revalidated after polls.
     typed_mode: Option<crate::runtime::ArrayMode>,
+}
+
+/// Guarded metadata tuples that are live at the current lowering point, keyed
+/// by the frame slot (argument or local) that holds each receiver. Every entry
+/// is individually valid: operations that can reenter, rebind a frame slot or
+/// alter storage clear the whole set, exactly like the former single slot.
+/// Leaf-or-exit array operations add or replace only their own receiver.
+#[derive(Clone, Copy, Default)]
+struct ElementSources {
+    entries: [Option<GuardedElementSource>; array_cache::ArrayPlan::MAX_LIVE_SOURCES],
+}
+
+impl ElementSources {
+    fn clear(&mut self) {
+        self.entries = Default::default();
+    }
+
+    fn find(&self, provenance: OptProvenance) -> Option<GuardedElementSource> {
+        if !matches!(
+            provenance,
+            OptProvenance::Argument(_) | OptProvenance::Local(_)
+        ) {
+            return None;
+        }
+        self.entries
+            .iter()
+            .flatten()
+            .find(|source| source.provenance == provenance)
+            .copied()
+    }
+
+    fn insert(&mut self, source: GuardedElementSource) {
+        if !matches!(
+            source.provenance,
+            OptProvenance::Argument(_) | OptProvenance::Local(_)
+        ) {
+            return;
+        }
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.is_some_and(|entry| entry.provenance == source.provenance))
+        {
+            *slot = Some(source);
+        } else if let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) {
+            *slot = Some(source);
+        } else {
+            // Evict the oldest tuple; dropping metadata is always sound.
+            self.entries.rotate_left(1);
+            self.entries[self.entries.len() - 1] = Some(source);
+        }
+    }
+
+    /// The tuples live on entry to `block_pc`: those live at the end of
+    /// every CFG predecessor. All predecessors must already be lowered (a
+    /// loop header's backedge is not), so each tuple is valid on every
+    /// incoming edge. Its Cranelift values are shared by all predecessors and
+    /// therefore defined in a block dominating this join.
+    fn at_block_entry(
+        block_pc: u32,
+        predecessors: Option<&Vec<u32>>,
+        exits: &std::collections::BTreeMap<u32, ElementSources>,
+    ) -> Self {
+        let mut entry = Self::default();
+        let Some(predecessors) = predecessors.filter(|incoming| !incoming.is_empty()) else {
+            return entry;
+        };
+        let Some(states) = predecessors
+            .iter()
+            .map(|predecessor| exits.get(predecessor))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return entry;
+        };
+        let same = |left: &GuardedElementSource, right: &GuardedElementSource| {
+            GuardedElementSource { block_pc, ..*left }
+                == GuardedElementSource { block_pc, ..*right }
+        };
+        for source in states[0].entries.iter().flatten() {
+            if states[1..].iter().all(|state| {
+                state
+                    .entries
+                    .iter()
+                    .flatten()
+                    .any(|other| same(source, other))
+            }) {
+                entry.insert(GuardedElementSource {
+                    block_pc,
+                    ..*source
+                });
+            }
+        }
+        entry
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1452,6 +1546,14 @@ fn lower_optimized_machine(
         matches!(ir.nodes()[id as usize].kind(),
         crate::ir::OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "to_propkey")
     };
+    // Lowering materializes only numeric constant-pool entries, as immediates
+    // (any other constant fails compilation). Such a push cannot reenter.
+    let numeric_constant_push = |id: u32| {
+        ir.nodes()
+            .get(id as usize)
+            .and_then(opt_push_const_index)
+            .is_some_and(|index| specialization.numeric_constants.contains_key(&index))
+    };
     let array_loops = crate::ir::LoopAnalysis::analyze(ir, array_work);
     let assumed_array_sites = ir
         .nodes()
@@ -1472,6 +1574,7 @@ fn lower_optimized_machine(
         |id| {
             assumed_array_sites.contains(&id)
                 || guarded_propkey(id)
+                || numeric_constant_push(id)
                 || ir.nodes().get(id as usize).is_some_and(|node| {
                     matches!(
                         node.kind(),
@@ -1514,6 +1617,7 @@ fn lower_optimized_machine(
                     (matches!(opcode.as_ref(), "get_array_el" | "put_array_el")
                         && guarded_sites.contains(&id))
                         || guarded_propkey(id)
+                        || numeric_constant_push(id)
                         || (matches!(
                             opcode.as_ref(),
                             "add"
@@ -1573,6 +1677,7 @@ fn lower_optimized_machine(
                 |id| {
                     guarded_sites.contains(&id)
                         || guarded_propkey(id)
+                        || numeric_constant_push(id)
                         || ir.nodes().get(id as usize).is_some_and(|node| {
                             matches!(
                                 node.kind(),
@@ -1609,16 +1714,85 @@ fn lower_optimized_machine(
         }
         plan
     };
+    // Amortization skips the per-iteration loop-header representation guard,
+    // so frame writes must normally be numeric-proven. That guard never checks
+    // an owned (helper-derived heap) local: it accepts any representation and
+    // every consumer keeps its own checks. A store into an owned local outside
+    // every natural loop (for example `const ints = buffers.ints` before a
+    // traversal) therefore neither feeds a guarded loop Phi nor runs between
+    // two header polls; an in-loop write to it is still rejected below.
+    let local_store_outside_loops = |id: u32| {
+        array_loops.is_complete()
+            && matches!(
+                ir.scalar_graph().effect_for_node(id),
+                crate::ir::ScalarHeapEffect::FrameWrite(crate::ir::FrameSlot::Local(local))
+                    if owned_locals.get(usize::from(local)).copied().unwrap_or(false)
+            )
+            && array_loops.block_for_node(id).is_some_and(|block| {
+                !array_loops
+                    .loops()
+                    .iter()
+                    .any(|natural_loop| natural_loop.contains_block(block))
+            })
+    };
     // Array feedback only proposes candidates. Poll amortization is enabled
     // after the concrete plan has proved that every heap site on the native
     // path is a guarded leaf-or-exit operation.
+    // Every lowered get_field is a shape-guarded leaf-or-exit access (a
+    // missing guard fails compilation), as are the certified array, property
+    // key and constant sites. None of them runs script or writes the frame on
+    // its continuing path, so an argument or local read after one of them
+    // keeps its entry-guarded representation. This proof only decides poll
+    // amortization; lowering keeps using `scalar_numeric`.
+    let leaf_frame_preserving = |id: u32| {
+        array_plan.guarded_leaf(id)
+            || property_plan.access(id).is_some()
+            || guarded_propkey(id)
+            || numeric_constant_push(id)
+            || ir.nodes().get(id as usize).is_some_and(|node| {
+                (int32_loop
+                    && matches!(
+                        node.kind(),
+                        crate::ir::OptimizedNodeKind::GuardNumeric { .. }
+                    ))
+                    || (matches!(node.kind(), crate::ir::OptimizedNodeKind::Bytecode { opcode }
+                        if opcode.as_ref() == "get_field")
+                        && specialization.properties.contains_key(&node.pc()))
+            })
+    };
+    let amortized_numeric = if side_path.is_none() && !int32_loop {
+        ir.scalar_graph()
+            .proven_numeric_values_with_preserved_frame_reads(
+                ir.nodes(),
+                |index| {
+                    usize::from(index) < usize::from(shape.arguments())
+                        && matches!(
+                            specialization
+                                .arguments
+                                .get(usize::from(index))
+                                .copied()
+                                .unwrap_or(specialization.entry),
+                            EntryRepresentation::Int32
+                        )
+                },
+                leaf_frame_preserving,
+                ir.scalar_graph().values().len().saturating_mul(128),
+            )
+    } else {
+        Vec::new()
+    };
     let amortized_poll = int32_loop
         || (side_path.is_none()
             && ir.scalar_graph().permits_amortized_poll_with_guarded_heap(
                 ir.nodes(),
-                &scalar_numeric,
+                &amortized_numeric,
                 |id| {
-                    if array_plan.guarded_leaf(id) || property_plan.access(id).is_some() {
+                    if array_plan.guarded_leaf(id)
+                        || property_plan.access(id).is_some()
+                        || numeric_constant_push(id)
+                        || guarded_propkey(id)
+                        || local_store_outside_loops(id)
+                    {
                         return true;
                     }
                     let Some(node) = ir.nodes().get(id as usize) else {
@@ -1779,9 +1953,11 @@ fn lower_optimized_machine(
             .map(|value| (value, alloc()))
             .collect::<std::collections::BTreeMap<_, _>>();
         let mut stack_provenance = vec![OptProvenance::Unknown; stack_slots];
-        let mut guarded_element_source: Option<GuardedElementSource> = None;
+        let mut guarded_element_source: ElementSources;
+        // Tuples live at the end of each lowered block, for forward joins.
+        let mut block_exit_sources = std::collections::BTreeMap::<u32, ElementSources>::new();
         let mut hoisted_element_sources =
-            std::collections::BTreeMap::<u32, GuardedElementSource>::new();
+            std::collections::BTreeMap::<u32, Vec<GuardedElementSource>>::new();
         // The scalar-region proof excludes heap effects and requires every
         // local definition to be primitive (or a lexical sentinel). No local
         // owns a heap value, so poll/deopt boundaries can publish SSA locals
@@ -1920,15 +2096,17 @@ fn lower_optimized_machine(
             &[],
         );
         for block in ir.blocks() {
-            guarded_element_source = guarded_element_source.filter(|source| {
-                source.block_pc == block.start_pc()
-                    || (matches!(source.provenance, OptProvenance::Argument(_))
-                        && predecessors
-                            .get(&block.start_pc())
-                            .is_some_and(|incoming| incoming.as_slice() == [source.block_pc]))
-            });
-            if let Some(source) = hoisted_element_sources.get(&block.start_pc()).copied() {
-                guarded_element_source = Some(source);
+            guarded_element_source = ElementSources::at_block_entry(
+                block.start_pc(),
+                predecessors.get(&block.start_pc()),
+                &block_exit_sources,
+            );
+            for source in hoisted_element_sources
+                .get(&block.start_pc())
+                .into_iter()
+                .flatten()
+            {
+                guarded_element_source.insert(*source);
             }
             let clif_block = blocks[&block.start_pc()];
             builder.switch_to_block(clif_block);
@@ -2017,11 +2195,18 @@ fn lower_optimized_machine(
                     crate::ir::OptimizedNodeKind::GuardNumeric { mid_loop: true, .. }
                 ) && hoisted_element_sources
                     .contains_key(&block.start_pc());
-                if !array_plan.is_empty()
-                    && array_plan.invalidates_before(node.id())
-                    && !retains_hoisted_metadata
-                {
-                    guarded_element_source = None;
+                if !array_plan.is_empty() && array_plan.invalidates_before(node.id()) {
+                    guarded_element_source.clear();
+                    if retains_hoisted_metadata {
+                        // The poll revalidates exactly the hoisted tuples.
+                        for source in hoisted_element_sources
+                            .get(&block.start_pc())
+                            .into_iter()
+                            .flatten()
+                        {
+                            guarded_element_source.insert(*source);
+                        }
+                    }
                 }
                 if matches!(node.kind(), crate::ir::OptimizedNodeKind::Bytecode { opcode }
                     if matches!(opcode.as_ref(), "if_false8" | "if_true8" | "if_false" | "if_true" | "goto" | "goto8" | "goto16"))
@@ -2079,8 +2264,10 @@ fn lower_optimized_machine(
                                         node.pc(),
                                         *guard,
                                     )?;
-                                    if let Some(source) =
-                                        hoisted_element_sources.get(&block.start_pc()).copied()
+                                    for source in hoisted_element_sources
+                                        .get(&block.start_pc())
+                                        .into_iter()
+                                        .flatten()
                                     {
                                         emit_opt_packed_loop_revalidate(
                                             builder,
@@ -2089,7 +2276,7 @@ fn lower_optimized_machine(
                                             depth,
                                             node.pc(),
                                             *guard,
-                                            source,
+                                            *source,
                                             element_layout,
                                             array_query,
                                         )?;
@@ -2137,8 +2324,10 @@ fn lower_optimized_machine(
                             // amortized cold edge. A typed store can keep its
                             // numeric locals unproven, selecting this path;
                             // cached pointers/length must still be revalidated.
-                            if let Some(source) =
-                                hoisted_element_sources.get(&block.start_pc()).copied()
+                            for source in hoisted_element_sources
+                                .get(&block.start_pc())
+                                .into_iter()
+                                .flatten()
                             {
                                 emit_opt_packed_loop_revalidate(
                                     &mut builder,
@@ -2147,7 +2336,7 @@ fn lower_optimized_machine(
                                     depth,
                                     node.pc(),
                                     *guard,
-                                    source,
+                                    *source,
                                     element_layout,
                                     array_query,
                                 )?;
@@ -2171,11 +2360,11 @@ fn lower_optimized_machine(
                         if array_plan.is_empty()
                             && node.effect() == crate::ir::OptimizedEffect::Reentrant
                         {
-                            guarded_element_source = None;
+                            guarded_element_source.clear();
                         }
                         match name {
                             "set_loc_uninitialized" => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 let index = opt_u16(node.bytes())?;
                                 if owned_locals[index] {
                                     emit_opt_free_local_slot(&mut builder, &env, index)?;
@@ -2307,7 +2496,7 @@ fn lower_optimized_machine(
                             n if opt_index(n, node.bytes(), "put_loc")?.is_some()
                                 || matches!(n, "put_loc_check" | "put_loc_check_init") =>
                             {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 let index = opt_index(n, node.bytes(), "put_loc")?
                                     .map_or_else(|| opt_u16(node.bytes()), Ok)?;
                                 let source_owned = depth
@@ -2555,9 +2744,7 @@ fn lower_optimized_machine(
                                     .filter(|candidate| {
                                         depth >= 2
                                             && stack_provenance[depth - 2]
-                                                == OptProvenance::Argument(usize::from(
-                                                    candidate.argument,
-                                                ))
+                                                == opt_array_receiver_provenance(candidate.receiver)
                                     })
                                     .map(|candidate| candidate.mode);
                                 opt_reject_owned(
@@ -2594,6 +2781,39 @@ fn lower_optimized_machine(
                                     &stack_provenance,
                                     depth.saturating_sub(1)..depth,
                                 )?;
+                                // A planned typed length selects the versioned
+                                // leaf query (exit on miss) rather than the
+                                // accessor-running lookup bridge.
+                                let planned_typed = array_plan
+                                    .access(node.id())
+                                    .filter(|access| {
+                                        access.access == crate::runtime::ArrayAccess::Length
+                                    })
+                                    .and_then(|access| {
+                                        array_plan.candidates().get(access.candidate)
+                                    })
+                                    .filter(|candidate| {
+                                        matches!(
+                                            candidate.mode,
+                                            crate::runtime::ArrayMode::Int32
+                                                | crate::runtime::ArrayMode::Float64
+                                        )
+                                    });
+                                // The query guards the actual operand, so it
+                                // is valid whichever frame slot supplied it;
+                                // provenance only keys the cached tuple. A
+                                // certified leaf length therefore never falls
+                                // back to the reentrant bridge.
+                                let typed_length = match planned_typed {
+                                    Some(candidate) => Some((
+                                        candidate.mode,
+                                        node.deopt_guard()
+                                            .ok_or(CompileFailure::InvalidArtifact)?,
+                                        block.start_pc(),
+                                        array_query,
+                                    )),
+                                    None => None,
+                                };
                                 depth = emit_opt_array_length(
                                     &mut builder,
                                     &env,
@@ -2602,6 +2822,7 @@ fn lower_optimized_machine(
                                     node.pc(),
                                     element_layout,
                                     &mut guarded_element_source,
+                                    typed_length,
                                 )?;
                             }
                             "put_array_el" => {
@@ -2625,7 +2846,7 @@ fn lower_optimized_machine(
                                     // A provenance disagreement cannot silently fall back to
                                     // an operation stronger than the published effect.
                                     if source_provenance
-                                        != OptProvenance::Argument(usize::from(candidate.argument))
+                                        != opt_array_receiver_provenance(candidate.receiver)
                                     {
                                         return Err(CompileFailure::InvalidArtifact);
                                     }
@@ -3121,7 +3342,7 @@ fn lower_optimized_machine(
                                 stack_provenance[index] = OptProvenance::ImmediatePrimitive;
                             }
                             "inc_loc" | "dec_loc" => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 let index = opt_u8(node.bytes())?;
                                 let (old, _) = opt_prepare_scalar_operation(
                                     &mut builder,
@@ -3168,7 +3389,7 @@ fn lower_optimized_machine(
                                 );
                             }
                             "add_loc" => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 let index = opt_u8(node.bytes())?;
                                 let rhs_index = depth
                                     .checked_sub(1)
@@ -3234,7 +3455,7 @@ fn lower_optimized_machine(
                                 }
                             }
                             n if opt_index(n, node.bytes(), "put_arg")?.is_some() => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 opt_reject_owned(
                                     &stack_provenance,
                                     depth.saturating_sub(1)..depth,
@@ -3264,7 +3485,7 @@ fn lower_optimized_machine(
                                 );
                             }
                             n if opt_index(n, node.bytes(), "set_arg")?.is_some() => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 opt_reject_owned(
                                     &stack_provenance,
                                     depth.saturating_sub(1)..depth,
@@ -3296,7 +3517,7 @@ fn lower_optimized_machine(
                                 );
                             }
                             n if opt_index(n, node.bytes(), "set_loc")?.is_some() => {
-                                guarded_element_source = None;
+                                guarded_element_source.clear();
                                 opt_reject_owned(
                                     &stack_provenance,
                                     depth.saturating_sub(1)..depth,
@@ -3780,6 +4001,7 @@ fn lower_optimized_machine(
                 )?;
                 builder.ins().jump(blocks[&next], &[]);
             }
+            block_exit_sources.insert(block.start_pc(), guarded_element_source);
         }
         builder.seal_all_blocks();
         builder.finalize();
@@ -5585,15 +5807,7 @@ fn emit_opt_packed_loop_revalidate(
     array_query: usize,
 ) -> Result<(), CompileFailure> {
     use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
-    let OptProvenance::Argument(argument) = expected.provenance else {
-        return Err(CompileFailure::InvalidArtifact);
-    };
-    let object = opt_use(
-        builder,
-        *env.arguments
-            .get(argument)
-            .ok_or(CompileFailure::InvalidArtifact)?,
-    );
+    let object = opt_receiver_object(builder, env, expected.provenance)?;
     let current = if let Some(mode) = expected.typed_mode {
         emit_opt_typed_metadata_guard(
             builder,
@@ -5634,6 +5848,42 @@ fn emit_opt_packed_loop_revalidate(
     Ok(())
 }
 
+fn opt_array_receiver_provenance(receiver: array_cache::ArrayReceiver) -> OptProvenance {
+    match receiver {
+        array_cache::ArrayReceiver::Argument(argument) => {
+            OptProvenance::Argument(usize::from(argument))
+        }
+        array_cache::ArrayReceiver::Local(local) => OptProvenance::Local(usize::from(local)),
+    }
+}
+
+/// Constant-pool index of a `push_const`/`push_const8` node.
+fn opt_push_const_index(node: &crate::ir::OptimizedNode) -> Option<u32> {
+    let crate::ir::OptimizedNodeKind::Bytecode { opcode } = node.kind() else {
+        return None;
+    };
+    match opcode.as_ref() {
+        "push_const8" => node.bytes().get(1).copied().map(u32::from),
+        "push_const" => Some(u32::from_le_bytes(node.bytes().get(1..5)?.try_into().ok()?)),
+        _ => None,
+    }
+}
+
+/// The current borrowed value of the frame slot that keys guarded metadata.
+fn opt_receiver_object(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    env: &OptEnv<'_>,
+    provenance: OptProvenance,
+) -> Result<OptPair, CompileFailure> {
+    let vars = match provenance {
+        OptProvenance::Argument(argument) => env.arguments.get(argument),
+        OptProvenance::Local(local) => env.locals.get(local),
+        _ => None,
+    }
+    .ok_or(CompileFailure::InvalidArtifact)?;
+    Ok(opt_use(builder, *vars))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_opt_array_loop_hoists(
     builder: &mut cranelift_frontend::FunctionBuilder<'_>,
@@ -5643,7 +5893,7 @@ fn emit_opt_array_loop_hoists(
     plan: &array_cache::ArrayPlan,
     preheader: u32,
     successor: u32,
-    sources: &mut std::collections::BTreeMap<u32, GuardedElementSource>,
+    sources: &mut std::collections::BTreeMap<u32, Vec<GuardedElementSource>>,
     element_layout: crate::abi::ElementLayout,
     array_query: usize,
     ir: &OptimizedIr,
@@ -5657,13 +5907,8 @@ fn emit_opt_array_loop_hoists(
             .candidates()
             .get(hoist.candidate)
             .ok_or(CompileFailure::InvalidArtifact)?;
-        let argument = usize::from(candidate.argument);
-        let object = opt_use(
-            builder,
-            *env.arguments
-                .get(argument)
-                .ok_or(CompileFailure::InvalidArtifact)?,
-        );
+        let receiver = opt_array_receiver_provenance(candidate.receiver);
+        let object = opt_receiver_object(builder, env, receiver)?;
         let guard = ir
             .blocks()
             .iter()
@@ -5690,7 +5935,7 @@ fn emit_opt_array_loop_hoists(
                 hoist.header,
                 guard,
                 object,
-                OptProvenance::Argument(argument),
+                receiver,
                 hoist.header,
                 element_layout,
             )?,
@@ -5703,7 +5948,7 @@ fn emit_opt_array_loop_hoists(
                     hoist.header,
                     guard,
                     object,
-                    OptProvenance::Argument(argument),
+                    receiver,
                     hoist.header,
                     candidate.mode,
                     array_query,
@@ -5712,11 +5957,74 @@ fn emit_opt_array_loop_hoists(
             }
             crate::runtime::ArrayMode::Generic => return Err(CompileFailure::InvalidArtifact),
         };
-        if sources.insert(hoist.header, source).is_some() {
-            return Err(CompileFailure::InvalidArtifact);
-        }
+        opt_push_hoisted_source(sources, hoist.header, source)?;
+    }
+    for hoist in plan
+        .storage_hoists()
+        .iter()
+        .filter(|hoist| hoist.preheader == preheader && hoist.header == successor)
+    {
+        let candidate = plan
+            .candidates()
+            .get(hoist.candidate)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let receiver = opt_array_receiver_provenance(candidate.receiver);
+        let object = opt_receiver_object(builder, env, receiver)?;
+        let guard = opt_loop_header_guard(ir, hoist.header)?;
+        let source = emit_opt_typed_metadata_guard(
+            builder,
+            env,
+            provenance,
+            depth,
+            hoist.header,
+            guard,
+            object,
+            receiver,
+            hoist.header,
+            candidate.mode,
+            array_query,
+            false,
+        )?;
+        opt_push_hoisted_source(sources, hoist.header, source)?;
     }
     Ok(())
+}
+
+fn opt_push_hoisted_source(
+    sources: &mut std::collections::BTreeMap<u32, Vec<GuardedElementSource>>,
+    header: u32,
+    source: GuardedElementSource,
+) -> Result<(), CompileFailure> {
+    let seeded = sources.entry(header).or_default();
+    if seeded.len() >= array_cache::ArrayPlan::MAX_LIVE_SOURCES
+        || seeded
+            .iter()
+            .any(|existing| existing.provenance == source.provenance)
+    {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    seeded.push(source);
+    Ok(())
+}
+
+/// The exact loop-header poll guard that owns every preheader metadata exit.
+fn opt_loop_header_guard(ir: &OptimizedIr, header: u32) -> Result<u32, CompileFailure> {
+    ir.blocks()
+        .iter()
+        .find(|block| block.start_pc() == header)
+        .and_then(|block| {
+            block
+                .nodes()
+                .iter()
+                .find_map(|&id| match ir.nodes()[id as usize].kind() {
+                    crate::ir::OptimizedNodeKind::GuardNumeric {
+                        guard,
+                        mid_loop: true,
+                    } => Some(*guard),
+                    _ => None,
+                })
+        })
+        .ok_or(CompileFailure::InvalidArtifact)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5727,7 +6035,8 @@ fn emit_opt_array_length(
     depth: usize,
     pc: u32,
     element_layout: crate::abi::ElementLayout,
-    guarded_source: &mut Option<GuardedElementSource>,
+    guarded_source: &mut ElementSources,
+    typed_length: Option<(crate::runtime::ArrayMode, u32, u32, usize)>,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
@@ -5740,14 +6049,10 @@ fn emit_opt_array_length(
         .checked_sub(1)
         .ok_or(CompileFailure::InvalidArtifact)?;
     let source_provenance = stack_provenance[index];
-    if let Some(source) = (*guarded_source).filter(|source| {
-        source.exact_length
-            && source.provenance == source_provenance
-            && matches!(
-                source_provenance,
-                OptProvenance::Argument(_) | OptProvenance::Local(_)
-            )
-    }) {
+    if let Some(source) = guarded_source
+        .find(source_provenance)
+        .filter(|source| source.exact_length)
+    {
         // This is the V8/JSC-style checked-field path: the preheader guard
         // established exact logical-length == dense-count and all intervening
         // effects were admitted as non-reentrant.  Preserve the metadata for
@@ -5759,6 +6064,34 @@ fn emit_opt_array_length(
         };
         opt_define(builder, env.stack[index], result);
         stack_provenance[index] = OptProvenance::ImmediatePrimitive;
+        return Ok(depth);
+    }
+    if let Some((mode, guard, block_pc, array_query)) = typed_length {
+        // The versioned leaf query validates the exact intrinsic getter chain
+        // and fixed attached backing without running script; a miss resumes
+        // QuickJS before this `get_length`, whose operand is still borrowed.
+        let object = opt_use(builder, env.stack[index]);
+        let source = emit_opt_typed_metadata_guard(
+            builder,
+            env,
+            stack_provenance,
+            depth,
+            pc,
+            guard,
+            object,
+            source_provenance,
+            block_pc,
+            mode,
+            array_query,
+            true,
+        )?;
+        let result = OptPair {
+            payload: builder.ins().sextend(types::I64, source.count),
+            tag: builder.ins().iconst(types::I64, i64::from(qjs::JS_TAG_INT)),
+        };
+        opt_define(builder, env.stack[index], result);
+        stack_provenance[index] = OptProvenance::ImmediatePrimitive;
+        guarded_source.insert(source);
         return Ok(depth);
     }
     // A generic lookup borrows its receiver from this existing owning root.
@@ -5893,7 +6226,7 @@ fn emit_opt_array_length(
     );
     // The logical result is not a dense-storage bounds proof, and the generic
     // arm may have changed storage through an accessor.
-    *guarded_source = None;
+    guarded_source.clear();
     Ok(depth)
 }
 
@@ -5917,7 +6250,7 @@ fn emit_opt_element_get(
     layout: super::helpers::FrameLayout,
     element_layout: crate::abi::ElementLayout,
     block_pc: u32,
-    guarded_source: &mut Option<GuardedElementSource>,
+    guarded_source: &mut ElementSources,
     expected_mode: Option<crate::runtime::ArrayMode>,
     bounds_covered_by_hoist: bool,
 ) -> Result<usize, CompileFailure> {
@@ -5947,13 +6280,7 @@ fn emit_opt_element_get(
         .ins()
         .icmp_imm(IntCC::Equal, key.tag, i64::from(qjs::JS_TAG_INT));
     let tags_ok = builder.ins().band(object_ok, key_ok);
-    let cached = (*guarded_source).filter(|source| {
-        source.provenance == stack_provenance[object_index]
-            && matches!(
-                source.provenance,
-                OptProvenance::Argument(_) | OptProvenance::Local(_)
-            )
-    });
+    let cached = guarded_source.find(stack_provenance[object_index]);
     let cached_index = cached.map(|_| builder.create_block());
     builder
         .ins()
@@ -6319,8 +6646,10 @@ fn emit_opt_element_get(
         tag: builder.block_params(continuation)[1],
     };
     let params = builder.block_params(continuation);
-    *guarded_source = cached.or_else(|| {
-        (expected_mode == Some(crate::runtime::ArrayMode::Packed)).then_some(GuardedElementSource {
+    // A load neither reenters nor alters storage, so other live tuples stay
+    // valid. Only an uncached packed load publishes its own metadata.
+    if cached.is_none() && expected_mode == Some(crate::runtime::ArrayMode::Packed) {
+        guarded_source.insert(GuardedElementSource {
             provenance: source_provenance,
             block_pc,
             data: params[2],
@@ -6328,8 +6657,8 @@ fn emit_opt_element_get(
             kind: params[4],
             exact_length: false,
             typed_mode: None,
-        })
-    });
+        });
+    }
     opt_define(builder, stack[object_index], result);
     stack_provenance[object_index] = OptProvenance::ImmediatePrimitive;
     stack_provenance[object_index + 1] = OptProvenance::Unknown;
@@ -6347,7 +6676,7 @@ fn emit_opt_typed_store(
     block_pc: u32,
     mode: crate::runtime::ArrayMode,
     array_query: usize,
-    guarded_source: &mut Option<GuardedElementSource>,
+    guarded_source: &mut ElementSources,
 ) -> Result<usize, CompileFailure> {
     use crate::runtime::ArrayMode;
     use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder, MemFlags};
@@ -6373,8 +6702,9 @@ fn emit_opt_typed_store(
     };
     let operands_ok = builder.ins().band(key_int, value_ok);
     emit_opt_guard_branch(builder, env, provenance, depth, pc, guard, operands_ok)?;
-    let source = match (*guarded_source)
-        .filter(|source| source.provenance == provenance[base] && source.typed_mode == Some(mode))
+    let source = match guarded_source
+        .find(provenance[base])
+        .filter(|source| source.typed_mode == Some(mode))
     {
         Some(source) => source,
         None => emit_opt_typed_metadata_guard(
@@ -6408,7 +6738,7 @@ fn emit_opt_typed_store(
     // releases an owner, and fixed nonshared storage cannot change underneath
     // it. Aliased views observe the write immediately; no element is forwarded.
     builder.ins().store(MemFlags::new(), scalar, address, 0);
-    *guarded_source = Some(source);
+    guarded_source.insert(source);
     provenance[base..depth].fill(OptProvenance::Unknown);
     Ok(base)
 }
@@ -6434,7 +6764,7 @@ fn emit_opt_element_put(
     element_layout: crate::abi::ElementLayout,
     block_pc: u32,
     source_provenance: OptProvenance,
-    guarded_source: &mut Option<GuardedElementSource>,
+    guarded_source: &mut ElementSources,
 ) -> Result<usize, CompileFailure> {
     use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
@@ -6732,7 +7062,9 @@ fn emit_opt_element_put(
 
     builder.switch_to_block(continuation);
     let params = builder.block_params(continuation);
-    *guarded_source = Some(GuardedElementSource {
+    // In-bounds primitive-over-primitive stores neither grow, reallocate nor
+    // release; other live tuples (including aliases of this array) stay valid.
+    guarded_source.insert(GuardedElementSource {
         provenance: source_provenance,
         block_pc,
         count: params[0],

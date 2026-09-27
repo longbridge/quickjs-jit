@@ -3,14 +3,28 @@
 //! every operation that can reenter, finalize a reference or alter storage.
 
 use crate::ir::{
-    IntegerRangeAnalysis, KnownFacts, LoopAnalysis, OptimizedIr, ScalarHeapEffect,
+    FrameSlot, IntegerRangeAnalysis, KnownFacts, LoopAnalysis, OptimizedIr, ScalarHeapEffect,
     ScalarHeapOperation, ScalarValueId,
 };
 use crate::runtime::{ArrayAccess, ArrayFeedbackSnapshot, ArrayMode};
 
+/// The frame slot whose current value is the guarded receiver.
+///
+/// Lowering keys cached metadata by the provenance of the stack operand, so a
+/// receiver is identified by the one frame slot that the operand was read
+/// from. An entry argument uses the SSA identity proof. A local receiver
+/// (for example `const ints = buffers.ints`) is admitted only when it is the
+/// unique frame slot holding the operand's SSA value at every planned access,
+/// and when no node of the enclosing natural loop writes that local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ArrayReceiver {
+    Argument(u16),
+    Local(u16),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArrayCandidate {
-    pub argument: u16,
+    pub receiver: ArrayReceiver,
     pub mode: ArrayMode,
     /// Typed length requires the metadata query to guard observable lookup.
     pub needs_length: bool,
@@ -48,16 +62,32 @@ pub(super) struct ArrayLoopHoist {
     pub length_node: u32,
 }
 
+/// Typed-array storage metadata (mode, fixed attached backing, count and data
+/// pointer, but not the observable `length` lookup) guarded once on the
+/// loop-entry edge. Accesses keep their per-access index guards; the hoist only
+/// removes the repeated leaf query for a loop-invariant receiver, like JSC's
+/// hoisted CheckStructure/GetButterfly for typed-array views.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ArrayStorageHoist {
+    pub candidate: usize,
+    pub preheader: u32,
+    pub header: u32,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ArrayPlan {
     candidates: Vec<ArrayCandidate>,
     accesses: Vec<Option<ArrayAccessPlan>>,
     hoists: Vec<ArrayLoopHoist>,
+    storage_hoists: Vec<ArrayStorageHoist>,
     invalidations: Vec<bool>,
 }
 
 impl ArrayPlan {
     const MAX_CANDIDATES: usize = 16;
+    /// Metadata tuples lowering may keep live at once. Every loop header seeds
+    /// at most this many hoisted sources.
+    pub(super) const MAX_LIVE_SOURCES: usize = 4;
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn analyze(
@@ -96,7 +126,7 @@ impl ArrayPlan {
         #[derive(Clone, Copy)]
         struct Proposed {
             node: u32,
-            argument: u16,
+            receiver: ArrayReceiver,
             mode: ArrayMode,
             access: ArrayAccess,
             index: Option<ScalarValueId>,
@@ -152,7 +182,11 @@ impl ArrayPlan {
             if access == ArrayAccess::Length && mode != ArrayMode::Packed && !typed_length_guard {
                 continue;
             }
-            let Some(argument) = facts.entry_argument(base) else {
+            let receiver = if let Some(argument) = facts.entry_argument(base) {
+                ArrayReceiver::Argument(argument)
+            } else if let Some(local) = unique_local_receiver(graph, facts, operation, base) {
+                ArrayReceiver::Local(local)
+            } else {
                 continue;
             };
             let Some(block) = loops.block_for_node(node.id()) else {
@@ -196,7 +230,7 @@ impl ArrayPlan {
             };
             proposed.push(Proposed {
                 node: node.id(),
-                argument,
+                receiver,
                 mode,
                 access,
                 index,
@@ -213,17 +247,17 @@ impl ArrayPlan {
         if spend(&mut work, conflict_work).is_none() {
             return Self::default();
         }
-        let mut conflicting_arguments = Vec::new();
+        let mut conflicting_receivers = Vec::new();
         for left in &proposed {
             if proposed
                 .iter()
-                .any(|right| right.argument == left.argument && right.mode != left.mode)
-                && !conflicting_arguments.contains(&left.argument)
+                .any(|right| right.receiver == left.receiver && right.mode != left.mode)
+                && !conflicting_receivers.contains(&left.receiver)
             {
-                conflicting_arguments.push(left.argument);
+                conflicting_receivers.push(left.receiver);
             }
         }
-        proposed.retain(|access| !conflicting_arguments.contains(&access.argument));
+        proposed.retain(|access| !conflicting_receivers.contains(&access.receiver));
 
         // A reentrant operation in the natural loop can replace storage, detach
         // a buffer, or run arbitrary script. Feedback never authorizes carrying
@@ -268,6 +302,15 @@ impl ArrayPlan {
                 {
                     continue;
                 }
+                // A local receiver is loop-invariant only when no loop node can
+                // rebind it. The metadata cache is keyed by that frame slot.
+                if let ArrayReceiver::Local(local) = candidate.receiver {
+                    if graph.effect_for_node(node.id())
+                        == ScalarHeapEffect::FrameWrite(FrameSlot::Local(local))
+                    {
+                        return false;
+                    }
+                }
                 if graph.effect_for_node(node.id()) != ScalarHeapEffect::Reentrant
                     || non_reentrant(node.id())
                     || proposed_nodes[node.id() as usize]
@@ -283,7 +326,7 @@ impl ArrayPlan {
         let mut accesses: Vec<Option<ArrayAccessPlan>> = vec![None; nodes.len()];
         for proposed in proposed {
             let candidate = if let Some(index) = candidates.iter().position(|candidate| {
-                candidate.argument == proposed.argument && candidate.mode == proposed.mode
+                candidate.receiver == proposed.receiver && candidate.mode == proposed.mode
             }) {
                 index
             } else {
@@ -291,7 +334,7 @@ impl ArrayPlan {
                     return Self::default();
                 }
                 candidates.push(ArrayCandidate {
-                    argument: proposed.argument,
+                    receiver: proposed.receiver,
                     mode: proposed.mode,
                     needs_length: false,
                 });
@@ -365,13 +408,59 @@ impl ArrayPlan {
                         covered_any = true;
                     }
                 }
-                if covered_any {
+                if covered_any
+                    && hoists
+                        .iter()
+                        .filter(|hoist: &&ArrayLoopHoist| hoist.header == natural_loop.header())
+                        .count()
+                        < Self::MAX_LIVE_SOURCES
+                {
                     hoists.push(ArrayLoopHoist {
                         candidate,
                         preheader,
                         header: natural_loop.header(),
                         bound,
                         length_node,
+                    });
+                }
+            }
+        }
+        // A loop-invariant typed receiver without a hoisted length (for
+        // example the destination of `floats[i] = ...`) still needs only one
+        // storage query per loop entry. The admission above already rejected
+        // loops containing a write to the receiver's frame slot or any
+        // uncertified reentrant node; polls revalidate the tuple.
+        let mut storage_hoists = Vec::new();
+        for (candidate, typed) in candidates.iter().enumerate() {
+            if !matches!(typed.mode, ArrayMode::Int32 | ArrayMode::Float64) {
+                continue;
+            }
+            for natural_loop in loops.loops() {
+                let Some(preheader) = natural_loop.preheader() else {
+                    continue;
+                };
+                let header = natural_loop.header();
+                if hoists
+                    .iter()
+                    .any(|hoist| hoist.candidate == candidate && hoist.header == header)
+                {
+                    continue;
+                }
+                let used = accesses.iter().flatten().any(|access| {
+                    access.candidate == candidate
+                        && access.loop_header == header
+                        && access.access != ArrayAccess::Length
+                });
+                let live = hoists.iter().filter(|hoist| hoist.header == header).count()
+                    + storage_hoists
+                        .iter()
+                        .filter(|hoist: &&ArrayStorageHoist| hoist.header == header)
+                        .count();
+                if used && live < Self::MAX_LIVE_SOURCES {
+                    storage_hoists.push(ArrayStorageHoist {
+                        candidate,
+                        preheader,
+                        header,
                     });
                 }
             }
@@ -405,6 +494,7 @@ impl ArrayPlan {
             candidates,
             accesses,
             hoists,
+            storage_hoists,
             invalidations,
         }
     }
@@ -428,6 +518,9 @@ impl ArrayPlan {
     pub(super) fn hoists(&self) -> &[ArrayLoopHoist] {
         &self.hoists
     }
+    pub(super) fn storage_hoists(&self) -> &[ArrayStorageHoist] {
+        &self.storage_hoists
+    }
     pub(super) fn invalidates_before(&self, node: u32) -> bool {
         self.invalidations
             .get(node as usize)
@@ -443,6 +536,36 @@ impl ArrayPlan {
             .saturating_mul(160)
             .saturating_add(Self::MAX_CANDIDATES.saturating_mul(64))
     }
+}
+
+/// The single local that holds `base` in the operation's pre-effect frame
+/// state. Any other frame slot holding the same SSA value makes the stack
+/// operand's lowering provenance ambiguous, so the site is left unplanned.
+/// Lowering independently requires the operand provenance to be this local.
+fn unique_local_receiver(
+    graph: &crate::ir::ScalarGraph,
+    facts: &KnownFacts,
+    operation: ScalarHeapOperation,
+    base: ScalarValueId,
+) -> Option<u16> {
+    let state = graph.frame_state_for_node(operation.frame_state_node())?;
+    if state
+        .arguments
+        .iter()
+        .any(|&value| facts.same_value(value, base))
+    {
+        return None;
+    }
+    let mut holders = state
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, &value)| facts.same_value(value, base));
+    let (local, _) = holders.next()?;
+    if holders.next().is_some() {
+        return None;
+    }
+    u16::try_from(local).ok()
 }
 
 fn spend(work: &mut usize, cost: usize) -> Option<()> {
@@ -587,7 +710,7 @@ mod tests {
         assert_eq!(
             plan.candidates(),
             &[ArrayCandidate {
-                argument: 0,
+                receiver: ArrayReceiver::Argument(0),
                 mode: ArrayMode::Packed,
                 needs_length: true
             }]
@@ -751,5 +874,69 @@ mod tests {
                 "effectful loop removed a per-access bounds guard: {source}; {plan:#?}"
             );
         }
+    }
+
+    #[test]
+    fn loop_invariant_local_typed_receiver_is_a_hoisted_candidate() {
+        let (ir, feedback) = fixture(
+            "(function(o){const a=o.a;let s=0;for(let i=0;i<a.length;i++)s=(s+a[i])|0;return s})",
+            ArrayMode::Int32,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        let [candidate] = plan.candidates() else {
+            panic!("one local receiver candidate expected: {plan:#?}");
+        };
+        assert!(matches!(candidate.receiver, ArrayReceiver::Local(_)));
+        assert!(candidate.needs_length);
+        let [hoist] = plan.hoists() else {
+            panic!("the local receiver's intrinsic length must be hoisted: {plan:#?}");
+        };
+        assert!(plan.guarded_leaf(hoist.length_node));
+        assert!(plan.storage_hoists().is_empty());
+    }
+
+    #[test]
+    fn rebound_or_aliased_local_receivers_are_not_candidates() {
+        for source in [
+            // Rebinding the receiver local inside the loop.
+            "(function(o){let a=o.a,b=o.b,s=0;for(let i=0;i<a.length;i++){s=(s+a[i])|0;a=b}return s})",
+            // Two locals hold the receiver: lowering provenance is ambiguous.
+            "(function(o){const a=o.a;const b=a;let s=0;for(let i=0;i<a.length;i++)s=(s+b[i])|0;return s})",
+            // An argument also holds the receiver.
+            "(function(o){const a=o;let s=0;for(let i=0;i<a.length;i++)s=(s+a[i])|0;return s})",
+        ] {
+            let (ir, feedback) = fixture(source, ArrayMode::Int32);
+            let plan = plan(&ir, &feedback, true, 100_000);
+            assert!(
+                plan.candidates()
+                    .iter()
+                    .all(|candidate| !matches!(candidate.receiver, ArrayReceiver::Local(_))),
+                "{source}: {plan:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_only_typed_receiver_gets_one_storage_hoist() {
+        let (ir, feedback) = fixture(
+            "(function(o,n){const f=o.f;for(let i=0;i<n;i++)f[i]=i;return 0})",
+            ArrayMode::Float64,
+        );
+        let plan = plan(&ir, &feedback, true, 100_000);
+        assert!(plan.hoists().is_empty());
+        let [hoist] = plan.storage_hoists() else {
+            panic!("one storage hoist expected: {plan:#?}");
+        };
+        assert_ne!(hoist.preheader, hoist.header);
+        assert!(matches!(
+            plan.candidates()[hoist.candidate].receiver,
+            ArrayReceiver::Local(_)
+        ));
+        // The store keeps its own per-access index guard.
+        assert!(ir
+            .nodes()
+            .iter()
+            .filter_map(|node| plan.access(node.id()))
+            .all(|access| access.requires_index_guard));
     }
 }
