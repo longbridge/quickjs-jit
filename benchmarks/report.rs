@@ -28,14 +28,25 @@ fn real_main() -> Result<bool, String> {
 }
 
 fn validate(data: &BenchmarkFile) -> Result<(), String> {
-    if data
+    if let Some(protocol) = data
         .modes
         .iter()
         .flat_map(|m| &m.workloads)
         .flat_map(|w| &w.samples)
-        .any(|s| s.protocol.is_some())
+        .find_map(|s| s.protocol.as_ref())
     {
-        return Err("incompatible timing protocol: the legacy gate reporter cannot evaluate shared-js-fixed-warmup-v2; use fixed-window metrics and report readiness diagnostics separately".into());
+        let name = if protocol.name.is_empty() {
+            "an unnamed protocol"
+        } else {
+            protocol.name.as_str()
+        };
+        return Err(format!(
+            "incompatible timing protocol: the legacy gate reporter cannot evaluate {name} \
+             (it only understands pre-v2 samples without protocol evidence; {} and {} \
+             need a protocol-aware paired summary such as summarize_paired.py)",
+            model::PROTOCOL_FIXED_WARMUP_V2,
+            model::PROTOCOL_MULTIBATCH_V3,
+        ));
     }
     if data.schema != "jit-benchmark-v1" {
         return Err("unsupported schema".into());
@@ -707,6 +718,35 @@ mod tests {
         assert!(validate(&data)
             .unwrap_err()
             .contains("incompatible timing protocol"));
+    }
+
+    #[test]
+    fn legacy_gate_reporter_explicitly_rejects_the_multibatch_protocol() {
+        for name in [
+            model::PROTOCOL_FIXED_WARMUP_V2,
+            model::PROTOCOL_MULTIBATCH_V3,
+        ] {
+            let mut data = valid_file();
+            data.modes[1].workloads[0].samples[3].protocol = Some(model::ProtocolEvidence {
+                name: name.into(),
+                timed_batches: 16,
+                ..Default::default()
+            });
+            let error = validate(&data).unwrap_err();
+            assert!(error.contains("incompatible timing protocol"), "{error}");
+            assert!(error.contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn v2_protocol_evidence_still_deserializes_without_v3_fields() {
+        let v2 = r#"{"name":"shared-js-fixed-warmup-v2","script_sha256":"a","driver_sha256":"b",
+            "warmup_batches":64,"calls_per_batch":10,"warmup_batch_ns":[1],
+            "fixed_metrics_before":null,"fixed_metrics_after":null,"readiness_diagnostic_ns":null}"#;
+        let parsed: model::ProtocolEvidence = serde_json::from_str(v2).unwrap();
+        assert_eq!(parsed.name, model::PROTOCOL_FIXED_WARMUP_V2);
+        assert_eq!(parsed.timed_batches, 0);
+        assert!(parsed.timed_batch_ns.is_empty() && parsed.fixed_batch_ns.is_none());
     }
 
     #[test]
