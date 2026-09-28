@@ -4138,6 +4138,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         self.optimized_vocabulary.remove(&key);
         self.baseline_property_refreshed.remove(&key);
         self.entry_tiers.remove(&key);
+        self.feedback.forget_function(key);
         self.coordinator.retire(key);
         self.maintenance();
     }
