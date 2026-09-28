@@ -133,7 +133,7 @@ fn untranslatable_loop_without_newly_admitted_opcodes_keeps_its_baseline() {
         ),
     ];
     for (source, call, expected) in cases {
-        let entries = native_entry_windows(source, call, expected);
+        let entries = native_entry_windows_after_install(source, call, expected);
         assert!(
             entries.windows(2).all(|pair| pair[1] > pair[0]),
             "Tier 1 function stopped entering native code: {source} {entries:?}"
@@ -162,4 +162,34 @@ fn untranslatable_property_loop_settles_instead_of_taking_a_terminal_baseline_re
         entries.windows(2).all(|pair| pair[0] == pair[1]),
         "settled generation kept entering native code: {entries:?}"
     );
+}
+
+/// Like `native_entry_windows`, but the windows start once native code first
+/// runs: unoptimized (debug, coverage) builds may still be compiling the
+/// baseline after the first windows.
+fn native_entry_windows_after_install(source: &str, call: &str, expected: &str) -> Vec<u64> {
+    let (_runtime, jit, context) = automatic_runtime();
+    context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
+    let run = || {
+        let value = context.with(|ctx| ctx.eval::<String, _>(call).unwrap());
+        assert_eq!(value, expected);
+        jit.poll();
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while jit.metrics().native_entries == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never entered native code: {source} {:?}",
+            jit.metrics()
+        );
+        run();
+    }
+    let mut entries = vec![jit.metrics().native_entries];
+    for _ in 0..3 {
+        for _ in 0..1_000 {
+            run();
+        }
+        entries.push(jit.metrics().native_entries);
+    }
+    entries
 }

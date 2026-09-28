@@ -1,7 +1,12 @@
 //! P3a native-call convention: pure self-recursive Int32 functions run their
 //! recursion as direct native calls, and every failure re-executes the CALL
 //! in the interpreter with identical results, exceptions and effects.
+// Sanitizer builds are excluded: at -O0 with instrumentation one interpreter
+// level takes tens of KiB of C stack, so the default 1 MiB JS stack overflows
+// within a few dozen levels and the recursion-depth semantics these tests
+// compare cannot be exercised.
 #![cfg(all(
+    not(rquickjs_sanitizer),
     feature = "compiler",
     feature = "test-support",
     target_endian = "little",
@@ -21,6 +26,15 @@ use std::time::{Duration, Instant};
 
 unsafe extern "C" {
     fn JS_JitGetHelperCount(rt: *mut qjs::JSRuntime, helper: u32, count: *mut u64) -> i32;
+}
+
+/// Serializes this file's tests. Native recursion is admitted only after
+/// automatic tiering has profiled the installed baseline, so tests running
+/// concurrently on a slow (coverage-instrumented) build can starve that
+/// profile until the deadline.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 const FIBONACCI: &str = "function fib(n){if(n<2)return n;return fib(n-1)+fib(n-2);}";
@@ -114,6 +128,7 @@ impl Harness {
 
 #[test]
 fn pure_self_recursion_publishes_a_helper_free_native_entry() {
+    let _serial = serial();
     let fixture = SnapshotFixture::compile(&format!("{FIBONACCI} fib"));
     let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
     let key = FunctionKey::new(
@@ -186,6 +201,7 @@ fn pure_self_recursion_publishes_a_helper_free_native_entry() {
 
 #[test]
 fn automatic_fibonacci_recursion_runs_as_native_calls() {
+    let _serial = serial();
     let harness = Harness::new(FIBONACCI, false);
     harness.warm_native("fib(15)", "610");
     let calls = generic_calls(&harness.context);
@@ -230,6 +246,7 @@ fn check_after_warmup(source: &str, warm: &[(&str, &str)], probes: &[(&str, &str
 
 #[test]
 fn native_recursion_failures_reexecute_exactly_in_the_interpreter() {
+    let _serial = serial();
     check_after_warmup(
         "function sum(n){return n<=0?0:n+sum(n-1);}\n\
          function big(n){return n<=0?2147483600:1+big(n-1);}\n\
@@ -256,6 +273,7 @@ fn native_recursion_failures_reexecute_exactly_in_the_interpreter() {
 
 #[test]
 fn native_recursion_observes_rebinding_and_refuses_accessors() {
+    let _serial = serial();
     check_after_warmup(
         FIBONACCI,
         &[("fib(12)", "144")],
@@ -285,6 +303,7 @@ fn native_recursion_observes_rebinding_and_refuses_accessors() {
 
 #[test]
 fn native_recursion_observes_a_shadowing_lexical_global() {
+    let _serial = serial();
     for force in [false, true] {
         let harness = Harness::new(
             "globalThis.fib=function(n){if(n<2)return n;return fib(n-1)+fib(n-2);};",
@@ -307,6 +326,7 @@ fn native_recursion_observes_a_shadowing_lexical_global() {
 
 #[test]
 fn native_recursion_stack_exhaustion_throws_the_interpreter_range_error() {
+    let _serial = serial();
     let source = "function depth(n){return n<=0?0:1+depth(n-1);}";
     let harness = Harness::new(source, false);
     harness.warm_native("depth(40)", "40");
@@ -343,6 +363,7 @@ fn native_recursion_stack_exhaustion_throws_the_interpreter_range_error() {
 
 #[test]
 fn native_recursion_polls_the_interrupt_handler() {
+    let _serial = serial();
     let harness = Harness::new(FIBONACCI, false);
     harness.warm_native("fib(15)", "610");
     let polls = Arc::new(AtomicUsize::new(0));
@@ -380,6 +401,7 @@ fn native_recursion_polls_the_interrupt_handler() {
 
 #[test]
 fn monomorphic_callers_link_to_a_published_native_entry() {
+    let _serial = serial();
     let source = format!(
         "{FIBONACCI}\nfunction caller(n){{let s=0;for(let i=0;i<n;i++){{s+=fib(12);}}return s;}}"
     );
@@ -426,6 +448,7 @@ fn monomorphic_callers_link_to_a_published_native_entry() {
 
 #[test]
 fn shallow_recursion_stays_out_of_native_code() {
+    let _serial = serial();
     // Four calls per outside entry cannot amortize QuickJS's native entry.
     let harness = Harness::new(
         "function shallow(n){return n<=0?0:n+shallow(n-1);}\n\
@@ -450,6 +473,7 @@ fn shallow_recursion_stays_out_of_native_code() {
 
 #[test]
 fn float64_self_recursion_runs_natively_and_guards_its_signature() {
+    let _serial = serial();
     check_after_warmup(
         // Warm-up inputs never produce integral intermediates, which the
         // baseline tier would re-tag as Int32 and make the signature mixed.
@@ -485,6 +509,7 @@ fn eval_error(harness: &Harness, expression: &str) -> Result<i32, String> {
 
 #[test]
 fn native_recursion_delivers_a_one_shot_interrupt() {
+    let _serial = serial();
     // A host handler that answers `true` exactly once: the chain's poll
     // consumes that answer, so the retried CALL must deliver it instead of
     // asking the handler again (which would now answer `false`).
@@ -536,6 +561,7 @@ fn check_against_interpreter(source: &str, warm: &[&str], probes: &[&str]) {
 
 #[test]
 fn native_tail_self_calls_return_the_callee_result() {
+    let _serial = serial();
     check_against_interpreter(
         "function count(n,acc){if(n<=0)return acc;return count(n-1,acc+1);}\n\
          function down(a,b){return a<=b?a:down(a-b,b);}",
@@ -553,6 +579,7 @@ fn native_tail_self_calls_return_the_callee_result() {
 
 #[test]
 fn native_recursion_resumes_after_a_caught_range_error() {
+    let _serial = serial();
     // Both chains start from exactly the same stack height: the same
     // wrapper, called from the same global code.
     let source = "function depth(n){return n<=0?0:1+depth(n-1);}\n\
@@ -561,17 +588,20 @@ fn native_recursion_resumes_after_a_caught_range_error() {
     // `run` has an exception region, so it stays on Tier 1 (P2c) and enters
     // `depth` through one generic CALL per evaluation; the recursion below
     // that entry must still be entirely native.
-    harness.warm_native_from("run(200)", "200", 1);
+    // Depths stay well inside the interpreter's limit in debug and
+    // coverage builds, whose C frames are several times larger.
+    harness.warm_native_from("run(100)", "100", 1);
     assert_eq!(harness.eval_string("run(1e6)"), "-1");
     // A later chain from that height runs natively again instead of being
     // refused (and deoptimized) at every call.
-    harness.warm_native_from("run(300)", "300", 1);
+    harness.warm_native_from("run(120)", "120", 1);
     let metrics = harness.jit.metrics();
     assert_eq!(metrics.native_entries, metrics.native_exits);
 }
 
 #[test]
 fn native_float64_comparisons_match_the_interpreter() {
+    let _serial = serial();
     check_against_interpreter(
         // Results stay non-integral (0.1 plus quarters) so the baseline tier
         // never re-tags them as Int32.
@@ -591,6 +621,7 @@ fn native_float64_comparisons_match_the_interpreter() {
 
 #[test]
 fn native_int32_lnot_matches_the_interpreter() {
+    let _serial = serial();
     check_against_interpreter(
         "function inv(n){if(!n)return 0;return 1+inv(n-1);}",
         &["inv(30)"],
@@ -606,6 +637,7 @@ fn native_int32_lnot_matches_the_interpreter() {
 
 #[test]
 fn a_linked_caller_follows_an_aliased_callee_binding() {
+    let _serial = serial();
     // The caller reaches the callee through a parameter, not through the
     // callee's own global name, so the chain must still prove that name.
     let source = format!(
@@ -634,6 +666,7 @@ fn a_linked_caller_follows_an_aliased_callee_binding() {
 
 #[test]
 fn a_replaced_callee_invalidates_its_linked_caller() {
+    let _serial = serial();
     // The caller guards raw callee identities. When the callee is freed and a
     // different function with the same name takes its place, possibly at the
     // same addresses, the caller must not run the old native body.
@@ -678,6 +711,7 @@ fn a_replaced_callee_invalidates_its_linked_caller() {
 
 #[test]
 fn native_call_sites_release_the_global_callee_on_every_edge() {
+    let _serial = serial();
     // `acc` is loaded by get_var (an owned stack slot). The native site
     // frees that reference after success and hands it to the interpreter on
     // every deopt edge; a leak keeps the replaced callee alive and an extra
@@ -737,6 +771,7 @@ fn native_call_sites_release_the_global_callee_on_every_edge() {
 
 #[test]
 fn granted_fast_entries_keep_native_chain_failures_exact() {
+    let _serial = serial();
     // P1c x P3a: a native-recursive root has its bounded Tier 2 trial decided
     // on its first optimized exit, so QuickJS may then enter it through
     // granted callback-free entries. A chain failure under such an entry

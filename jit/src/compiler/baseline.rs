@@ -7369,6 +7369,12 @@ fn lower_iterator(
                 .map_err(|_| CompileFailure::ResourceLimit)?;
             let next_address = builder.ins().iadd_imm(scratch, value_bytes);
             let out_address = builder.ins().iadd_imm(scratch, 2 * value_bytes);
+            emit_msan_unpoison(
+                builder,
+                helpers.pointer_type,
+                scratch,
+                2 * mem::size_of::<qjs::JSValue>(),
+            );
             let call = super::emit_external_call(
                 builder,
                 signature,

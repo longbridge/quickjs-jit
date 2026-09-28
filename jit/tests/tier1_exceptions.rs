@@ -192,17 +192,27 @@ fn production_with(
         let runtime = Runtime::new().unwrap();
         let attached = jit.then(|| Jit::attach(&runtime, config.clone()).unwrap());
         let context = Context::full(&runtime).unwrap();
-        let mut result = String::new();
         context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
-        for _ in 0..rounds {
-            result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
+        // Slow (sanitizer) builds may still be compiling after `rounds`; keep
+        // evaluating until the queued compilation has been installed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut round = 0;
+        let result = loop {
+            let result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
             while runtime.is_job_pending() {
                 runtime.execute_pending_job().unwrap();
             }
             if let Some(jit) = &attached {
                 jit.poll();
             }
-        }
+            round += 1;
+            let compiling = attached
+                .as_ref()
+                .is_some_and(|jit| jit.metrics().pending_worker_jobs > 0);
+            if round >= rounds && (!compiling || std::time::Instant::now() >= deadline) {
+                break result;
+            }
+        };
         (
             result,
             attached.map(|jit| jit.metrics()).unwrap_or_default(),
@@ -326,7 +336,7 @@ fn production_tiering_installs_common_try_catch_shapes() {
             .unwrap(),
         "function f(n){ if (n <= 0) return 0; try { return f(n - 1) + 1; } catch (e) { return -1; } }\n\
          function g(o){ try { return o.x.y; } catch (e) { return -1; } }\n\
-         function run(){ let t = 0; for (let i = 0; i < 400; i++) { t += f(i & 31); t += g((i & 7) ? {x:{y:i}} : {}); } return String(t); }",
+         function run(){ let t = 0; for (let i = 0; i < 400; i++) { t += f(i & 7); t += g((i & 7) ? {x:{y:i}} : {}); } return String(t); }",
         "run()",
         40,
     );

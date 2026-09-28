@@ -89,7 +89,9 @@ fn run(mode: Mode, stress: bool, source: &str, expected: Option<&str>) -> String
         return first;
     };
     assert_eq!(Some(first.as_str()), expected, "{mode:?} stress={stress}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // Sanitizer builds compile and run stress-GC rounds far more slowly.
+    let budget = if cfg!(rquickjs_sanitizer) { 300 } else { 60 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget);
     let mut native_rounds = 0;
     let mut rounds = 1;
     // Production tiering may legitimately demote an unprofitable function to
