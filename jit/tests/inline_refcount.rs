@@ -107,11 +107,17 @@ fn run(mode: Mode, stress: bool, source: &str, expected: Option<&str>) -> String
             native_rounds += 1;
         }
         jit.poll();
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{mode:?} stress={stress} never ran native code: {:?}",
-            jit.metrics()
-        );
+        // The deadline only bounds waiting for native code. Once the native
+        // requirement holds, a slow host (coverage, stress GC) may stop before
+        // the minimum round count instead of failing.
+        if std::time::Instant::now() >= deadline {
+            assert!(
+                native_rounds >= required_native_rounds,
+                "{mode:?} stress={stress} never ran native code: {:?}",
+                jit.metrics()
+            );
+            break;
+        }
         if native_rounds < required_native_rounds {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

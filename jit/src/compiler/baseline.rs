@@ -40,7 +40,7 @@ use crate::{
 };
 
 use super::{
-    emit_external_call,
+    emit_external_call, emit_msan_unpoison,
     helpers::{generated_signatures, FrameLayout},
     CompileControl, CompileFailure, Compiler,
 };
@@ -326,6 +326,7 @@ fn emit_array_push_statement_fast_path(
         pointer_type,
         fast.array_push_method,
         &[ctx, receiver_address, atom, value_address, out_address],
+        &[scratch],
     );
     let succeeded = builder.ins().icmp_imm(
         IntCC::Equal,
@@ -381,6 +382,7 @@ fn emit_retain_literal_shape(
         pointer_type,
         fast.retain_shape,
         &[ctx, object_address],
+        &[scratch],
     );
     Ok(())
 }
@@ -492,12 +494,21 @@ fn object_scratch(builder: &mut FunctionBuilder<'_>, values: usize) -> StackSlot
     ))
 }
 
+/// Calls an object leaf. `slots` are the stack slots the leaf reads through
+/// pointer parameters; they are unpoisoned first because MSan cannot observe
+/// Cranelift stores.
 fn emit_object_leaf_call(
     builder: &mut FunctionBuilder<'_>,
     pointer_type: cranelift_codegen::ir::Type,
     target: usize,
     params: &[Value],
+    slots: &[StackSlot],
 ) -> Value {
+    for slot in slots {
+        let size = builder.func.sized_stack_slots[*slot].size as usize;
+        let address = builder.ins().stack_addr(pointer_type, *slot, 0);
+        emit_msan_unpoison(builder, pointer_type, address, size);
+    }
     let mut signature = Signature::new(builder.func.signature.call_conv);
     for param in params {
         signature
@@ -562,6 +573,7 @@ fn emit_object_literal_fast_path(
         pointer_type,
         fast.literal,
         &[ctx, atoms_address, values_address, count, out_address],
+        &[atom_slot, value_slot],
     );
     let hit = builder.create_block();
     let fallback = builder.create_block();
@@ -6146,6 +6158,7 @@ fn emit_array_method_fast_path(
         pointer_type,
         fast.array_method,
         &[ctx, receiver_address, atom_value, out_address],
+        &[scratch],
     );
     let succeeded = builder.ins().icmp_imm(
         IntCC::Equal,
@@ -6239,6 +6252,7 @@ fn emit_array_push_fast_path(
         pointer_type,
         fast.array_push,
         &[ctx, addresses[0], addresses[1], addresses[2], addresses[3]],
+        &[scratch],
     );
     let succeeded = builder.ins().icmp_imm(
         IntCC::Equal,
