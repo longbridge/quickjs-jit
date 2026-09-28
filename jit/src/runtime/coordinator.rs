@@ -1277,6 +1277,10 @@ impl Coordinator {
             || profile.feedback_epoch == 0
             || profile.feedback_epoch != feedback.epoch()
             || !feedback.contains_stable_observation(key, profile.pc, profile.observed)
+            // Side-path lowering only specializes numeric exits and rejects any
+            // other profile as an invalid artifact; queueing one would spend a
+            // compile and record a failure against the installed Tier 2 code.
+            || !matches!(profile.observed, ObservedType::Int32 | ObservedType::Float64)
             || !self.installed_keys.contains_key(&(key, Tier::Baseline))
             || !self.installed_keys.contains_key(&(key, Tier::Optimizing))
         {

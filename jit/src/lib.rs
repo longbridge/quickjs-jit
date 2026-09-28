@@ -24,7 +24,6 @@ pub mod runtime;
 pub mod test_support;
 
 use core::ops::Deref;
-#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -998,6 +997,26 @@ impl ProductionProfile {
 /// tiering leaves closure-creating functions in the interpreter. Explicit
 /// tier policies (`BaselineOnly`, `Optimize`) and forced test tiers still
 /// compile them, so the lowering stays covered.
+#[cfg(all(
+    feature = "compiler",
+    any(
+        all(
+            target_os = "macos",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 fn automatic_closure_creation_unprofitable(
     config: &JitConfig,
     verified: &bytecode::VerifiedFunction,
@@ -3007,9 +3026,23 @@ impl ProductionBackend {
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
                 matches!(instruction.opcode().name(), "add" | "sub" | "mul" | "div")
             }) && !snapshot.instructions().iter().any(|instruction| {
+                // Every call form, including the short `call0`..`call3`
+                // encodings: a caller's object or function arguments never
+                // form a bounded numeric signature, so the wait below would
+                // never end.
                 matches!(
                     instruction.opcode().name(),
-                    "call" | "tail_call" | "call_method" | "get_field" | "put_field"
+                    "call"
+                        | "call0"
+                        | "call1"
+                        | "call2"
+                        | "call3"
+                        | "call_method"
+                        | "tail_call"
+                        | "tail_call_method"
+                        | "call_constructor"
+                        | "get_field"
+                        | "put_field"
                 )
             });
             /* A value-site observation can arrive at the loop hot probe before

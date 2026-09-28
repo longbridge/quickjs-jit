@@ -6599,10 +6599,26 @@ fn emit_opt_typed_metadata_guard(
             0
         },
     );
-    let call = builder.ins().call_indirect(
+    super::emit_msan_unpoison(
+        builder,
+        env.pointer_type,
+        receiver,
+        core::mem::size_of::<qjs::JSValue>(),
+    );
+    super::emit_msan_unpoison(
+        builder,
+        env.pointer_type,
+        metadata,
+        core::mem::size_of::<qjs::JSJitArrayMetadata>(),
+    );
+    let call = super::emit_external_call(
+        builder,
         signature,
         query,
         &[ctx, receiver, expected_mode_value, flags, metadata],
+        env.pointer_type,
+        None,
+        None,
     );
     let status = builder.inst_results(call)[0];
     let accepted = builder.ins().icmp_imm(
