@@ -364,7 +364,10 @@ fn steady_sort_comparator_uses_granted_entries_with_exact_metrics() {
     };
 
     let mut steady = None;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Sanitizer builds compile Tier 2 far more slowly while this file's other
+    // tests share the runner's cores.
+    let budget = if cfg!(rquickjs_sanitizer) { 120 } else { 20 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget);
     while std::time::Instant::now() < deadline {
         jit.poll();
         let before = jit.metrics();
