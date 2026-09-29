@@ -36,20 +36,23 @@ fn untranslatable_loop_settles_its_baseline_decision_once() {
         )
         .unwrap();
     });
-    let mut evaluations = Vec::new();
-    let mut entries = Vec::new();
-    for round in 0..4_000 {
+    let run = || {
         let value = context.with(|ctx| ctx.eval::<i32, _>("kinds(items)").unwrap());
         assert_eq!(value, 3);
         jit.poll();
-        if round % 1_000 == 999 {
-            let metrics = jit.metrics();
-            evaluations.push(metrics.profitability_evaluations);
-            entries.push(metrics.native_entries);
+    };
+    wait_for_native_entry(&jit, run);
+    let mut evaluations = Vec::new();
+    let mut entries = Vec::new();
+    for _ in 0..4 {
+        for _ in 0..1_000 {
+            run();
         }
+        let metrics = jit.metrics();
+        evaluations.push(metrics.profitability_evaluations);
+        entries.push(metrics.native_entries);
     }
     let metrics = jit.metrics();
-    assert!(metrics.native_entries > 0, "{metrics:?}");
     assert_eq!(metrics.tier2_entries, 0, "{metrics:?}");
     assert_eq!(metrics.unsupported_opcode_failures, 0, "{metrics:?}");
     assert!(
@@ -57,7 +60,8 @@ fn untranslatable_loop_settles_its_baseline_decision_once() {
         "untranslatable candidate kept re-evaluating: {evaluations:?} {metrics:?}"
     );
     // The settled generation runs in the interpreter with its probes off,
-    // exactly where a failed bounded Tier 2 trial used to leave it.
+    // exactly where a failed bounded Tier 2 trial used to leave it. The
+    // first window, starting at install, serves the short baseline warmup.
     assert!(
         entries.windows(2).all(|pair| pair[0] == pair[1]),
         "settled generation kept entering native code: {entries:?} {metrics:?}"
@@ -83,23 +87,6 @@ fn untranslatable_call_only_method_returns_to_the_interpreter() {
     }
     let metrics = jit.metrics();
     assert!(metrics.generic_call_rejections > 0, "{metrics:?}");
-}
-
-/// Runs `call` repeatedly under automatic tiering and returns the
-/// `native_entries` metric sampled after each 1,000-round window.
-fn native_entry_windows(source: &str, call: &str, expected: &str) -> Vec<u64> {
-    let (_runtime, jit, context) = automatic_runtime();
-    context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
-    let mut entries = Vec::new();
-    for round in 0..4_000 {
-        let value = context.with(|ctx| ctx.eval::<String, _>(call).unwrap());
-        assert_eq!(value, expected);
-        jit.poll();
-        if round % 1_000 == 999 {
-            entries.push(jit.metrics().native_entries);
-        }
-    }
-    entries
 }
 
 #[test]
@@ -149,7 +136,7 @@ fn untranslatable_property_loop_settles_instead_of_taking_a_terminal_baseline_re
     // candidate. The settle owns it: a refresh queued before the settle
     // leaves no installed baseline to demote, and its later install kept the
     // generation entering native code with its probes off.
-    let entries = native_entry_windows(
+    let entries = native_entry_windows_after_install(
         "globalThis.points = [{ x: 1, y: 'a' }, { x: 2, y: 3 }, { x: 3, y: 'b' }]; \
          globalThis.f = function(items) { let n = 0; \
            for (let i = 0; i < items.length; i++) { \
@@ -158,15 +145,17 @@ fn untranslatable_property_loop_settles_instead_of_taking_a_terminal_baseline_re
         "f(points)",
         "4",
     );
+    // `entries[0]` is sampled at install; the first window serves the short
+    // baseline warmup before the settle.
     assert!(
-        entries.windows(2).all(|pair| pair[0] == pair[1]),
+        entries[1..].windows(2).all(|pair| pair[0] == pair[1]),
         "settled generation kept entering native code: {entries:?}"
     );
 }
 
-/// Like `native_entry_windows`, but the windows start once native code first
-/// runs: unoptimized (debug, coverage) builds may still be compiling the
-/// baseline after the first windows.
+/// Runs `call` repeatedly under automatic tiering and returns the
+/// `native_entries` metric sampled at the first native entry and after each
+/// following 1,000-round window.
 fn native_entry_windows_after_install(source: &str, call: &str, expected: &str) -> Vec<u64> {
     let (_runtime, jit, context) = automatic_runtime();
     context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
@@ -175,15 +164,7 @@ fn native_entry_windows_after_install(source: &str, call: &str, expected: &str) 
         assert_eq!(value, expected);
         jit.poll();
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while jit.metrics().native_entries == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "never entered native code: {source} {:?}",
-            jit.metrics()
-        );
-        run();
-    }
+    wait_for_native_entry(&jit, run);
     let mut entries = vec![jit.metrics().native_entries];
     for _ in 0..3 {
         for _ in 0..1_000 {
@@ -192,4 +173,19 @@ fn native_entry_windows_after_install(source: &str, call: &str, expected: &str) 
         entries.push(jit.metrics().native_entries);
     }
     entries
+}
+
+/// Runs `run` until the first native entry. The baseline compiles in the
+/// background, and unoptimized (debug, coverage) builds or a busy host may
+/// install it only after many calls.
+fn wait_for_native_entry(jit: &rquickjs_jit::Jit, run: impl Fn()) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while jit.metrics().native_entries == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never entered native code: {:?}",
+            jit.metrics()
+        );
+        run();
+    }
 }

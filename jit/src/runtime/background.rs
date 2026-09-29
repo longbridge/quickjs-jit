@@ -154,10 +154,17 @@ impl BackgroundCompiler {
                             worker_budget,
                             max_ir_bytes,
                         );
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            compiler.compile_controlled(request, &control)
-                        }))
-                        .unwrap_or(Err(crate::compiler::CompileFailure::CompilerPanicked));
+                        // One-shot scripts retire right after their only
+                        // call; compiling them would only delay live jobs
+                        // queued behind them.
+                        let result = if request.is_retired() {
+                            Err(crate::compiler::CompileFailure::Cancelled)
+                        } else {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                compiler.compile_controlled(request, &control)
+                            }))
+                            .unwrap_or(Err(crate::compiler::CompileFailure::CompilerPanicked))
+                        };
                         let completion = super::CompileCompletion {
                             key,
                             requested_tier: tier,

@@ -621,7 +621,7 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
         automatic_context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&automatic_context, &invocation);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + native_evidence_budget();
         while std::time::Instant::now() < deadline {
             run_warm_loop(&automatic_context);
             automatic.jit().poll();
@@ -679,7 +679,7 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&context, &invocation);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + native_evidence_budget();
         while std::time::Instant::now() < deadline {
             run_warm_loop(&context);
             optimized.jit().poll();
@@ -710,6 +710,12 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         );
         assert_eq!(actual, expected, "optimized seed {seed}");
     }
+}
+
+/// Time a seed may take to reach native code. Sanitizer builds compile far
+/// more slowly, and this file's other tests share the runner's cores.
+fn native_evidence_budget() -> std::time::Duration {
+    std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 120 } else { 10 })
 }
 
 /// Warm through one function defined once. Evaluating a fresh warm script

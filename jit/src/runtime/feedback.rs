@@ -918,6 +918,29 @@ impl FeedbackTable {
         self.version
     }
 
+    /// Drops every observation about `function` once its bytecode
+    /// generation is freed. Only live generations can use feedback, and the
+    /// capacity bound would otherwise fill up with retired functions (for
+    /// example one-shot eval scripts), after which no new function could
+    /// record the return types that call links and native calls require.
+    pub fn forget_function(&mut self, function: FunctionKey) {
+        // The version is left unchanged: a freed generation can never be
+        // compiled again, so no live lattice entry changes and artifacts in
+        // flight for other functions keep their feedback epoch.
+        self.entries.retain(|key, _| key.function != function);
+        self.calls.remove(&function);
+        self.binaries.retain(|(key, _), _| *key != function);
+        self.conversions.retain(|(key, _), _| *key != function);
+        self.branches.retain(|(key, _), _| *key != function);
+        self.call_signatures.retain(|(key, _), _| *key != function);
+        self.arrays.forget_function(function);
+        if self.last_call == Some(function) {
+            self.last_call = None;
+            self.last_call_arguments.clear();
+        }
+        self.recent_types = [None; 4];
+    }
+
     pub fn observe_array(
         &mut self,
         function: FunctionKey,
@@ -1393,6 +1416,29 @@ mod call_link_tests {
         table.observe_call_signature_with_identity(
             CALLER, PC, CALLEE, 0x1000, 0x2000, arguments, result,
         );
+    }
+
+    #[test]
+    fn retired_functions_release_their_feedback_capacity() {
+        let mut table = FeedbackTable::new(2, 2);
+        let retired = FunctionKey::new(10, 10);
+        let live = FunctionKey::new(11, 11);
+        table.observe_return(retired, 1, ObservedType::Int32);
+        table.observe_return(retired, 2, ObservedType::Int32);
+        assert_eq!(
+            table.observe_type(live, 1, FeedbackKind::Exit, ObservedType::Int32),
+            FeedbackState::Megamorphic
+        );
+        table.forget_function(retired);
+        assert_eq!(
+            table.observe_type(live, 1, FeedbackKind::Exit, ObservedType::Int32),
+            FeedbackState::Monomorphic
+        );
+        let snapshot = table.snapshot(1);
+        assert!(snapshot
+            .entries()
+            .iter()
+            .all(|entry| entry.function() == live));
     }
 
     #[test]

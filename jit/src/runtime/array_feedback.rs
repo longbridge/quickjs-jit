@@ -119,6 +119,12 @@ pub struct ArrayFeedbackTable {
 }
 
 impl ArrayFeedbackTable {
+    /// Drops the observations of a freed function generation.
+    /// Like `FeedbackTable::forget_function`, this leaves the version alone.
+    pub fn forget_function(&mut self, function: FunctionKey) {
+        self.entries.retain(|(key, _), _| *key != function);
+    }
+
     pub fn new(capacity: usize, diversity_limit: usize) -> Self {
         Self {
             capacity,

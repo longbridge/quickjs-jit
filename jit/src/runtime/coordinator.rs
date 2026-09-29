@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc,
     },
@@ -631,9 +631,18 @@ pub struct CompileRequest {
     frame_inline_targets: Arc<[FrameInlineTarget]>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     native_call_targets: Arc<[NativeCallTarget]>,
+    /// Set when the function generation retires after dispatch, so a worker
+    /// skips the compile instead of spending the bounded worker queue on it.
+    retired: Arc<AtomicBool>,
 }
 
 impl CompileRequest {
+    /// Whether the requested generation retired after this request was
+    /// dispatched. Its completion can never be installed.
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     pub(super) fn discard_inline_snapshots(&mut self) {
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         {
@@ -1022,6 +1031,9 @@ pub struct Coordinator {
     environment: ArtifactEnvironment,
     dependencies: DependencyGraph,
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
+    /// Retirement flags shared with dispatched requests (see
+    /// `CompileRequest::is_retired`).
+    in_flight_retired: FxHashMap<FunctionKey, Arc<AtomicBool>>,
     side_exits: HashMap<FunctionKey, HashMap<u32, u8>>,
     side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
     specialization_versions: HashMap<(FunctionKey, u64), u8>,
@@ -1119,6 +1131,7 @@ impl Coordinator {
             environment,
             dependencies: DependencyGraph::default(),
             latest_feedback_epochs: HashMap::new(),
+            in_flight_retired: FxHashMap::default(),
             side_exits: HashMap::new(),
             side_exit_observations: HashMap::new(),
             specialization_versions: HashMap::new(),
@@ -1658,6 +1671,7 @@ impl Coordinator {
             frame_inline_targets,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             native_call_targets,
+            retired: Arc::new(AtomicBool::new(false)),
         });
         if let Some(signature) = side_path_signature {
             let versions = self
@@ -1692,6 +1706,8 @@ impl Coordinator {
                     side_path: request.side_path_profile.is_some(),
                 },
             );
+            self.in_flight_retired
+                .insert(request.key, Arc::clone(&request.retired));
             self.metrics.compiling = self.metrics.compiling.saturating_add(1);
             return Some(request);
         }
@@ -1722,6 +1738,14 @@ impl Coordinator {
     }
 
     pub fn complete(&mut self, completion: CompileCompletion) {
+        let key = completion.key;
+        self.complete_in_flight(completion);
+        if !self.in_flight.contains_key(&key) {
+            self.in_flight_retired.remove(&key);
+        }
+    }
+
+    fn complete_in_flight(&mut self, completion: CompileCompletion) {
         let Some(expected) = self.in_flight.get(&completion.key).copied() else {
             #[cfg(feature = "test-support")]
             self.record_completion_disposition(
@@ -2013,6 +2037,9 @@ impl Coordinator {
         self.last_benefit_target = None;
         self.queue.retain(|request| request.key != key);
         self.in_flight.remove(&key);
+        if let Some(retired) = self.in_flight_retired.remove(&key) {
+            retired.store(true, Ordering::Release);
+        }
         let function = self.functions.entry(key).or_default();
         let was_retired = function.retired;
         function.retired = true;
@@ -3065,6 +3092,33 @@ mod tests {
                 coordinator.metrics()
             );
         }
+    }
+
+    #[test]
+    fn retiring_a_dispatched_generation_marks_its_request_retired() {
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        let retired = FunctionKey::new(51, 1);
+        let live = FunctionKey::new(52, 1);
+        coordinator
+            .queue(retired, Tier::Baseline, snapshot())
+            .unwrap();
+        coordinator.queue(live, Tier::Baseline, snapshot()).unwrap();
+        let retired_request = coordinator.begin_next().unwrap();
+        let live_request = coordinator.begin_next().unwrap();
+        assert!(!retired_request.is_retired());
+        coordinator.retire(retired);
+        assert!(retired_request.is_retired());
+        assert!(!live_request.is_retired());
+        coordinator.complete(CompileCompletion {
+            key: retired,
+            requested_tier: Tier::Baseline,
+            artifact_key: retired_request.artifact_key(),
+            attempt_id: retired_request.attempt_id(),
+            result: Err(CompileFailure::Cancelled),
+        });
+        assert_eq!(coordinator.metrics().cancelled_compilations, 0);
+        assert!(coordinator.in_flight_retired.contains_key(&live));
+        assert!(!coordinator.in_flight_retired.contains_key(&retired));
     }
 
     #[cfg(feature = "test-support")]
