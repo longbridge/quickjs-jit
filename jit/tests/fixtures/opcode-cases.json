@@ -1431,6 +1431,574 @@
         "ownership-gc",
         "coercion-reentrancy"
       ]
+    },
+    {
+      "opcode": "fclosure",
+      "definition": "var src = 'function f(a){ if (a) {'; for (var i = 0; i < 260; i++) src += '()=>' + i + ';'; src += '} return (()=>42)() }'; (0, eval)(src)",
+      "expression": "f(0)",
+      "helper": "FClosure",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "fclosure8",
+      "definition": "function f(a){ const g = () => a + 1; return g() }",
+      "expression": "f(41)",
+      "helper": "FClosure",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_name",
+      "definition": "function f(a){ const g = () => a + 1; return g.name + ':' + g() }",
+      "expression": "f(41)",
+      "helper": "SetName",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref0",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; return function f(x){ return a + b + c + d + e + x } })()",
+      "expression": "f(10)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref1",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; return function f(x){ return a + b + c + d + e + x } })()",
+      "expression": "f(11)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref2",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; return function f(x){ return a + b + c + d + e + x } })()",
+      "expression": "f(12)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref3",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; return function f(x){ return a + b + c + d + e + x } })()",
+      "expression": "f(13)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; return function f(x){ return a + b + c + d + e + x } })()",
+      "expression": "f(14)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_ref_check",
+      "definition": "var f = (function(){ let c = 0; return function f(a){ c = c + a; return c } })()",
+      "expression": "f(1) + f(2)",
+      "helper": "GetVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref0",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ a = x; b = x + 1; c = x + 2; d = x + 3; e = x + 4; return x } })()",
+      "expression": "f(10) + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref1",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ a = x; b = x + 1; c = x + 2; d = x + 3; e = x + 4; return x } })()",
+      "expression": "f(11) + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref2",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ a = x; b = x + 1; c = x + 2; d = x + 3; e = x + 4; return x } })()",
+      "expression": "f(12) + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref3",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ a = x; b = x + 1; c = x + 2; d = x + 3; e = x + 4; return x } })()",
+      "expression": "f(13) + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ a = x; b = x + 1; c = x + 2; d = x + 3; e = x + 4; return x } })()",
+      "expression": "f(14) + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_var_ref0",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ return [a = x, b = x + 1, c = x + 2, d = x + 3, e = x + 4] } })()",
+      "expression": "f(10).join() + '|' + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_var_ref1",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ return [a = x, b = x + 1, c = x + 2, d = x + 3, e = x + 4] } })()",
+      "expression": "f(11).join() + '|' + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_var_ref2",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ return [a = x, b = x + 1, c = x + 2, d = x + 3, e = x + 4] } })()",
+      "expression": "f(12).join() + '|' + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_var_ref3",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ return [a = x, b = x + 1, c = x + 2, d = x + 3, e = x + 4] } })()",
+      "expression": "f(13).join() + '|' + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "set_var_ref",
+      "definition": "var f = (function(){ var a = 1, b = 2, c = 3, d = 4, e = 5; globalThis.peek = function(){ return [a, b, c, d, e].join() }; return function f(x){ return [a = x, b = x + 1, c = x + 2, d = x + 3, e = x + 4] } })()",
+      "expression": "f(14).join() + '|' + peek()",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var_ref_check",
+      "definition": "var f = (function(){ let c = 0; return function f(a){ c = c + a; return c } })()",
+      "expression": "f(3) + f(4)",
+      "helper": "PutVarRef",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "close_loc",
+      "definition": "function f(n){ const fs = []; for (let i = 0; i < n; i++) { fs.push(() => i) } let s = 0; for (let j = 0; j < n; j++) { const g = fs[j]; s += g() } return s }",
+      "expression": "f(5)",
+      "helper": "CloseLocal",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "push_this",
+      "definition": "function f(o){ return this.x + o }",
+      "expression": "[f.call({x:40},2), f.call(7,1), f.call(undefined,1), f.call('s',1), (()=>{try{return f.call({get x(){throw new RangeError('x')}},1)}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "special_object",
+      "definition": "function f(){ 'use strict'; return arguments.length + ':' + arguments[0] }",
+      "expression": "[f(40,2,3), f(), f('a')]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "get_var_undef",
+      "definition": "function f(){ return typeof missingGlobal + ':' + typeof Math }",
+      "expression": "f()",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "put_var",
+      "definition": "globalThis.counterGlobal = 0; function f(v){ counterGlobal = v; return counterGlobal }",
+      "expression": "[f(1), f('x'), f({a:1}).a, globalThis.counterGlobal.a]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "delete_var",
+      "definition": "globalThis.deletableGlobal = 1; function f(){ return delete deletableGlobal }",
+      "expression": "[f(), typeof deletableGlobal, f()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "typeof",
+      "definition": "function f(x){ return typeof x }",
+      "expression": "[f(1), f(1.5), f('s'), f(null), f(undefined), f({}), f(f), f(1n), f(Symbol()), f(true), f(class {})]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "typeof_is_undefined",
+      "definition": "function f(x){ return typeof x === 'undefined' }",
+      "expression": "[f(), f(undefined), f(1), f(null), f({}), f(''), f('x'.repeat(3))]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "typeof_is_function",
+      "definition": "function f(x){ return typeof x === 'function' }",
+      "expression": "[f(f), f(1), f({}), f(class {}), f(new Proxy(function(){}, {})), f(new Proxy({}, {})), f('s')]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "in",
+      "definition": "function f(k,o){ return k in o }",
+      "expression": "[f('a',{a:1}), f('b',{a:1}), f(0,[1]), f(Symbol.iterator,[]), (()=>{try{return f('a',1)}catch(e){return e.name}})(), (()=>{try{return f({toString(){throw new RangeError('k')}},{})}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "instanceof",
+      "definition": "function f(a,b){ return a instanceof b }",
+      "expression": "[f([],Array), f({},Array), f(1,Number), (()=>{try{return f(1,1)}catch(e){return e.name}})(), (()=>{try{return f({}, {[Symbol.hasInstance](){throw new RangeError('h')}})}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "delete",
+      "definition": "function f(o,k){ return delete o[k] }",
+      "expression": "[f({a:1},'a'), f(Object.freeze({a:1}),'a'), f([1,2],0), f({}, 'missing'), (()=>{try{return f(null,'a')}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "to_object",
+      "definition": "function f(o){ const {a, b} = o; return a + ':' + b }",
+      "expression": "[f({a:1,b:2}), f('xy'), f(5), (()=>{try{return f(null)}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "to_propkey2",
+      "definition": "function f(o,k){ o[k] += 1; return o[k] }",
+      "expression": "[f({a:1},'a'), f([5],0), f({}, {toString(){return 'z'}}), (()=>{try{return f(null,'a')}catch(e){return e.name}})(), (()=>{try{return f({}, {toString(){throw new RangeError('k')}})}catch(e){return e.name}})()]",
+      "helper": "GenericOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "pow",
+      "definition": "function f(a,b){ return a ** b }",
+      "expression": "[f(2,10), f(2,0.5), f(-8,1/3), String(f(2n,3n)), f('3',2), f({valueOf(){return 3}},2), (()=>{try{return f(2n,1)}catch(e){return e.name}})(), (()=>{try{return f({valueOf(){throw new RangeError('v')}},2)}catch(e){return e.name}})()]",
+      "helper": "BinaryArithSlow",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "dup1",
+      "definition": "function f(s,k){ let x; ({[k]: x} = s); return x }",
+      "expression": "[f({a:1},'a'), f({},'b'), f([7,8],1)]",
+      "helper": "Dup",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "dup2",
+      "definition": "function f(o,k){ o[k] *= 2; return o[k] }",
+      "expression": "[f({a:21},'a'), f([5],0), f({m:1.5}, 'm')]",
+      "helper": "Dup",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc"
+      ]
+    },
+    {
+      "opcode": "perm4",
+      "definition": "function f(a,i){ let v = a[i]++; return v + ':' + a[i] }",
+      "expression": "[f([1,2],0), f({x:5},'x'), f([0,0,0,-1], 3)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "rot3r",
+      "definition": "function f(s,k,o){ ({[k]: o.p} = s); return o.p }",
+      "expression": "[f({a:1},'a',{}), f({},'b',{p:3})]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "swap2",
+      "definition": "function f(s,k,a,i){ ({[k]: a[i]} = s); return a[i] }",
+      "expression": "[f({a:1},'a',[],0), f({b:2},'b',{},'x')]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "rot3l",
+      "definition": "function f(s,a,i){ ({p: a[i]} = s); return a[i] }",
+      "expression": "[f({p:4},[],1), f({},{q:1},'q')]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "throw",
+      "definition": "function f(a){ if (a) throw {code: a}; return 'none' }",
+      "expression": "(()=>{let caught;try{f(7)}catch(e){caught=e.code}return [f(0),caught]})()",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "throw_error",
+      "definition": "function f(a){ const k = a; if (a > 1) k = 2; return k }",
+      "expression": "(()=>{let caught;try{f(5)}catch(e){caught=e.name+':'+e.message}return [f(1),caught]})()",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "catch",
+      "definition": "function f(o){ let r; try { r = o.x.y } catch (e) { r = e.name } return r }",
+      "expression": "[f({x:{y:4}}),f({}),f({x:null})]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "nip_catch",
+      "definition": "function f(g){ try { return g(2) } catch (e) { return 'caught:' + e.name } }",
+      "expression": "[f(function(v){return v*21}),f(5)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "gosub",
+      "definition": "function f(a){ let log = ''; try { if (a) throw a; log += 'body'; } catch (e) { log += 'caught' + e; } finally { log += ',finally'; } return log }",
+      "expression": "[f(0),f(3)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "ret",
+      "definition": "function f(n){ let c = 0; for (let i = 0; i < n; i++) { try { if (i % 3 === 0) continue; c += i; } finally { c += 100; } } return c }",
+      "expression": "[f(10),f(0)]",
+      "helper": null,
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow"
+      ]
+    },
+    {
+      "opcode": "for_of_start",
+      "definition": "function f(values){ let sum=0; for(const value of values) sum+=value; return sum }",
+      "expression": "(()=>{const events=[];return [f([1,2,3]),f(new Set([4,5])),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}}),events,(()=>{try{return f(42)}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_of_next",
+      "definition": "function f(values){ let out=''; for(const value of values) out+=value; return out }",
+      "expression": "(()=>{const events=[];return [f(['a','b',{toString(){events.push('str');return 'c'}}]),f('xyz'),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}}),events,(()=>{try{return f({[Symbol.iterator](){return {next(){return 1}}}})}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "iterator_close",
+      "definition": "function f(values,stop){ let sum=0; for(const value of values){ if(value===stop) break; sum+=value } return sum }",
+      "expression": "(()=>{const events=[];return [f([1,2,3],2),f({[Symbol.iterator](){let i=0;return {next(){events.push('next'+i);return {value:i,done:i++>=3}},return(){events.push('return');return {}}}}},1),events,(()=>{try{return f({[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){throw new RangeError('close')}}}},1)}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_in_start",
+      "definition": "function f(o){ let keys=''; for(const key in o) keys+=key; return keys }",
+      "expression": "(()=>{const events=[];return [f({a:1,b:2}),f([7,8]),f(null),f(new Proxy({p:1},{ownKeys(t){events.push('keys');return Reflect.ownKeys(t)}})),events,(()=>{try{return f(new Proxy({},{ownKeys(){throw new EvalError('keys')}}))}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
+    },
+    {
+      "opcode": "for_in_next",
+      "definition": "function f(o,g){ let keys=''; for(const key in o){ keys+=key; g(o) } return keys }",
+      "expression": "(()=>{const events=[];return [f({a:1,b:2,c:3},o=>{delete o.c;events.push('g')}),f('xy',()=>{}),events,(()=>{try{return f(new Proxy({a:1},{getOwnPropertyDescriptor(){throw new URIError('d')}}),()=>{})}catch(e){return e.name}})()]})()",
+      "helper": "IteratorOp",
+      "dimensions": [
+        "normal",
+        "exception-or-nonthrow",
+        "ownership-gc",
+        "coercion-reentrancy"
+      ]
     }
   ]
 }

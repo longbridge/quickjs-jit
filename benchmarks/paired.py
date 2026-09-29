@@ -13,6 +13,7 @@ import platform
 from pathlib import Path
 import subprocess
 import time
+from protocol_check import PROTOCOL_V3, timed_batches_from_env, validate_protocol
 
 p = argparse.ArgumentParser()
 p.add_argument('--binaries', required=True, help='JSON map from variant to binary')
@@ -25,6 +26,10 @@ p.add_argument('--diagnostic-tiers', action='store_true')
 args = p.parse_args()
 if args.pairs < 1:
     p.error('--pairs must be positive')
+try:
+    timed_batches = timed_batches_from_env()
+except ValueError as error:
+    p.error(str(error))
 if args.cpu is not None and platform.system() != 'Linux':
     p.error('--cpu requires Linux taskset')
 import fcntl
@@ -53,8 +58,8 @@ metadata.update(collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hex
     bun_version=subprocess.check_output([str(bun), '--version'],text=True).strip(),
     bun_sha256=hashlib.sha256(bun.read_bytes()).hexdigest(), bun_flags=[],
     rustc=subprocess.check_output(['rustc','-Vv'],text=True),
-    protocol='shared-js-fixed-warmup-v2', throughput_windows=0,
-    note='Latency-only paired candidate diagnostic. Fixed 10-call window; counters include shared driver. Readiness diagnostic is separately conditioned.')
+    protocol=PROTOCOL_V3, timed_batches=timed_batches, throughput_windows=0,
+    note='Latency-only paired candidate diagnostic. elapsed_ns is the median of the timed 10-call batches that follow 64 warmups; the first timed batch is the legacy fixed-batch diagnostic. Counters include shared driver. Readiness diagnostic is separately conditioned.')
 (out / 'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
 for workload in args.workloads.split(','):
     script = Path(args.scripts) / (workload + '.js')
@@ -68,20 +73,18 @@ for workload in args.workloads.split(','):
             if target.exists():
                 raise RuntimeError(f'Refusing to overwrite existing evidence: {target}')
             command = [bins[variant], 'worker', '--mode', mode, '--script', str(script)]
+            # Every engine and variant receives the same K explicitly.
+            worker_env = dict(os.environ, JIT_BENCH_TIMED_BATCHES=str(timed_batches))
             if args.cpu is not None:
                 command = ['taskset', '-c', args.cpu] + command
             started = time.monotonic()
-            result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=180, env=worker_env)
             if result.returncode:
                 (out / 'failure.json').write_text(json.dumps(dict(command=command, stdout=result.stdout, stderr=result.stderr),indent=2))
                 raise RuntimeError(f'Worker failed: {command}: {result.stderr}')
             value = json.loads(result.stdout)
             protocol = value['protocol']
-            assert protocol['name'] == metadata['protocol']
-            assert protocol['script_sha256'] == metadata['scripts'][workload]
-            assert protocol['warmup_batches'] == len(protocol['warmup_batch_ns']) == 64
-            assert protocol['calls_per_batch'] == 10
-            assert value['elapsed_ns'] > 0
+            validate_protocol(value, metadata, workload, mode)
             if mode != 'bun':
                 assert value['native_exits'] == value['native_entries']
             before, after = protocol['fixed_metrics_before'], protocol['fixed_metrics_after']
@@ -91,12 +94,20 @@ for workload in args.workloads.split(','):
                 assert all(v >= 0 for v in value['fixed_deltas'].values())
                 assert value['fixed_deltas']['native_entries'] == value['fixed_deltas']['native_exits']
                 value['fixed_compilation_quiet'] = (after['pending_worker_jobs'] == before['pending_worker_jobs'] == 0 and after['pending_snapshot_bytes'] == before['pending_snapshot_bytes'] == 0 and value['fixed_deltas']['installed'] == 0 and value['fixed_deltas']['compile_ns'] == 0)
+            before, after = protocol.get('timed_metrics_before'), protocol.get('timed_metrics_after')
+            if before is not None:
+                # Spans every timed batch plus the untimed checksum/poll steps between them.
+                value['timed_deltas'] = {k:after[k]-before[k] for k in cumulative}
+                assert all(v >= 0 for v in value['timed_deltas'].values())
+                assert value['timed_deltas']['native_entries'] == value['timed_deltas']['native_exits']
+                value['timed_compilation_quiet'] = (after['pending_worker_jobs'] == before['pending_worker_jobs'] == 0 and after['pending_snapshot_bytes'] == before['pending_snapshot_bytes'] == 0 and value['timed_deltas']['installed'] == 0 and value['timed_deltas']['compile_ns'] == 0)
             value.update(variant=variant, requested_mode=mode, pair_index=pair, process_wall_seconds=time.monotonic()-started)
             target.write_text(json.dumps(value,indent=2)+'\n')
         print(f'{workload}: pair {pair} complete',flush=True)
     values = [json.loads(path.read_text()) for path in out.glob(f'{workload}-*.json')]
     assert len({v['checksum'] for v in values}) == 1, workload
     assert len({v['protocol']['driver_sha256'] for v in values}) == 1, workload
+    assert len({v['protocol'].get('bun_wrapper_sha256') for v in values if v['requested_mode'] == 'bun'}) <= 1, workload
     (out / 'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
 for variant, binary in bins.items():
     assert hashlib.sha256(Path(binary).read_bytes()).hexdigest() == metadata['binary_sha256'][variant]

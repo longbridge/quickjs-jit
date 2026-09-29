@@ -64,6 +64,13 @@ enum ManifestHelper {
     Regexp,
     NewArray,
     NewObject,
+    FClosure,
+    GetVarRef,
+    PutVarRef,
+    CloseLocal,
+    SetName,
+    GenericOp,
+    IteratorOp,
 }
 
 impl ManifestHelper {
@@ -90,6 +97,13 @@ impl ManifestHelper {
             Self::Regexp => HelperId::Regexp,
             Self::NewArray => HelperId::NewArray,
             Self::NewObject => HelperId::NewObject,
+            Self::FClosure => HelperId::FClosure,
+            Self::GetVarRef => HelperId::GetVarRef,
+            Self::PutVarRef => HelperId::PutVarRef,
+            Self::CloseLocal => HelperId::CloseLocal,
+            Self::SetName => HelperId::SetName,
+            Self::GenericOp => HelperId::GenericOp,
+            Self::IteratorOp => HelperId::IteratorOp,
         }
     }
 }
@@ -149,6 +163,7 @@ fn required_dimensions(case: &OpcodeCase) -> BTreeSet<Dimension> {
                 | ManifestHelper::CallConstructor
                 | ManifestHelper::BinaryArithSlow
                 | ManifestHelper::UnaryArithSlow
+                | ManifestHelper::IteratorOp
         )
     ) {
         required.insert(Dimension::CoercionReentrancy);
@@ -250,8 +265,8 @@ fn manifest_dimension_schema_is_closed_and_required_dimensions_are_mechanical() 
 #[test]
 fn rejected_programs_have_exact_fallback_and_interpreter_semantics() {
     assert_tier1_rejected(
-        "function f(a){ return typeof a }",
-        "f(86)",
+        "function f(a){ return a ? 1n : 2n }",
+        "String(f(86))",
         FallbackReason::UnsupportedOpcode,
     );
 }
@@ -527,6 +542,42 @@ fn every_advertised_helper_family_has_a_real_native_execution_case() {
             "object",
             HelperId::NewObject,
         ),
+        (
+            "function f(a){ const g = () => a + 1; return g() }",
+            "f(41)",
+            "fclosure8",
+            HelperId::FClosure,
+        ),
+        (
+            "function f(a){ const g = () => a + 1; return g.name + g() }",
+            "f(41)",
+            "set_name",
+            HelperId::SetName,
+        ),
+        (
+            "var f = (function(){ var c = 40; return function f(a){ return c + a } })()",
+            "f(2)",
+            "get_var_ref0",
+            HelperId::GetVarRef,
+        ),
+        (
+            "var f = (function(){ var c = 40; return function f(a){ c = a; return 1 } })()",
+            "f(2)",
+            "put_var_ref0",
+            HelperId::PutVarRef,
+        ),
+        (
+            "function f(n){ const fs = []; for (let i = 0; i < n; i++) { fs.push(() => i) } let s = 0; for (let j = 0; j < n; j++) { const g = fs[j]; s += g() } return s }",
+            "f(5)",
+            "close_loc",
+            HelperId::CloseLocal,
+        ),
+        (
+            "function f(values){ let sum=0; for(const value of values) sum+=value; return sum }",
+            "f(new Set([20,22]))",
+            "for_of_next",
+            HelperId::IteratorOp,
+        ),
     ];
     for (definition, expression, opcode, helper) in cases {
         differential(definition, expression)
@@ -570,7 +621,7 @@ fn seeded_structured_programs_match_interpreter_and_automatic_modes() {
         automatic_context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         automatic_context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&automatic_context, &invocation);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + native_evidence_budget();
         while std::time::Instant::now() < deadline {
             run_warm_loop(&automatic_context);
             automatic.jit().poll();
@@ -628,7 +679,7 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         context.with(|ctx| ctx.eval::<(), _>(canonical_observer_prelude()).unwrap());
         context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
         install_warm_loop(&context, &invocation);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + native_evidence_budget();
         while std::time::Instant::now() < deadline {
             run_warm_loop(&context);
             optimized.jit().poll();
@@ -659,6 +710,12 @@ fn seeded_structured_programs_enter_optimized_mode_with_native_evidence() {
         );
         assert_eq!(actual, expected, "optimized seed {seed}");
     }
+}
+
+/// Time a seed may take to reach native code. Sanitizer builds compile far
+/// more slowly, and this file's other tests share the runner's cores.
+fn native_evidence_budget() -> std::time::Duration {
+    std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 120 } else { 10 })
 }
 
 /// Warm through one function defined once. Evaluating a fresh warm script

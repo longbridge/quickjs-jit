@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc,
     },
@@ -120,6 +120,33 @@ impl DirectCallTarget {
     }
     pub const fn signature(&self) -> &BoundedSpecializationSignature {
         &self.signature
+    }
+    pub fn entry(&self) -> *const u8 {
+        self.published.as_ptr()
+    }
+    pub(crate) fn publication(&self) -> crate::compiler::baseline::PublishedBaselineCode {
+        self.published.clone()
+    }
+}
+
+/// A monomorphic call edge whose callee artifact publishes a P3a native call
+/// entry. The caller guards the callee identity and proves its global self
+/// binding at run time; the publication pin keeps the entry executable.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[derive(Clone, Debug)]
+pub struct NativeCallTarget {
+    link: super::CallLinkStatus,
+    plan: crate::compiler::native_call::NativeCallPlan,
+    published: crate::compiler::baseline::PublishedBaselineCode,
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+impl NativeCallTarget {
+    pub const fn link(&self) -> &super::CallLinkStatus {
+        &self.link
+    }
+    pub const fn plan(&self) -> &crate::compiler::native_call::NativeCallPlan {
+        &self.plan
     }
     pub fn entry(&self) -> *const u8 {
         self.published.as_ptr()
@@ -340,6 +367,99 @@ fn artifact_matches_direct_call(artifact: &CompiledArtifact, call: &CallSpeciali
             })
 }
 
+/// Conservatively predicts whether a Tier 2 caller can take the linked direct
+/// entry at `pc`. `emit_opt_specialized_call` uses it only for a receiver-free
+/// call whose function operand and every HeapRef argument are frame reads
+/// (`get_arg*` / `get_loc*` / `get_loc_check`). Any other site (callee by
+/// global name, closure variable, method receiver, or a HeapRef argument from a
+/// global or an expression) falls back to the generic CALL there, so the
+/// planner must keep frame inlining it.
+///
+/// The prediction replays only the call's own basic block: values from
+/// earlier blocks, rearranged by stack shuffles, or read before any later
+/// frame write or nested call are unknown. It may under-approximate (the site
+/// then stays frame-inlined, the pre-linking behavior) but never admits a site
+/// whose operands the block does not visibly read from frame slots.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub(crate) fn tier2_direct_call_site_usable(
+    body: &VerifiedFunction,
+    pc: u32,
+    call: &CallSpecializationKey,
+) -> bool {
+    let instructions = body.instructions();
+    let Some(index) = instructions
+        .iter()
+        .position(|instruction| instruction.pc() == pc)
+    else {
+        return false;
+    };
+    let instruction = &instructions[index];
+    if !matches!(
+        instruction.opcode().name(),
+        "call" | "call0" | "call1" | "call2" | "call3"
+    ) {
+        return false;
+    }
+    let argc = crate::bytecode::effective_pop(instruction).saturating_sub(1);
+    if argc != call.arguments().len() {
+        return false;
+    }
+    let Some(block) = body
+        .control_flow_graph()
+        .blocks()
+        .iter()
+        .find(|block| block.instruction_range().contains(&index))
+    else {
+        return false;
+    };
+    // `true` marks a value pushed by a frame read that is still current.
+    let mut stack: Vec<bool> = Vec::new();
+    for instruction in &instructions[block.instruction_range().start..index] {
+        let name = instruction.opcode().name();
+        let frame_read = name != "get_loc0_loc1"
+            && (name.starts_with("get_arg")
+                || name.starts_with("get_loc")
+                    && (name == "get_loc_check"
+                        || name
+                            .strip_prefix("get_loc")
+                            .is_some_and(|rest| rest.bytes().all(|byte| byte.is_ascii_digit()))));
+        if frame_read {
+            stack.push(true);
+            continue;
+        }
+        // A frame write, closure-variable write, or nested call may change a
+        // slot after it was read; forget every earlier frame read.
+        if name.contains("_loc")
+            || name.contains("_arg")
+            || name.contains("var_ref")
+            || name.starts_with("call")
+            || name.starts_with("tail_call")
+            || name.starts_with("apply")
+            || name.starts_with("eval")
+        {
+            stack.iter_mut().for_each(|known| *known = false);
+        }
+        let pop = crate::bytecode::effective_pop(instruction);
+        stack.truncate(stack.len().saturating_sub(pop));
+        stack.extend(std::iter::repeat_n(
+            false,
+            usize::from(instruction.opcode().n_push()),
+        ));
+    }
+    let Some(function_index) = stack.len().checked_sub(argc + 1) else {
+        return false;
+    };
+    stack[function_index]
+        && call
+            .arguments()
+            .iter()
+            .enumerate()
+            .all(|(argument, representation)| {
+                *representation != FeedbackRepresentation::HeapRef
+                    || stack[function_index + 1 + argument]
+            })
+}
+
 impl CompiledCallTarget {
     pub const fn identity(&self) -> ArtifactVersionIdentity {
         self.identity
@@ -509,9 +629,20 @@ pub struct CompileRequest {
     direct_call_targets: Arc<[DirectCallTarget]>,
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     frame_inline_targets: Arc<[FrameInlineTarget]>,
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    native_call_targets: Arc<[NativeCallTarget]>,
+    /// Set when the function generation retires after dispatch, so a worker
+    /// skips the compile instead of spending the bounded worker queue on it.
+    retired: Arc<AtomicBool>,
 }
 
 impl CompileRequest {
+    /// Whether the requested generation retired after this request was
+    /// dispatched. Its completion can never be installed.
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     pub(super) fn discard_inline_snapshots(&mut self) {
         #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
         {
@@ -600,6 +731,15 @@ impl CompileRequest {
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn frame_inline_targets(&self) -> &[FrameInlineTarget] {
         &self.frame_inline_targets
+    }
+    /// The native-call target of a monomorphic call site, if its callee
+    /// published a P3a native entry when this request was queued.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn native_call_target(&self, pc: u32) -> Option<&NativeCallTarget> {
+        let status = self.feedback.call_link_at(self.key, pc)?;
+        self.native_call_targets
+            .iter()
+            .find(|target| target.link == status)
     }
     #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
     pub fn frame_inline_target(&self, pc: u32) -> Option<&FrameInlineTarget> {
@@ -891,6 +1031,9 @@ pub struct Coordinator {
     environment: ArtifactEnvironment,
     dependencies: DependencyGraph,
     latest_feedback_epochs: HashMap<FunctionKey, u64>,
+    /// Retirement flags shared with dispatched requests (see
+    /// `CompileRequest::is_retired`).
+    in_flight_retired: FxHashMap<FunctionKey, Arc<AtomicBool>>,
     side_exits: HashMap<FunctionKey, HashMap<u32, u8>>,
     side_exit_observations: HashMap<(FunctionKey, u32), Option<ObservedType>>,
     specialization_versions: HashMap<(FunctionKey, u64), u8>,
@@ -988,6 +1131,7 @@ impl Coordinator {
             environment,
             dependencies: DependencyGraph::default(),
             latest_feedback_epochs: HashMap::new(),
+            in_flight_retired: FxHashMap::default(),
             side_exits: HashMap::new(),
             side_exit_observations: HashMap::new(),
             specialization_versions: HashMap::new(),
@@ -1146,6 +1290,10 @@ impl Coordinator {
             || profile.feedback_epoch == 0
             || profile.feedback_epoch != feedback.epoch()
             || !feedback.contains_stable_observation(key, profile.pc, profile.observed)
+            // Side-path lowering only specializes numeric exits and rejects any
+            // other profile as an invalid artifact; queueing one would spend a
+            // compile and record a failure against the installed Tier 2 code.
+            || !matches!(profile.observed, ObservedType::Int32 | ObservedType::Float64)
             || !self.installed_keys.contains_key(&(key, Tier::Baseline))
             || !self.installed_keys.contains_key(&(key, Tier::Optimizing))
         {
@@ -1434,8 +1582,19 @@ impl Coordinator {
                     if budget.exhausted() {
                         break;
                     }
+                    // Pure inlining owns its site. A linked direct entry is a
+                    // transaction with an exact pre-effect miss to the generic
+                    // CALL and needs no shadow frame, so it is preferred over
+                    // frame inlining, but only where the Tier 2 caller can
+                    // take it. Elsewhere the site would reach the generic CALL.
                     if direct_call_targets.iter().any(|target| {
-                        target.pc() == instruction.pc() && target.inline_snapshot().is_some()
+                        target.pc() == instruction.pc()
+                            && (target.inline_snapshot().is_some()
+                                || tier2_direct_call_site_usable(
+                                    &snapshot,
+                                    instruction.pc(),
+                                    target.call(),
+                                ))
                     }) {
                         continue;
                     }
@@ -1451,6 +1610,32 @@ impl Coordinator {
                     }
                 }
                 targets.into()
+            } else {
+                Arc::from([])
+            };
+        #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+        let native_call_targets: Arc<[NativeCallTarget]> =
+            if tier == Tier::Optimizing && side_path_profile.is_none() {
+                snapshot
+                    .instructions()
+                    .iter()
+                    .filter_map(|instruction| {
+                        let link = feedback.call_link_at(key, instruction.pc())?;
+                        if link.callee() == key {
+                            return None;
+                        }
+                        let pin = self.pin(link.callee(), Tier::Optimizing)?;
+                        let artifact = pin.artifact();
+                        let plan = artifact.optimized_metadata()?.native_call_plan()?.clone();
+                        let published = artifact.native_call_published()?.clone();
+                        Some(NativeCallTarget {
+                            link,
+                            plan,
+                            published,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
             } else {
                 Arc::from([])
             };
@@ -1484,6 +1669,9 @@ impl Coordinator {
             direct_call_targets,
             #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
             frame_inline_targets,
+            #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+            native_call_targets,
+            retired: Arc::new(AtomicBool::new(false)),
         });
         if let Some(signature) = side_path_signature {
             let versions = self
@@ -1518,6 +1706,8 @@ impl Coordinator {
                     side_path: request.side_path_profile.is_some(),
                 },
             );
+            self.in_flight_retired
+                .insert(request.key, Arc::clone(&request.retired));
             self.metrics.compiling = self.metrics.compiling.saturating_add(1);
             return Some(request);
         }
@@ -1548,6 +1738,14 @@ impl Coordinator {
     }
 
     pub fn complete(&mut self, completion: CompileCompletion) {
+        let key = completion.key;
+        self.complete_in_flight(completion);
+        if !self.in_flight.contains_key(&key) {
+            self.in_flight_retired.remove(&key);
+        }
+    }
+
+    fn complete_in_flight(&mut self, completion: CompileCompletion) {
         let Some(expected) = self.in_flight.get(&completion.key).copied() else {
             #[cfg(feature = "test-support")]
             self.record_completion_disposition(
@@ -1839,6 +2037,9 @@ impl Coordinator {
         self.last_benefit_target = None;
         self.queue.retain(|request| request.key != key);
         self.in_flight.remove(&key);
+        if let Some(retired) = self.in_flight_retired.remove(&key) {
+            retired.store(true, Ordering::Release);
+        }
         let function = self.functions.entry(key).or_default();
         let was_retired = function.retired;
         function.retired = true;
@@ -1985,6 +2186,19 @@ impl Coordinator {
             children: Default::default(),
         }
         .admission_probe(kind, caller_shape)
+    }
+
+    /// True when the callee's installed optimizing artifact publishes a P3a
+    /// native call entry that a monomorphic caller can link to.
+    #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+    pub fn native_call_ready(&mut self, callee: FunctionKey) -> bool {
+        self.pin(callee, Tier::Optimizing).is_some_and(|pin| {
+            pin.artifact().native_call_published().is_some()
+                && pin
+                    .artifact()
+                    .optimized_metadata()
+                    .is_some_and(|metadata| metadata.native_call_plan().is_some())
+        })
     }
 
     /// A resolved target cannot become frame-inlineable without a generation
@@ -2878,6 +3092,33 @@ mod tests {
                 coordinator.metrics()
             );
         }
+    }
+
+    #[test]
+    fn retiring_a_dispatched_generation_marks_its_request_retired() {
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        let retired = FunctionKey::new(51, 1);
+        let live = FunctionKey::new(52, 1);
+        coordinator
+            .queue(retired, Tier::Baseline, snapshot())
+            .unwrap();
+        coordinator.queue(live, Tier::Baseline, snapshot()).unwrap();
+        let retired_request = coordinator.begin_next().unwrap();
+        let live_request = coordinator.begin_next().unwrap();
+        assert!(!retired_request.is_retired());
+        coordinator.retire(retired);
+        assert!(retired_request.is_retired());
+        assert!(!live_request.is_retired());
+        coordinator.complete(CompileCompletion {
+            key: retired,
+            requested_tier: Tier::Baseline,
+            artifact_key: retired_request.artifact_key(),
+            attempt_id: retired_request.attempt_id(),
+            result: Err(CompileFailure::Cancelled),
+        });
+        assert_eq!(coordinator.metrics().cancelled_compilations, 0);
+        assert!(coordinator.in_flight_retired.contains_key(&live));
+        assert!(!coordinator.in_flight_retired.contains_key(&retired));
     }
 
     #[cfg(feature = "test-support")]

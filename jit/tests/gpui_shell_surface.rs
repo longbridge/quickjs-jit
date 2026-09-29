@@ -196,9 +196,10 @@ fn deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing() {
     context
         .with(|ctx| {
             ctx.eval::<(), _>(
-                // `typeof` has no Tier 1 lowering, so this continuation is a
-                // deterministic policy reject.
-                "globalThis.__terminalHost = value => JSON.stringify({ value, kind: typeof value });",
+                // BigInt literals (`push_bigint_i32`) have no Tier 1
+                // lowering, so this continuation is a deterministic policy
+                // reject.
+                "globalThis.__terminalHost = value => JSON.stringify({ value, kind: String(1n) });",
             )
         })
         .unwrap();
@@ -208,7 +209,7 @@ fn deterministic_tier1_rejection_stops_after_one_snapshot_without_queueing() {
             let function: Function = ctx.globals().get("__terminalHost").unwrap();
             assert_eq!(
                 function.call::<_, String>((42,)).unwrap(),
-                r#"{"value":42,"kind":"number"}"#
+                r#"{"value":42,"kind":"1"}"#
             );
         });
         runtime.jit().poll();

@@ -288,6 +288,23 @@ impl InlineFrame<'_, '_> {
         builder.switch_to_block(success);
         Ok(())
     }
+    /// Memory location of a flat helper slot in this shadow frame.
+    fn slot_address(&self, slot: u32) -> (Value, usize) {
+        let slot = slot as usize;
+        let arguments = usize::from(self.region.body.argument_count);
+        let locals = usize::from(self.region.body.local_count);
+        if slot < arguments {
+            (self.arguments, slot)
+        } else if slot < arguments + locals {
+            (self.locals, slot - arguments)
+        } else {
+            (self.stack, slot - arguments - locals)
+        }
+    }
+    /// Exact `JS_JitHelperFree`: the helper's pc and depth are published
+    /// first, then primitives and shared heap references are released inline
+    /// (leaving undefined, as the helper does). The last heap reference and
+    /// stress-GC frames still call the helper.
     fn free(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -296,6 +313,36 @@ impl InlineFrame<'_, '_> {
         live: usize,
         exception_depth: usize,
     ) -> Result<(), CompileFailure> {
+        set_pc(builder, self.root, self.frame, pc);
+        self.depth(builder, live);
+        let (base, index) = self.slot_address(slot);
+        let value = opt_load(builder, base, index);
+        let heap = builder.create_block();
+        let primitive = builder.create_block();
+        let clear = builder.create_block();
+        let helper = builder.create_block();
+        let done = builder.create_block();
+        builder.set_cold_block(helper);
+        let refcounted = super::super::refcount::emit_has_ref_count(builder, value.tag);
+        builder.ins().brif(refcounted, heap, &[], primitive, &[]);
+        builder.switch_to_block(primitive);
+        let no_stress =
+            super::super::refcount::emit_no_stress(builder, self.frame, self.root.layout.flags);
+        builder.ins().brif(no_stress, clear, &[], helper, &[]);
+        builder.switch_to_block(heap);
+        super::super::refcount::emit_release_refcounted(
+            builder,
+            self.frame,
+            self.root.layout.flags,
+            value.payload,
+            clear,
+            helper,
+        );
+        builder.switch_to_block(clear);
+        let empty = undefined(builder);
+        opt_store(builder, base, index, empty);
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(helper);
         self.helper(
             builder,
             qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
@@ -303,7 +350,64 @@ impl InlineFrame<'_, '_> {
             pc,
             live,
             exception_depth,
-        )
+        )?;
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(done);
+        Ok(())
+    }
+    /// Exact `JS_JitHelperDup` into an unoccupied slot: primitives are copied
+    /// and heap values gain one reference inline; stress-GC frames keep the
+    /// helper for every value.
+    fn dup(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        output: u32,
+        input: u32,
+        pc: u32,
+        live: usize,
+        exception_depth: usize,
+    ) -> Result<(), CompileFailure> {
+        set_pc(builder, self.root, self.frame, pc);
+        self.depth(builder, live);
+        let (input_base, input_index) = self.slot_address(input);
+        let (output_base, output_index) = self.slot_address(output);
+        let value = opt_load(builder, input_base, input_index);
+        let heap = builder.create_block();
+        let copy = builder.create_block();
+        let helper = builder.create_block();
+        let done = builder.create_block();
+        builder.set_cold_block(helper);
+        let primitive = builder.create_block();
+        let refcounted = super::super::refcount::emit_has_ref_count(builder, value.tag);
+        builder.ins().brif(refcounted, heap, &[], primitive, &[]);
+        builder.switch_to_block(primitive);
+        let no_stress =
+            super::super::refcount::emit_no_stress(builder, self.frame, self.root.layout.flags);
+        builder.ins().brif(no_stress, copy, &[], helper, &[]);
+        builder.switch_to_block(heap);
+        super::super::refcount::emit_dup_refcounted(
+            builder,
+            self.frame,
+            self.root.layout.flags,
+            value.payload,
+            copy,
+            helper,
+        );
+        builder.switch_to_block(copy);
+        opt_store(builder, output_base, output_index, value);
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(helper);
+        self.helper(
+            builder,
+            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+            &[0, output, input],
+            pc,
+            live,
+            exception_depth,
+        )?;
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(done);
+        Ok(())
     }
     fn check(&self, builder: &mut FunctionBuilder<'_>, pc: u32) -> Result<(), CompileFailure> {
         let status = runtime_call(
@@ -432,7 +536,7 @@ pub(super) fn emit(
         opt_store(builder, env.stack_base, index, pair);
     }
     set_pc(builder, env, env.frame, node.pc());
-    opt_own_stack_for_exit(
+    opt_own_stack_for_helper(
         builder,
         env.frame,
         env.sret,
@@ -749,14 +853,7 @@ fn emit_body(
                         state.resume(builder, instruction.pc, false)?;
                         builder.switch_to_block(valid);
                     }
-                    state.helper(
-                        builder,
-                        qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
-                        &[0, state.flat(depth)?, input],
-                        next,
-                        depth + 1,
-                        depth,
-                    )?;
+                    state.dup(builder, state.flat(depth)?, input, next, depth + 1, depth)?;
                 }
                 IrOp::PutArgument { index, keep } | IrOp::PutLocal { index, keep } => {
                     let (buffer, slot) = if matches!(instruction.op, IrOp::PutArgument { .. }) {
@@ -769,14 +866,7 @@ fn emit_body(
                     };
                     state.free(builder, slot, next, depth, depth)?;
                     if keep {
-                        state.helper(
-                            builder,
-                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
-                            &[0, slot, state.flat(depth - 1)?],
-                            next,
-                            depth,
-                            depth,
-                        )?;
+                        state.dup(builder, slot, state.flat(depth - 1)?, next, depth, depth)?;
                     } else {
                         let pair = opt_load(builder, state.stack, depth - 1);
                         opt_store(builder, buffer, usize::from(index), pair);
@@ -818,10 +908,10 @@ fn emit_body(
                     opt_store(builder, state.locals, usize::from(index), empty);
                 }
                 IrOp::Drop => state.free(builder, state.flat(depth - 1)?, next, depth, depth)?,
-                IrOp::Stack(StackOp::Dup) => state.helper(
+                IrOp::Stack(StackOp::Dup) => state.dup(
                     builder,
-                    qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
-                    &[0, state.flat(depth)?, state.flat(depth - 1)?],
+                    state.flat(depth)?,
+                    state.flat(depth - 1)?,
                     next,
                     depth + 1,
                     depth,

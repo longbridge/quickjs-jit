@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, IrOp, PollKind,
-    StackOp, TaggedValue, UnaryOp,
+    BinaryOp, FrameSlot, FrameState, FrameStateId, FrameStateKind, FrameStateTable, GenericOp,
+    IrOp, IteratorOp, PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode,
 };
 
 const POLL_INTERVAL: usize = 1_024;
@@ -52,6 +52,23 @@ pub struct IrBlock {
     pub instructions: Vec<IrInstruction>,
 }
 
+/// The handler an exception raised by an instruction resumes in this frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrExceptionHandler {
+    /// Operand-stack index of the innermost live catch offset.
+    pub catch_index: u16,
+    /// First PC of the handler block, entered with the caught value at
+    /// `catch_index` and stack depth `catch_index + 1`.
+    pub handler_pc: u32,
+}
+
+/// The CATCH call of one handler's landing pad.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrCatchSite {
+    pub catch_index: u16,
+    pub state: FrameStateId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaselineIr {
     pub blocks: Vec<IrBlock>,
@@ -59,6 +76,10 @@ pub struct BaselineIr {
     pub max_stack_depth: u16,
     pub argument_count: u16,
     pub local_count: u16,
+    /// Innermost handler of every instruction PC inside a try region.
+    pub exception_handlers: BTreeMap<u32, IrExceptionHandler>,
+    /// One landing-pad CATCH call per handler PC.
+    pub catch_sites: BTreeMap<u32, IrCatchSite>,
 }
 
 impl BaselineIr {
@@ -85,12 +106,65 @@ impl BaselineIr {
         let block_depths = block_depths(function)?;
         let snapshot = function.snapshot();
         let mut states = FrameStateTable::default();
+        let mut exception_handlers = BTreeMap::new();
+        for instruction in function.instructions() {
+            let Some(handler) = function.exception_handler(instruction.pc()) else {
+                continue;
+            };
+            // An iterator-close offset is unwound by the interpreter itself;
+            // native dispatch only resumes ordinary catch handlers. An
+            // exception raised under a for-of close offset takes the ordinary
+            // exception exit, which publishes the exact frame: the
+            // interpreter closes the iterator with a throw completion and,
+            // inside a try region, then resumes the enclosing handler itself.
+            let Some(handler_pc) = handler.handler_pc() else {
+                continue;
+            };
+            exception_handlers.insert(
+                instruction.pc(),
+                IrExceptionHandler {
+                    catch_index: handler.catch_index(),
+                    handler_pc,
+                },
+            );
+        }
+        let mut catch_sites = BTreeMap::new();
+        for handler in exception_handlers.values() {
+            if catch_sites.contains_key(&handler.handler_pc) {
+                continue;
+            }
+            if block_depths.get(&handler.handler_pc).copied()
+                != Some(usize::from(handler.catch_index) + 1)
+            {
+                return Err(CompileFailure::InvalidArtifact);
+            }
+            let state = record_state(
+                &mut states,
+                snapshot.arg_count(),
+                snapshot.local_count(),
+                usize::from(handler.catch_index) + 1,
+                FrameStateKind::Helper,
+                handler.handler_pc,
+            )?;
+            catch_sites.insert(
+                handler.handler_pc,
+                IrCatchSite {
+                    catch_index: handler.catch_index,
+                    state,
+                },
+            );
+        }
         let mut blocks = Vec::with_capacity(function.control_flow_graph().blocks().len());
         let mut max_stack_depth = 0_usize;
         let mut emitted_since_poll = 0_usize;
         let loop_bodies = loop_body_blocks(function);
 
         for (block_index, block) in function.control_flow_graph().blocks().iter().enumerate() {
+            // Dead code after a finally block's `ret` has no predecessor and
+            // no proof; it is never lowered.
+            if !function.is_reachable(block.start_pc()) {
+                continue;
+            }
             let mut depth = *block_depths
                 .get(&block.start_pc())
                 .ok_or(CompileFailure::InvalidArtifact)?;
@@ -240,7 +314,28 @@ impl BaselineIr {
                     });
                 }
 
-                let op = translate_instruction(instruction)?;
+                let op = match instruction.opcode().name() {
+                    // The verifier resolved each `ret` to the exact return
+                    // points of its finally block.
+                    "ret" => IrOp::Ret {
+                        targets: block.successors().to_vec().into_boxed_slice(),
+                    },
+                    // Values between the kept operand and its catch offset
+                    // would need ordered releases; only the direct form is
+                    // lowered.
+                    // The innermost catch offset may also be a for-of
+                    // iterator close offset (`return` inside for-of).
+                    "nip_catch"
+                        if function
+                            .exception_handler(pc)
+                            .map(|handler| usize::from(handler.catch_index()) + 2)
+                            == Some(depth) =>
+                    {
+                        IrOp::NipCatch
+                    }
+                    "nip_catch" => return Err(CompileFailure::UnsupportedOpcode),
+                    _ => translate_instruction(instruction)?,
+                };
                 let depth_before = depth;
                 let helper_call_count = operation_helper_call_count(&op);
                 let frame_state = if operation_may_exit(&op) && helper_call_count == 0 {
@@ -259,7 +354,7 @@ impl BaselineIr {
                 if depth < pop {
                     return Err(CompileFailure::InvalidArtifact);
                 }
-                let next_depth = depth - pop + instruction.opcode().n_push() as usize;
+                let next_depth = depth - pop + effective_push(instruction);
                 max_stack_depth = max_stack_depth.max(next_depth).max(depth);
                 let helper_depth = helper_stack_depth(&op, depth, next_depth)?;
                 max_stack_depth = max_stack_depth.max(helper_depth);
@@ -374,6 +469,31 @@ impl BaselineIr {
             });
         }
 
+        // Tier 1 proves `put_loc_check_init` statically from the entry
+        // analysis. Once this frame creates closures, a callee can initialize
+        // a captured lexical slot (for example a derived constructor's `this`
+        // through `put_var_ref_check_init`), which that proof cannot observe.
+        let ops = || {
+            blocks
+                .iter()
+                .flat_map(|block: &IrBlock| &block.instructions)
+        };
+        if ops().any(|instruction| matches!(instruction.op, IrOp::FClosure(_)))
+            && ops().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    IrOp::PutLocalChecked {
+                        initialize: true,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(CompileFailure::Tier1Rejected(
+                crate::bytecode::FallbackReason::ClosureFrame,
+            ));
+        }
+
         Ok(Self {
             blocks,
             frame_states: states,
@@ -381,6 +501,8 @@ impl BaselineIr {
                 .map_err(|_| CompileFailure::ResourceLimit)?,
             argument_count: snapshot.arg_count(),
             local_count: snapshot.local_count(),
+            exception_handlers,
+            catch_sites,
         })
     }
 }
@@ -433,12 +555,17 @@ fn operation_may_exit(operation: &IrOp) -> bool {
             | IrOp::Branch { .. }
             | IrOp::Return
             | IrOp::ReturnUndefined
+            | IrOp::Ret { .. }
     )
 }
 
 fn operation_helper_call_count(operation: &IrOp) -> usize {
     match operation {
         IrOp::ResolveConstant(_) | IrOp::ResolveAtom(_) | IrOp::GetGlobal(_) | IrOp::NewObject => 1,
+        IrOp::FClosure(_) | IrOp::GetVarRef { .. } | IrOp::CloseLocal(_) | IrOp::SetName(_) => 1,
+        // `set_var_ref*` first duplicates the kept value into the operand
+        // slot above the stack, then the store consumes that duplicate.
+        IrOp::PutVarRef { keep, .. } => 1 + usize::from(*keep),
         IrOp::NewArrayFrom(count) => 1 + usize::from(*count),
         IrOp::GetProperty(_) | IrOp::SetProperty(_) => 2,
         IrOp::DefineProperty(_) => 1,
@@ -453,6 +580,8 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
         IrOp::Call { argc, has_this } => 1 + usize::from(*argc) + 1 + usize::from(*has_this),
         IrOp::CallConstructor(argc) => 1 + usize::from(*argc) + 2,
         IrOp::Regexp => 1,
+        IrOp::Generic(_) => 1,
+        IrOp::Iterator(_) => 1,
         IrOp::GetArgument(_) | IrOp::GetLocal(_) | IrOp::GetLocalChecked(_) => 1,
         IrOp::GetLocalPair => 2,
         IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => 1 + usize::from(*keep),
@@ -492,6 +621,7 @@ fn operation_helper_call_count(operation: &IrOp) -> usize {
             | BinaryOp::StrictNotEqual,
         ) => 1,
         IrOp::Branch { .. } => 1,
+        IrOp::Throw | IrOp::ThrowError { .. } => 1,
         _ => 0,
     }
 }
@@ -510,6 +640,7 @@ fn helper_stack_depth(
     let extra = match operation {
         IrOp::GetProperty(_) | IrOp::Call { .. } | IrOp::CallConstructor(_) => 2,
         IrOp::GetPropertyKeep(_) => 1,
+        IrOp::PutVarRef { keep: true, .. } => 1,
         IrOp::NewArrayFrom(count) if *count != 0 => 2,
         IrOp::DefineElement => 2,
         IrOp::NewArrayFrom(_) => 0,
@@ -571,6 +702,12 @@ fn effective_pop(instruction: &Instruction) -> usize {
     }
 }
 
+/// `gosub` is declared without stack effects in the QuickJS opcode table but
+/// pushes the Int32 return offset that its finally block's `ret` consumes.
+fn effective_push(instruction: &Instruction) -> usize {
+    instruction.opcode().n_push() as usize + usize::from(instruction.opcode().name() == "gosub")
+}
+
 fn block_depths(function: &VerifiedFunction) -> Result<BTreeMap<u32, usize>, CompileFailure> {
     let cfg = function.control_flow_graph();
     let mut depths = BTreeMap::from([(0_u32, 0_usize)]);
@@ -583,7 +720,7 @@ fn block_depths(function: &VerifiedFunction) -> Result<BTreeMap<u32, usize>, Com
             if depth < pop {
                 return Err(CompileFailure::InvalidArtifact);
             }
-            depth = depth - pop + instruction.opcode().n_push() as usize;
+            depth = depth - pop + effective_push(instruction);
         }
         for &successor in block.successors() {
             match depths.get(&successor) {
@@ -623,6 +760,14 @@ fn constant_operand(instruction: &Instruction) -> Option<u32> {
     match instruction.opcode().format() {
         OperandFormat::Constant => Some(instruction.operand_u32(1)),
         OperandFormat::Constant8 => Some(u32::from(instruction.operand_u8(1))),
+        _ => None,
+    }
+}
+
+fn closure_operand(instruction: &Instruction) -> Option<u16> {
+    match instruction.opcode().format() {
+        OperandFormat::Closure => Some(instruction.operand_u16(1)),
+        OperandFormat::NoneClosure => short_index(instruction),
         _ => None,
     }
 }
@@ -698,6 +843,74 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         },
         "call_constructor" => IrOp::CallConstructor(instruction.operand_u16(1)),
         "regexp" => IrOp::Regexp,
+        "fclosure" | "fclosure8" => {
+            IrOp::FClosure(constant_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
+        "get_var_ref" | "get_var_ref0" | "get_var_ref1" | "get_var_ref2" | "get_var_ref3"
+        | "get_var_ref_check" => IrOp::GetVarRef {
+            index: closure_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+            checked: name == "get_var_ref_check",
+        },
+        "put_var_ref"
+        | "put_var_ref0"
+        | "put_var_ref1"
+        | "put_var_ref2"
+        | "put_var_ref3"
+        | "set_var_ref"
+        | "set_var_ref0"
+        | "set_var_ref1"
+        | "set_var_ref2"
+        | "set_var_ref3"
+        | "put_var_ref_check"
+        | "put_var_ref_check_init" => IrOp::PutVarRef {
+            index: closure_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+            mode: match name {
+                "put_var_ref_check" => VarRefMode::Check,
+                "put_var_ref_check_init" => VarRefMode::CheckInit,
+                _ => VarRefMode::Plain,
+            },
+            keep: name.starts_with("set_var_ref"),
+        },
+        "set_name" => {
+            IrOp::SetName(atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
+        "close_loc" => {
+            IrOp::CloseLocal(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
+        }
+        "push_this" => IrOp::Generic(GenericOp::PushThis),
+        "special_object" => match instruction.operand_u8(1) {
+            crate::bytecode::SPECIAL_OBJECT_MAPPED_ARGUMENTS
+            | crate::bytecode::SPECIAL_OBJECT_IMPORT_META => {
+                return Err(CompileFailure::UnsupportedOpcode)
+            }
+            kind if kind > crate::bytecode::SPECIAL_OBJECT_MAX => {
+                return Err(CompileFailure::UnsupportedOpcode)
+            }
+            kind => IrOp::Generic(GenericOp::SpecialObject(kind)),
+        },
+        "get_var_undef" => IrOp::Generic(GenericOp::GetVarUndef(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "delete_var" => IrOp::Generic(GenericOp::DeleteVar(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "put_var" => IrOp::Generic(GenericOp::PutVar(
+            atom_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?,
+        )),
+        "typeof" => IrOp::Generic(GenericOp::TypeOf),
+        "typeof_is_undefined" => IrOp::Generic(GenericOp::TypeOfIsUndefined),
+        "typeof_is_function" => IrOp::Generic(GenericOp::TypeOfIsFunction),
+        "to_object" => IrOp::Generic(GenericOp::ToObject),
+        "to_propkey2" => IrOp::Generic(GenericOp::ToPropertyKey2),
+        "in" => IrOp::Generic(GenericOp::In),
+        "instanceof" => IrOp::Generic(GenericOp::InstanceOf),
+        "delete" => IrOp::Generic(GenericOp::Delete),
+        "pow" => IrOp::Generic(GenericOp::Pow),
+        "for_of_start" => IrOp::Iterator(IteratorOp::ForOfStart),
+        "for_of_next" => IrOp::Iterator(IteratorOp::ForOfNext(instruction.operand_u8(1))),
+        "for_in_start" => IrOp::Iterator(IteratorOp::ForInStart),
+        "for_in_next" => IrOp::Iterator(IteratorOp::ForInNext),
+        "iterator_close" => IrOp::Iterator(IteratorOp::Close),
         "get_arg" | "get_arg0" | "get_arg1" | "get_arg2" | "get_arg3" => {
             IrOp::GetArgument(indexed_operand(instruction).ok_or(CompileFailure::InvalidArtifact)?)
         }
@@ -814,6 +1027,33 @@ fn translate_instruction(instruction: &Instruction) -> Result<IrOp, CompileFailu
         },
         "return" => IrOp::Return,
         "return_undef" => IrOp::ReturnUndefined,
+        "catch" => IrOp::Catch(
+            u32::try_from(
+                instruction
+                    .branch_target()
+                    .ok_or(CompileFailure::InvalidArtifact)?,
+            )
+            .map_err(|_| CompileFailure::InvalidArtifact)?,
+        ),
+        "throw" => IrOp::Throw,
+        "throw_error" => IrOp::ThrowError {
+            atom: instruction.operand_u32(1),
+            kind: instruction.operand_u8(5),
+        },
+        "gosub" => IrOp::Gosub {
+            target: u32::try_from(
+                instruction
+                    .branch_target()
+                    .ok_or(CompileFailure::InvalidArtifact)?,
+            )
+            .map_err(|_| CompileFailure::InvalidArtifact)?,
+            return_pc: instruction
+                .pc()
+                .checked_add(
+                    u32::try_from(instruction.size()).map_err(|_| CompileFailure::ResourceLimit)?,
+                )
+                .ok_or(CompileFailure::ResourceLimit)?,
+        },
         _ => return Err(CompileFailure::UnsupportedOpcode),
     };
     Ok(operation)

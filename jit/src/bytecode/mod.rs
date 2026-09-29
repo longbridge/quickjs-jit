@@ -18,8 +18,16 @@ pub use policy::{
     audited_opcode_policy_table, tier1_policy, AuditedOpcodePolicy, FallbackReason, HelperId,
     Tier1Policy, Tier1Rejection, GENERATED_OPCODE_COUNT, GENERATED_OPCODE_FINGERPRINT,
 };
-pub use stack::SlotKind;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub(crate) use stack::effective_pop;
+#[cfg(feature = "compiler")]
+pub(crate) use stack::local_index;
+pub use stack::{ExceptionHandler, SlotKind};
 pub use verify::{Resource, VerifiedFunction, VerifyError, VerifyErrorKind, VerifyLimits};
+#[cfg(feature = "compiler")]
+pub(crate) use verify::{
+    SPECIAL_OBJECT_IMPORT_META, SPECIAL_OBJECT_MAPPED_ARGUMENTS, SPECIAL_OBJECT_MAX,
+};
 
 /// Numeric opcode constants generated from QuickJS's authoritative macro table.
 pub mod opcode {

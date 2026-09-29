@@ -249,6 +249,9 @@ impl OptimizedIr {
         }) {
             return Err(CompileFailure::UnsupportedOpcode);
         }
+        // Tier 2 lowers lexical checks as plain frame accesses, so it may only
+        // admit them where the binding is initialized on every path.
+        prove_lexical_checks(function)?;
         let make_guard = |pc: u32,
                           mid_loop: bool,
                           next_guard: &mut u32,
@@ -493,6 +496,20 @@ impl OptimizedIr {
 
     pub fn scalar_graph(&self) -> &super::ScalarGraph {
         &self.scalar_graph
+    }
+
+    /// Select checked Int32 updates whose loop-carried inputs are proven only
+    /// through frame reads that `preserve` authorizes (for example, planned
+    /// guarded property leaves). The caller must emit exactly those guarded
+    /// lowerings, or fail compilation. Returns the number of selected updates;
+    /// zero leaves the graph untouched.
+    pub(crate) fn specialize_integer_updates_with_preserved_frame_reads(
+        &mut self,
+        preserve: impl Fn(u32) -> bool,
+        work: usize,
+    ) -> usize {
+        self.scalar_graph
+            .specialize_integer_updates_with_preserved_frame_reads(&self.nodes, preserve, work)
     }
     pub fn nodes(&self) -> &[OptimizedNode] {
         &self.nodes
@@ -863,6 +880,140 @@ fn optimized_block_depths(
         }
     }
     Ok(depths)
+}
+
+/// Feedback-independent part of Tier-2 admission. `false` means translation
+/// rejects this function with `UnsupportedOpcode` for every feedback snapshot
+/// (a reachable opcode lies outside the optimized vocabulary), so its
+/// baseline artifact is the terminal native tier.
+pub fn optimized_vocabulary_admits(function: &VerifiedFunction) -> bool {
+    let instructions = function.instructions();
+    function.control_flow_graph().blocks().iter().all(|block| {
+        instructions
+            .get(block.instruction_range())
+            .is_some_and(|block| {
+                block.iter().all(|instruction| {
+                    let name = match instruction.opcode().name() {
+                        "tail_call" => "call",
+                        "tail_call_method" => "call_method",
+                        name => name,
+                    };
+                    classify_optimized_opcode(name).is_ok()
+                })
+            })
+    })
+}
+
+/// Whether every instruction has an optimized-IR classification. Tier 2
+/// translates the whole function, so a single unclassified opcode (exact
+/// generic helpers, literal allocation, ...) makes every attempt fail.
+pub(crate) fn optimized_opcodes_supported(function: &VerifiedFunction) -> bool {
+    function.instructions().iter().all(|instruction| {
+        matches!(
+            instruction.opcode().name(),
+            "tail_call" | "tail_call_method"
+        ) || classify_optimized_opcode(instruction.opcode().name()).is_ok()
+    })
+}
+
+/// Local may hold an initialized JS value on some path reaching this point.
+const LEXICAL_MAY_BE_INITIALIZED: u8 = 1;
+/// Local may hold `JS_UNINITIALIZED` on some path reaching this point.
+const LEXICAL_MAY_BE_UNINITIALIZED: u8 = 2;
+
+/// Proves that every `get_loc_check`/`put_loc_check` reads a local that is
+/// initialized on every incoming path, and rejects `put_loc_check_init`.
+///
+/// The bytecode verifier deliberately joins "uninitialized" with a JS value
+/// kind into a plain tagged cell (a lexical binding declared in a loop body or
+/// reached by switch fall-through), because Tier 1 keeps the runtime TDZ
+/// check. The Tier 2 lowering has no TDZ check, so without this proof the
+/// interpreter's ReferenceError would be silently replaced by a load.
+///
+/// QuickJS initializes every frame local to `undefined` on entry and only
+/// `set_loc_uninitialized` stores `JS_UNINITIALIZED`. Nested closures cannot
+/// uninitialize a frame binding, so "initialized on every path" is stable
+/// across calls; the converse is not (an arrow `super()` initializes `this`),
+/// which is why `put_loc_check_init` is never admitted here.
+fn prove_lexical_checks(function: &VerifiedFunction) -> Result<(), CompileFailure> {
+    use std::collections::{BTreeMap, VecDeque};
+    let cfg = function.control_flow_graph();
+    let local_count = usize::from(function.snapshot().local_count());
+    let instructions = function.instructions();
+    let touches_lexical = instructions.iter().any(|instruction| {
+        matches!(
+            instruction.opcode().name(),
+            "get_loc_check" | "put_loc_check" | "put_loc_check_init" | "set_loc_uninitialized"
+        )
+    });
+    if !touches_lexical {
+        return Ok(());
+    }
+    let mut entry: BTreeMap<u32, Vec<u8>> =
+        BTreeMap::from([(0u32, vec![LEXICAL_MAY_BE_INITIALIZED; local_count])]);
+    let mut queue = VecDeque::from([0u32]);
+    // A block is queued once on discovery and once per join that adds a bit,
+    // so the fixpoint is bounded by blocks * (2 * locals + 1).
+    let mut budget = cfg
+        .blocks()
+        .len()
+        .saturating_mul(local_count.saturating_mul(2).saturating_add(1))
+        .saturating_add(1);
+    while let Some(pc) = queue.pop_front() {
+        budget = budget.checked_sub(1).ok_or(CompileFailure::ResourceLimit)?;
+        let block = cfg.block(pc).ok_or(CompileFailure::InvalidArtifact)?;
+        let mut state = entry
+            .get(&pc)
+            .cloned()
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        for instruction in &instructions[block.instruction_range()] {
+            let name = instruction.opcode().name();
+            let Some(index) = crate::bytecode::local_index(instruction) else {
+                continue;
+            };
+            let slot = state
+                .get_mut(index)
+                .ok_or(CompileFailure::InvalidArtifact)?;
+            match name {
+                "set_loc_uninitialized" => *slot = LEXICAL_MAY_BE_UNINITIALIZED,
+                "get_loc_check" | "put_loc_check" => {
+                    if *slot & LEXICAL_MAY_BE_UNINITIALIZED != 0 {
+                        return Err(CompileFailure::UnsupportedOpcode);
+                    }
+                    *slot = LEXICAL_MAY_BE_INITIALIZED;
+                }
+                "put_loc_check_init" => return Err(CompileFailure::UnsupportedOpcode),
+                _ if name.starts_with("put_loc")
+                    || name.starts_with("set_loc")
+                    || matches!(name, "inc_loc" | "dec_loc" | "add_loc") =>
+                {
+                    *slot = LEXICAL_MAY_BE_INITIALIZED;
+                }
+                // Plain reads and `close_loc` leave the cell unchanged.
+                _ => {}
+            }
+        }
+        for successor in block.successors() {
+            match entry.get_mut(successor) {
+                Some(existing) => {
+                    let mut changed = false;
+                    for (joined, incoming) in existing.iter_mut().zip(&state) {
+                        let next = *joined | *incoming;
+                        changed |= next != *joined;
+                        *joined = next;
+                    }
+                    if changed {
+                        queue.push_back(*successor);
+                    }
+                }
+                None => {
+                    entry.insert(*successor, state.clone());
+                    queue.push_back(*successor);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn classify_optimized_opcode(

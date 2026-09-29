@@ -5,7 +5,7 @@ use core::{fmt, mem};
 use rquickjs_core::qjs;
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 24;
+pub const ABI_MINOR: u16 = 25;
 
 pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
@@ -30,6 +30,8 @@ pub enum AbiStructure {
     BackendVTable,
     InlineApi,
     ArrayApi,
+    IteratorApi,
+    ObjectApi,
 }
 
 /// Constructors for the authoritative native-to-interpreter exit contract.
@@ -115,6 +117,8 @@ pub struct AbiInfo {
     raw: qjs::JSJitABIInfo,
     inline_api: qjs::JSJitInlineAPI,
     array_api: qjs::JSJitArrayAPI,
+    iterator_api: qjs::JSJitIteratorAPI,
+    object_api: qjs::JSJitObjectAPI,
 }
 
 /// Runtime-exported, append-only offsets for element fast paths.  QuickJS
@@ -198,6 +202,21 @@ impl AbiInfo {
         &self.array_api
     }
 
+    /// Non-allocating continuing-path leaves for synchronous iteration. A
+    /// miss never touches state; callers fall back to the exact helper.
+    #[cfg(feature = "compiler")]
+    pub(crate) const fn iterator_api(&self) -> &qjs::JSJitIteratorAPI {
+        &self.iterator_api
+    }
+
+    /// Non-throwing, non-reentrant allocation and array-method fast paths.
+    /// Each entry completes the exact interpreter effect or misses without an
+    /// observable effect; callers keep their generic helper as the fallback.
+    #[cfg(feature = "compiler")]
+    pub(crate) const fn object_api(&self) -> &qjs::JSJitObjectAPI {
+        &self.object_api
+    }
+
     #[cfg(feature = "compiler")]
     pub(crate) fn element_layout(&self) -> ElementLayout {
         let raw = self.raw.element_layout;
@@ -240,12 +259,16 @@ impl AbiInfo {
                 // All fields are integers or nullable function pointers.
                 inline_api: unsafe { mem::zeroed() },
                 array_api: unsafe { mem::zeroed() },
+                iterator_api: unsafe { mem::zeroed() },
+                object_api: unsafe { mem::zeroed() },
             };
             // Do not resolve native inline addresses against a mismatched
             // main ABI, even when the optional table has a familiar version.
             info.validate_main()?;
             info.inline_api = query_inline_api()?;
             info.array_api = query_array_api()?;
+            info.iterator_api = query_iterator_api()?;
+            info.object_api = query_object_api()?;
             Ok(info)
         } else {
             Err(AbiError::QueryFailed(status))
@@ -255,7 +278,9 @@ impl AbiInfo {
     pub(crate) fn validate(&self) -> Result<(), AbiError> {
         self.validate_main()?;
         validate_inline_api(self.inline_api())?;
-        validate_array_api(&self.array_api)
+        validate_array_api(&self.array_api)?;
+        validate_iterator_api(&self.iterator_api)?;
+        validate_object_api(&self.object_api)
     }
 
     fn validate_main(&self) -> Result<(), AbiError> {
@@ -373,6 +398,10 @@ impl AbiInfo {
             }
             AbiMismatch::StructureLayout(AbiStructure::InlineApi) => self.inline_api.version ^= 1,
             AbiMismatch::StructureLayout(AbiStructure::ArrayApi) => self.array_api.version ^= 1,
+            AbiMismatch::StructureLayout(AbiStructure::IteratorApi) => {
+                self.iterator_api.version ^= 1
+            }
+            AbiMismatch::StructureLayout(AbiStructure::ObjectApi) => self.object_api.version ^= 1,
             AbiMismatch::BuildFingerprint => self.raw.build_fingerprint ^= 1,
         }
     }
@@ -698,6 +727,34 @@ fn runtime_api_layout_fingerprint() -> u64 {
             mem::offset_of!(qjs::JSJitRuntimeAPI, unary_arith_slow),
             mem::size_of::<usize>(),
         ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, fclosure),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, get_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, put_var_ref),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, close_loc),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, set_name),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, generic_op),
+            mem::size_of::<usize>(),
+        ),
+        (
+            mem::offset_of!(qjs::JSJitRuntimeAPI, iterator_op),
+            mem::size_of::<usize>(),
+        ),
     ] {
         hash = layout_field(hash, offset, size);
     }
@@ -723,6 +780,7 @@ fn backend_vtable_layout_fingerprint() -> u64 {
         mem::offset_of!(qjs::JSJitBackendVTable, native_exit),
         mem::offset_of!(qjs::JSJitBackendVTable, record_feedback),
         mem::offset_of!(qjs::JSJitBackendVTable, entry_cache_epoch),
+        mem::offset_of!(qjs::JSJitBackendVTable, entry_fast_grant),
     ] {
         hash = layout_field(hash, offset, mem::size_of::<usize>());
     }
@@ -912,11 +970,21 @@ fn element_layout_fingerprint() -> u64 {
     hash
 }
 
+/// Byte offset of `JSRefCountHeader::ref_count` in every payload addressed by
+/// a JSValue with `JS_VALUE_HAS_REF_COUNT`. Generated code updates the count
+/// in place; the linked QuickJS pins this value in its value-layout
+/// fingerprint (`0022-inline-refcount.patch`), so a mismatch fails closed.
+pub(crate) const REF_COUNT_OFFSET: i32 = 0;
+/// Width in bytes of the C `int` reference count.
+pub(crate) const REF_COUNT_BYTES: u64 = 4;
+
 fn value_layout_fingerprint() -> u64 {
     let mut hash = layout_start::<qjs::JSValue>();
     hash = hash_u64(hash, (qjs::JS_TAG_FIRST as i64) as u64);
     hash = hash_u64(hash, (qjs::JS_TAG_FLOAT64 as i64) as u64);
-    hash_u64(hash, u64::from(cfg!(target_pointer_width = "32")))
+    hash = hash_u64(hash, u64::from(cfg!(target_pointer_width = "32")));
+    hash = hash_u64(hash, REF_COUNT_OFFSET as u64);
+    hash_u64(hash, REF_COUNT_BYTES)
 }
 
 fn expected_build_fingerprint() -> u64 {
@@ -1009,6 +1077,152 @@ fn validate_array_api(api: &qjs::JSJitArrayAPI) -> Result<(), AbiError> {
     }
 }
 
+fn query_iterator_api() -> Result<qjs::JSJitIteratorAPI, AbiError> {
+    let pointer = unsafe { qjs::JS_JitGetIteratorAPI(qjs::QJSJIT_ITERATOR_API_VERSION) };
+    if pointer.is_null()
+        || unsafe { core::ptr::addr_of!((*pointer).struct_size).read() }
+            != mem::size_of::<qjs::JSJitIteratorAPI>() as u32
+    {
+        return Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::IteratorApi,
+        )));
+    }
+    let api = unsafe { pointer.read() };
+    validate_iterator_api(&api)?;
+    Ok(api)
+}
+
+fn validate_iterator_api(api: &qjs::JSJitIteratorAPI) -> Result<(), AbiError> {
+    if api.struct_size != mem::size_of::<qjs::JSJitIteratorAPI>() as u32
+        || api.version != qjs::QJSJIT_ITERATOR_API_VERSION
+        || api.effects != 0
+        || api.reserved != 0
+        || api.array_values_next.is_none()
+    {
+        Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::IteratorApi,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod iterator_api_tests {
+    use super::*;
+
+    #[test]
+    fn iterator_api_is_exactly_versioned_and_complete() {
+        let pointer = unsafe { qjs::JS_JitGetIteratorAPI(qjs::QJSJIT_ITERATOR_API_VERSION) };
+        assert!(!pointer.is_null());
+        let valid = unsafe { *pointer };
+        assert!(validate_iterator_api(&valid).is_ok());
+        assert!(unsafe { qjs::JS_JitGetIteratorAPI(0) }.is_null());
+        for field in 0..5 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.struct_size -= 1,
+                1 => invalid.version += 1,
+                2 => invalid.effects = 1,
+                3 => invalid.reserved = 1,
+                _ => invalid.array_values_next = None,
+            }
+            assert!(validate_iterator_api(&invalid).is_err(), "field {field}");
+        }
+        let mut info = AbiInfo::linked().unwrap();
+        info.iterator_api.effects = 1;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::IteratorApi
+            )))
+        );
+    }
+}
+
+fn query_object_api() -> Result<qjs::JSJitObjectAPI, AbiError> {
+    let pointer = unsafe { qjs::JS_JitGetObjectAPI(qjs::QJSJIT_OBJECT_API_VERSION) };
+    if pointer.is_null()
+        || unsafe { core::ptr::addr_of!((*pointer).struct_size).read() }
+            != mem::size_of::<qjs::JSJitObjectAPI>() as u32
+    {
+        return Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ObjectApi,
+        )));
+    }
+    let api = unsafe { pointer.read() };
+    validate_object_api(&api)?;
+    Ok(api)
+}
+
+/// The object table may allocate and trigger QuickJS' allocation-time cycle
+/// collection (C finalizers only). Any other advertised effect, such as a
+/// throw or VM reentry, is incompatible with the leaf call sites.
+fn validate_object_api(api: &qjs::JSJitObjectAPI) -> Result<(), AbiError> {
+    let permitted = qjs::JS_JIT_OBJECT_EFFECT_ALLOCATE | qjs::JS_JIT_OBJECT_EFFECT_COLLECT;
+    if api.struct_size != mem::size_of::<qjs::JSJitObjectAPI>() as u32
+        || api.version != qjs::QJSJIT_OBJECT_API_VERSION
+        || api.effects & !permitted != 0
+        || api.max_literal_fields != qjs::JS_JIT_OBJECT_LITERAL_MAX_FIELDS
+        || api.literal.is_none()
+        || api.retain_shape.is_none()
+        || api.array_method.is_none()
+        || api.array_push.is_none()
+        || api.array_push_method.is_none()
+    {
+        Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+            AbiStructure::ObjectApi,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod object_api_tests {
+    use super::*;
+
+    fn linked_table() -> qjs::JSJitObjectAPI {
+        let pointer = unsafe { qjs::JS_JitGetObjectAPI(qjs::QJSJIT_OBJECT_API_VERSION) };
+        assert!(!pointer.is_null());
+        unsafe { *pointer }
+    }
+
+    #[test]
+    fn object_api_is_exactly_versioned_bounded_and_complete() {
+        let valid = linked_table();
+        assert!(validate_object_api(&valid).is_ok());
+        assert!(unsafe { qjs::JS_JitGetObjectAPI(0) }.is_null());
+        for field in 0..9 {
+            let mut invalid = valid;
+            match field {
+                0 => invalid.struct_size -= 1,
+                1 => invalid.version += 1,
+                2 => invalid.effects |= 1 << 8,
+                3 => invalid.max_literal_fields += 1,
+                4 => invalid.literal = None,
+                5 => invalid.retain_shape = None,
+                6 => invalid.array_method = None,
+                7 => invalid.array_push_method = None,
+                _ => invalid.array_push = None,
+            }
+            assert!(validate_object_api(&invalid).is_err(), "field {field}");
+        }
+    }
+
+    #[test]
+    fn object_table_validation_is_part_of_the_main_abi_contract() {
+        let mut info = AbiInfo::linked().unwrap();
+        info.object_api.array_push = None;
+        assert_eq!(
+            info.validate(),
+            Err(AbiError::Incompatible(AbiMismatch::StructureLayout(
+                AbiStructure::ObjectApi
+            )))
+        );
+    }
+}
+
 #[cfg(test)]
 mod array_api_tests {
     use super::*;
@@ -1073,7 +1287,7 @@ mod inline_api_tests {
     fn inline_recovery_requires_the_matching_main_abi_minor() {
         let native = AbiInfo::query_linked().unwrap();
         assert_eq!(ABI_MINOR, native.minor());
-        assert_eq!(native.minor(), 24);
+        assert_eq!(native.minor(), 25);
         assert!(unsafe { qjs::JS_JitGetInlineAPI(0) }.is_null());
     }
 

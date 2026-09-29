@@ -57,7 +57,11 @@ mod call_cleanup;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod helpers;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+pub mod native_call;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 pub mod optimized;
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+mod refcount;
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 mod tagged_call_link;
 
@@ -177,6 +181,53 @@ unsafe extern "C" fn unpoison_jit_frame(frame: *mut rquickjs_core::qjs::JSJitExe
             }
         }
     }
+}
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+#[cfg(rquickjs_memory_sanitizer)]
+unsafe extern "C" fn unpoison_jit_bytes(start: *const core::ffi::c_void, size: usize) {
+    unsafe extern "C" {
+        fn __msan_unpoison(address: *const core::ffi::c_void, size: usize);
+    }
+
+    if !start.is_null() {
+        unsafe { __msan_unpoison(start, size) };
+    }
+}
+
+/// Marks bytes that generated code stored as initialized before an
+/// instrumented callee reads them. MSan cannot observe Cranelift stores, so
+/// stack slots passed by address otherwise keep stale shadow. No-op outside
+/// MSan builds.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn emit_msan_unpoison(
+    builder: &mut cranelift_frontend::FunctionBuilder<'_>,
+    pointer_type: cranelift_codegen::ir::Type,
+    address: cranelift_codegen::ir::Value,
+    size: usize,
+) {
+    #[cfg(rquickjs_memory_sanitizer)]
+    {
+        use cranelift_codegen::ir::{AbiParam, InstBuilder, Signature};
+
+        builder.set_srcloc(Default::default());
+        let mut signature = Signature::new(builder.func.signature.call_conv);
+        signature
+            .params
+            .extend([AbiParam::new(pointer_type), AbiParam::new(pointer_type)]);
+        let signature = builder.import_signature(signature);
+        let target = builder.ins().iconst(
+            pointer_type,
+            unpoison_jit_bytes as *const () as usize as i64,
+        );
+        let size = builder.ins().iconst(pointer_type, size as i64);
+        builder
+            .ins()
+            .call_indirect(signature, target, &[address, size]);
+    }
+
+    #[cfg(not(rquickjs_memory_sanitizer))]
+    let _ = (builder, pointer_type, address, size);
 }
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]

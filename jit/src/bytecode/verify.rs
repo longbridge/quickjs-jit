@@ -119,9 +119,35 @@ pub struct VerifiedFunction {
     instructions: Vec<Instruction>,
     cfg: ControlFlowGraph,
     osr_points: Box<[super::OsrPoint]>,
+    exception_handlers: std::collections::BTreeMap<u32, stack::ExceptionHandler>,
+    unreachable: std::collections::BTreeSet<u32>,
+    exception_regions: bool,
 }
 
 impl VerifiedFunction {
+    /// False for dead instructions the verifier admitted without a proof
+    /// (only after a finally block's `ret`).
+    pub fn is_reachable(&self, pc: u32) -> bool {
+        !self.unreachable.contains(&pc)
+    }
+
+    /// The innermost live catch offset when the instruction at `pc` starts,
+    /// i.e. where the interpreter's unwinding of an exception raised by that
+    /// instruction first stops. `None` outside every try region.
+    pub fn exception_handler(&self, pc: u32) -> Option<stack::ExceptionHandler> {
+        self.exception_handlers.get(&pc).copied()
+    }
+
+    /// True when any instruction executes with a live catch offset that
+    /// resumes a handler in this frame, or the bytecode contains a
+    /// try/finally transfer (a for-of iterator close offset alone is not a
+    /// region). Consumers that cannot model
+    /// exceptional control flow (inlining, direct leaf calls) must reject it.
+    /// Computed once at verification: maintenance consults it on every scan.
+    pub fn has_exception_regions(&self) -> bool {
+        self.exception_regions
+    }
+
     pub fn snapshot(&self) -> &CompileSnapshot {
         &self.snapshot
     }
@@ -148,10 +174,13 @@ impl VerifiedFunction {
         }
         let mut unsupported = None;
         for instruction in &self.instructions {
-            if let super::Tier1Policy::Reject(reason) =
-                super::tier1_policy(instruction.opcode().id())
-                    .expect("verified opcode belongs to the generated table")
-            {
+            let policy = super::tier1_policy(instruction.opcode().id())
+                .expect("verified opcode belongs to the generated table");
+            let policy = match special_object_rejection(instruction) {
+                Some(reason) => super::Tier1Policy::Reject(reason),
+                None => policy,
+            };
+            if let super::Tier1Policy::Reject(reason) = policy {
                 let rejection = super::Tier1Rejection::new(instruction.pc(), reason);
                 if reason == super::FallbackReason::UnsupportedOpcode {
                     unsupported.get_or_insert(rejection);
@@ -161,6 +190,29 @@ impl VerifiedFunction {
             }
         }
         unsupported.map_or(Ok(()), Err)
+    }
+}
+
+/// QuickJS `OP_SPECIAL_OBJECT_MAPPED_ARGUMENTS`: sloppy-mode `arguments`
+/// aliases argument slots through variable references, which native code
+/// keeps in registers, so it remains an extended-frame rejection.
+pub(crate) const SPECIAL_OBJECT_MAPPED_ARGUMENTS: u8 = 1;
+/// QuickJS `OP_SPECIAL_OBJECT_IMPORT_META`: module state is interpreter-only.
+pub(crate) const SPECIAL_OBJECT_IMPORT_META: u8 = 6;
+/// QuickJS `OP_SPECIAL_OBJECT_NULL_PROTO`, the largest kind this ABI knows.
+pub(crate) const SPECIAL_OBJECT_MAX: u8 = 7;
+
+/// Operand-sensitive rejections for opcodes whose policy is otherwise a
+/// helper: only `special_object` kinds that copy frame state are admitted.
+fn special_object_rejection(instruction: &Instruction) -> Option<super::FallbackReason> {
+    if instruction.opcode().name() != "special_object" {
+        return None;
+    }
+    match instruction.operand_u8(1) {
+        SPECIAL_OBJECT_MAPPED_ARGUMENTS => Some(super::FallbackReason::ExtendedFrame),
+        SPECIAL_OBJECT_IMPORT_META => Some(super::FallbackReason::UnsupportedOpcode),
+        kind if kind > SPECIAL_OBJECT_MAX => Some(super::FallbackReason::UnsupportedOpcode),
+        _ => None,
     }
 }
 
@@ -387,12 +439,21 @@ pub(crate) fn verify(
         limits.max_basic_blocks,
     )?;
     let proof = stack::prove(&snapshot, &instructions, &cfg, limits.max_work_units)?;
-    if let Some(instruction) = instructions
+    // QuickJS emits the enclosing loop's continuation after a finally block's
+    // `ret` even when every path leaves through the return points. Only
+    // functions with finally blocks may carry such dead code; it has no proof
+    // and consumers never translate it.
+    let has_subroutines = instructions
         .iter()
-        .find(|instruction| !proof.visited.contains(&instruction.pc()))
-    {
+        .any(|instruction| matches!(instruction.opcode().name(), "gosub" | "ret"));
+    let unreachable: std::collections::BTreeSet<u32> = instructions
+        .iter()
+        .map(Instruction::pc)
+        .filter(|pc| !proof.visited.contains(pc))
+        .collect();
+    if let Some(pc) = unreachable.first().copied().filter(|_| !has_subroutines) {
         return Err(VerifyError::new(
-            instruction.pc(),
+            pc,
             VerifyErrorKind::UnreachableInstruction,
         ));
     }
@@ -408,7 +469,7 @@ pub(crate) fn verify(
         .blocks()
         .iter()
         .map(|block| block.start_pc())
-        .filter(|pc| cfg.is_loop_header(*pc))
+        .filter(|pc| cfg.is_loop_header(*pc) && !unreachable.contains(pc))
         .map(|pc| {
             let state = proof
                 .before
@@ -418,10 +479,26 @@ pub(crate) fn verify(
         })
         .collect::<Result<Vec<_>, VerifyError>>()?
         .into_boxed_slice();
+    // A for-of iterator close offset alone is not an exception region: an
+    // exception raised under it leaves the frame through the ordinary exit,
+    // where the interpreter closes the iterator exactly.
+    let exception_regions = proof
+        .handlers
+        .values()
+        .any(|handler| handler.resumes_in_frame())
+        || instructions.iter().any(|instruction| {
+            matches!(
+                instruction.opcode().name(),
+                "catch" | "nip_catch" | "gosub" | "ret" | "throw" | "throw_error"
+            )
+        });
     Ok(VerifiedFunction {
         snapshot,
         instructions,
         cfg,
         osr_points,
+        exception_handlers: proof.handlers,
+        unreachable,
+        exception_regions,
     })
 }

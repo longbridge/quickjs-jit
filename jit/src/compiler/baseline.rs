@@ -32,15 +32,15 @@ use crate::{
         Relocation, RelocationKind, RelocationTarget, StackMap, UnwindKind, UnwindMetadata,
     },
     ir::{
-        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, IrOp, PollKind, StackOp,
-        TaggedValue, UnaryOp, MAX_HELPER_SCRATCH_SLOTS,
+        BaselineIr, BinaryOp, FrameSlot, FrameStateId, FrameStateKind, GenericOp, IrOp, IteratorOp,
+        PollKind, StackOp, TaggedValue, UnaryOp, VarRefMode, MAX_HELPER_SCRATCH_SLOTS,
     },
     platform::{CodeAllocator, CodeMemoryError, ExecutableCode},
     runtime::CompileRequest,
 };
 
 use super::{
-    emit_external_call,
+    emit_external_call, emit_msan_unpoison,
     helpers::{generated_signatures, FrameLayout},
     CompileControl, CompileFailure, Compiler,
 };
@@ -91,9 +91,534 @@ struct HelperLowering<'a> {
     signatures: &'a [cranelift_codegen::ir::SigRef],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    /// The function creates closures (`fclosure`), so attached var refs may
+    /// alias its argument and local slots. Any helper that can run JavaScript
+    /// may then write those slots through the closure, so the native copies
+    /// are reloaded from the interpreter frame after every helper returns.
+    reload_captured_slots: bool,
+    /// Landing pad of the innermost try region around the instruction being
+    /// lowered; `None` exits to the interpreter with the pending exception.
+    exception_target: std::cell::Cell<Option<Block>>,
+    element_layout: crate::abi::ElementLayout,
+    object_fast: Option<ObjectFastPaths>,
+}
+
+/// Addresses of the versioned object/array leaves (`JSJitObjectAPI`). Every
+/// leaf either completes the interpreter's exact effect or misses without an
+/// observable effect, never throws and never reenters the VM, so generated
+/// code keeps the generic helper sequence as the fallback of every hit test.
+#[derive(Clone, Copy, Debug)]
+struct ObjectFastPaths {
+    literal: usize,
+    retain_shape: usize,
+    array_method: usize,
+    array_push: usize,
+    array_push_method: usize,
+    max_literal_fields: usize,
+}
+
+impl ObjectFastPaths {
+    fn from_api(api: &qjs::JSJitObjectAPI) -> Option<Self> {
+        Some(Self {
+            literal: api.literal? as usize,
+            retain_shape: api.retain_shape? as usize,
+            array_method: api.array_method? as usize,
+            array_push: api.array_push? as usize,
+            array_push_method: api.array_push_method? as usize,
+            max_literal_fields: usize::try_from(api.max_literal_fields).ok()?,
+        })
+    }
+}
+
+/// A straight-line instruction range with a leaf fast path. The hit path
+/// jumps to `join`; the unchanged instructions `start..=end` are lowered in
+/// the fallback block, which then jumps to `join` as well.
+#[derive(Clone, Copy, Debug)]
+struct FusedRegion {
+    end: usize,
+    join: Block,
+    /// Stack slot of a literal built on the fallback path whose final shape
+    /// is retained so later executions hit the literal leaf.
+    retain_literal: Option<usize>,
+}
+
+fn literal_operand(op: &IrOp, argument_count: usize, local_count: usize) -> Option<LiteralValue> {
+    match *op {
+        IrOp::Push(constant) if constant.tag >= 0 => Some(LiteralValue::Constant(constant)),
+        IrOp::GetArgument(index) if usize::from(index) < argument_count => {
+            Some(LiteralValue::Argument(index))
+        }
+        IrOp::GetLocal(index) | IrOp::GetLocalChecked(index)
+            if usize::from(index) < local_count =>
+        {
+            Some(LiteralValue::Local(index))
+        }
+        _ => None,
+    }
+}
+
+fn literal_operand_pair(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    value: LiteralValue,
+) -> Result<Pair, CompileFailure> {
+    Ok(match value {
+        LiteralValue::Constant(constant) => constant_pair(builder, constant),
+        LiteralValue::Argument(argument) => use_pair(
+            builder,
+            *helpers
+                .arguments
+                .get(usize::from(argument))
+                .ok_or(CompileFailure::InvalidArtifact)?,
+        ),
+        LiteralValue::Local(local) => use_pair(
+            builder,
+            *helpers
+                .locals
+                .get(usize::from(local))
+                .ok_or(CompileFailure::InvalidArtifact)?,
+        ),
+    })
+}
+
+/// `receiver.method(value)` where the receiver and the single argument are
+/// side-effect-free reads: `(receiver, atom, value, end)`.
+fn array_push_statement_pattern(
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    argument_count: usize,
+    local_count: usize,
+) -> Option<(LiteralValue, u32, LiteralValue, usize)> {
+    let receiver = match literal_operand(&instructions.get(start)?.op, argument_count, local_count)?
+    {
+        LiteralValue::Constant(_) => return None,
+        receiver => receiver,
+    };
+    let IrOp::GetPropertyKeep(atom) = instructions.get(start + 1)?.op else {
+        return None;
+    };
+    let value = literal_operand(
+        &instructions.get(start + 2)?.op,
+        argument_count,
+        local_count,
+    )?;
+    matches!(
+        instructions.get(start + 3)?.op,
+        IrOp::Call {
+            argc: 1,
+            has_this: true
+        }
+    )
+    .then_some((receiver, atom, value, start + 3))
+}
+
+fn emit_fused_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    depth: usize,
+) -> Result<Option<FusedRegion>, CompileFailure> {
+    let argument_count = helpers.arguments.len();
+    let local_count = helpers.locals.len();
+    if let Some((atoms, values, end)) = object_literal_pattern(
+        instructions,
+        start,
+        argument_count,
+        local_count,
+        fast.max_literal_fields,
+    ) {
+        if depth + usize::from(!values.is_empty()) >= helpers.stack.len() {
+            return Ok(None);
+        }
+        let join = emit_object_literal_fast_path(builder, helpers, fast, &atoms, &values, depth)?;
+        return Ok(Some(FusedRegion {
+            end,
+            join,
+            retain_literal: Some(depth),
+        }));
+    }
+    if let Some((receiver, atom, value, end)) =
+        array_push_statement_pattern(instructions, start, argument_count, local_count)
+    {
+        if depth + 2 >= helpers.stack.len() {
+            return Ok(None);
+        }
+        let join = emit_array_push_statement_fast_path(
+            builder, helpers, fast, receiver, atom, value, depth,
+        )?;
+        return Ok(Some(FusedRegion {
+            end,
+            join,
+            retain_literal: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// Whole-statement `array.push(value)`: one leaf performs the exact
+/// `get_field2` lookup and the built-in push without materializing the
+/// receiver, method or argument references (no DUP/FREE helpers).
+#[allow(clippy::too_many_arguments)]
+fn emit_array_push_statement_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    receiver: LiteralValue,
+    atom: u32,
+    value: LiteralValue,
+    depth: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let receiver = literal_operand_pair(builder, helpers, receiver)?;
+    let value = literal_operand_pair(builder, helpers, value)?;
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let fallback = builder.create_block();
+    let join = builder.create_block();
+    let is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    let class_check = builder.create_block();
+    builder
+        .ins()
+        .brif(is_object, class_check, &[], fallback, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], fallback, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let value_size =
+        i32::try_from(mem::size_of::<qjs::JSValue>()).map_err(|_| CompileFailure::ResourceLimit)?;
+    let scratch = object_scratch(builder, 3);
+    for (index, pair) in [receiver, value].into_iter().enumerate() {
+        let offset =
+            value_size * i32::try_from(index).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, scratch, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, scratch, offset + helpers.layout.value_tag);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let receiver_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    let value_address = builder.ins().stack_addr(pointer_type, scratch, value_size);
+    let out_address = builder
+        .ins()
+        .stack_addr(pointer_type, scratch, 2 * value_size);
+    let atom = builder.ins().iconst(types::I32, i64::from(atom));
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_push_method,
+        &[ctx, receiver_address, atom, value_address, out_address],
+        &[scratch],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], fallback, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(fallback);
+    builder.switch_to_block(hit);
+    let length = Pair {
+        payload: builder
+            .ins()
+            .stack_load(types::I64, scratch, 2 * value_size),
+        tag: builder.ins().stack_load(
+            types::I64,
+            scratch,
+            2 * value_size + helpers.layout.value_tag,
+        ),
+    };
+    define_pair(builder, helpers.stack[depth], length);
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    define_pair(builder, helpers.stack[depth + 1], undefined);
+    define_pair(builder, helpers.stack[depth + 2], undefined);
+    builder.ins().jump(join, &[]);
+    builder.switch_to_block(fallback);
+    Ok(join)
+}
+
+/// After the generic literal sequence, retain the object's final shape.
+fn emit_retain_literal_shape(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    object_index: usize,
+) -> Result<(), CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let object = use_pair(builder, helpers.stack[object_index]);
+    let scratch = object_scratch(builder, 1);
+    builder.ins().stack_store(object.payload, scratch, 0);
+    builder
+        .ins()
+        .stack_store(object.tag, scratch, helpers.layout.value_tag);
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let object_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.retain_shape,
+        &[ctx, object_address],
+        &[scratch],
+    );
+    Ok(())
+}
+
+/// One side-effect-free value of a fused object literal. Each operand is read
+/// in place and duplicated by the leaf, exactly like the bytecode push would.
+#[derive(Clone, Copy, Debug)]
+enum LiteralValue {
+    Constant(TaggedValue),
+    Argument(u16),
+    Local(u16),
+}
+
+/// `object` followed by `(pure push, define_field)*`, all inside one block.
+/// Returns the atoms/values and the index of the last fused instruction.
+fn object_literal_pattern(
+    instructions: &[crate::ir::IrInstruction],
+    start: usize,
+    argument_count: usize,
+    local_count: usize,
+    max_fields: usize,
+) -> Option<(Vec<u32>, Vec<LiteralValue>, usize)> {
+    if !matches!(instructions.get(start)?.op, IrOp::NewObject) {
+        return None;
+    }
+    let mut atoms = Vec::new();
+    let mut values = Vec::new();
+    let mut end = start;
+    while atoms.len() < max_fields {
+        let (Some(value), Some(define)) = (instructions.get(end + 1), instructions.get(end + 2))
+        else {
+            break;
+        };
+        let IrOp::DefineProperty(atom) = define.op else {
+            break;
+        };
+        let Some(value) = literal_operand(&value.op, argument_count, local_count) else {
+            break;
+        };
+        if atom == 0 || atoms.contains(&atom) {
+            break;
+        }
+        atoms.push(atom);
+        values.push(value);
+        end += 2;
+    }
+    // QuickJS keeps only the final hashed shape of a literal alive (the
+    // transition shapes are mutated in place), so a prefix of a longer
+    // literal would miss on every execution. Fuse complete literals only.
+    literal_is_complete(instructions, end).then_some((atoms, values, end))
+}
+
+/// Bytecode stack effect `(pops, pushes)` of the Tier 1 operations that may
+/// follow a literal. `None` stops the completeness scan conservatively.
+fn literal_scan_stack_effect(op: &IrOp) -> Option<(usize, usize)> {
+    Some(match *op {
+        IrOp::Nop => (0, 0),
+        IrOp::Push(_)
+        | IrOp::ResolveConstant(_)
+        | IrOp::ResolveAtom(_)
+        | IrOp::GetGlobal(_)
+        | IrOp::NewObject
+        | IrOp::GetArgument(_)
+        | IrOp::GetLocal(_)
+        | IrOp::GetLocalChecked(_) => (0, 1),
+        IrOp::GetLocalPair => (0, 2),
+        IrOp::NewArrayFrom(count) => (usize::from(count), 1),
+        IrOp::GetProperty(_) | IrOp::ToPropertyKey | IrOp::Unary(_) => (1, 1),
+        IrOp::GetPropertyKeep(_) => (1, 2),
+        IrOp::SetProperty(_) => (2, 0),
+        IrOp::DefineProperty(_) | IrOp::GetElement | IrOp::Binary(_) => (2, 1),
+        IrOp::SetElement => (3, 0),
+        IrOp::DefineElement => (3, 1),
+        IrOp::Call { argc, has_this } => (usize::from(argc) + 1 + usize::from(has_this), 1),
+        IrOp::PutArgument { keep, .. } | IrOp::PutLocal { keep, .. } => (1, usize::from(keep)),
+        IrOp::Drop => (1, 0),
+        _ => return None,
+    })
+}
+
+/// True when the object produced by the literal ending at `end` is consumed
+/// in this block before another definition could target it.
+fn literal_is_complete(instructions: &[crate::ir::IrInstruction], end: usize) -> bool {
+    // Depths are relative to the literal object's slot, which sits at 0.
+    let mut depth = 1_usize;
+    for instruction in instructions.iter().skip(end + 1).take(64) {
+        match instruction.op {
+            IrOp::DefineProperty(_) if depth == 2 => return false,
+            IrOp::DefineElement if depth == 3 => return false,
+            _ => {}
+        }
+        let Some((pops, pushes)) = literal_scan_stack_effect(&instruction.op) else {
+            return true;
+        };
+        if pops >= depth {
+            return true;
+        }
+        depth = depth - pops + pushes;
+    }
+    false
+}
+
+fn object_scratch(builder: &mut FunctionBuilder<'_>, values: usize) -> StackSlot {
+    let bytes = values.max(1) * mem::size_of::<qjs::JSValue>();
+    builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        u32::try_from(bytes).expect("bounded scratch"),
+        3,
+    ))
+}
+
+/// Calls an object leaf. `slots` are the stack slots the leaf reads through
+/// pointer parameters; they are unpoisoned first because MSan cannot observe
+/// Cranelift stores.
+fn emit_object_leaf_call(
+    builder: &mut FunctionBuilder<'_>,
+    pointer_type: cranelift_codegen::ir::Type,
+    target: usize,
+    params: &[Value],
+    slots: &[StackSlot],
+) -> Value {
+    for slot in slots {
+        let size = builder.func.sized_stack_slots[*slot].size as usize;
+        let address = builder.ins().stack_addr(pointer_type, *slot, 0);
+        emit_msan_unpoison(builder, pointer_type, address, size);
+    }
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    for param in params {
+        signature
+            .params
+            .push(AbiParam::new(builder.func.dfg.value_type(*param)));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    let signature = builder.import_signature(signature);
+    let target = builder.ins().iconst(pointer_type, target as i64);
+    let call = emit_external_call(builder, signature, target, params, pointer_type, None, None);
+    builder.inst_results(call)[0]
+}
+
+/// Emit the literal leaf before the generic `object`/`define_field` sequence.
+/// On a hit the fused result is installed and control jumps to the returned
+/// join block; on a miss the builder is left in the fallback block, where the
+/// caller lowers the unchanged instruction sequence and then jumps to join.
+#[allow(clippy::too_many_arguments)]
+fn emit_object_literal_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    atoms: &[u32],
+    values: &[LiteralValue],
+    depth: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let value_slot = object_scratch(builder, values.len());
+    let out_slot = object_scratch(builder, 1);
+    let atom_slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        u32::try_from(atoms.len().max(1) * 4).map_err(|_| CompileFailure::ResourceLimit)?,
+        2,
+    ));
+    for (index, (atom, value)) in atoms.iter().zip(values).enumerate() {
+        let pair = literal_operand_pair(builder, helpers, *value)?;
+        let offset = i32::try_from(index * mem::size_of::<qjs::JSValue>())
+            .map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, value_slot, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, value_slot, offset + helpers.layout.value_tag);
+        let atom = builder.ins().iconst(types::I32, i64::from(*atom));
+        let atom_offset = i32::try_from(index * 4).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(atom, atom_slot, atom_offset);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let atoms_address = builder.ins().stack_addr(pointer_type, atom_slot, 0);
+    let values_address = builder.ins().stack_addr(pointer_type, value_slot, 0);
+    let count = builder.ins().iconst(
+        types::I32,
+        i64::try_from(atoms.len()).map_err(|_| CompileFailure::ResourceLimit)?,
+    );
+    let out_address = builder.ins().stack_addr(pointer_type, out_slot, 0);
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.literal,
+        &[ctx, atoms_address, values_address, count, out_address],
+        &[atom_slot, value_slot],
+    );
+    let hit = builder.create_block();
+    let fallback = builder.create_block();
+    let join = builder.create_block();
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], fallback, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(fallback);
+    builder.switch_to_block(hit);
+    let object = Pair {
+        payload: builder.ins().stack_load(types::I64, out_slot, 0),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, out_slot, helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[depth], object);
+    if !values.is_empty() {
+        let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+        define_pair(builder, helpers.stack[depth + 1], undefined);
+    }
+    builder.ins().jump(join, &[]);
+    builder.switch_to_block(fallback);
+    Ok(join)
 }
 
 impl HelperLowering<'_> {
+    /// Refresh the native argument/local copies from the interpreter frame.
+    /// Every helper call first publishes all of them (`materialize_frame`),
+    /// so right after it returns the frame is the authoritative owner.
+    fn reload_captured_slots(&self, builder: &mut FunctionBuilder<'_>) {
+        if !self.reload_captured_slots {
+            return;
+        }
+        for (index, pair) in self.arguments.iter().copied().enumerate() {
+            reload_pair(builder, pair, self.arg_buf, index, self.layout);
+        }
+        for (index, pair) in self.locals.iter().copied().enumerate() {
+            reload_pair(builder, pair, self.var_buf, index, self.layout);
+        }
+    }
+
     fn invoke(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -123,7 +648,10 @@ impl HelperLowering<'_> {
             arguments,
             self.pointer_type,
             self.layout,
-        )
+            self.exception_target.get(),
+        )?;
+        self.reload_captured_slots(builder);
+        Ok(())
     }
 
     fn set_depth(
@@ -199,67 +727,6 @@ impl HelperLowering<'_> {
         builder.switch_to_block(continuation);
         Ok(())
     }
-
-    fn shape_guard(
-        &self,
-        builder: &mut FunctionBuilder<'_>,
-        state: FrameStateId,
-        live_depth: usize,
-        object: u32,
-        shape: crate::runtime::ShapeToken,
-    ) -> Result<Value, CompileFailure> {
-        let frame_state = self.ir.frame_states.get(state);
-        let fixed_slots = usize::from(self.ir.argument_count) + usize::from(self.ir.local_count);
-        let visible_depth = frame_state
-            .slots
-            .len()
-            .checked_sub(fixed_slots)
-            .ok_or(CompileFailure::InvalidArtifact)?;
-        materialize_frame(
-            builder,
-            self.frame,
-            self.arg_buf,
-            self.var_buf,
-            self.stack_base,
-            self.arguments,
-            self.locals,
-            self.stack,
-            live_depth,
-            visible_depth,
-            frame_state.pc,
-            self.pointer_type,
-            self.layout,
-        )?;
-        let helper_id = qjs::JSJitHelperId_JS_JIT_HELPER_SHAPE_GUARD as usize;
-        let helper = builder.ins().load(
-            self.pointer_type,
-            MemFlags::new(),
-            self.runtime_api,
-            self.layout.helper_offsets[helper_id],
-        );
-        let params = [
-            self.frame,
-            helper_u32(
-                builder,
-                u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
-            ),
-            helper_u32(builder, object),
-            helper_u32(builder, shape.identity() as u32),
-            helper_u32(builder, (shape.identity() >> 32) as u32),
-            helper_u32(builder, shape.generation() as u32),
-            helper_u32(builder, (shape.generation() >> 32) as u32),
-        ];
-        let call = emit_external_call(
-            builder,
-            self.signatures[helper_id],
-            helper,
-            &params,
-            self.pointer_type,
-            Some(self.frame),
-            None,
-        );
-        Ok(builder.inst_results(call)[0])
-    }
 }
 
 /// Cranelift compiler configured for one explicit target ISA.
@@ -301,16 +768,19 @@ fn baseline_property_sites(
             let observations = site.observations();
             let safe = site.state() != ShapeFeedbackState::Megamorphic
                 && !observations.is_empty()
-                && observations.len() <= 3
+                && observations.len() <= crate::runtime::POLYMORPHIC_PROPERTY_LIMIT
                 && observations.iter().all(|observation| {
-                    matches!(
-                        observation.value(),
-                        ObservedType::Int32
-                            | ObservedType::Float64
-                            | ObservedType::Bool
-                            | ObservedType::Null
-                            | ObservedType::Undefined
-                    ) && observation.prototype().identity() == 0
+                    observation.shape().identity() != 0
+                        && observation.shape().generation() != 0
+                        && matches!(
+                            observation.value(),
+                            ObservedType::Int32
+                                | ObservedType::Float64
+                                | ObservedType::Bool
+                                | ObservedType::Null
+                                | ObservedType::Undefined
+                        )
+                        && observation.prototype().identity() == 0
                         && observation.prototype().generation() == 0
                         && !observation
                             .attributes()
@@ -552,9 +1022,9 @@ impl BaselineCompiler {
         let layout = FrameLayout::validated(
             u8::try_from(pointer_type.bytes()).map_err(|_| CompileFailure::InvalidArtifact)?,
         )?;
-        let element_layout = crate::abi::AbiInfo::linked()
-            .map_err(|_| CompileFailure::InvalidArtifact)?
-            .element_layout();
+        let abi = crate::abi::AbiInfo::linked().map_err(|_| CompileFailure::InvalidArtifact)?;
+        let element_layout = abi.element_layout();
+        let object_fast = ObjectFastPaths::from_api(abi.object_api());
         let ir = match policy {
             CompilePolicy::AdvertisedOnly => BaselineIr::translate(function)?,
             #[cfg(feature = "test-support")]
@@ -599,6 +1069,7 @@ impl BaselineCompiler {
                 GuardExit::Retry,
                 direct_calls,
                 properties,
+                object_fast,
             )?;
             builder.seal_all_blocks();
             builder.finalize();
@@ -612,6 +1083,7 @@ impl BaselineCompiler {
             control.check_ir_bytes(clif_text.len())?;
         }
         let function_parameters = clif.params.clone();
+        let reachable_locations = reachable_source_locations(&clif);
         let mut context = Context::for_function(clif);
         context.set_disasm(cfg!(feature = "test-support"));
         let compiled = context
@@ -709,6 +1181,15 @@ impl BaselineCompiler {
                         if osr_start.is_some() && matching_ranges.is_empty() {
                             return None;
                         }
+                        // A state lowered only into blocks the CLIF control
+                        // flow graph cannot reach (for example the handler of
+                        // a try region with no exceptional edge) is removed
+                        // with its block; no machine code can observe it.
+                        if matching_ranges.is_empty()
+                            && !reachable_locations.contains(&source_location)
+                        {
+                            return None;
+                        }
                         return Some(Err(CompileFailure::InvalidArtifact));
                     };
                     let (location_kind, code_offset) = match state.kind {
@@ -771,6 +1252,16 @@ impl BaselineCompiler {
             machine_disassembly: compiled.vcode.clone(),
             osr_codes: Vec::new(),
         };
+        #[cfg(feature = "test-support")]
+        dump_code_for_diagnostics(
+            if osr_start.is_some() {
+                "tier1-osr"
+            } else {
+                "tier1"
+            },
+            &code.clif,
+            code.machine_disassembly(),
+        );
         if osr_start.is_none() && matches!(policy, CompilePolicy::AdvertisedOnly) {
             for point in function.osr_points() {
                 let Some(map) =
@@ -857,6 +1348,7 @@ impl Compiler for BaselineCompiler {
                 &self.isa,
                 request.snapshot(),
                 signature,
+                Some(request.feedback()),
                 None,
             )
             .ok()
@@ -910,6 +1402,7 @@ impl Compiler for BaselineCompiler {
                 &self.isa,
                 request.snapshot(),
                 signature,
+                Some(request.feedback()),
                 Some(control),
             )
             .ok()
@@ -947,19 +1440,94 @@ impl Compiler for BaselineCompiler {
 /// Finalizes Cranelift IR produced by the independent optimizing builder. This
 /// owns only target encoding/unwind packaging; it does not translate or lower
 /// baseline IR.
+/// Native-call entries call themselves through a colocated user name, and a
+/// Tier 2 body names the native entry published in its own artifact. Both are
+/// resolved at publication; every other external name keeps its symbol text.
+fn native_call_relocation_target(
+    name: &cranelift_codegen::ir::ExternalName,
+    parameters: &cranelift_codegen::ir::function::FunctionParameters,
+) -> Option<RelocationTarget> {
+    let cranelift_codegen::ir::ExternalName::User(reference) = name else {
+        return None;
+    };
+    let user = parameters.user_named_funcs().get(*reference)?;
+    if user.index != 0 {
+        return None;
+    }
+    match user.namespace {
+        super::native_call::NATIVE_SELF_NAMESPACE => Some(RelocationTarget::FunctionOffset(0)),
+        super::native_call::NATIVE_ENTRY_NAMESPACE => Some(RelocationTarget::Symbol(
+            super::native_call::NATIVE_ENTRY_SYMBOL.into(),
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn finalize_optimized_machine(
     isa: &OwnedTargetIsa,
     clif: Function,
     control: Option<&CompileControl>,
     requires_helper_stack_map: bool,
 ) -> Result<RelocatableCode, CompileFailure> {
+    finalize_optimized_machine_with_lowered_text(
+        isa,
+        clif,
+        control,
+        requires_helper_stack_map,
+        None,
+    )
+}
+
+/// As [`finalize_optimized_machine`]. `lowered_text` is the builder's CLIF
+/// before any post-lowering cleanup; it becomes the artifact's `clif()` text so
+/// lowering-structure evidence is independent of the machine-level cleanups
+/// (constant canonicalization, constant-branch folding, exit
+/// rematerialization) that only change register pressure and dead code.
+pub(crate) fn finalize_optimized_machine_with_lowered_text(
+    isa: &OwnedTargetIsa,
+    clif: Function,
+    control: Option<&CompileControl>,
+    requires_helper_stack_map: bool,
+    lowered_text: Option<String>,
+) -> Result<RelocatableCode, CompileFailure> {
+    let clif_text = lowered_text.unwrap_or_else(|| clif.display().to_string());
     if let Some(control) = control {
         control.check()?;
-        control.check_ir_bytes(clif.display().to_string().len())?;
+        control.check_ir_bytes(clif_text.len())?;
     }
-    let clif_text = clif.display().to_string();
+    let mut clif = clif;
+    canonicalize_integer_constants(&mut clif);
+    fold_constant_branches(&mut clif);
     let function_parameters = clif.params.clone();
     let mut context = Context::for_function(clif);
+    // With shared constants, loop-invariant tags and values become constant
+    // block parameters. Remove those first so guards on them fold to jumps
+    // too; `compile` below reruns the complete Cranelift pipeline.
+    context.compute_cfg();
+    context.compute_domtree();
+    context
+        .eliminate_unreachable_code(&**isa)
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    context
+        .remove_constant_phis(&**isa)
+        .map_err(|_| CompileFailure::InvalidArtifact)?;
+    context.func.dfg.resolve_all_aliases();
+    fold_bitcast_round_trips(&mut context.func);
+    fold_constant_branches(&mut context.func);
+    // Folding can remove the only helper call (for example one guarded by a
+    // proven check); an artifact without calls publishes no helper map.
+    let requires_helper_stack_map = requires_helper_stack_map
+        && context.func.layout.blocks().any(|block| {
+            context
+                .func
+                .layout
+                .block_insts(block)
+                .any(|inst| context.func.dfg.insts[inst].opcode().is_call())
+        });
+    #[cfg(feature = "test-support")]
+    let final_text = diagnostics_directory()
+        .is_some()
+        .then(|| context.func.display().to_string());
     context.set_disasm(cfg!(feature = "test-support"));
     let compiled = context
         .compile(&**isa, &mut ControlPlane::default())
@@ -981,11 +1549,15 @@ pub(crate) fn finalize_optimized_machine(
         .map(|reloc| {
             let target = match &reloc.target {
                 FinalizedRelocTarget::Func(offset) => RelocationTarget::FunctionOffset(*offset),
-                FinalizedRelocTarget::ExternalName(name) => RelocationTarget::Symbol(
-                    name.display(Some(&function_parameters))
-                        .to_string()
-                        .into_boxed_str(),
-                ),
+                FinalizedRelocTarget::ExternalName(name) => {
+                    native_call_relocation_target(name, &function_parameters).unwrap_or_else(|| {
+                        RelocationTarget::Symbol(
+                            name.display(Some(&function_parameters))
+                                .to_string()
+                                .into_boxed_str(),
+                        )
+                    })
+                }
             };
             Relocation::with_target(
                 reloc.offset,
@@ -1020,6 +1592,14 @@ pub(crate) fn finalize_optimized_machine(
     } else {
         (Vec::new(), Vec::new())
     };
+    #[cfg(feature = "test-support")]
+    if let Some(final_text) = final_text {
+        dump_code_for_diagnostics(
+            "tier2",
+            &final_text,
+            compiled.vcode.as_deref().unwrap_or(""),
+        );
+    }
     Ok(RelocatableCode {
         bytes,
         relocations,
@@ -1034,6 +1614,332 @@ pub(crate) fn finalize_optimized_machine(
         machine_disassembly: compiled.vcode.clone(),
         osr_codes: Vec::new(),
     })
+}
+
+/// Rewrites every `iconst` to one canonical definition per (type, value) at
+/// the top of the entry block.
+///
+/// The optimizing lowering materializes tag and payload constants where they
+/// are needed, so SSA construction turns loop-invariant constants such as the
+/// Int32 tag into block parameters whose incoming values are distinct `iconst`
+/// instructions. Cranelift's constant-phi removal compares value identity and
+/// runs before GVN, so those parameters otherwise survive into register
+/// allocation and cost a register (and moves) per loop-carried slot. Constants
+/// are pure and the entry block dominates every block, so sharing one
+/// definition preserves semantics exactly.
+pub(crate) fn canonicalize_integer_constants(function: &mut Function) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    use cranelift_codegen::ir::{InstructionData, Opcode};
+    let Some(entry) = function.layout.entry_block() else {
+        return;
+    };
+    function.dfg.resolve_all_aliases();
+    let mut constants = Vec::new();
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            if let InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } = function.dfg.insts[inst]
+            {
+                let value = function.dfg.first_result(inst);
+                constants.push((inst, value, function.dfg.value_type(value), imm.bits()));
+            }
+        }
+    }
+    if constants.len() < 2 {
+        return;
+    }
+    let mut canonical = std::collections::HashMap::new();
+    let mut cursor = FuncCursor::new(function);
+    cursor.goto_first_insertion_point(entry);
+    for &(_, _, ty, bits) in &constants {
+        canonical
+            .entry((ty, bits))
+            .or_insert_with(|| cursor.ins().iconst(ty, bits));
+    }
+    let mut replacements = std::collections::HashMap::new();
+    for &(inst, value, ty, bits) in &constants {
+        cursor.func.layout.remove_inst(inst);
+        replacements.insert(value, canonical[&(ty, bits)]);
+    }
+    let function = cursor.func;
+    let blocks = function.layout.blocks().collect::<Vec<_>>();
+    for block in blocks {
+        let mut next = function.layout.first_inst(block);
+        while let Some(inst) = next {
+            next = function.layout.next_inst(inst);
+            function.dfg.map_inst_values(inst, |value| {
+                replacements.get(&value).copied().unwrap_or(value)
+            });
+        }
+    }
+}
+
+/// Forwards `bitcast.T (bitcast.U x)` to `x` when `x` already has type `T`.
+///
+/// The optimizing lowering keeps Float64 payloads in 64-bit integer frame
+/// variables, so each arithmetic step converts its operands back to `f64`
+/// and its result to `i64`. Without this rewrite every chained Float64
+/// operation pays a GPR/XMM move pair on its dependency chain. Only scalar
+/// bitcasts are forwarded; a round trip through another type of the same
+/// width is the identity on the bits.
+pub(crate) fn fold_bitcast_round_trips(function: &mut Function) {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let mut replacements = std::collections::HashMap::new();
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            let InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                arg,
+                ..
+            } = function.dfg.insts[inst]
+            else {
+                continue;
+            };
+            let ValueDef::Result(source, 0) = function.dfg.value_def(arg) else {
+                continue;
+            };
+            let InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                arg: original,
+                ..
+            } = function.dfg.insts[source]
+            else {
+                continue;
+            };
+            let result = function.dfg.first_result(inst);
+            let ty = function.dfg.value_type(result);
+            let middle = function.dfg.value_type(arg);
+            if ty.is_vector() || middle.is_vector() || function.dfg.value_type(original) != ty {
+                continue;
+            }
+            replacements.insert(result, original);
+        }
+    }
+    if replacements.is_empty() {
+        return;
+    }
+    let blocks = function.layout.blocks().collect::<Vec<_>>();
+    for block in blocks {
+        let mut next = function.layout.first_inst(block);
+        while let Some(inst) = next {
+            next = function.layout.next_inst(inst);
+            function.dfg.map_inst_values(inst, |value| {
+                replacements.get(&value).copied().unwrap_or(value)
+            });
+        }
+    }
+}
+
+/// Evaluates `value` when it is a compile-time integer built only from
+/// constants, integer width conversions, bitwise operations and integer
+/// comparisons. Results are normalized to the value's type width.
+fn constant_integer_value(
+    function: &Function,
+    value: cranelift_codegen::ir::Value,
+    memo: &mut std::collections::HashMap<cranelift_codegen::ir::Value, Option<i64>>,
+    depth: u32,
+) -> Option<i64> {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstructionData, Opcode, ValueDef};
+    if let Some(&known) = memo.get(&value) {
+        return known;
+    }
+    if depth > 64 {
+        return None;
+    }
+    let ty = function.dfg.value_type(value);
+    if !ty.is_int() || ty.bits() > 64 {
+        return None;
+    }
+    let bits = ty.bits();
+    let wrap = |raw: i64| -> i64 {
+        if bits == 64 {
+            raw
+        } else {
+            let shift = 64 - bits;
+            (raw << shift) >> shift
+        }
+    };
+    let ValueDef::Result(inst, 0) = function.dfg.value_def(value) else {
+        return None;
+    };
+    let mut operand = |value| constant_integer_value(function, value, memo, depth + 1);
+    let compare = |cond: IntCC, lhs: i64, rhs: i64, width: u32| -> i64 {
+        let unsigned = |raw: i64| -> u64 {
+            if width == 64 {
+                raw as u64
+            } else {
+                (raw as u64) & ((1u64 << width) - 1)
+            }
+        };
+        let result = match cond {
+            IntCC::Equal => lhs == rhs,
+            IntCC::NotEqual => lhs != rhs,
+            IntCC::SignedLessThan => lhs < rhs,
+            IntCC::SignedGreaterThanOrEqual => lhs >= rhs,
+            IntCC::SignedGreaterThan => lhs > rhs,
+            IntCC::SignedLessThanOrEqual => lhs <= rhs,
+            IntCC::UnsignedLessThan => unsigned(lhs) < unsigned(rhs),
+            IntCC::UnsignedGreaterThanOrEqual => unsigned(lhs) >= unsigned(rhs),
+            IntCC::UnsignedGreaterThan => unsigned(lhs) > unsigned(rhs),
+            IntCC::UnsignedLessThanOrEqual => unsigned(lhs) <= unsigned(rhs),
+        };
+        i64::from(result)
+    };
+    let result = match function.dfg.insts[inst] {
+        InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            imm,
+        } => Some(wrap(imm.bits())),
+        InstructionData::Unary { opcode, arg } => {
+            let arg_ty = function.dfg.value_type(arg);
+            let raw = operand(arg);
+            match (opcode, raw) {
+                (Opcode::Ireduce | Opcode::Sextend, Some(raw)) => Some(wrap(raw)),
+                (Opcode::Uextend, Some(raw)) if arg_ty.bits() < 64 => {
+                    Some(wrap(raw & ((1i64 << arg_ty.bits()) - 1)))
+                }
+                (Opcode::Bnot, Some(raw)) => Some(wrap(!raw)),
+                _ => None,
+            }
+        }
+        InstructionData::Binary { opcode, args } => {
+            match (opcode, operand(args[0]), operand(args[1])) {
+                (Opcode::Band, Some(lhs), Some(rhs)) => Some(wrap(lhs & rhs)),
+                (Opcode::Bor, Some(lhs), Some(rhs)) => Some(wrap(lhs | rhs)),
+                (Opcode::Bxor, Some(lhs), Some(rhs)) => Some(wrap(lhs ^ rhs)),
+                // An and with a known zero, or an or with a known all-ones
+                // operand, is constant whatever the other operand is.
+                (Opcode::Band, Some(0), _) | (Opcode::Band, _, Some(0)) => Some(0),
+                (Opcode::Bor, Some(-1), _) | (Opcode::Bor, _, Some(-1)) => Some(wrap(-1)),
+                _ => None,
+            }
+        }
+        InstructionData::BinaryImm64 { opcode, arg, imm } => {
+            let imm = wrap(imm.bits());
+            match (opcode, operand(arg)) {
+                (Opcode::BandImm, Some(raw)) => Some(wrap(raw & imm)),
+                (Opcode::BorImm, Some(raw)) => Some(wrap(raw | imm)),
+                (Opcode::BxorImm, Some(raw)) => Some(wrap(raw ^ imm)),
+                _ => None,
+            }
+        }
+        InstructionData::IntCompare { cond, args, .. } => {
+            let width = function.dfg.value_type(args[0]).bits();
+            match (operand(args[0]), operand(args[1])) {
+                (Some(lhs), Some(rhs)) if width <= 64 => Some(compare(cond, lhs, rhs, width)),
+                _ => None,
+            }
+        }
+        InstructionData::IntCompareImm { cond, arg, imm, .. } => {
+            let width = function.dfg.value_type(arg).bits();
+            let rhs = if width == 64 {
+                imm.bits()
+            } else {
+                let shift = 64 - width;
+                (imm.bits() << shift) >> shift
+            };
+            operand(arg)
+                .filter(|_| width <= 64)
+                .map(|lhs| compare(cond, lhs, rhs, width))
+        }
+        _ => None,
+    };
+    memo.insert(value, result);
+    result
+}
+
+/// Replaces `brif` on a compile-time constant condition with a jump.
+///
+/// Guards whose checks the specializer has already proven (for example a tag
+/// comparison against the canonical Int32 tag constant) reach Cranelift as
+/// branches on folded constants, which its mid-end does not turn into jumps.
+/// The dead deopt blocks then keep values live for register allocation and
+/// the hot path executes a materialize/test/branch per proven guard. The
+/// untaken successor is unreachable and is removed by Cranelift's
+/// unreachable-code elimination.
+pub(crate) fn fold_constant_branches(function: &mut Function) {
+    use cranelift_codegen::ir::{InstBuilder, InstructionData, Opcode};
+    let mut memo = std::collections::HashMap::new();
+    let mut folds = Vec::new();
+    for block in function.layout.blocks() {
+        let Some(inst) = function.layout.last_inst(block) else {
+            continue;
+        };
+        let InstructionData::Brif {
+            opcode: Opcode::Brif,
+            arg,
+            blocks,
+        } = function.dfg.insts[inst]
+        else {
+            continue;
+        };
+        let Some(condition) = constant_integer_value(function, arg, &mut memo, 0) else {
+            continue;
+        };
+        let taken = blocks[usize::from(condition == 0)];
+        let target = taken.block(&function.dfg.value_lists);
+        let arguments = taken.args_slice(&function.dfg.value_lists).to_vec();
+        folds.push((inst, target, arguments));
+    }
+    if folds.is_empty() {
+        return;
+    }
+    for (inst, target, arguments) in folds {
+        function.dfg.replace(inst).jump(target, &arguments);
+    }
+    // Drop the blocks the folded branches made unreachable, so callers that
+    // inspect the finalized IR (for example to decide whether a helper call
+    // remains) see exactly the code that will be emitted.
+    let Some(entry) = function.layout.entry_block() else {
+        return;
+    };
+    let mut reachable = std::collections::HashSet::new();
+    let mut worklist = vec![entry];
+    while let Some(block) = worklist.pop() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        for inst in function.layout.block_insts(block) {
+            for successor in function.dfg.insts[inst].branch_destination(&function.dfg.jump_tables)
+            {
+                worklist.push(successor.block(&function.dfg.value_lists));
+            }
+        }
+    }
+    let unreachable = function
+        .layout
+        .blocks()
+        .filter(|block| !reachable.contains(block))
+        .collect::<Vec<_>>();
+    for block in unreachable {
+        while let Some(inst) = function.layout.first_inst(block) {
+            function.layout.remove_inst(inst);
+        }
+        function.layout.remove_block(block);
+    }
+}
+
+/// Test-support diagnostic: when `QJSJIT_DUMP_CODE` names a directory, write
+/// each finalized function's Cranelift IR and machine disassembly there so
+/// benchmark kernels can be inspected under production tiering.
+#[cfg(feature = "test-support")]
+fn diagnostics_directory() -> Option<std::ffi::OsString> {
+    std::env::var_os("QJSJIT_DUMP_CODE")
+}
+
+#[cfg(feature = "test-support")]
+fn dump_code_for_diagnostics(kind: &str, clif: &str, machine: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let Some(directory) = diagnostics_directory() else {
+        return;
+    };
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = std::path::Path::new(&directory)
+        .join(format!("{}-{sequence:04}-{kind}.txt", std::process::id()));
+    let _ = std::fs::write(path, format!("{clif}\n;; machine code\n{machine}"));
 }
 
 pub(crate) fn artifact_from_relocatable(
@@ -1148,6 +2054,17 @@ impl RelocatableCode {
     }
 
     pub fn publish(self) -> Result<PublishedBaselineCode, CodeMemoryError> {
+        self.publish_with(&[], Vec::new())
+    }
+
+    /// Publishes with named relocation symbols resolved to absolute
+    /// addresses. `retained` publications stay executable at least as long
+    /// as this code, which may embed their addresses.
+    pub(crate) fn publish_with(
+        self,
+        symbols: &[(&str, u64)],
+        retained: Vec<PublishedBaselineCode>,
+    ) -> Result<PublishedBaselineCode, CodeMemoryError> {
         if !self.host_publishable || self.target != Triple::host() {
             return Err(CodeMemoryError::TargetIsaMismatch);
         }
@@ -1165,7 +2082,10 @@ impl RelocatableCode {
                         base.checked_add(u64::from(*offset))
                     }
                     RelocationTarget::Absolute(value) => Some(*value),
-                    RelocationTarget::Symbol(_) => None,
+                    RelocationTarget::Symbol(name) => symbols
+                        .iter()
+                        .find(|(symbol, _)| *symbol == &**name)
+                        .map(|(_, address)| *address),
                 })
                 .map_err(|_| CodeMemoryError::UnresolvedRelocationTarget)?;
             resolved.push(resolved_relocation);
@@ -1177,16 +2097,22 @@ impl RelocatableCode {
         let osr_codes = self
             .osr_codes
             .into_iter()
-            .map(|(map, code)| Ok((map, code.publish()?)))
+            .map(|(map, code)| Ok((map, code.publish_with(symbols, retained.clone())?)))
             .collect::<Result<Vec<_>, CodeMemoryError>>()?;
-        Ok(PublishedBaselineCode::new(
+        let mut published = PublishedBaselineCode::new(
             executable,
             unwind_registration,
             self.unwind_metadata,
             self.stack_maps,
             self.frame_states,
             osr_codes,
-        ))
+        );
+        if !retained.is_empty() {
+            Arc::get_mut(&mut published.allocation)
+                .expect("new publication is uniquely owned")
+                .retained = retained.into_boxed_slice();
+        }
+        Ok(published)
     }
 }
 
@@ -1204,6 +2130,8 @@ struct PublishedBaselineAllocation {
     stack_maps: Box<[StackMap]>,
     frame_states: Box<[ArtifactFrameState]>,
     osr_codes: Box<[(crate::runtime::OsrMap, PublishedBaselineCode)]>,
+    /// Publications whose absolute addresses this code embeds.
+    retained: Box<[PublishedBaselineCode]>,
     #[cfg(feature = "test-support")]
     lifetime_events: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -1225,6 +2153,7 @@ impl PublishedBaselineCode {
                 stack_maps: stack_maps.into_boxed_slice(),
                 frame_states: frame_states.into_boxed_slice(),
                 osr_codes: osr_codes.into_boxed_slice(),
+                retained: Box::new([]),
                 #[cfg(feature = "test-support")]
                 lifetime_events: Arc::new(Mutex::new(Vec::new())),
             }),
@@ -1820,6 +2749,34 @@ fn frame_state_source_loc(state: FrameStateId) -> Result<SourceLoc, CompileFailu
     Ok(SourceLoc::new(bits))
 }
 
+/// Source locations of every instruction in a block reachable from the CLIF
+/// entry block. Cranelift's unreachable-code elimination uses the same
+/// control flow graph, so a frame state whose location is absent here was
+/// only lowered into code that is removed before emission.
+fn reachable_source_locations(function: &Function) -> BTreeSet<u32> {
+    let mut locations = BTreeSet::new();
+    let Some(entry) = function.layout.entry_block() else {
+        return locations;
+    };
+    let cfg = cranelift_codegen::flowgraph::ControlFlowGraph::with_function(function);
+    let mut visited = BTreeSet::from([entry]);
+    let mut worklist = vec![entry];
+    while let Some(block) = worklist.pop() {
+        for instruction in function.layout.block_insts(block) {
+            let location = function.srcloc(instruction);
+            if !location.is_default() {
+                locations.insert(location.bits());
+            }
+        }
+        for successor in cfg.succ_iter(block) {
+            if visited.insert(successor) {
+                worklist.push(successor);
+            }
+        }
+    }
+    locations
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum EntryRoot {
     Argument(u16),
@@ -2026,9 +2983,66 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
         let mut terminated = false;
 
         for instruction in &block.instructions {
+            // Every helper edge of an instruction inside a try region may
+            // enter its handler. The handler observes the frame's arguments
+            // and locals as they are at that edge: before, after, or (for a
+            // kept store) between the release of the old value and the store.
+            let handler = (!matches!(
+                instruction.op,
+                IrOp::Poll { .. } | IrOp::OsrLabel { .. } | IrOp::Nop
+            ))
+            .then(|| ir.exception_handlers.get(&instruction.pc).copied())
+            .flatten();
+            if let Some(handler) = handler {
+                successors.push(exceptional_input(&frame, handler)?);
+                match instruction.op {
+                    IrOp::PutLocal { index, keep: true } => {
+                        let mut transient = frame.clone();
+                        *transient
+                            .locals
+                            .get_mut(usize::from(index))
+                            .ok_or(CompileFailure::InvalidArtifact)? =
+                            AbstractValue::known(KnownKind::Undefined);
+                        successors.push(exceptional_input(&transient, handler)?);
+                    }
+                    IrOp::PutArgument { index, keep: true } => {
+                        let mut transient = frame.clone();
+                        *transient
+                            .arguments
+                            .get_mut(usize::from(index))
+                            .ok_or(CompileFailure::InvalidArtifact)? =
+                            AbstractValue::known(KnownKind::Undefined);
+                        successors.push(exceptional_input(&transient, handler)?);
+                    }
+                    _ => {}
+                }
+            }
             match &instruction.op {
                 IrOp::Poll { .. } | IrOp::OsrLabel { state: _ } | IrOp::Nop => {}
                 IrOp::Push(value) => frame.stack.push(AbstractValue::from_tagged(*value)),
+                IrOp::Catch(_) => frame.stack.push(AbstractValue::known(KnownKind::Other)),
+                IrOp::NipCatch => {
+                    let value = frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    frame.stack.push(value);
+                }
+                IrOp::Throw => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    terminated = true;
+                }
+                IrOp::ThrowError { .. } => terminated = true,
+                IrOp::Gosub { target, .. } => {
+                    frame.stack.push(AbstractValue::known(KnownKind::Number));
+                    successors.push((*target, frame.clone()));
+                    terminated = true;
+                }
+                IrOp::Ret { targets } => {
+                    frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    for target in targets.iter() {
+                        successors.push((*target, frame.clone()));
+                    }
+                    terminated = true;
+                }
                 // Constant-pool descriptors are pointer-free but intentionally
                 // do not carry the full runtime value. Keep their abstract
                 // domain unknown: the lowering performs the exact tag guard
@@ -2040,6 +3054,30 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 }
                 IrOp::GetGlobal(_) => {
                     frame.stack.push(AbstractValue::unknown());
+                }
+                IrOp::FClosure(_) => {
+                    frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                // Closure variables may hold any value, including the TDZ
+                // sentinel for the unchecked form; uses guard at run time.
+                IrOp::GetVarRef { .. } => {
+                    frame.stack.push(AbstractValue::unknown());
+                }
+                IrOp::PutVarRef { keep, .. } => {
+                    if *keep {
+                        frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
+                    } else {
+                        frame.stack.pop().ok_or(CompileFailure::InvalidArtifact)?;
+                    }
+                }
+                IrOp::SetName(_) => {
+                    frame.stack.last().ok_or(CompileFailure::InvalidArtifact)?;
+                }
+                IrOp::CloseLocal(index) => {
+                    frame
+                        .locals
+                        .get(usize::from(*index))
+                        .ok_or(CompileFailure::InvalidArtifact)?;
                 }
                 IrOp::NewObject => {
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
@@ -2121,6 +3159,58 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                         .ok_or(CompileFailure::InvalidArtifact)?;
                     frame.stack.truncate(new_len);
                     frame.stack.push(AbstractValue::known(KnownKind::Other));
+                }
+                IrOp::Generic(operation) => {
+                    let (pop, push) = operation.stack_effect();
+                    let start = frame
+                        .stack
+                        .len()
+                        .checked_sub(pop)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    if *operation == GenericOp::ToPropertyKey2 {
+                        // The object stays in place; only the key changes.
+                        frame.stack.truncate(start + 1);
+                        frame.stack.push(AbstractValue::unknown());
+                    } else {
+                        frame.stack.truncate(start);
+                        for _ in 0..push {
+                            frame.stack.push(if operation.produces_boolean() {
+                                AbstractValue::known(KnownKind::Boolean)
+                            } else if *operation == GenericOp::ToObject {
+                                AbstractValue::known(KnownKind::Other)
+                            } else {
+                                AbstractValue::unknown()
+                            });
+                        }
+                    }
+                }
+                IrOp::Iterator(operation) => {
+                    let base = frame
+                        .stack
+                        .len()
+                        .checked_sub(operation.window_below())
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    match operation {
+                        IteratorOp::ForOfStart => {
+                            frame.stack.truncate(base);
+                            frame.stack.extend([
+                                AbstractValue::unknown(),
+                                AbstractValue::unknown(),
+                                AbstractValue::unknown(),
+                            ]);
+                        }
+                        IteratorOp::ForInStart => {
+                            frame.stack.truncate(base);
+                            frame.stack.push(AbstractValue::unknown());
+                        }
+                        IteratorOp::ForOfNext(_) | IteratorOp::ForInNext => {
+                            // Completion replaces the iterator with undefined.
+                            frame.stack[base] = AbstractValue::unknown();
+                            frame.stack.push(AbstractValue::unknown());
+                            frame.stack.push(AbstractValue::known(KnownKind::Boolean));
+                        }
+                        IteratorOp::Close => frame.stack.truncate(base),
+                    }
                 }
                 IrOp::GetArgument(index) => frame.stack.push(
                     frame
@@ -2321,6 +3411,11 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
                 }
                 IrOp::ReturnUndefined => terminated = true,
             }
+            if let Some(handler) = handler {
+                if frame.stack.len() >= usize::from(handler.catch_index) {
+                    successors.push(exceptional_input(&frame, handler)?);
+                }
+            }
             if terminated {
                 break;
             }
@@ -2354,6 +3449,29 @@ fn analyze_entry_domains(ir: &BaselineIr) -> Result<EntryAnalysis, CompileFailur
     }
 
     Ok(analysis)
+}
+
+/// The abstract frame a handler block is entered with from one exceptional
+/// edge: operands below the catch offset, then the caught (unknown) value.
+fn exceptional_input(
+    frame: &AbstractFrame,
+    handler: crate::ir::IrExceptionHandler,
+) -> Result<(u32, AbstractFrame), CompileFailure> {
+    let catch_index = usize::from(handler.catch_index);
+    let mut stack = frame
+        .stack
+        .get(..catch_index)
+        .ok_or(CompileFailure::InvalidArtifact)?
+        .to_vec();
+    stack.push(AbstractValue::unknown());
+    Ok((
+        handler.handler_pc,
+        AbstractFrame {
+            arguments: frame.arguments.clone(),
+            locals: frame.locals.clone(),
+            stack,
+        },
+    ))
 }
 
 /// `helper_backed` is true for the plain `Unary` form, whose non-numeric
@@ -2410,6 +3528,10 @@ fn binary_returns_boolean(operation: BinaryOp) -> bool {
 fn ir_op_produces_boolean(operation: &IrOp) -> bool {
     match operation {
         IrOp::Binary(operation) => binary_returns_boolean(*operation),
+        IrOp::Generic(operation) => operation.produces_boolean(),
+        // `js_for_of_next`/`js_for_in_next` and the Array values leaf always
+        // leave an exact JS boolean `done` flag on the stack top.
+        IrOp::Iterator(IteratorOp::ForOfNext(_) | IteratorOp::ForInNext) => true,
         _ => false,
     }
 }
@@ -2441,6 +3563,7 @@ fn lower_function(
     _guard_exit: GuardExit,
     direct_calls: &[BaselineDirectCallSite],
     properties: &[BaselinePropertySite],
+    object_fast: Option<ObjectFastPaths>,
 ) -> Result<(), CompileFailure> {
     let pointer_type = isa.pointer_type();
     let blocks: BTreeMap<u32, Block> = ir
@@ -2469,21 +3592,6 @@ fn lower_function(
     }
     let sret = params[0];
     let frame = params[1];
-    let property_caches = properties
-        .iter()
-        .map(|property| {
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                0,
-            ));
-            (property.pc, slot)
-        })
-        .collect::<BTreeMap<_, _>>();
-    for slot in property_caches.values().copied() {
-        let zero = builder.ins().iconst(types::I64, 0);
-        builder.ins().stack_store(zero, slot, 0);
-    }
 
     if analysis.retry_before_entry {
         emit_exit(
@@ -2572,6 +3680,21 @@ fn lower_function(
         .into_iter()
         .map(|signature| builder.import_signature(signature))
         .collect::<Vec<_>>();
+    // Continuing-path Array values leaf. Absent (or an invalid table) means
+    // every `for_of_next` takes the exact ITERATOR_OP helper.
+    let array_values_next = if ir.blocks.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, IrOp::Iterator(IteratorOp::ForOfNext(_))))
+    }) {
+        crate::abi::AbiInfo::linked()
+            .ok()
+            .and_then(|abi| abi.iterator_api().array_values_next)
+            .map(|leaf| leaf as usize)
+    } else {
+        None
+    };
     let helper_lowering = HelperLowering {
         ir,
         frame,
@@ -2586,7 +3709,19 @@ fn lower_function(
         signatures: &helper_signatures,
         pointer_type,
         layout,
+        reload_captured_slots: creates_closures(ir),
+        exception_target: std::cell::Cell::new(None),
+        element_layout,
+        object_fast,
     };
+    // One landing pad per handler: every exceptional edge of its try region
+    // publishes the exact owned stack and enters it.
+    let landing_blocks: BTreeMap<u32, Block> = ir
+        .catch_sites
+        .keys()
+        .map(|handler_pc| (*handler_pc, builder.create_block()))
+        .collect();
+    let fixed_slots = usize::from(ir.argument_count) + usize::from(ir.local_count);
 
     macro_rules! invoke_helper {
         ($helper_id:expr, $state:expr, $live_depth:expr, $arguments:expr) => {{
@@ -2613,7 +3748,20 @@ fn lower_function(
         let mut terminated = false;
         let mut entered_osr_continuation = false;
         let mut previous_effectful_op_was_boolean = false;
-        for instruction in &block.instructions {
+        let mut fused: Option<FusedRegion> = None;
+        for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+            if fused.is_none() {
+                if let Some(fast) = object_fast {
+                    fused = emit_fused_fast_path(
+                        builder,
+                        &helper_lowering,
+                        fast,
+                        &block.instructions,
+                        instruction_index,
+                        depth,
+                    )?;
+                }
+            }
             let mut helper_states = instruction.helper_states.iter().copied();
             let prior_op_was_boolean = previous_effectful_op_was_boolean;
             if !matches!(
@@ -2622,6 +3770,15 @@ fn lower_function(
             ) {
                 previous_effectful_op_was_boolean = ir_op_produces_boolean(&instruction.op);
             }
+            let exception_target = match ir.exception_handlers.get(&instruction.pc) {
+                Some(handler) => Some(
+                    *landing_blocks
+                        .get(&handler.handler_pc)
+                        .ok_or(CompileFailure::InvalidArtifact)?,
+                ),
+                None => None,
+            };
+            helper_lowering.exception_target.set(exception_target);
             builder.set_srcloc(SourceLoc::default());
             if !matches!(&instruction.op, IrOp::Poll { .. }) {
                 if let Some(state) = instruction.frame_state {
@@ -2674,6 +3831,7 @@ fn lower_function(
                         pointer_type,
                         layout,
                     );
+                    helper_lowering.reload_captured_slots(builder);
                     if let Some(continuation) = loop_continuation {
                         builder.ins().jump(continuation, &[]);
                         builder.seal_block(continuation);
@@ -2769,7 +3927,6 @@ fn lower_function(
                     properties
                         .iter()
                         .find(|site| site.pc == instruction.pc && !site.store),
-                    property_caches.get(&instruction.pc).copied(),
                 )?,
                 IrOp::GetPropertyKeep(atom) => lower_get_property_keep(
                     builder,
@@ -2787,7 +3944,6 @@ fn lower_function(
                     properties
                         .iter()
                         .find(|site| site.pc == instruction.pc && site.store),
-                    property_caches.get(&instruction.pc).copied(),
                 )?,
                 IrOp::DefineProperty(atom) => lower_define_property(
                     builder,
@@ -2871,6 +4027,143 @@ fn lower_function(
                     depth = pattern_index + 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
                 }
+                IrOp::FClosure(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_FCLOSURE,
+                        state,
+                        depth,
+                        &[output, index]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::GetVarRef { index, checked } => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let output = flat_stack_slot(ir, depth)?;
+                    let mode = if checked {
+                        qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK
+                    } else {
+                        qjs::JSJitVarRefMode_JS_JIT_VAR_REF_PLAIN
+                    };
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_GET_VAR_REF,
+                        state,
+                        depth,
+                        &[output, u32::from(index), mode]
+                    );
+                    reload_pair(builder, stack[depth], stack_base, depth, layout);
+                    depth += 1;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::PutVarRef { index, mode, keep } => {
+                    let top = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let mode = match mode {
+                        VarRefMode::Plain => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_PLAIN,
+                        VarRefMode::Check => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK,
+                        VarRefMode::CheckInit => qjs::JSJitVarRefMode_JS_JIT_VAR_REF_CHECK_INIT,
+                    };
+                    let value_index = if keep {
+                        // `set_var_ref*` keeps the value: store an owned
+                        // duplicate from the scratch slot above the stack.
+                        let dup_state = helper_states
+                            .next()
+                            .ok_or(CompileFailure::InvalidArtifact)?;
+                        let source = use_pair(builder, stack[top]);
+                        lower_dup_if_refcounted(
+                            builder,
+                            &helper_lowering,
+                            dup_state,
+                            depth,
+                            depth,
+                            source,
+                            flat_stack_slot(ir, top)?,
+                            false,
+                            false,
+                        )?;
+                        depth
+                    } else {
+                        top
+                    };
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = flat_stack_slot(ir, value_index)?;
+                    // The helper consumes the value slot on success and on a
+                    // TDZ exception. The exception exit publishes only the
+                    // bytecode-visible stack below the consumed operand.
+                    helper_lowering.invoke(
+                        builder,
+                        qjs::JSJitHelperId_JS_JIT_HELPER_PUT_VAR_REF,
+                        state,
+                        value_index + 1,
+                        value_index,
+                        &[value, u32::from(index), mode],
+                    )?;
+                    clear_pair(builder, stack[value_index], stack_base, value_index, layout)?;
+                    if !keep {
+                        depth = top;
+                    }
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::SetName(atom) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let object = flat_stack_slot(
+                        ir,
+                        depth
+                            .checked_sub(1)
+                            .ok_or(CompileFailure::InvalidArtifact)?,
+                    )?;
+                    // The named object stays borrowed in its stack slot.
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_SET_NAME,
+                        state,
+                        depth,
+                        &[object, atom]
+                    );
+                }
+                IrOp::CloseLocal(index) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    invoke_helper!(
+                        qjs::JSJitHelperId_JS_JIT_HELPER_CLOSE_LOC,
+                        state,
+                        depth,
+                        &[u32::from(index)]
+                    );
+                }
+                IrOp::Generic(operation) => lower_generic(
+                    builder,
+                    &helper_lowering,
+                    &mut helper_states,
+                    &mut depth,
+                    operation,
+                )?,
+                IrOp::Iterator(operation) => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    lower_iterator(
+                        builder,
+                        &helper_lowering,
+                        state,
+                        &mut depth,
+                        operation,
+                        array_values_next,
+                    )?;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
                 IrOp::GetArgument(index) => {
                     let state = helper_states
                         .next()
@@ -2884,6 +4177,7 @@ fn lower_function(
                         depth,
                         source,
                         flat_argument_slot(index),
+                        false,
                         false,
                     )?;
                     depth += 1;
@@ -2903,6 +4197,7 @@ fn lower_function(
                         source,
                         flat_local_slot(ir, index),
                         false,
+                        false,
                     )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -2921,6 +4216,7 @@ fn lower_function(
                         source,
                         flat_local_slot(ir, index),
                         true,
+                        false,
                     )?;
                     depth += 1;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -2931,20 +4227,18 @@ fn lower_function(
                             .next()
                             .ok_or(CompileFailure::InvalidArtifact)?;
                         let output_index = depth + usize::from(local_index);
-                        let output = flat_stack_slot(ir, output_index)?;
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_DUP,
+                        let source = use_pair(builder, locals[usize::from(local_index)]);
+                        lower_dup_if_refcounted(
+                            builder,
+                            &helper_lowering,
                             state,
                             output_index,
-                            &[output, flat_local_slot(ir, local_index)]
-                        );
-                        reload_pair(
-                            builder,
-                            stack[output_index],
-                            stack_base,
                             output_index,
-                            layout,
-                        );
+                            source,
+                            flat_local_slot(ir, local_index),
+                            false,
+                            true,
+                        )?;
                     }
                     depth += 2;
                     set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
@@ -3157,22 +4451,18 @@ fn lower_function(
                             let state = helper_states
                                 .next()
                                 .ok_or(CompileFailure::InvalidArtifact)?;
-                            invoke_helper!(
-                                qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                            let value = use_pair(builder, stack[start]);
+                            lower_free_always_in_stress(
+                                builder,
+                                &helper_lowering,
                                 state,
                                 depth,
-                                &[flat_stack_slot(ir, start)?]
-                            );
-                            for (offset, variables) in stack
-                                .get(start..depth)
-                                .ok_or(CompileFailure::InvalidArtifact)?
-                                .iter()
-                                .copied()
-                                .enumerate()
-                            {
-                                let index = start + offset;
-                                reload_pair(builder, variables, stack_base, index, layout);
-                            }
+                                value,
+                                flat_stack_slot(ir, start)?,
+                                stack[start],
+                                stack_base,
+                                start,
+                            )?;
                             apply_stack_operation(builder, &stack, &mut depth, operation);
                         }
                         StackOp::Dup
@@ -3210,6 +4500,7 @@ fn lower_function(
                                     output_index,
                                     source_pair,
                                     flat_stack_slot(ir, start + source)?,
+                                    false,
                                     false,
                                 )?;
                             }
@@ -3260,13 +4551,17 @@ fn lower_function(
                             UnaryOp::IsNull => tag_is(builder, value.tag, qjs::JS_TAG_NULL),
                             _ => unreachable!(),
                         };
-                        invoke_helper!(
-                            qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
+                        lower_free_always_in_stress(
+                            builder,
+                            &helper_lowering,
                             state,
                             depth,
-                            &[slot]
-                        );
-                        reload_pair(builder, stack[index], stack_base, index, layout);
+                            value,
+                            slot,
+                            stack[index],
+                            stack_base,
+                            index,
+                        )?;
                         let boolean = pair_from_bool(builder, result);
                         define_pair(builder, stack[index], boolean);
                     } else if matches!(operation, UnaryOp::Plus | UnaryOp::LogicalNot) {
@@ -3529,6 +4824,185 @@ fn lower_function(
                         .brif(taken, blocks[&target], &[], blocks[&fallthrough], &[]);
                     terminated = true;
                 }
+                IrOp::Catch(handler_pc) => {
+                    let offset = constant_pair(
+                        builder,
+                        TaggedValue::new(u64::from(handler_pc), qjs::JS_TAG_CATCH_OFFSET as i64),
+                    );
+                    define_pair(
+                        builder,
+                        *stack.get(depth).ok_or(CompileFailure::InvalidArtifact)?,
+                        offset,
+                    );
+                    depth += 1;
+                }
+                IrOp::NipCatch => {
+                    // `catch_offset value -> value`; a catch offset owns no
+                    // reference, so moving the value over it releases nothing.
+                    let value_index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let catch_index = depth
+                        .checked_sub(2)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = use_pair(builder, stack[value_index]);
+                    define_pair(builder, stack[catch_index], value);
+                    clear_pair(builder, stack[value_index], stack_base, value_index, layout)?;
+                    depth = value_index;
+                    set_visible_stack_depth(builder, frame, stack_base, depth, layout)?;
+                }
+                IrOp::Throw | IrOp::ThrowError { .. } => {
+                    let state = helper_states
+                        .next()
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let frame_state = ir.frame_states.get(state);
+                    let visible_depth = frame_state
+                        .slots
+                        .len()
+                        .checked_sub(fixed_slots)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        visible_depth,
+                        frame_state.pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    let exception_depth = match instruction.op {
+                        IrOp::ThrowError { atom, kind } => {
+                            emit_exception_api_call(
+                                builder,
+                                frame,
+                                qjs::JS_JitThrowError as *const () as usize,
+                                state,
+                                &[atom, u32::from(kind)],
+                                pointer_type,
+                            )?;
+                            depth
+                        }
+                        _ => {
+                            let value_index = depth
+                                .checked_sub(1)
+                                .ok_or(CompileFailure::InvalidArtifact)?;
+                            emit_exception_api_call(
+                                builder,
+                                frame,
+                                qjs::JS_JitThrowValue as *const () as usize,
+                                state,
+                                &[flat_stack_slot(ir, value_index)?],
+                                pointer_type,
+                            )?;
+                            // The operand is the pending exception now.
+                            clear_pair(
+                                builder,
+                                stack[value_index],
+                                stack_base,
+                                value_index,
+                                layout,
+                            )?;
+                            value_index
+                        }
+                    };
+                    // Both calls always leave an exception pending.
+                    emit_exception_edge(
+                        builder,
+                        frame,
+                        sret,
+                        stack_base,
+                        exception_depth,
+                        exception_target,
+                        pointer_type,
+                        layout,
+                    )?;
+                    terminated = true;
+                }
+                IrOp::Gosub { target, return_pc } => {
+                    let return_offset = constant_pair(
+                        builder,
+                        TaggedValue::new(i64::from(return_pc) as u64, qjs::JS_TAG_INT as i64),
+                    );
+                    define_pair(
+                        builder,
+                        *stack.get(depth).ok_or(CompileFailure::InvalidArtifact)?,
+                        return_offset,
+                    );
+                    builder.ins().jump(
+                        *blocks.get(&target).ok_or(CompileFailure::InvalidArtifact)?,
+                        &[],
+                    );
+                    terminated = true;
+                }
+                IrOp::Ret { ref targets } => {
+                    let index = depth
+                        .checked_sub(1)
+                        .ok_or(CompileFailure::InvalidArtifact)?;
+                    let value = use_pair(builder, stack[index]);
+                    clear_pair(builder, stack[index], stack_base, index, layout)?;
+                    let is_int = tag_is(builder, value.tag, qjs::JS_TAG_INT);
+                    let offset = builder.ins().ireduce(types::I32, value.payload);
+                    let unknown = builder.create_block();
+                    for target in targets.iter() {
+                        let block = *blocks.get(target).ok_or(CompileFailure::InvalidArtifact)?;
+                        let matches = builder.ins().icmp_imm(
+                            IntCC::Equal,
+                            offset,
+                            i64::from(
+                                i32::try_from(*target)
+                                    .map_err(|_| CompileFailure::InvalidArtifact)?,
+                            ),
+                        );
+                        let hit = builder.ins().band(is_int, matches);
+                        let next = builder.create_block();
+                        builder.ins().brif(hit, block, &[], next, &[]);
+                        builder.seal_block(next);
+                        builder.switch_to_block(next);
+                    }
+                    builder.ins().jump(unknown, &[]);
+                    // Only this function's `gosub` sites push return offsets;
+                    // anything else is resumed by the interpreter's own `ret`.
+                    builder.seal_block(unknown);
+                    builder.switch_to_block(unknown);
+                    builder.set_cold_block(unknown);
+                    define_pair(builder, stack[index], value);
+                    materialize_frame(
+                        builder,
+                        frame,
+                        arg_buf,
+                        var_buf,
+                        stack_base,
+                        &arguments,
+                        &locals,
+                        &stack,
+                        depth,
+                        depth,
+                        instruction.pc,
+                        pointer_type,
+                        layout,
+                    )?;
+                    let bytecode = builder.ins().load(
+                        pointer_type,
+                        MemFlags::new(),
+                        frame,
+                        layout.bytecode_start,
+                    );
+                    let resume = builder.ins().iadd_imm(bytecode, i64::from(instruction.pc));
+                    emit_exit(
+                        builder,
+                        sret,
+                        qjs::JSJitExitKind_JS_JIT_EXIT_DEOPT,
+                        Some(resume),
+                        pointer_type,
+                    );
+                    terminated = true;
+                }
                 IrOp::Return => {
                     let result_index = depth
                         .checked_sub(1)
@@ -3599,9 +5073,26 @@ fn lower_function(
             if helper_states.next().is_some() {
                 return Err(CompileFailure::InvalidArtifact);
             }
+            if let Some(region) = fused {
+                if instruction_index == region.end {
+                    if terminated {
+                        return Err(CompileFailure::InvalidArtifact);
+                    }
+                    if let (Some(object_index), Some(fast)) = (region.retain_literal, object_fast) {
+                        emit_retain_literal_shape(builder, &helper_lowering, fast, object_index)?;
+                    }
+                    builder.ins().jump(region.join, &[]);
+                    builder.seal_block(region.join);
+                    builder.switch_to_block(region.join);
+                    fused = None;
+                }
+            }
             if terminated {
                 break;
             }
+        }
+        if fused.is_some() {
+            return Err(CompileFailure::InvalidArtifact);
         }
         if !terminated {
             if let Some(next) = ir.blocks.get(block_index + 1) {
@@ -3610,6 +5101,70 @@ fn lower_function(
                 return Err(CompileFailure::InvalidArtifact);
             }
         }
+    }
+
+    // Landing pads run the interpreter's exception prologue on the published
+    // frame. A caught exception resumes the handler natively with the caught
+    // value in the catch offset's slot; anything else (uncatchable errors,
+    // invariant failures) leaves through the ordinary exception exit so the
+    // interpreter unwinds the exact published frame.
+    for (handler_pc, landing) in &landing_blocks {
+        let site = *ir
+            .catch_sites
+            .get(handler_pc)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        let catch_index = usize::from(site.catch_index);
+        let handler = *blocks
+            .get(handler_pc)
+            .ok_or(CompileFailure::InvalidArtifact)?;
+        builder.set_srcloc(SourceLoc::default());
+        builder.switch_to_block(*landing);
+        builder.set_cold_block(*landing);
+        let status = emit_exception_api_call(
+            builder,
+            frame,
+            qjs::JS_JitCatchException as *const () as usize,
+            site.state,
+            &[flat_stack_slot(ir, catch_index)?, *handler_pc],
+            pointer_type,
+        )?;
+        let caught = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+        let resume = builder.create_block();
+        let propagate = builder.create_block();
+        builder.ins().brif(caught, resume, &[], propagate, &[]);
+        builder.seal_block(resume);
+        builder.seal_block(propagate);
+        builder.switch_to_block(propagate);
+        builder.set_cold_block(propagate);
+        emit_exit(
+            builder,
+            sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+            None,
+            pointer_type,
+        );
+        builder.switch_to_block(resume);
+        // Every edge into a landing pad published the frame first, so the
+        // frame owns the argument/local slots here. In a function that
+        // creates closures, the throwing helper (or the catch prologue's
+        // backtrace hook) may have run JavaScript that wrote those slots
+        // through an attached var ref and released the old values; the
+        // handler must resume from the frame, not from stale SSA copies.
+        helper_lowering.reload_captured_slots(builder);
+        reload_pair(
+            builder,
+            *stack
+                .get(catch_index)
+                .ok_or(CompileFailure::InvalidArtifact)?,
+            stack_base,
+            catch_index,
+            layout,
+        );
+        let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+        for pair in stack.iter().skip(catch_index + 1) {
+            define_pair(builder, *pair, undefined);
+        }
+        builder.ins().jump(handler, &[]);
     }
 
     builder.set_srcloc(SourceLoc::default());
@@ -3626,10 +5181,249 @@ fn lower_function(
     Ok(())
 }
 
+/// Functions that instantiate closures may share argument/local storage with
+/// attached var refs (`JSVarRef.pvalue` points into the interpreter frame).
+pub(crate) fn creates_closures(ir: &BaselineIr) -> bool {
+    ir.blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| matches!(instruction.op, IrOp::FClosure(_)))
+}
+
 fn next_helper_state(
     states: &mut impl Iterator<Item = FrameStateId>,
 ) -> Result<FrameStateId, CompileFailure> {
     states.next().ok_or(CompileFailure::InvalidArtifact)
+}
+
+/// `GENERIC_OP` packs the QuickJS opcode in bits 0..7 and the bytecode's
+/// 8-bit immediate in bits 8..15.
+fn generic_operation(name: &str, immediate: u8) -> Result<u32, CompileFailure> {
+    Ok(quickjs_opcode_id(name)? | (u32::from(immediate) << 8))
+}
+
+/// Lowers an opcode whose semantics are executed exactly by `GENERIC_OP`
+/// (or `BINARY_ARITH_SLOW` for `pow`). Every operand stays in its frame slot
+/// across the helper; the helper clears consumed slots on success and on a
+/// language exception, so the exception depth is the pre-instruction depth.
+fn lower_generic(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    states: &mut impl Iterator<Item = FrameStateId>,
+    depth: &mut usize,
+    operation: GenericOp,
+) -> Result<(), CompileFailure> {
+    const NONE: u32 = qjs::JS_JIT_SLOT_NONE;
+    let live = *depth;
+    let (pop, push) = operation.stack_effect();
+    let base = live
+        .checked_sub(pop)
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let slot = |index: usize| flat_stack_slot(helpers.ir, index);
+    let state = next_helper_state(states)?;
+    let generic = qjs::JSJitHelperId_JS_JIT_HELPER_GENERIC_OP;
+    match operation {
+        GenericOp::PushThis
+        | GenericOp::SpecialObject(_)
+        | GenericOp::GetVarUndef(_)
+        | GenericOp::DeleteVar(_) => {
+            let (name, immediate, atom) = match operation {
+                GenericOp::PushThis => ("push_this", 0, NONE),
+                GenericOp::SpecialObject(kind) => ("special_object", kind, NONE),
+                GenericOp::GetVarUndef(atom) => ("get_var_undef", 0, atom),
+                GenericOp::DeleteVar(atom) => ("delete_var", 0, atom),
+                _ => unreachable!(),
+            };
+            let output = slot(live)?;
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[output, NONE, atom, generic_operation(name, immediate)?],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[live],
+                helpers.stack_base,
+                live,
+                helpers.layout,
+            );
+        }
+        GenericOp::PutVar(atom) => {
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[NONE, slot(base)?, atom, generic_operation("put_var", 0)?],
+            )?;
+            clear_pair(
+                builder,
+                helpers.stack[base],
+                helpers.stack_base,
+                base,
+                helpers.layout,
+            )?;
+        }
+        GenericOp::ToPropertyKey2 => {
+            // The interpreter leaves an object-coercible receiver and an
+            // Int32/string/symbol key untouched; everything else (including
+            // the TypeError) takes the exact helper.
+            let object = use_pair(builder, helpers.stack[base]);
+            let key = use_pair(builder, helpers.stack[base + 1]);
+            let undefined = tag_is(builder, object.tag, qjs::JS_TAG_UNDEFINED);
+            let null = tag_is(builder, object.tag, qjs::JS_TAG_NULL);
+            let not_coercible = builder.ins().bor(undefined, null);
+            let int_key = tag_is(builder, key.tag, qjs::JS_TAG_INT);
+            let string_key = tag_is(builder, key.tag, qjs::JS_TAG_STRING);
+            let symbol_key = tag_is(builder, key.tag, qjs::JS_TAG_SYMBOL);
+            let key_ready = builder.ins().bor(int_key, string_key);
+            let key_ready = builder.ins().bor(key_ready, symbol_key);
+            let slow_needed = builder.ins().bxor_imm(key_ready, 1);
+            let slow_needed = builder.ins().bor(slow_needed, not_coercible);
+            let slow = builder.create_block();
+            let continuation = builder.create_block();
+            builder
+                .ins()
+                .brif(slow_needed, slow, &[], continuation, &[]);
+            builder.seal_block(slow);
+            builder.switch_to_block(slow);
+            builder.set_cold_block(slow);
+            helpers.invoke(
+                builder,
+                generic,
+                state,
+                live,
+                live,
+                &[
+                    slot(base + 1)?,
+                    slot(base)?,
+                    NONE,
+                    generic_operation("to_propkey2", 0)?,
+                ],
+            )?;
+            reload_pair(
+                builder,
+                helpers.stack[base + 1],
+                helpers.stack_base,
+                base + 1,
+                helpers.layout,
+            );
+            builder.ins().jump(continuation, &[]);
+            builder.seal_block(continuation);
+            builder.switch_to_block(continuation);
+        }
+        GenericOp::TypeOf
+        | GenericOp::TypeOfIsUndefined
+        | GenericOp::TypeOfIsFunction
+        | GenericOp::ToObject => {
+            let name = match operation {
+                GenericOp::TypeOf => "typeof",
+                GenericOp::TypeOfIsUndefined => "typeof_is_undefined",
+                GenericOp::TypeOfIsFunction => "typeof_is_function",
+                _ => "to_object",
+            };
+            let input = slot(base)?;
+            let arguments = [input, input, NONE, generic_operation(name, 0)?];
+            if matches!(
+                operation,
+                GenericOp::TypeOfIsUndefined | GenericOp::TypeOfIsFunction
+            ) {
+                // Non-negative tags are neither objects nor reference counted:
+                // their `typeof` never names a function and only `undefined`
+                // names itself, so the answer needs no helper or release.
+                let value = use_pair(builder, helpers.stack[base]);
+                let primitive =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::SignedGreaterThanOrEqual, value.tag, 0);
+                let fast = builder.create_block();
+                let slow = builder.create_block();
+                let continuation = builder.create_block();
+                builder.ins().brif(primitive, fast, &[], slow, &[]);
+                builder.seal_block(fast);
+                builder.switch_to_block(fast);
+                let result = if operation == GenericOp::TypeOfIsUndefined {
+                    tag_is(builder, value.tag, qjs::JS_TAG_UNDEFINED)
+                } else {
+                    builder.ins().iconst(types::I8, 0)
+                };
+                let result = pair_from_bool(builder, result);
+                define_pair(builder, helpers.stack[base], result);
+                builder.ins().jump(continuation, &[]);
+                builder.seal_block(slow);
+                builder.switch_to_block(slow);
+                builder.set_cold_block(slow);
+                helpers.invoke(builder, generic, state, live, live, &arguments)?;
+                reload_pair(
+                    builder,
+                    helpers.stack[base],
+                    helpers.stack_base,
+                    base,
+                    helpers.layout,
+                );
+                builder.ins().jump(continuation, &[]);
+                builder.seal_block(continuation);
+                builder.switch_to_block(continuation);
+            } else {
+                helpers.invoke(builder, generic, state, live, live, &arguments)?;
+                reload_pair(
+                    builder,
+                    helpers.stack[base],
+                    helpers.stack_base,
+                    base,
+                    helpers.layout,
+                );
+            }
+        }
+        GenericOp::In | GenericOp::InstanceOf | GenericOp::Delete | GenericOp::Pow => {
+            let left = slot(base)?;
+            let right = slot(base + 1)?;
+            if operation == GenericOp::Pow {
+                helpers.invoke(
+                    builder,
+                    qjs::JSJitHelperId_JS_JIT_HELPER_BINARY_ARITH_SLOW,
+                    state,
+                    live,
+                    live,
+                    &[left, left, right, quickjs_opcode_id("pow")?],
+                )?;
+            } else {
+                let name = match operation {
+                    GenericOp::In => "in",
+                    GenericOp::InstanceOf => "instanceof",
+                    _ => "delete",
+                };
+                helpers.invoke(
+                    builder,
+                    generic,
+                    state,
+                    live,
+                    live,
+                    &[left, left, right, generic_operation(name, 0)?],
+                )?;
+            }
+            reload_pair(
+                builder,
+                helpers.stack[base],
+                helpers.stack_base,
+                base,
+                helpers.layout,
+            );
+            clear_pair(
+                builder,
+                helpers.stack[base + 1],
+                helpers.stack_base,
+                base + 1,
+                helpers.layout,
+            )?;
+        }
+    }
+    *depth = base + push;
+    helpers.set_depth(builder, *depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3642,17 +5436,21 @@ fn lower_dup_if_refcounted(
     source: Pair,
     source_slot: u32,
     checked: bool,
+    stress_primitives: bool,
 ) -> Result<(), CompileFailure> {
     let output_slot = flat_stack_slot(helpers.ir, output_index)?;
-    let mut needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
-    if checked {
-        let uninitialized = tag_is(builder, source.tag, qjs::JS_TAG_UNINITIALIZED);
-        needs_helper = builder.ins().bor(needs_helper, uninitialized);
-    }
     let primitive = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    emit_inline_dup_dispatch(
+        builder,
+        helpers,
+        source,
+        checked,
+        stress_primitives,
+        primitive,
+        slow,
+    );
     builder.seal_block(primitive);
     builder.switch_to_block(primitive);
     define_pair(builder, helpers.stack[output_index], source);
@@ -3680,6 +5478,54 @@ fn lower_dup_if_refcounted(
     Ok(())
 }
 
+/// Branches to `primitive` (after an inline `ref_count++` for heap values)
+/// when DUP needs no helper, else to `slow`. Checked locals send
+/// `JS_TAG_UNINITIALIZED` to the helper exactly as before.
+fn emit_inline_dup_dispatch(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    source: Pair,
+    checked: bool,
+    stress_primitives: bool,
+    primitive: Block,
+    slow: Block,
+) {
+    if checked {
+        let uninitialized = tag_is(builder, source.tag, qjs::JS_TAG_UNINITIALIZED);
+        let initialized = builder.create_block();
+        builder
+            .ins()
+            .brif(uninitialized, slow, &[], initialized, &[]);
+        builder.seal_block(initialized);
+        builder.switch_to_block(initialized);
+    }
+    let refcounted = super::refcount::emit_has_ref_count(builder, source.tag);
+    let duplicate = builder.create_block();
+    if stress_primitives {
+        let copy = builder.create_block();
+        builder.ins().brif(refcounted, duplicate, &[], copy, &[]);
+        builder.seal_block(copy);
+        builder.switch_to_block(copy);
+        let no_stress =
+            super::refcount::emit_no_stress(builder, helpers.frame, helpers.layout.flags);
+        builder.ins().brif(no_stress, primitive, &[], slow, &[]);
+    } else {
+        builder
+            .ins()
+            .brif(refcounted, duplicate, &[], primitive, &[]);
+    }
+    builder.seal_block(duplicate);
+    builder.switch_to_block(duplicate);
+    super::refcount::emit_dup_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        source.payload,
+        primitive,
+        slow,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_dup_local_if_refcounted(
     builder: &mut FunctionBuilder<'_>,
@@ -3693,11 +5539,10 @@ fn lower_dup_local_if_refcounted(
     output_base: Value,
     output_index: usize,
 ) -> Result<(), CompileFailure> {
-    let needs_helper = builder.ins().icmp_imm(IntCC::SignedLessThan, source.tag, 0);
     let primitive = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(needs_helper, slow, &[], primitive, &[]);
+    emit_inline_dup_dispatch(builder, helpers, source, false, false, primitive, slow);
     builder.seal_block(primitive);
     builder.switch_to_block(primitive);
     define_pair(builder, output, source);
@@ -3731,20 +5576,126 @@ fn lower_free_if_refcounted(
     backing_base: Value,
     backing_index: usize,
 ) -> Result<(), CompileFailure> {
-    let refcounted = builder.ins().icmp_imm(IntCC::SignedLessThan, value.tag, 0);
+    lower_free(
+        builder,
+        helpers,
+        state,
+        live_depth,
+        value,
+        value_slot,
+        variables,
+        backing_base,
+        backing_index,
+        false,
+    )
+}
+
+/// FREE for sites that historically invoked the helper for every value:
+/// outside stress GC primitives need no work, but stress-GC frames keep the
+/// helper (and its collection points) for primitives too.
+#[allow(clippy::too_many_arguments)]
+fn lower_free_always_in_stress(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    value: Pair,
+    value_slot: u32,
+    variables: PairVars,
+    backing_base: Value,
+    backing_index: usize,
+) -> Result<(), CompileFailure> {
+    lower_free(
+        builder,
+        helpers,
+        state,
+        live_depth,
+        value,
+        value_slot,
+        variables,
+        backing_base,
+        backing_index,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_free(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    live_depth: usize,
+    value: Pair,
+    value_slot: u32,
+    variables: PairVars,
+    backing_base: Value,
+    backing_index: usize,
+    stress_primitives: bool,
+) -> Result<(), CompileFailure> {
+    let refcounted = super::refcount::emit_has_ref_count(builder, value.tag);
+    let release = builder.create_block();
+    let released = builder.create_block();
     let slow = builder.create_block();
     let continuation = builder.create_block();
-    builder.ins().brif(refcounted, slow, &[], continuation, &[]);
+    if stress_primitives {
+        let primitive = builder.create_block();
+        builder.ins().brif(refcounted, release, &[], primitive, &[]);
+        builder.seal_block(primitive);
+        builder.switch_to_block(primitive);
+        let no_stress =
+            super::refcount::emit_no_stress(builder, helpers.frame, helpers.layout.flags);
+        builder.ins().brif(no_stress, continuation, &[], slow, &[]);
+    } else {
+        builder
+            .ins()
+            .brif(refcounted, release, &[], continuation, &[]);
+    }
+    builder.seal_block(release);
+    builder.switch_to_block(release);
+    super::refcount::emit_release_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        value.payload,
+        released,
+        slow,
+    );
+    builder.seal_block(released);
+    builder.switch_to_block(released);
+    // Match the helper's post-state: the consumed slot holds undefined, in
+    // the SSA variables and in its backing frame memory.
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    define_pair(builder, variables, undefined);
+    store_jsvalue_slot(
+        builder,
+        backing_base,
+        backing_index,
+        undefined,
+        helpers.layout,
+    )?;
+    builder.ins().jump(continuation, &[]);
     builder.seal_block(slow);
     builder.switch_to_block(slow);
-    helpers.invoke(
+    // FREE consumes its slot before it can fail (stress collection only).
+    // A local or argument slot is then undefined in the frame while its SSA
+    // variable still names the released value; a native handler would resume
+    // with that stale alias. Such an edge exits instead, and the interpreter
+    // unwinds from the frame itself. Operand slots are safe: the landing pad
+    // resets every operand above the catch offset.
+    let exception_target = helpers.exception_target.get();
+    if backing_base != helpers.stack_base {
+        helpers.exception_target.set(None);
+    }
+    let result = helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_FREE,
         state,
         live_depth,
         live_depth,
         &[value_slot],
-    )?;
+    );
+    helpers.exception_target.set(exception_target);
+    result?;
     reload_pair(
         builder,
         variables,
@@ -3870,7 +5821,6 @@ fn lower_get_property(
     depth: usize,
     atom: u32,
     property: Option<&BaselinePropertySite>,
-    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(1)
@@ -3880,72 +5830,31 @@ fn lower_get_property(
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let output = flat_stack_slot(helpers.ir, output_index)?;
     let get_state = next_helper_state(states)?;
-    if let Some((property, property_cache)) = property.zip(property_cache) {
+    if let Some(property) = property {
         let generic = builder.create_block();
         let joined = builder.create_block();
         builder.append_block_param(joined, types::I64);
         builder.append_block_param(joined, types::I64);
-        for (index, observation) in property.observations.iter().copied().enumerate() {
-            let access = builder.create_block();
-            let validate = builder.create_block();
-            let next = if index + 1 == property.observations.len() {
-                generic
-            } else {
-                builder.create_block()
-            };
-            let receiver = use_pair(builder, helpers.stack[object_index]);
-            let object_tag =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
-            let cached_check = builder.create_block();
-            builder
-                .ins()
-                .brif(object_tag, cached_check, &[], validate, &[]);
-            builder.switch_to_block(cached_check);
-            let current_shape = builder.ins().load(
-                helpers.pointer_type,
-                MemFlags::trusted(),
-                receiver.payload,
-                24,
-            );
-            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
-            let expected = observation.shape().identity();
-            let pointer_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
-            let cache_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, cached, expected as i64);
-            let validated = builder.ins().band(pointer_ok, cache_ok);
-            builder.ins().brif(validated, access, &[], validate, &[]);
-            builder.switch_to_block(validate);
-            let status =
-                helpers.shape_guard(builder, get_state, depth, object, observation.shape())?;
-            let matched =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
-            let cache = builder.create_block();
-            builder.ins().brif(matched, cache, &[], next, &[]);
-            builder.switch_to_block(cache);
-            let expected_value = builder.ins().iconst(types::I64, expected as i64);
-            builder.ins().stack_store(expected_value, property_cache, 0);
-            builder.ins().jump(access, &[]);
+        let receiver = use_pair(builder, helpers.stack[object_index]);
+        let accesses = emit_shape_dispatch(
+            builder,
+            helpers.pointer_type,
+            receiver,
+            &property.observations,
+            generic,
+        )?;
+        let layout = crate::abi::AbiInfo::linked()
+            .map_err(|_| CompileFailure::InvalidArtifact)?
+            .property_layout();
+        for (observation, access) in property.observations.iter().copied().zip(accesses) {
             builder.switch_to_block(access);
             let props = builder.ins().load(
                 helpers.pointer_type,
                 MemFlags::trusted(),
                 receiver.payload,
-                32,
+                layout.object_properties_offset,
             );
-            let offset = i32::try_from(
-                usize::try_from(observation.offset())
-                    .map_err(|_| CompileFailure::ResourceLimit)?
-                    .checked_mul(16)
-                    .ok_or(CompileFailure::ResourceLimit)?,
-            )
-            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let offset = property_slot_offset(observation)?;
             let value = Pair {
                 payload: builder
                     .ins()
@@ -3963,9 +5872,6 @@ fn lower_get_property(
             builder.ins().brif(tag_ok, direct, &[], generic, &[]);
             builder.switch_to_block(direct);
             builder.ins().jump(joined, &[value.payload, value.tag]);
-            if index + 1 != property.observations.len() {
-                builder.switch_to_block(next);
-            }
         }
         builder.switch_to_block(generic);
         helpers.invoke(
@@ -3983,6 +5889,7 @@ fn lower_get_property(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
         let value = use_pair(builder, helpers.stack[output_index]);
         builder.ins().jump(joined, &[value.payload, value.tag]);
         builder.switch_to_block(joined);
@@ -4011,6 +5918,7 @@ fn lower_get_property(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
     }
     move_stack_pair(
         builder,
@@ -4044,6 +5952,95 @@ fn lower_get_property(
     helpers.set_depth(builder, depth)
 }
 
+/// Byte offset of an own-property slot in `JSObject::prop`.
+fn property_slot_offset(
+    observation: crate::runtime::ShapeObservation,
+) -> Result<i32, CompileFailure> {
+    usize::try_from(observation.offset())
+        .ok()
+        .and_then(|offset| offset.checked_mul(16))
+        .and_then(|offset| i32::try_from(offset).ok())
+        .filter(|offset| offset.checked_add(8).is_some())
+        .ok_or(CompileFailure::ResourceLimit)
+}
+
+/// Inline polymorphic own-property dispatch: one pointer compare per observed
+/// shape, then the shape's monotonic layout generation. It is exactly the
+/// SHAPE_GUARD helper predicate (the generation is zeroed on any layout
+/// change and never reused), without a frame materialization or helper
+/// crossing. A non-object receiver, an unknown shape or a stale generation
+/// reaches `generic`. Returns one access block per observation, in feedback
+/// order; the current block is terminated.
+fn emit_shape_dispatch(
+    builder: &mut FunctionBuilder<'_>,
+    pointer_type: cranelift_codegen::ir::Type,
+    receiver: Pair,
+    observations: &[crate::runtime::ShapeObservation],
+    generic: Block,
+) -> Result<Vec<Block>, CompileFailure> {
+    if observations.is_empty() || observations.len() > crate::runtime::POLYMORPHIC_PROPERTY_LIMIT {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    for (index, observation) in observations.iter().enumerate() {
+        if observation.shape().identity() == 0
+            || observation.shape().generation() == 0
+            || observations[..index]
+                .iter()
+                .any(|prior| prior.shape().identity() == observation.shape().identity())
+        {
+            return Err(CompileFailure::InvalidArtifact);
+        }
+    }
+    let layout = crate::abi::AbiInfo::linked()
+        .map_err(|_| CompileFailure::InvalidArtifact)?
+        .property_layout();
+    let is_object =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
+    let dispatch = builder.create_block();
+    builder.ins().brif(is_object, dispatch, &[], generic, &[]);
+    builder.switch_to_block(dispatch);
+    let shape = builder.ins().load(
+        pointer_type,
+        MemFlags::trusted(),
+        receiver.payload,
+        layout.object_shape_offset,
+    );
+    // A live object's shape is always valid; load its generation once.
+    let generation = builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        shape,
+        layout.shape_generation_offset,
+    );
+    let mut accesses = Vec::with_capacity(observations.len());
+    for (index, observation) in observations.iter().enumerate() {
+        let next = if index + 1 == observations.len() {
+            generic
+        } else {
+            builder.create_block()
+        };
+        let same_shape =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, shape, observation.shape().identity() as i64);
+        let current = builder.ins().icmp_imm(
+            IntCC::Equal,
+            generation,
+            observation.shape().generation() as i64,
+        );
+        let matches = builder.ins().band(same_shape, current);
+        let access = builder.create_block();
+        builder.ins().brif(matches, access, &[], next, &[]);
+        accesses.push(access);
+        if index + 1 != observations.len() {
+            builder.switch_to_block(next);
+        }
+    }
+    Ok(accesses)
+}
+
 fn property_value_tag(value: crate::runtime::ObservedType) -> Result<i32, CompileFailure> {
     Ok(match value {
         crate::runtime::ObservedType::Int32 => qjs::JS_TAG_INT,
@@ -4071,10 +6068,18 @@ fn lower_get_property_keep(
         .ok_or(CompileFailure::InvalidArtifact)?;
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let output = flat_stack_slot(helpers.ir, *depth)?;
+    let state = next_helper_state(states)?;
+    // `receiver.method` on a fast Array whose lookup resolves to a plain data
+    // property of the realm's Array.prototype (for example `push`): the leaf
+    // returns the duplicated value without running the generic lookup helper.
+    let joined = helpers
+        .object_fast
+        .map(|fast| emit_array_method_fast_path(builder, helpers, fast, object_index, *depth, atom))
+        .transpose()?;
     helpers.invoke(
         builder,
         qjs::JSJitHelperId_JS_JIT_HELPER_GET_PROPERTY,
-        next_helper_state(states)?,
+        state,
         *depth,
         *depth,
         &[output, object, atom],
@@ -4086,8 +6091,189 @@ fn lower_get_property_keep(
         *depth,
         helpers.layout,
     );
+    if let Some(joined) = joined {
+        builder.ins().jump(joined, &[]);
+        builder.seal_block(joined);
+        builder.switch_to_block(joined);
+    }
     *depth += 1;
     helpers.set_depth(builder, *depth)
+}
+
+/// Inline fast-Array class test followed by the `array_method` leaf. Leaves
+/// the builder in the generic block and returns the join block.
+fn emit_array_method_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    object_index: usize,
+    output_index: usize,
+    atom: u32,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let receiver = use_pair(builder, helpers.stack[object_index]);
+    let class_check = builder.create_block();
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    builder
+        .ins()
+        .brif(is_object, class_check, &[], generic, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], generic, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let scratch = object_scratch(builder, 2);
+    builder.ins().stack_store(receiver.payload, scratch, 0);
+    builder
+        .ins()
+        .stack_store(receiver.tag, scratch, helpers.layout.value_tag);
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let receiver_address = builder.ins().stack_addr(pointer_type, scratch, 0);
+    let out_offset =
+        i32::try_from(mem::size_of::<qjs::JSValue>()).map_err(|_| CompileFailure::ResourceLimit)?;
+    let out_address = builder.ins().stack_addr(pointer_type, scratch, out_offset);
+    let atom_value = builder.ins().iconst(types::I32, i64::from(atom));
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_method,
+        &[ctx, receiver_address, atom_value, out_address],
+        &[scratch],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], generic, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(generic);
+    builder.switch_to_block(hit);
+    let method = Pair {
+        payload: builder.ins().stack_load(types::I64, scratch, out_offset),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, scratch, out_offset + helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[output_index], method);
+    builder.ins().jump(joined, &[]);
+    builder.switch_to_block(generic);
+    Ok(joined)
+}
+
+/// `Array.prototype.push` with one argument: the leaf mirrors
+/// `js_array_push`'s fast-array path after verifying the exact built-in
+/// function, and misses (generic CALL) on anything else. All inputs remain
+/// borrowed, so the caller's interpreter-order cleanup is shared by both paths.
+#[allow(clippy::too_many_arguments)]
+fn emit_array_push_fast_path(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    fast: ObjectFastPaths,
+    function_index: usize,
+    this_index: usize,
+    argument_index: usize,
+    output_index: usize,
+) -> Result<Block, CompileFailure> {
+    let pointer_type = helpers.pointer_type;
+    let function = use_pair(builder, helpers.stack[function_index]);
+    let receiver = use_pair(builder, helpers.stack[this_index]);
+    let argument = use_pair(builder, helpers.stack[argument_index]);
+    let call = builder.create_block();
+    let hit = builder.create_block();
+    let generic = builder.create_block();
+    let joined = builder.create_block();
+    let function_is_object = tag_is(builder, function.tag, qjs::JS_TAG_OBJECT);
+    let receiver_is_object = tag_is(builder, receiver.tag, qjs::JS_TAG_OBJECT);
+    let objects = builder.ins().band(function_is_object, receiver_is_object);
+    let class_check = builder.create_block();
+    builder.ins().brif(objects, class_check, &[], generic, &[]);
+    builder.seal_block(class_check);
+    builder.switch_to_block(class_check);
+    // Only Array receivers can hit; other method calls go straight to CALL.
+    let class = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        receiver.payload,
+        helpers.element_layout.object_class_id_offset,
+    );
+    let class = builder.ins().uextend(types::I64, class);
+    let is_array =
+        builder
+            .ins()
+            .icmp_imm(IntCC::Equal, class, helpers.element_layout.array_class_id);
+    builder.ins().brif(is_array, call, &[], generic, &[]);
+    builder.seal_block(call);
+    builder.switch_to_block(call);
+    let value_size = mem::size_of::<qjs::JSValue>();
+    let scratch = object_scratch(builder, 4);
+    for (index, pair) in [function, receiver, argument].into_iter().enumerate() {
+        let offset =
+            i32::try_from(index * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+        builder.ins().stack_store(pair.payload, scratch, offset);
+        builder
+            .ins()
+            .stack_store(pair.tag, scratch, offset + helpers.layout.value_tag);
+    }
+    let ctx = builder.ins().load(
+        pointer_type,
+        MemFlags::new(),
+        helpers.frame,
+        helpers.layout.ctx,
+    );
+    let mut addresses = Vec::with_capacity(4);
+    for index in 0..4 {
+        let offset =
+            i32::try_from(index * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+        addresses.push(builder.ins().stack_addr(pointer_type, scratch, offset));
+    }
+    let status = emit_object_leaf_call(
+        builder,
+        pointer_type,
+        fast.array_push,
+        &[ctx, addresses[0], addresses[1], addresses[2], addresses[3]],
+        &[scratch],
+    );
+    let succeeded = builder.ins().icmp_imm(
+        IntCC::Equal,
+        status,
+        i64::from(qjs::JSJitObjectStatus_JS_JIT_OBJECT_OK),
+    );
+    builder.ins().brif(succeeded, hit, &[], generic, &[]);
+    builder.seal_block(hit);
+    builder.seal_block(generic);
+    builder.switch_to_block(hit);
+    let out_offset = i32::try_from(3 * value_size).map_err(|_| CompileFailure::ResourceLimit)?;
+    let length = Pair {
+        payload: builder.ins().stack_load(types::I64, scratch, out_offset),
+        tag: builder
+            .ins()
+            .stack_load(types::I64, scratch, out_offset + helpers.layout.value_tag),
+    };
+    define_pair(builder, helpers.stack[output_index], length);
+    builder.ins().jump(joined, &[]);
+    builder.switch_to_block(generic);
+    Ok(joined)
 }
 
 fn lower_set_property(
@@ -4097,7 +6283,6 @@ fn lower_set_property(
     depth: &mut usize,
     atom: u32,
     property: Option<&BaselinePropertySite>,
-    property_cache: Option<StackSlot>,
 ) -> Result<(), CompileFailure> {
     let object_index = depth
         .checked_sub(2)
@@ -4106,70 +6291,29 @@ fn lower_set_property(
     let object = flat_stack_slot(helpers.ir, object_index)?;
     let value = flat_stack_slot(helpers.ir, value_index)?;
     let set_state = next_helper_state(states)?;
-    if let Some((property, property_cache)) = property.zip(property_cache) {
+    if let Some(property) = property {
         let generic = builder.create_block();
         let joined = builder.create_block();
-        for (index, observation) in property.observations.iter().copied().enumerate() {
-            let access = builder.create_block();
-            let validate = builder.create_block();
-            let next = if index + 1 == property.observations.len() {
-                generic
-            } else {
-                builder.create_block()
-            };
-            let receiver = use_pair(builder, helpers.stack[object_index]);
-            let object_tag =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, receiver.tag, i64::from(qjs::JS_TAG_OBJECT));
-            let cached_check = builder.create_block();
-            builder
-                .ins()
-                .brif(object_tag, cached_check, &[], validate, &[]);
-            builder.switch_to_block(cached_check);
-            let current_shape = builder.ins().load(
-                helpers.pointer_type,
-                MemFlags::trusted(),
-                receiver.payload,
-                24,
-            );
-            let cached = builder.ins().stack_load(types::I64, property_cache, 0);
-            let expected = observation.shape().identity();
-            let pointer_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, current_shape, expected as i64);
-            let cache_ok = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, cached, expected as i64);
-            let validated = builder.ins().band(pointer_ok, cache_ok);
-            builder.ins().brif(validated, access, &[], validate, &[]);
-            builder.switch_to_block(validate);
-            let status =
-                helpers.shape_guard(builder, set_state, *depth, object, observation.shape())?;
-            let matched =
-                builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, status, i64::from(qjs::JS_JIT_HELPER_OK));
-            let cache = builder.create_block();
-            builder.ins().brif(matched, cache, &[], next, &[]);
-            builder.switch_to_block(cache);
-            let expected_value = builder.ins().iconst(types::I64, expected as i64);
-            builder.ins().stack_store(expected_value, property_cache, 0);
-            builder.ins().jump(access, &[]);
+        let receiver = use_pair(builder, helpers.stack[object_index]);
+        let accesses = emit_shape_dispatch(
+            builder,
+            helpers.pointer_type,
+            receiver,
+            &property.observations,
+            generic,
+        )?;
+        let layout = crate::abi::AbiInfo::linked()
+            .map_err(|_| CompileFailure::InvalidArtifact)?
+            .property_layout();
+        for (observation, access) in property.observations.iter().copied().zip(accesses) {
             builder.switch_to_block(access);
             let props = builder.ins().load(
                 helpers.pointer_type,
                 MemFlags::trusted(),
                 receiver.payload,
-                32,
+                layout.object_properties_offset,
             );
-            let offset = i32::try_from(
-                usize::try_from(observation.offset())
-                    .map_err(|_| CompileFailure::ResourceLimit)?
-                    .checked_mul(16)
-                    .ok_or(CompileFailure::ResourceLimit)?,
-            )
-            .map_err(|_| CompileFailure::ResourceLimit)?;
+            let offset = property_slot_offset(observation)?;
             let expected_tag = property_value_tag(observation.value())?;
             let current_tag =
                 builder
@@ -4201,9 +6345,6 @@ fn lower_set_property(
                 helpers.layout,
             )?;
             builder.ins().jump(joined, &[]);
-            if index + 1 != property.observations.len() {
-                builder.switch_to_block(next);
-            }
         }
         builder.switch_to_block(generic);
         helpers.invoke(
@@ -5144,6 +7285,172 @@ fn lower_to_property_key(
     helpers.set_depth(builder, depth)
 }
 
+/// Synchronous iteration opcodes run the interpreter's own stack effect on
+/// the materialized frame through ITERATOR_OP. `for_of_next` first tries the
+/// non-allocating Array values leaf, which revalidates the live iterator, its
+/// exact built-in `next` method and the dense in-bounds element on every step;
+/// any miss (holes past the dense count, non-Array receivers, user iterators,
+/// completion) takes the exact helper instead.
+fn lower_iterator(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    state: FrameStateId,
+    depth: &mut usize,
+    operation: IteratorOp,
+    array_values_next: Option<usize>,
+) -> Result<(), CompileFailure> {
+    let stack = helpers.stack;
+    let before = *depth;
+    let base = before
+        .checked_sub(operation.window_below())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    let after = before
+        .checked_add_signed(operation.net_push())
+        .ok_or(CompileFailure::InvalidArtifact)?;
+    if before.max(after) > stack.len() {
+        return Err(CompileFailure::InvalidArtifact);
+    }
+    let (name, operand) = match operation {
+        IteratorOp::ForOfStart => ("for_of_start", 0),
+        IteratorOp::ForOfNext(extra) => ("for_of_next", u32::from(extra)),
+        IteratorOp::ForInStart => ("for_in_start", 0),
+        IteratorOp::ForInNext => ("for_in_next", 0),
+        IteratorOp::Close => ("iterator_close", 0),
+    };
+    // The interpreter's `sp` when the operation throws: iterator_close has
+    // already dropped the catch offset and the next method.
+    let exception_depth = match operation {
+        IteratorOp::Close => before - 2,
+        _ => before,
+    };
+    let arguments = [
+        u32::try_from(before).map_err(|_| CompileFailure::ResourceLimit)?,
+        quickjs_opcode_id(name)?,
+        operand,
+        0,
+    ];
+
+    let continuation = match (operation, array_values_next) {
+        (IteratorOp::ForOfNext(_), Some(leaf)) => {
+            let continuation = builder.create_block();
+            let hit = builder.create_block();
+            let miss = builder.create_block();
+            let scratch = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(3 * mem::size_of::<qjs::JSValue>())
+                    .map_err(|_| CompileFailure::ResourceLimit)?,
+                3,
+            ));
+            let scratch = builder.ins().stack_addr(helpers.pointer_type, scratch, 0);
+            let iterator = use_pair(builder, stack[base]);
+            let next_method = use_pair(builder, stack[base + 1]);
+            store_jsvalue_slot(builder, scratch, 0, iterator, helpers.layout)?;
+            store_jsvalue_slot(builder, scratch, 1, next_method, helpers.layout)?;
+            let mut signature = Signature::new(builder.func.signature.call_conv);
+            signature.params.extend([
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+                AbiParam::new(helpers.pointer_type),
+            ]);
+            signature.returns.push(AbiParam::new(types::I32));
+            let signature = builder.import_signature(signature);
+            let target = builder.ins().iconst(
+                helpers.pointer_type,
+                i64::try_from(leaf).map_err(|_| CompileFailure::ResourceLimit)?,
+            );
+            let ctx = builder.ins().load(
+                helpers.pointer_type,
+                MemFlags::new(),
+                helpers.frame,
+                helpers.layout.ctx,
+            );
+            let value_bytes = i64::try_from(mem::size_of::<qjs::JSValue>())
+                .map_err(|_| CompileFailure::ResourceLimit)?;
+            let next_address = builder.ins().iadd_imm(scratch, value_bytes);
+            let out_address = builder.ins().iadd_imm(scratch, 2 * value_bytes);
+            emit_msan_unpoison(
+                builder,
+                helpers.pointer_type,
+                scratch,
+                2 * mem::size_of::<qjs::JSValue>(),
+            );
+            let call = super::emit_external_call(
+                builder,
+                signature,
+                target,
+                &[ctx, scratch, next_address, out_address],
+                helpers.pointer_type,
+                None,
+                None,
+            );
+            let status = builder.inst_results(call)[0];
+            let produced = builder.ins().icmp_imm(
+                IntCC::Equal,
+                status,
+                i64::from(qjs::JSJitIteratorQueryStatus_JS_JIT_ITERATOR_QUERY_VALUE),
+            );
+            builder.ins().brif(produced, hit, &[], miss, &[]);
+            builder.seal_block(hit);
+            builder.seal_block(miss);
+
+            builder.switch_to_block(hit);
+            let value = load_jsvalue(builder, scratch, 2, helpers.layout);
+            define_pair(builder, stack[before], value);
+            let not_done = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_BOOL as i64));
+            define_pair(builder, stack[before + 1], not_done);
+            builder.ins().jump(continuation, &[]);
+
+            builder.switch_to_block(miss);
+            Some(continuation)
+        }
+        _ => None,
+    };
+
+    helpers.invoke(
+        builder,
+        qjs::JSJitHelperId_JS_JIT_HELPER_ITERATOR_OP,
+        state,
+        before,
+        exception_depth,
+        &arguments,
+    )?;
+    let reload = |builder: &mut FunctionBuilder<'_>, index: usize| {
+        reload_pair(
+            builder,
+            stack[index],
+            helpers.stack_base,
+            index,
+            helpers.layout,
+        )
+    };
+    match operation {
+        IteratorOp::ForOfStart => {
+            for index in base..after {
+                reload(builder, index);
+            }
+        }
+        IteratorOp::ForInStart => reload(builder, base),
+        IteratorOp::ForOfNext(_) | IteratorOp::ForInNext => {
+            reload(builder, base);
+            reload(builder, before);
+            reload(builder, before + 1);
+        }
+        IteratorOp::Close => {
+            for (index, pair) in stack.iter().copied().enumerate().take(before).skip(base) {
+                clear_pair(builder, pair, helpers.stack_base, index, helpers.layout)?;
+            }
+        }
+    }
+    if let Some(continuation) = continuation {
+        builder.ins().jump(continuation, &[]);
+        builder.seal_block(continuation);
+        builder.switch_to_block(continuation);
+    }
+    *depth = after;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // Call bytecode operands and lowering state are separate by design.
 fn lower_call(
     builder: &mut FunctionBuilder<'_>,
@@ -5342,11 +7649,26 @@ fn lower_call(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
         let miss = builder.ins().iconst(types::I8, 0);
         builder.ins().jump(joined, &[miss]);
         builder.switch_to_block(joined);
         direct_hit = Some(builder.block_params(joined)[0]);
     } else {
+        let push_joined = match helpers.object_fast {
+            Some(fast) if has_this && !is_constructor && argc == 1 => {
+                Some(emit_array_push_fast_path(
+                    builder,
+                    helpers,
+                    fast,
+                    function_index,
+                    this_index,
+                    argv_index,
+                    output_index,
+                )?)
+            }
+            _ => None,
+        };
         helpers.invoke(
             builder,
             if is_constructor {
@@ -5372,6 +7694,12 @@ fn lower_call(
             output_index,
             helpers.layout,
         );
+        clear_reloaded_output(builder, helpers, output_index)?;
+        if let Some(joined) = push_joined {
+            builder.ins().jump(joined, &[]);
+            builder.seal_block(joined);
+            builder.switch_to_block(joined);
+        }
     }
     // CALL borrows every input. The bytecode stack effect is separate and is
     // implemented in QuickJS interpreter order, clearing primitive inputs
@@ -5411,13 +7739,19 @@ fn lower_call(
         // precisely one duplicate, so dropping that duplicate can never run a
         // finalizer and is the exact non-finalizing JS_FreeValue fast path.
         let function = use_pair(builder, helpers.stack[displaced_index]);
-        let ref_count = builder
-            .ins()
-            .load(types::I32, MemFlags::trusted(), function.payload, 0);
+        let ref_count = builder.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            function.payload,
+            crate::abi::REF_COUNT_OFFSET,
+        );
         let ref_count = builder.ins().iadd_imm(ref_count, -1);
-        builder
-            .ins()
-            .store(MemFlags::trusted(), ref_count, function.payload, 0);
+        builder.ins().store(
+            MemFlags::trusted(),
+            ref_count,
+            function.payload,
+            crate::abi::REF_COUNT_OFFSET,
+        );
         clear_pair(
             builder,
             helpers.stack[displaced_index],
@@ -5525,6 +7859,36 @@ fn lower_call_input_free(
     )?;
     builder.ins().jump(continuation, &[]);
     builder.switch_to_block(free);
+    // Heap owners, and every operand in stress mode, reach this block. A
+    // shared heap reference is released inline; the last one and stress mode
+    // keep the exact FREE helper.
+    let refcounted = super::refcount::emit_has_ref_count(builder, input.tag);
+    let release = builder.create_block();
+    let released = builder.create_block();
+    let helper = builder.create_block();
+    builder.ins().brif(refcounted, release, &[], helper, &[]);
+    builder.switch_to_block(release);
+    super::refcount::emit_release_refcounted(
+        builder,
+        helpers.frame,
+        helpers.layout.flags,
+        input.payload,
+        released,
+        helper,
+    );
+    builder.switch_to_block(released);
+    // The slot may be a scratch owner that an earlier helper published; the
+    // FREE helper would leave undefined there, and exits require it.
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    store_jsvalue_slot(
+        builder,
+        helpers.stack_base,
+        index,
+        undefined,
+        helpers.layout,
+    )?;
+    builder.ins().jump(clear, &[]);
+    builder.switch_to_block(helper);
     let slot = flat_stack_slot(helpers.ir, index)?;
     helpers.invoke(
         builder,
@@ -5700,6 +8064,7 @@ fn emit_helper_call(
     arguments: &[Value],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    exception_target: Option<Block>,
 ) -> Result<(), CompileFailure> {
     let signature = *signatures
         .get(helper_id)
@@ -5735,15 +8100,46 @@ fn emit_helper_call(
     builder.seal_block(exception);
     builder.seal_block(continuation);
     builder.switch_to_block(exception);
-    force_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
-    emit_exit(
+    emit_exception_edge(
         builder,
+        frame,
         sret,
-        qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
-        None,
+        stack_base,
+        exception_depth,
+        exception_target,
         pointer_type,
-    );
+        layout,
+    )?;
     builder.switch_to_block(continuation);
+    Ok(())
+}
+
+/// Publishes the exact operand stack owned at a pending exception, then
+/// either enters the innermost try region's landing pad or exits so the
+/// interpreter unwinds the frame.
+#[allow(clippy::too_many_arguments)]
+fn emit_exception_edge(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    sret: Value,
+    stack_base: Value,
+    exception_depth: usize,
+    exception_target: Option<Block>,
+    pointer_type: cranelift_codegen::ir::Type,
+    layout: FrameLayout,
+) -> Result<(), CompileFailure> {
+    force_visible_stack_depth(builder, frame, stack_base, exception_depth, layout)?;
+    if let Some(landing) = exception_target {
+        builder.ins().jump(landing, &[]);
+    } else {
+        emit_exit(
+            builder,
+            sret,
+            qjs::JSJitExitKind_JS_JIT_EXIT_EXCEPTION,
+            None,
+            pointer_type,
+        );
+    }
     Ok(())
 }
 
@@ -5768,6 +8164,7 @@ fn invoke_frame_helper(
     helper_arguments: &[u32],
     pointer_type: cranelift_codegen::ir::Type,
     layout: FrameLayout,
+    exception_target: Option<Block>,
 ) -> Result<(), CompileFailure> {
     let frame_state = ir.frame_states.get(state);
     let fixed_slots = usize::from(ir.argument_count) + usize::from(ir.local_count);
@@ -5815,7 +8212,60 @@ fn invoke_frame_helper(
         &values,
         pointer_type,
         layout,
+        exception_target,
     )
+}
+
+/// Calls one of the ABI 1.25 exception entry points (`JS_JitThrowValue`,
+/// `JS_JitThrowError`, `JS_JitCatchException`). They share the helper
+/// convention: frame, stack-map id and u32 operands in, status out. The call
+/// carries its frame state's source location so the state maps to exactly
+/// this call's return address.
+fn emit_exception_api_call(
+    builder: &mut FunctionBuilder<'_>,
+    frame: Value,
+    address: usize,
+    state: FrameStateId,
+    operands: &[u32],
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Result<Value, CompileFailure> {
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(types::I32));
+    for _ in operands {
+        signature.params.push(AbiParam::new(types::I32));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    let signature = builder.import_signature(signature);
+    let target = builder.ins().iconst(
+        pointer_type,
+        i64::try_from(address).map_err(|_| CompileFailure::InvalidArtifact)?,
+    );
+    let mut params = Vec::with_capacity(operands.len() + 2);
+    params.push(frame);
+    params.push(helper_u32(
+        builder,
+        u32::try_from(state.index()).map_err(|_| CompileFailure::ResourceLimit)?,
+    ));
+    params.extend(
+        operands
+            .iter()
+            .copied()
+            .map(|operand| helper_u32(builder, operand)),
+    );
+    let source_location = frame_state_source_loc(state)?;
+    builder.set_srcloc(source_location);
+    let call = emit_external_call(
+        builder,
+        signature,
+        target,
+        &params,
+        pointer_type,
+        Some(frame),
+        Some(source_location),
+    );
+    builder.set_srcloc(SourceLoc::default());
+    Ok(builder.inst_results(call)[0])
 }
 
 fn helper_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
@@ -5864,6 +8314,26 @@ fn move_stack_pair(
     define_pair(builder, stack[destination], value);
     let _ = (base, layout);
     clear_pair(builder, stack[source], base, source, layout)
+}
+
+/// After a helper publishes an owned output in frame memory and the value is
+/// reloaded into SSA, the SSA variable is the only owner the lowering tracks.
+/// A later inline FREE no longer rematerializes the frame, so clear the
+/// published copy: CALL/GET_PROPERTY outputs live in scratch slots, which must
+/// hold undefined at every exit.
+fn clear_reloaded_output(
+    builder: &mut FunctionBuilder<'_>,
+    helpers: &HelperLowering<'_>,
+    index: usize,
+) -> Result<(), CompileFailure> {
+    let undefined = constant_pair(builder, TaggedValue::new(0, qjs::JS_TAG_UNDEFINED as i64));
+    store_jsvalue_slot(
+        builder,
+        helpers.stack_base,
+        index,
+        undefined,
+        helpers.layout,
+    )
 }
 
 fn clear_pair(
@@ -6471,6 +8941,8 @@ mod tests {
             max_stack_depth: 16,
             argument_count: 4,
             local_count: 4,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         }
     }
 
@@ -6496,6 +8968,13 @@ mod tests {
             IrOp::Call { .. } => "call",
             IrOp::CallConstructor(_) => "call_constructor",
             IrOp::Regexp => "regexp",
+            IrOp::FClosure(_) => "fclosure",
+            IrOp::GetVarRef { .. } => "get_var_ref",
+            IrOp::PutVarRef { .. } => "put_var_ref",
+            IrOp::CloseLocal(_) => "close_local",
+            IrOp::SetName(_) => "set_name",
+            IrOp::Generic(_) => "generic",
+            IrOp::Iterator(_) => "iterator",
             IrOp::GetArgument(_) => "get_argument",
             IrOp::GetLocal(_) => "get_local",
             IrOp::GetLocalChecked(_) => "get_local_checked",
@@ -6515,6 +8994,12 @@ mod tests {
             IrOp::Branch { .. } => "branch",
             IrOp::Return => "return",
             IrOp::ReturnUndefined => "return_undefined",
+            IrOp::Catch(_) => "catch",
+            IrOp::NipCatch => "nip_catch",
+            IrOp::Throw => "throw",
+            IrOp::ThrowError { .. } => "throw_error",
+            IrOp::Gosub { .. } => "gosub",
+            IrOp::Ret { .. } => "ret",
         }
     }
 
@@ -6565,6 +9050,32 @@ mod tests {
                 IrOp::CallConstructor(0),
             ),
             linear_ir(vec![numeric_push(), numeric_push()], IrOp::Regexp),
+            linear_ir(Vec::new(), IrOp::FClosure(0)),
+            linear_ir(
+                Vec::new(),
+                IrOp::GetVarRef {
+                    index: 0,
+                    checked: true,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutVarRef {
+                    index: 0,
+                    mode: VarRefMode::Check,
+                    keep: false,
+                },
+            ),
+            linear_ir(
+                vec![numeric_push()],
+                IrOp::PutVarRef {
+                    index: 0,
+                    mode: VarRefMode::Plain,
+                    keep: true,
+                },
+            ),
+            linear_ir(Vec::new(), IrOp::CloseLocal(0)),
+            linear_ir(vec![numeric_push()], IrOp::SetName(1)),
             linear_ir(Vec::new(), IrOp::GetArgument(0)),
             linear_ir(Vec::new(), IrOp::GetLocal(0)),
             linear_ir(Vec::new(), IrOp::GetLocalChecked(0)),
@@ -6604,7 +9115,50 @@ mod tests {
             linear_ir(vec![numeric_push()], IrOp::AddLocal(0)),
             linear_ir(vec![numeric_push()], IrOp::Return),
             linear_ir(Vec::new(), IrOp::ReturnUndefined),
+            linear_ir(Vec::new(), IrOp::Catch(1)),
+            linear_ir(
+                vec![instruction(0, IrOp::Catch(1)), numeric_push()],
+                IrOp::NipCatch,
+            ),
+            linear_ir(vec![numeric_push()], IrOp::Throw),
+            linear_ir(Vec::new(), IrOp::ThrowError { atom: 1, kind: 2 }),
         ];
+        cases.push(BaselineIr {
+            blocks: vec![
+                IrBlock {
+                    start_pc: 0,
+                    stack_depth: 0,
+                    instructions: vec![instruction(
+                        0,
+                        IrOp::Gosub {
+                            target: 2,
+                            return_pc: 1,
+                        },
+                    )],
+                },
+                IrBlock {
+                    start_pc: 1,
+                    stack_depth: 0,
+                    instructions: vec![instruction(1, IrOp::ReturnUndefined)],
+                },
+                IrBlock {
+                    start_pc: 2,
+                    stack_depth: 1,
+                    instructions: vec![instruction(
+                        2,
+                        IrOp::Ret {
+                            targets: Box::new([1]),
+                        },
+                    )],
+                },
+            ],
+            frame_states: FrameStateTable::default(),
+            max_stack_depth: 1,
+            argument_count: 0,
+            local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
+        });
         for operation in [
             StackOp::Nip,
             StackOp::Nip1,
@@ -6687,6 +9241,8 @@ mod tests {
             max_stack_depth: 0,
             argument_count: 0,
             local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         });
         cases.push(BaselineIr {
             blocks: vec![
@@ -6719,6 +9275,8 @@ mod tests {
             max_stack_depth: 1,
             argument_count: 0,
             local_count: 0,
+            exception_handlers: BTreeMap::new(),
+            catch_sites: BTreeMap::new(),
         });
 
         let mut seen = BTreeSet::new();
@@ -6739,8 +9297,241 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            33,
+            44,
             "every IrOp variant is represented: {seen:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod post_lowering_tests {
+    use super::{canonicalize_integer_constants, fold_bitcast_round_trips, fold_constant_branches};
+    use cranelift_codegen::ir::{
+        condcodes::IntCC, types, AbiParam, Function, InstBuilder, Signature,
+    };
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+
+    fn verify(function: &Function) {
+        cranelift_codegen::verify_function(
+            function,
+            &cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder()),
+        )
+        .unwrap_or_else(|errors| panic!("{errors}: {}", function.display()));
+    }
+
+    fn signature(params: &[types::Type], returns: &[types::Type]) -> Signature {
+        let mut signature = Signature::new(CallConv::SystemV);
+        signature
+            .params
+            .extend(params.iter().map(|&ty| AbiParam::new(ty)));
+        signature
+            .returns
+            .extend(returns.iter().map(|&ty| AbiParam::new(ty)));
+        signature
+    }
+
+    /// A loop whose `tag` variable is redefined to a fresh `iconst 0` on the
+    /// backedge, as the lowering does for Int32 tags.
+    #[test]
+    fn loop_invariant_constants_share_one_definition() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let exit = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        let counter = Variable::from_u32(0);
+        let tag = Variable::from_u32(1);
+        builder.declare_var(counter, types::I64);
+        builder.declare_var(tag, types::I64);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        builder.def_var(counter, x);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.def_var(tag, zero);
+        builder.ins().jump(header, &[]);
+        builder.switch_to_block(header);
+        let current = builder.use_var(counter);
+        let done = builder.ins().icmp_imm(IntCC::Equal, current, 0);
+        builder.ins().brif(done, exit, &[], body, &[]);
+        builder.switch_to_block(body);
+        let next = builder.ins().iadd_imm(current, -1);
+        builder.def_var(counter, next);
+        let again = builder.ins().iconst(types::I64, 0);
+        builder.def_var(tag, again);
+        builder.ins().jump(header, &[]);
+        builder.switch_to_block(exit);
+        let result = builder.use_var(tag);
+        builder.ins().return_(&[result]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        canonicalize_integer_constants(&mut function);
+        verify(&function);
+        let text = function.display().to_string();
+        assert_eq!(text.matches("iconst.i64 0").count(), 1, "{text}");
+        // Every edge into the header now passes the same zero, which is what
+        // lets Cranelift's constant-phi removal delete the tag parameter.
+        let jumps = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("jump block1"))
+            .collect::<Vec<_>>();
+        assert_eq!(jumps.len(), 2, "{text}");
+        let zero = text
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.ends_with("iconst.i64 0")
+                    .then(|| line.split_whitespace().next().unwrap().to_owned())
+            })
+            .unwrap();
+        assert!(
+            jumps.iter().all(|jump| jump.contains(&format!("{zero})"))),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn constant_conditions_become_jumps_and_drop_dead_exits() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let pass = builder.create_block();
+        let deopt = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.append_block_param(pass, types::I64);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        let tag = builder.ins().iconst(types::I64, 0);
+        let int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+        let float = builder.ins().icmp_imm(IntCC::Equal, tag, 8);
+        let one = builder.ins().iconst(types::I8, 1);
+        let numeric = builder.ins().bor(int, float);
+        let numeric = builder.ins().band(one, numeric);
+        builder.ins().brif(numeric, pass, &[x], deopt, &[]);
+        builder.switch_to_block(pass);
+        let value = builder.block_params(pass)[0];
+        builder.ins().return_(&[value]);
+        builder.switch_to_block(deopt);
+        let marker = builder.ins().iconst(types::I64, -1);
+        builder.ins().return_(&[marker]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        canonicalize_integer_constants(&mut function);
+        fold_constant_branches(&mut function);
+        verify(&function);
+        let folded = function.display().to_string();
+        assert!(!folded.contains("brif"), "{folded}");
+        assert!(folded.contains("jump block1(v0)"), "{folded}");
+        assert!(!folded.contains("block2"), "dead exit removed: {folded}");
+    }
+
+    #[test]
+    fn runtime_conditions_are_left_alone() {
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::I64], &[types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let left = builder.create_block();
+        let right = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let x = builder.block_params(entry)[0];
+        let small = builder.ins().icmp_imm(IntCC::UnsignedLessThan, x, 8);
+        let zero = builder.ins().iconst(types::I8, 0);
+        // `small | 0` still depends on x; `x & 0` would not.
+        let condition = builder.ins().bor(small, zero);
+        builder.ins().brif(condition, left, &[], right, &[]);
+        builder.switch_to_block(left);
+        builder.ins().return_(&[x]);
+        builder.switch_to_block(right);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[zero]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_constant_branches(&mut function);
+        verify(&function);
+        assert!(function.display().to_string().contains("brif"));
+    }
+
+    #[test]
+    fn narrow_comparisons_fold_with_their_type_width() {
+        let mut function =
+            Function::with_name_signature(Default::default(), signature(&[], &[types::I32]));
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        let taken = builder.create_block();
+        let other = builder.create_block();
+        builder.switch_to_block(entry);
+        // -1 as i32 is below zero signed but the largest value unsigned, and
+        // its zero extension is positive.
+        let minus_one = builder.ins().iconst(types::I32, -1);
+        let wide = builder.ins().uextend(types::I64, minus_one);
+        let unsigned_big = builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, minus_one, 7);
+        let signed_negative = builder.ins().icmp_imm(IntCC::SignedLessThan, minus_one, 0);
+        let widened_positive = builder.ins().icmp_imm(IntCC::SignedGreaterThan, wide, 0);
+        let both = builder.ins().band(unsigned_big, widened_positive);
+        let all = builder.ins().band(both, signed_negative);
+        builder.ins().brif(all, taken, &[], other, &[]);
+        builder.switch_to_block(taken);
+        let one = builder.ins().iconst(types::I32, 1);
+        builder.ins().return_(&[one]);
+        builder.switch_to_block(other);
+        let two = builder.ins().iconst(types::I32, 2);
+        builder.ins().return_(&[two]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_constant_branches(&mut function);
+        verify(&function);
+        let folded = function.display().to_string();
+        assert!(folded.contains("jump block1"), "{folded}");
+        assert!(!folded.contains("block2"), "{folded}");
+    }
+
+    #[test]
+    fn float_payload_round_trips_forward_the_original_value() {
+        use cranelift_codegen::ir::MemFlags;
+        let mut function = Function::with_name_signature(
+            Default::default(),
+            signature(&[types::F64, types::I64], &[types::F64, types::I64]),
+        );
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let float = builder.block_params(entry)[0];
+        let bits = builder.block_params(entry)[1];
+        let payload = builder.ins().bitcast(types::I64, MemFlags::new(), float);
+        let back = builder.ins().bitcast(types::F64, MemFlags::new(), payload);
+        let sum = builder.ins().fadd(back, back);
+        // An integer payload viewed as f64 and back is also the identity.
+        let viewed = builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+        let raw = builder.ins().bitcast(types::I64, MemFlags::new(), viewed);
+        builder.ins().return_(&[sum, raw]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        fold_bitcast_round_trips(&mut function);
+        verify(&function);
+        let text = function.display().to_string();
+        assert!(text.contains("fadd v0, v0"), "{text}");
+        assert!(text.contains("return v4, v1"), "{text}");
     }
 }
