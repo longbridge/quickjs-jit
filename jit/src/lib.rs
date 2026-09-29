@@ -2762,18 +2762,6 @@ impl ProductionBackend {
                 self.settle_untranslatable_tier2_candidate(key);
                 continue;
             }
-            // Any other generation Tier 2 cannot translate keeps its baseline
-            // as its terminal tier. A trial would fail with
-            // `UnsupportedOpcode` until the optimizing tier is blacklisted,
-            // which is terminal and also switches off that baseline.
-            if !forced_trial
-                && !*self
-                    .optimized_vocabulary
-                    .entry(key)
-                    .or_insert_with(|| ir::optimized_vocabulary_admits(snapshot))
-            {
-                continue;
-            }
             // Tier 2 has no exceptional control flow; exception regions stay
             // on their Tier 1 code instead of failing admission. Checked only
             // for ready candidates so the per-maintenance scan stays as is.
