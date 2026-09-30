@@ -106,6 +106,33 @@ impl FrameInline {
         }
     }
 
+    /// Like `wait_for_tier2`, but also waits until the Tier2 body makes no
+    /// generic CALL: a slow host can enter a first caller artifact compiled
+    /// before its callee's edge was ready.
+    fn wait_for_linked_tier2(&self, expression: &str, expected: f64) {
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
+        loop {
+            assert_eq!(self.number(expression), expected, "{expression}");
+            self.jit.poll();
+            let before = self.jit.metrics();
+            let calls = self.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL);
+            assert_eq!(self.number(expression), expected, "{expression}");
+            let after = self.jit.metrics();
+            if after.tier2_entries == before.tier2_entries + 1
+                && self.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL) == calls
+                && after.pending_worker_jobs == 0
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "linked Tier2 was not installed: {after:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn wait_for_caller_tier2(
         &self,
         callee_name: &str,
@@ -358,7 +385,7 @@ fn duplicated_frame_inline_result_preserves_owners_through_gc_and_deopt() {
         "#,
         );
         test.wait_for_tier2("effect(state,7)", 7.0);
-        test.wait_for_tier2("caller(effect,state,7)", 7.0);
+        test.wait_for_linked_tier2("caller(effect,state,7)", 7.0);
         let warmed = test.jit.metrics();
         assert_eq!(warmed.compile_failures, 0, "stress={stress}: {warmed:?}");
         let calls = test.count(qjs::JSJitHelperId_JS_JIT_HELPER_CALL);
