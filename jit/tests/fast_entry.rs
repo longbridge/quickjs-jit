@@ -27,8 +27,13 @@ struct Calls {
 }
 
 /// Leaked for the process lifetime so native code can reach it without a pin.
+/// Each allocation stays registered so LeakSanitizer still finds it reachable
+/// once the test that created it has returned.
 fn calls() -> &'static Calls {
-    Box::leak(Box::default())
+    static LEAKED: Mutex<Vec<&'static Calls>> = Mutex::new(Vec::new());
+    let calls: &'static Calls = Box::leak(Box::default());
+    LEAKED.lock().unwrap().push(calls);
+    calls
 }
 
 struct Pin {

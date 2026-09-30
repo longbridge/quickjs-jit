@@ -72,7 +72,8 @@ fn with_optimized_binary<T>(
         .with(|ctx| ctx.eval::<(), _>(format!("function f(a,b){{return {body}}}")))
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while std::time::Instant::now() < deadline {
         context.with(|ctx| {
             let function: Function<'_> = ctx.globals().get("f").unwrap();
@@ -175,7 +176,8 @@ fn with_optimized_source(source: &str, warm: &str, check: impl FnOnce(&Context, 
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while std::time::Instant::now() < deadline {
         context.with(|ctx| {
             let _: rquickjs::Value<'_> = ctx.eval(warm).unwrap();
@@ -310,7 +312,8 @@ fn with_optimized_loop(source: &str, warm: &str, check: impl FnOnce(&Context, &J
             ))
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while std::time::Instant::now() < deadline {
         context.with(|ctx| {
             let warm: Function<'_> = ctx.globals().get("__warm").unwrap();

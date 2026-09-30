@@ -1,0 +1,416 @@
+{
+  "schema": "gpui-shell-paired-v1",
+  "measured_at": "2026-09-30",
+  "candidate_revision": "8fa2a4894eb6148bb096b2f2e154ac9e661fd848",
+  "gpui_kit_base": "2c2feb769115530f56d6478d5bb78840131888d0",
+  "test": "gpui_shell tests::benchmark::emit_one_jit_acceptance_sample (64 warmup renders, 200 measured renders, steady_state_ns = mean render incl. debug_tree check)",
+  "pairs_retained": 10,
+  "pairs_discarded": 2,
+  "order": "alternating reversed per pair",
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20260909
+  },
+  "host": "13th Gen Intel(R) Core(TM) i7-13700KF; Linux-7.2.5-3-omarchy-x86_64-with-glibc2.44",
+  "binaries": {
+    "shell-0.12.10": "9312c2350e43036c434bb5e017ed2594a507aa277f0785a4c220a78adc6a1f69",
+    "shell-0.12.9": "6d587472b052881af056fdc0e896385e6fe267d2a5adee7709913d2f96268d1c",
+    "shell-fix-8fa2a48": "7215580eb853ba16a60c3f9302a78e05b940911abc79cef5629e231254ea09f4"
+  },
+  "runs": {
+    "s5-1core": {
+      "cpus": "taskset -c 8 (main and JIT worker share one core)",
+      "workloads": {
+        "panel": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 811.9595,
+              "0.12.10/automatic": 981.3785,
+              "fix-8fa2a48/automatic": 803.707,
+              "fix-8fa2a48/interpreter": 801.492
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.029093503035186,
+                "ci95": [
+                  1.002072000983406,
+                  1.0733399737197922
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 1.2744751927982882,
+                "ci95": [
+                  1.217950547032757,
+                  1.3887305251464916
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 0.9979116295204772,
+                "ci95": [
+                  0.992449960090909,
+                  1.0059846146474565
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 875.193,
+              "0.12.10/automatic": 1011.065,
+              "fix-8fa2a48/automatic": 832.4485,
+              "fix-8fa2a48/interpreter": 819.871
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.0826750483138468,
+                "ci95": [
+                  1.0004860357022247,
+                  1.1968062902786702
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 1.3181958838082963,
+                "ci95": [
+                  1.222738199773299,
+                  1.4593374155153795
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 1.003138745276263,
+                "ci95": [
+                  0.9898805117451944,
+                  1.0187771831585815
+                ]
+              }
+            }
+          }
+        },
+        "compute": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 15.0915,
+              "0.12.10/automatic": 127.1345,
+              "fix-8fa2a48/automatic": 10.298,
+              "fix-8fa2a48/interpreter": 222.7165
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.4655148524486266,
+                "ci95": [
+                  1.298509503136378,
+                  1.6503896211250244
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 12.32684282988836,
+                "ci95": [
+                  11.974675526994039,
+                  12.685095524544064
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 21.594814928126894,
+                "ci95": [
+                  21.41847466710368,
+                  21.772413002885486
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 16.468,
+              "0.12.10/automatic": 2051.2615,
+              "fix-8fa2a48/automatic": 12.642,
+              "fix-8fa2a48/interpreter": 226.6705
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.338736342792241,
+                "ci95": [
+                  1.1758461044109265,
+                  1.5302644249903152
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 154.56165975580862,
+                "ci95": [
+                  148.69577185223503,
+                  160.93433000604705
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 17.591889100829608,
+                "ci95": [
+                  16.866828173429003,
+                  18.271631015589637
+                ]
+              }
+            }
+          }
+        },
+        "mixed": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 178.48,
+              "0.12.10/automatic": 363.262,
+              "fix-8fa2a48/automatic": 92.7135,
+              "fix-8fa2a48/interpreter": 306.9695
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.9024628163101225,
+                "ci95": [
+                  1.8793374699610848,
+                  1.9243759834971732
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 3.913926363876618,
+                "ci95": [
+                  3.8751377665192996,
+                  3.9548032555420605
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 3.2970890370169217,
+                "ci95": [
+                  3.2719649250528136,
+                  3.3152906677934397
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 183.2,
+              "0.12.10/automatic": 2231.4975,
+              "fix-8fa2a48/automatic": 97.529,
+              "fix-8fa2a48/interpreter": 315.1215
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.750264822166015,
+                "ci95": [
+                  1.5435245501012138,
+                  1.8893327387085466
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 21.22569682762332,
+                "ci95": [
+                  18.401448367447678,
+                  24.252105930579713
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 3.067596968058854,
+                "ci95": [
+                  2.7101560595443916,
+                  3.290974243154774
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "s5-2core": {
+      "cpus": "taskset -c 8,10 (two physical P-cores)",
+      "workloads": {
+        "panel": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 806.8725,
+              "0.12.10/automatic": 987.911,
+              "fix-8fa2a48/automatic": 805.549,
+              "fix-8fa2a48/interpreter": 798.957
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 0.9973158359601578,
+                "ci95": [
+                  0.9889171369674501,
+                  1.003636469860589
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 1.224514889057869,
+                "ci95": [
+                  1.2131424423067076,
+                  1.2357418779926679
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 0.9925664553685941,
+                "ci95": [
+                  0.99063567531783,
+                  0.9946375245736212
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 824.455,
+              "0.12.10/automatic": 1008.3785,
+              "fix-8fa2a48/automatic": 845.3685,
+              "fix-8fa2a48/interpreter": 825.255
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 0.9512525571819852,
+                "ci95": [
+                  0.9192364769445204,
+                  0.9809386099733595
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 1.2055080390203756,
+                "ci95": [
+                  1.1585011631150928,
+                  1.2551211073477326
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 0.960716142879846,
+                "ci95": [
+                  0.9395567816327389,
+                  0.9785656656336412
+                ]
+              }
+            }
+          }
+        },
+        "compute": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 16.286,
+              "0.12.10/automatic": 62.405,
+              "fix-8fa2a48/automatic": 10.2375,
+              "fix-8fa2a48/interpreter": 223.0215
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.6426642573206784,
+                "ci95": [
+                  1.4070216073344337,
+                  1.9420142487252121
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 6.619499879036475,
+                "ci95": [
+                  5.321746380358696,
+                  8.305979176190888
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 21.750109473926813,
+                "ci95": [
+                  21.640682585360643,
+                  21.849052835554012
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 15.8365,
+              "0.12.10/automatic": 439.6995,
+              "fix-8fa2a48/automatic": 11.3975,
+              "fix-8fa2a48/interpreter": 227.103
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 2.680194367474053,
+                "ci95": [
+                  1.3571571464158232,
+                  6.3897172055151445
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 50.116072531222734,
+                "ci95": [
+                  36.29685724902885,
+                  76.49065183214856
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 19.794590946655187,
+                "ci95": [
+                  18.342405233310934,
+                  20.980984692575614
+                ]
+              }
+            }
+          }
+        },
+        "mixed": {
+          "steady_state_ns": {
+            "median_us": {
+              "0.12.9/automatic": 179.2105,
+              "0.12.10/automatic": 180.071,
+              "fix-8fa2a48/automatic": 92.4385,
+              "fix-8fa2a48/interpreter": 306.213
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 1.9390596610819413,
+                "ci95": [
+                  1.916314623243905,
+                  1.9618510710298518
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 1.992455421407972,
+                "ci95": [
+                  1.774041846898373,
+                  2.2245637947042134
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 3.3192375402372187,
+                "ci95": [
+                  3.305148326588638,
+                  3.3372177721529326
+                ]
+              }
+            }
+          },
+          "p99_script_render_ns": {
+            "median_us": {
+              "0.12.9/automatic": 182.092,
+              "0.12.10/automatic": 334.298,
+              "fix-8fa2a48/automatic": 95.0065,
+              "fix-8fa2a48/interpreter": 311.4405
+            },
+            "fix_speed_vs": {
+              "0.12.9/automatic": {
+                "speed": 2.047715086698208,
+                "ci95": [
+                  1.884629203250106,
+                  2.351323790833418
+                ]
+              },
+              "0.12.10/automatic": {
+                "speed": 4.4243064965165635,
+                "ci95": [
+                  3.5398084456572256,
+                  5.686552671000553
+                ]
+              },
+              "fix-8fa2a48/interpreter": {
+                "speed": 3.3633497925915026,
+                "ci95": [
+                  3.2419401221298747,
+                  3.5327797675095645
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -30,7 +30,8 @@ fn tier1_enters_for_map_and_set_constructors() {
         .unwrap()
     });
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = (0, 0);
     while Instant::now() < deadline {
         result = context.with(|ctx| {
@@ -73,7 +74,8 @@ fn tier1_constructor_keeps_borrowed_argument_slots_owned_by_the_caller() {
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = String::new();
     while Instant::now() < deadline {
         result = context.with(|ctx| {

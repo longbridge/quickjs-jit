@@ -195,7 +195,8 @@ fn production_with(
         context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
         // Slow (sanitizer) builds may still be compiling after `rounds`; keep
         // evaluating until the queued compilation has been installed.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
         let mut round = 0;
         let result = loop {
             let result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());
@@ -223,13 +224,19 @@ fn production_with(
     (interpreted, compiled, metrics)
 }
 
+const HOT_EXCEPTION_LOOP: &str = "function f(n){ let caught=0, finals=0; for(let i=0;i<n;i++){ try { if((i&15)===0) throw i; caught-=1; } catch (value) { caught+=value; } finally { finals++; } } return caught + ':' + finals; }";
+
+fn baseline_only() -> JitConfig {
+    JitConfig::builder()
+        .tier_policy(JitTierPolicy::BaselineOnly)
+        .build()
+        .unwrap()
+}
+
 #[test]
-fn production_tiering_runs_hot_exception_loops_natively() {
-    let (interpreted, compiled, metrics) = production(
-        "function f(n){ let caught=0, finals=0; for(let i=0;i<n;i++){ try { if((i&15)===0) throw i; caught-=1; } catch (value) { caught+=value; } finally { finals++; } } return caught + ':' + finals; }",
-        "f(4000)",
-        40,
-    );
+fn baseline_policy_runs_hot_exception_loops_natively() {
+    let (interpreted, compiled, metrics) =
+        production_with(baseline_only(), HOT_EXCEPTION_LOOP, "f(4000)", 40);
     assert_eq!(compiled, interpreted);
     assert!(metrics.native_entries > 0, "{metrics:?}");
     assert_eq!(metrics.native_retries, 0, "{metrics:?}");
@@ -237,10 +244,22 @@ fn production_tiering_runs_hot_exception_loops_natively() {
 }
 
 #[test]
+fn automatic_tiering_keeps_exception_regions_interpreted() {
+    // Automatic tiering defers the opcodes Tier 1 gained in roadmap P2 until
+    // profitability can measure the interpreter; explicit policies still
+    // compile them (above).
+    let (interpreted, compiled, metrics) = production(HOT_EXCEPTION_LOOP, "f(4000)", 40);
+    assert_eq!(compiled, interpreted);
+    assert_eq!(metrics.native_entries, 0, "{metrics:?}");
+    assert!(metrics.tier1_rejections > 0, "{metrics:?}");
+}
+
+#[test]
 fn osr_enters_a_loop_header_inside_a_try_region() {
     // The first invocation is long enough to enter the loop through OSR with
     // the catch offset live on the interpreter operand stack.
-    let (interpreted, compiled, metrics) = production(
+    let (interpreted, compiled, metrics) = production_with(
+        baseline_only(),
         "function f(n){ let s = 0; try { for (let i = 0; i < n; i++) { s = (s + i) | 0; if (i === n - 3) throw s; } } catch (e) { return 'caught:' + e; } return 'done:' + s; }",
         "f(3000000)",
         1,

@@ -863,12 +863,23 @@ struct ProductionBackend {
     fast_entry: Arc<FastEntryShared>,
     // C brackets each native invocation with a synchronous enter/exit pair.
     // Keep active records through retirement and preserve each invocation's tier.
-    execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
+    // The flag marks an OSR entry, which times only the rest of one call.
+    execution_starts: Vec<(
+        runtime::FunctionKey,
+        std::time::Instant,
+        runtime::Tier,
+        bool,
+    )>,
     execution_profiles: rustc_hash::FxHashMap<runtime::FunctionKey, ProductionProfile>,
     profitability_evaluations: u64,
     profitability_approved: u64,
     profitability_rejected: u64,
     profitability_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
+    /// Earliest future `profitability_backoff` retry clock (`u64::MAX` when
+    /// none). Retries are evaluated by maintenance, so reaching one makes
+    /// maintenance due; otherwise quiet native code would stretch each short
+    /// backoff to a full `HOT_MAINTENANCE_INTERVAL`.
+    next_profitability_retry: u64,
     /// Baseline was measured harmful and unpublished.  This is deliberately
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
@@ -955,6 +966,11 @@ struct ProductionProfile {
     helper_calls: u64,
     baseline_executions: u64,
     baseline_ns: u64,
+    /// Fastest complete Baseline invocation (entered at its first
+    /// instruction, not through OSR); zero until one is observed.
+    /// Preemption only lengthens a sample, so the minimum still shows whether
+    /// entry cost can dominate the body.
+    baseline_min_ns: u64,
     /// Baseline entries not nested in an active execution of the same
     /// function: `baseline_executions / baseline_outermost` estimates how many
     /// calls one outside entry performs through self recursion.
@@ -969,7 +985,14 @@ struct ProductionProfile {
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 impl ProductionProfile {
-    fn record_baseline(&mut self, elapsed_ns: u64) {
+    fn record_baseline(&mut self, elapsed_ns: u64, complete: bool) {
+        if complete {
+            let elapsed_ns = elapsed_ns.max(1);
+            self.baseline_min_ns = match self.baseline_min_ns {
+                0 => elapsed_ns,
+                fastest => fastest.min(elapsed_ns),
+            };
+        }
         self.baseline_executions = self.baseline_executions.saturating_add(1);
         self.baseline_ns = self.baseline_ns.saturating_add(elapsed_ns);
     }
@@ -1031,6 +1054,112 @@ fn automatic_closure_creation_unprofitable(
             .iter()
             .any(|instruction| matches!(instruction.opcode().name(), "fclosure" | "fclosure8"))
 }
+
+/// Opcodes Tier 1 has compiled since roadmap P2, each with the reason
+/// automatic tiering rejected it at 0.12.9. Their helper-bridged Baselines
+/// are shorter than native entry bookkeeping in host UI code (gpui-shell's
+/// panel builder ran 0.8x the interpreter's speed) and settle through extra
+/// compiles that delay hot kernels. Until profitability measures the
+/// interpreter, automatic tiering keeps such functions interpreted; explicit
+/// tier policies and forced test tiers still compile them.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const AUTOMATIC_DEFERRED_TIER1_OPCODES: &[(&str, bytecode::FallbackReason)] = &[
+    ("fclosure", bytecode::FallbackReason::UnsupportedOpcode),
+    ("push_this", bytecode::FallbackReason::ExtendedFrame),
+    (
+        "special_object",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    ("dup1", bytecode::FallbackReason::UnsupportedOpcode),
+    ("dup2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("perm4", bytecode::FallbackReason::UnsupportedOpcode),
+    ("swap2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("rot3l", bytecode::FallbackReason::UnsupportedOpcode),
+    ("rot3r", bytecode::FallbackReason::UnsupportedOpcode),
+    ("throw", bytecode::FallbackReason::UnsupportedOpcode),
+    ("throw_error", bytecode::FallbackReason::UnsupportedOpcode),
+    ("get_var_undef", bytecode::FallbackReason::UnsupportedOpcode),
+    ("put_var", bytecode::FallbackReason::UnsupportedOpcode),
+    ("set_name", bytecode::FallbackReason::ExtendedFrame),
+    ("get_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref_check", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref_check", bytecode::FallbackReason::ClosureFrame),
+    ("close_loc", bytecode::FallbackReason::UnsupportedOpcode),
+    ("catch", bytecode::FallbackReason::ExceptionRegion),
+    ("gosub", bytecode::FallbackReason::ExceptionRegion),
+    ("ret", bytecode::FallbackReason::ExceptionRegion),
+    ("nip_catch", bytecode::FallbackReason::ExceptionRegion),
+    ("to_object", bytecode::FallbackReason::UnsupportedOpcode),
+    ("to_propkey2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_in_start", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_of_start", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_in_next", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_of_next", bytecode::FallbackReason::UnsupportedOpcode),
+    (
+        "iterator_close",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    ("typeof", bytecode::FallbackReason::UnsupportedOpcode),
+    ("delete", bytecode::FallbackReason::UnsupportedOpcode),
+    ("delete_var", bytecode::FallbackReason::UnsupportedOpcode),
+    ("pow", bytecode::FallbackReason::UnsupportedOpcode),
+    ("instanceof", bytecode::FallbackReason::UnsupportedOpcode),
+    ("in", bytecode::FallbackReason::UnsupportedOpcode),
+    ("fclosure8", bytecode::FallbackReason::UnsupportedOpcode),
+    ("get_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    (
+        "typeof_is_undefined",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    (
+        "typeof_is_function",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+];
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn automatic_deferred_tier1_rejection(
+    config: &JitConfig,
+    verified: &bytecode::VerifiedFunction,
+) -> Option<bytecode::FallbackReason> {
+    #[cfg(feature = "test-support")]
+    if config.force_optimized() {
+        return None;
+    }
+    if config.tier_policy() != JitTierPolicy::Automatic {
+        return None;
+    }
+    verified.instructions().iter().find_map(|instruction| {
+        let name = instruction.opcode().name();
+        AUTOMATIC_DEFERRED_TIER1_OPCODES
+            .iter()
+            .find(|(deferred, _)| *deferred == name)
+            .map(|(_, reason)| *reason)
+    })
+}
+
+/// Fastest Baseline execution below which exhausted Tier2 profitability
+/// retries still return a function to the interpreter. Native entry and exit
+/// bookkeeping (including two `Instant` reads) costs a fraction of a
+/// microsecond, so it can outweigh a body as short as `return a + b` (about
+/// 0.5 us per Baseline execution, bookkeeping included). A Baseline that runs
+/// for longer cannot lose to the interpreter through entry cost; it keeps
+/// running while its bounded Tier2 trial waits for the compile queue.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const ENTRY_DOMINATED_BASELINE_NS: u64 = 10_000;
 
 /// Minimum observed self-recursive calls per outside entry before a pure
 /// recursive function is admitted to the native-call convention.
@@ -1754,7 +1883,7 @@ mod production_osr_validation_tests {
     fn tier2_profitability_trial_is_classified_exactly_once() {
         let mut profile = ProductionProfile::default();
         for _ in 0..8 {
-            profile.record_baseline(100);
+            profile.record_baseline(100, true);
         }
         for _ in 0..7 {
             profile.record_optimized(80);
@@ -1771,7 +1900,7 @@ mod production_osr_validation_tests {
 
         let mut slow = ProductionProfile::default();
         for _ in 0..8 {
-            slow.record_baseline(100);
+            slow.record_baseline(100, true);
         }
         for _ in 0..8 {
             slow.record_optimized(125);
@@ -1787,7 +1916,7 @@ mod production_osr_validation_tests {
         // not condemn a Tier-2 version whose steady state is faster.
         let mut profile = ProductionProfile::default();
         for _ in 0..8 {
-            profile.record_baseline(600);
+            profile.record_baseline(600, true);
         }
         for _ in 0..7 {
             profile.record_optimized(400);
@@ -2392,6 +2521,7 @@ impl ProductionBackend {
             profitability_approved: 0,
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
+            next_profitability_retry: u64::MAX,
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
             tier2_untranslatable: rustc_hash::FxHashSet::default(),
             native_recursive: rustc_hash::FxHashSet::default(),
@@ -2439,9 +2569,20 @@ impl ProductionBackend {
         let due = self.hot_ticks_since_maintenance >= HOT_MAINTENANCE_INTERVAL
             || self.coordinator.has_pending_work()
             || self.feedback.version() != self.last_scan_feedback_version
-            || self.coordinator.installed_count() != self.last_scan_installed;
+            || self.coordinator.installed_count() != self.last_scan_installed
+            || self.clock >= self.next_profitability_retry;
         if due {
             self.maintenance();
+            // Only future retries can make the next maintenance due; one the
+            // scan did not reach waits for ordinary maintenance.
+            let clock = self.clock;
+            self.next_profitability_retry = self
+                .profitability_backoff
+                .values()
+                .map(|&(_, retry_at)| retry_at)
+                .filter(|&retry_at| retry_at > clock)
+                .min()
+                .unwrap_or(u64::MAX);
         } else {
             self.clock = self.clock.saturating_add(1);
             self.coordinator.advance_clock(self.clock);
@@ -2568,9 +2709,9 @@ impl ProductionBackend {
         self.optimizing_snapshots.remove(&key);
         self.feedback_disabled.insert(key);
         self.tier2_untranslatable.insert(key);
-        if self.profitability_blacklisted.insert(key) {
-            self.coordinator.demote_baseline_to_interpreter(key);
-        }
+        // A Baseline retained for a Tier2 trial is demoted here too.
+        self.profitability_blacklisted.insert(key);
+        self.coordinator.demote_baseline_to_interpreter(key);
     }
 
     fn maintenance(&mut self) {
@@ -3017,10 +3158,9 @@ impl ProductionBackend {
                 self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
                 self.optimizing_snapshots.remove(&key);
                 self.feedback_disabled.insert(key);
-                if !self.profitability_blacklisted.contains(&key) {
-                    self.profitability_blacklisted.insert(key);
-                    self.coordinator.demote_baseline_to_interpreter(key);
-                }
+                // A Baseline retained for a Tier2 trial is demoted here too.
+                self.profitability_blacklisted.insert(key);
+                self.coordinator.demote_baseline_to_interpreter(key);
                 continue;
             }
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
@@ -3166,10 +3306,26 @@ impl ProductionBackend {
                         .or_insert((0, self.clock));
                     entry.0 = entry.0.saturating_add(1);
                     if entry.0 >= 5 {
+                        // Queue the funded trial at the next maintenance
+                        // instead of the next periodic one.
+                        entry.1 = self.clock.saturating_add(1);
+                        self.next_profitability_retry = self.next_profitability_retry.min(entry.1);
+                        // Exhausted retries fund one bounded Tier2 trial
+                        // (below, through the blacklist). Only a Baseline
+                        // whose entry cost can dominate its body goes back to
+                        // the interpreter meanwhile; demoting a long-running
+                        // one would stall it until the queued trial installs.
                         self.profitability_blacklisted.insert(key);
-                        self.coordinator.demote_baseline_to_interpreter(key);
+                        // No complete execution yet: keep the conservative
+                        // demotion.
+                        if measured.baseline_min_ns == 0
+                            || measured.baseline_min_ns < ENTRY_DOMINATED_BASELINE_NS
+                        {
+                            self.coordinator.demote_baseline_to_interpreter(key);
+                        }
                     } else {
                         entry.1 = self.clock.saturating_add(1u64 << entry.0.min(20));
+                        self.next_profitability_retry = self.next_profitability_retry.min(entry.1);
                     }
                     continue;
                 }
@@ -3229,6 +3385,18 @@ impl ProductionBackend {
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
                 } else {
+                    // A trial funded by exhausted retries while its
+                    // long-running Baseline was retained: the function is
+                    // proven hot and slow, so compile it ahead of first
+                    // Baselines queued by other functions.
+                    if self.profitability_blacklisted.contains(&key)
+                        && matches!(
+                            self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                            runtime::CompileState::Installed(_)
+                        )
+                    {
+                        self.coordinator.prioritize(key, runtime::Tier::Optimizing);
+                    }
                     self.tier2_deferred.remove(&key);
                     self.tier2_sources.insert(key, snapshot);
                 }
@@ -3711,6 +3879,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             self.maintenance();
             return;
         }
+        if let Some(reason) = automatic_deferred_tier1_rejection(&self.config, &verified) {
+            self.coordinator
+                .reject_tier1(key, runtime::Tier::Baseline, reason);
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
         self.ensure_artifact_environment();
         let adaptive = runtime::AdaptiveInputs {
             bytecode_bytes: verified
@@ -3815,9 +3991,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         // Profitability-demoted functions have no publishable native entry.
         // Avoid running global maintenance at every subsequent call/OSR probe;
         // this keeps the fail-open interpreter path close to unattached cost.
+        // A blacklisted function whose long-running Baseline was retained for
+        // its Tier2 trial still enters that Baseline.
         if self.profitability_blacklisted.contains(&key)
             && !matches!(
                 self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Installed(_)
+            )
+            && !matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Baseline),
                 runtime::CompileState::Installed(_)
             )
         {
@@ -3947,14 +4129,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             && self
                 .execution_starts
                 .last()
-                .is_none_or(|(parent, _, _)| *parent != key)
+                .is_none_or(|(parent, _, _, _)| *parent != key)
         {
             if let Some(profile) = self.execution_profiles.get_mut(&key) {
                 profile.baseline_outermost = profile.baseline_outermost.saturating_add(1);
             }
         }
         self.execution_starts
-            .push((key, std::time::Instant::now(), tier));
+            .push((key, std::time::Instant::now(), tier, pc != 0));
     }
 
     fn entry_fast_grant(
@@ -3998,11 +4180,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         // An unmatched callback must not discard a different active timer.
         // Actual C invocations, including recursive and OSR entries, are LIFO.
         let mut measured_tier2_loss = false;
-        if let Some((_, start, tier)) = self
+        if let Some((_, start, tier, osr)) = self
             .execution_starts
             .last()
             .copied()
-            .filter(|(active, _, _)| !unpaired && *active == key)
+            .filter(|(active, _, _, _)| !unpaired && *active == key)
         {
             self.execution_starts.pop();
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
@@ -4024,6 +4206,12 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 // function identity. The coordinator only acts on a loss when
                 // that baseline is still installed to fall back to.
                 measured_tier2_loss = classify_tier2_trial(profile) == Some(true);
+                // A forced test tier must stay optimized: under sanitizer or
+                // loaded hosts, timing noise alone can classify a loss.
+                #[cfg(feature = "test-support")]
+                if self.config.force_optimized() {
+                    measured_tier2_loss = false;
+                }
                 if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
                     if let Some(baseline_average) =
                         profile.baseline_ns.checked_div(profile.baseline_executions)
@@ -4043,7 +4231,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     }
                 }
             } else {
-                profile.record_baseline(elapsed);
+                profile.record_baseline(elapsed, !osr);
             }
         }
         if measured_tier2_loss && self.coordinator.demote_unprofitable_optimized(key) {

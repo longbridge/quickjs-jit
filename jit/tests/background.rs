@@ -37,7 +37,8 @@ fn foreground_submission_never_waits_for_blocked_compiler() {
     assert_eq!(coordinator.drain_completions().drained(), 0);
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while workers.live_usage().0 != 0 && Instant::now() < deadline {
         std::thread::yield_now();
     }
@@ -102,7 +103,7 @@ fn stale_completion_after_reload_is_discarded() {
 }
 
 #[test]
-fn saturated_worker_mailbox_rolls_request_back_to_queue() {
+fn busy_workers_leave_backlog_queued_without_saturating_the_mailbox() {
     let (compiler, control) = FakeCompiler::new(2);
     let mut workers = BackgroundCompiler::new(Arc::new(compiler), 1, 1).unwrap();
     let mut coordinator = Coordinator::with_limits(3, 3, 4, 1024);
@@ -113,12 +114,24 @@ fn saturated_worker_mailbox_rolls_request_back_to_queue() {
     }
     assert!(workers.dispatch_next(&mut coordinator).unwrap());
     let _first = control.next_request().unwrap();
-    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    // The only worker is busy: the backlog stays in the coordinator queue,
+    // where a later Tier2 request can still overtake it.
     assert!(!workers.dispatch_next(&mut coordinator).unwrap());
-    assert_eq!(coordinator.metrics().worker_queue_saturated, 1);
+    assert_eq!(coordinator.metrics().worker_queue_saturated, 0);
+    assert_eq!(
+        coordinator.state(FunctionKey::new(2, 1)),
+        CompileState::Queued(Tier::Baseline)
+    );
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
-    let _ = control.next_request().unwrap();
+    while workers.live_usage().0 != 0 {
+        std::thread::yield_now();
+    }
+    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    assert_eq!(
+        control.next_request().unwrap().key(),
+        FunctionKey::new(2, 1)
+    );
     control.complete(CompiledArtifact::fake(Tier::Baseline));
     workers.shutdown(&mut coordinator);
     assert_eq!(
@@ -150,11 +163,17 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
         coordinator
             .queue(FunctionKey::new(id, 1), Tier::Baseline, snapshot(id, 1))
             .unwrap();
-        workers.dispatch_next(&mut coordinator).unwrap();
+        // Dispatch waits for an idle worker; the previous job may still be
+        // releasing its usage after the fake compiler returned.
+        while workers.live_usage().0 != 0 {
+            std::thread::yield_now();
+        }
+        assert!(workers.dispatch_next(&mut coordinator).unwrap());
         assert!(control.next_request().is_some());
         control.complete(CompiledArtifact::fake(Tier::Baseline));
     }
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while coordinator.metrics().completion_queue_saturated == 0 && Instant::now() < deadline {
         std::thread::yield_now();
     }
@@ -222,7 +241,8 @@ fn production_backend_receives_owned_snapshots_automatically() {
             .unwrap();
         assert_eq!(value, 42);
     });
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while Instant::now() < deadline {
         jit.poll();
         if jit.metrics().installed >= 1 {
@@ -321,7 +341,8 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
     let environment_a = jit_a.test_artifact_environment();
     let environment_b = jit_b.test_artifact_environment();
     assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while Instant::now() < deadline
         && (jit_a.metrics().installed == 0 || jit_b.metrics().installed == 0)
     {
@@ -411,7 +432,8 @@ fn pending_job_poll_installs_without_an_additional_eligible_function_call() {
         )
         .unwrap();
     });
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while Instant::now() < deadline && jit.metrics().installed == 0 {
         let _ = runtime.execute_pending_job();
         std::thread::yield_now();
@@ -495,9 +517,11 @@ fn snapshot_quota_falls_back_without_disabling_runtime() {
 fn pending_snapshot_and_ir_quotas_are_total_and_release_via_raii() {
     let (compiler, control) = FakeCompiler::new(1);
     let bytes = snapshot(1, 1).snapshot().owned_bytes();
+    // Two workers, so the second request is dispatchable while the first is
+    // pending and reaches the total quota check.
     let mut workers = BackgroundCompiler::new_with_resource_limits(
         Arc::new(compiler),
-        1,
+        2,
         2,
         std::time::Duration::from_secs(30),
         bytes,

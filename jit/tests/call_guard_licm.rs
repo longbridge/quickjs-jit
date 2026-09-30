@@ -84,7 +84,8 @@ impl NativeLoop {
     }
 
     fn ready(&self, expression: &str, expected: f64) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let before = self.jit.metrics();
             let calls = self.count(rquickjs_core::qjs::JSJitHelperId_JS_JIT_HELPER_CALL);
@@ -119,7 +120,8 @@ impl NativeLoop {
     }
 
     fn ready_with_call_fallback(&self, warm: &str, expected: f64, zero_trip: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             assert_eq!(self.number(warm), expected);
             self.jit.poll();

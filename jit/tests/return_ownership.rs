@@ -28,7 +28,8 @@ fn setup(stress: bool, source: &str) -> (Runtime, Jit, Context) {
 }
 
 fn warm(jit: &Jit, mut call: impl FnMut()) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 100 } else { 20 });
     loop {
         let before = jit.metrics();
         call();

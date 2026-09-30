@@ -222,7 +222,8 @@ fn baseline_only_tiering_runs_closure_creating_loops_natively() {
         )
         .unwrap()
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = 0;
     while Instant::now() < deadline {
         result = context.with(|ctx| ctx.eval::<i32, _>("kernel(200)").unwrap());
@@ -273,7 +274,8 @@ fn closure_tdz_write_error_unwinds_live_operands_to_the_callers_handler() {
 }
 
 fn run_until_native(jit: &Jit, context: &Context, source: &str) -> (i32, u64) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = 0;
     while Instant::now() < deadline {
         result = context.with(|ctx| ctx.eval::<i32, _>(source).unwrap());

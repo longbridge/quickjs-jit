@@ -216,7 +216,8 @@ fn production_element_receiver_kernel_never_enters_a_deopt_loop() {
 }
 
 fn wait_for(jit: &Jit, mut step: impl FnMut(), done: impl Fn(&rquickjs_jit::JitMetrics) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         step();
         jit.poll();
@@ -564,7 +565,8 @@ fn automatic_tiering_refreshes_a_terminal_baseline_with_property_ics() {
         |metrics| metrics.installed >= 2 && metrics.pending_worker_jobs == 0,
     );
     let rt = raw_runtime(&context);
-    let settle = Instant::now() + Duration::from_secs(60);
+    let settle =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         assert_eq!(
             unsafe { rquickjs_core::qjs::JS_JitResetHelperCounters(rt) },

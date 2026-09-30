@@ -46,7 +46,7 @@ mod tier2_ownership {
     /// returns the result and metrics, and tears the runtime down. A
     /// reference-count error surfaces as a QuickJS assertion abort at
     /// `JS_FreeRuntime`, which fails the whole test binary.
-    fn run(source: &str) -> (f64, rquickjs_jit::JitMetrics) {
+    fn run(source: &str, expect_tier2: bool) -> (f64, rquickjs_jit::JitMetrics) {
         let runtime = Runtime::new().unwrap();
         let jit = Jit::attach(
             &runtime,
@@ -65,15 +65,24 @@ mod tier2_ownership {
             })
             .unwrap();
         let mut result = 0.0;
-        for _ in 0..200 {
+        // At least 200 calls. A caller expecting Tier 2 keeps calling until it
+        // is entered: slow (sanitizer) builds may queue the trial later.
+        let budget = if cfg!(rquickjs_sanitizer) { 300 } else { 60 };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget);
+        for call in 0.. {
             result = context.with(|ctx| {
                 let workload: Function<'_> = ctx.globals().get("workload").unwrap();
                 let argument: Object<'_> = ctx.globals().get("workloadArgument").unwrap();
                 workload.call((2000, 7, argument)).unwrap()
             });
             jit.poll();
-            if jit.metrics().tier2_entries > 0 {
+            if jit.metrics().tier2_entries > 0
+                || (call >= 199 && (!expect_tier2 || std::time::Instant::now() >= deadline))
+            {
                 break;
+            }
+            if call >= 199 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
         let metrics = jit.metrics();
@@ -88,8 +97,10 @@ mod tier2_ownership {
         // `p.x = p.x + 1` keeps a second receiver alias below the get_field
         // operands. Before M2 each guarded access leaked one reference and
         // JS_FreeRuntime aborted on a non-empty gc_obj_list.
-        let (result, metrics) =
-            run("function workload(n,s,p){ for(let i=0;i<n;i++){ p.x = p.x + 1 } return p.x }");
+        let (result, metrics) = run(
+            "function workload(n,s,p){ for(let i=0;i<n;i++){ p.x = p.x + 1 } return p.x }",
+            true,
+        );
         assert!(metrics.tier2_entries > 0, "{metrics:?}");
         assert_eq!(metrics.native_fallbacks, 0, "{metrics:?}");
         assert_eq!(metrics.deopts, 0, "{metrics:?}");
@@ -106,7 +117,7 @@ mod tier2_ownership {
             "function workload(n,s,p){ let q=p; let t=0; for(let i=0;i<n;i++){ t = t + q.x } return t }",
             "function workload(n,s,p){ let q=p; for(let i=0;i<n;i++){ p.x = p.x + 1 } return q.x }",
         ] {
-            let (result, metrics) = run(source);
+            let (result, metrics) = run(source, false);
             assert_eq!(metrics.tier2_entries, 0, "{source}: {metrics:?}");
             assert_eq!(metrics.native_fallbacks, 0, "{source}: {metrics:?}");
             assert!(result >= 0.0, "{source}: {result}");

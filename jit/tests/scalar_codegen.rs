@@ -120,7 +120,8 @@ fn warm_tier2_with(
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 100 } else { 20 });
     loop {
         let before = jit.metrics();
         let result = context.with(|ctx| {

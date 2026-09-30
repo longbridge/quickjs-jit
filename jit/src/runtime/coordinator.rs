@@ -1686,6 +1686,22 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Moves a queued request to the front of the compile queue. Returns
+    /// false when no such request is waiting.
+    pub fn prioritize(&mut self, key: FunctionKey, tier: Tier) -> bool {
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|request| request.key == key && request.tier == tier)
+        else {
+            return false;
+        };
+        if let Some(request) = self.queue.remove(index) {
+            self.queue.push_front(request);
+        }
+        true
+    }
+
     pub fn begin_next(&mut self) -> Option<CompileRequest> {
         loop {
             let request = self.queue.pop_front()?;
@@ -2598,7 +2614,6 @@ impl Coordinator {
         self.cache.collect_invalidated();
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3170,6 +3185,49 @@ mod tests {
                 dependency,
                 current_generation: Some(2),
             })
+        );
+    }
+
+    #[test]
+    fn prioritized_request_is_taken_ahead_of_earlier_requests() {
+        let mut coordinator = Coordinator::with_limits(4, 4, 4, 1 << 20);
+        let first = FunctionKey::new(1, 1);
+        let second = FunctionKey::new(2, 1);
+        let kernel = FunctionKey::new(3, 1);
+        // Tier2 requires an installed Baseline.
+        coordinator
+            .queue(kernel, Tier::Baseline, snapshot())
+            .unwrap();
+        let request = coordinator.begin_next().unwrap();
+        coordinator.complete(CompileCompletion {
+            key: kernel,
+            requested_tier: Tier::Baseline,
+            artifact_key: request.artifact_key(),
+            attempt_id: request.attempt_id(),
+            result: Ok(CompiledArtifact::fake(Tier::Baseline).bind_fake(request.artifact_key())),
+        });
+        coordinator
+            .queue(first, Tier::Baseline, snapshot())
+            .unwrap();
+        coordinator
+            .queue(second, Tier::Baseline, snapshot())
+            .unwrap();
+        coordinator
+            .queue(kernel, Tier::Optimizing, snapshot())
+            .unwrap();
+        assert!(coordinator.prioritize(kernel, Tier::Optimizing));
+        assert!(!coordinator.prioritize(FunctionKey::new(9, 1), Tier::Optimizing));
+
+        let order: Vec<_> = std::iter::from_fn(|| coordinator.begin_next())
+            .map(|request| (request.key(), request.tier()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (kernel, Tier::Optimizing),
+                (first, Tier::Baseline),
+                (second, Tier::Baseline),
+            ]
         );
     }
 

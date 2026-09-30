@@ -75,7 +75,10 @@ impl Native {
                 .with(|ctx| unsafe { rquickjs_core::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) }),
             context,
         };
-        let deadline = Instant::now() + Duration::from_secs(60);
+        // Sanitizer builds compile far more slowly (CI runners took over 30 s
+        // for one of these compiles).
+        let budget = if cfg!(rquickjs_sanitizer) { 300 } else { 60 };
+        let deadline = Instant::now() + Duration::from_secs(budget);
         let mut result = native.invoke();
         loop {
             native._jit.poll();

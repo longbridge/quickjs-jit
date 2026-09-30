@@ -278,7 +278,8 @@ fn helpers_run_only_for_last_references_or_stress() {
         };
         let call =
             |source: &str| context.with(|ctx| ctx.eval::<i32, _>(source).catch(&ctx).unwrap());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let before = jit.metrics().native_entries;
             assert_eq!(call("sharedOnly(64)"), 64);

@@ -382,7 +382,8 @@ fn zero_argument_tier2_callee_deopts_under_a_tier1_generic_op_caller() {
         });
         jit.poll();
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while jit.metrics().tier2_entries == 0 {
         run(100.0);
         assert!(

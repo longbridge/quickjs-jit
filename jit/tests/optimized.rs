@@ -1667,7 +1667,8 @@ fn semantic_values_execute_on_macos_and_deopt_before_object_coercion() {
                 ctx.eval::<(), _>("function target(a,b,c,d){return ((a+b)*(c+d))+((a+b)*(c+d))}")
             })
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
         while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
             assert_eq!(
                 context
@@ -2003,7 +2004,8 @@ fn production_feedback_installs_and_executes_the_int32_add_specialization() {
     context
         .with(|ctx| ctx.eval::<(), _>("function add(a,b){return a+b}"))
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while std::time::Instant::now() < deadline {
         assert_eq!(
             context.with(|ctx| {
@@ -2190,7 +2192,8 @@ fn production_tier2_waits_for_and_calls_a_direct_callee() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     while std::time::Instant::now() < deadline {
         assert_eq!(
             context.with(|ctx| {
@@ -2259,7 +2262,8 @@ fn production_tier2_direct_call_checks_object_before_payload() {
         })
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -2348,7 +2352,8 @@ fn production_unboxed_call_deopts_exactly_on_target_type_and_overflow_mismatch()
     // Background compilation is much slower under coverage or sanitizer
     // instrumentation; let every queued caller version land before the
     // deoptimization probes run.
-    let settled = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let settled = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while std::time::Instant::now() < settled {
         let metrics = jit.metrics();
         if metrics.pending_worker_jobs == 0
@@ -2420,7 +2425,8 @@ fn production_worker_installs_and_enters_narrow_tier2_native_code() {
         function.call::<_, f64>((50_000, 0)).unwrap()
     });
     assert_eq!(first, 1_249_975_000.0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while std::time::Instant::now() < deadline {
         let last = context.with(|ctx| {
             let function: Function<'_> = ctx.globals().get("f").unwrap();
@@ -2490,7 +2496,8 @@ fn stable_int32_loop_waits_for_and_installs_a_bounded_raw_i32_version() {
         })
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while std::time::Instant::now() < deadline {
         let metrics = jit.metrics();
         if metrics.tier2_entries >= 10
@@ -2600,6 +2607,10 @@ fn iterative_fibonacci_enters_tier2_with_multi_local_loop_phis() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
+#[cfg_attr(
+    rquickjs_sanitizer,
+    ignore = "absolute-time heuristic: instrumentation slows entry bookkeeping but not generated code"
+)]
 fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
     use rquickjs::{Context, Function, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
@@ -2658,7 +2669,76 @@ fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
+fn automatic_layout_kernel_reaches_tier2_without_host_polling() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    // gpui-shell never calls `Jit::poll`: maintenance runs only when hot
+    // probes find it due. Profitability retries must still follow their
+    // short backoff instead of waiting a full periodic interval each.
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(&runtime, JitConfig::default()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function layoutKernel(batches,seed){\
+                 let checksum=seed;\
+                 for(let batch=0;batch<batches;batch+=1){\
+                   let a=0;let b=1;\
+                   for(let i=0;i<40;i+=1){const next=a+b;a=b;b=next;}\
+                   checksum=b;\
+                 }\
+                 return checksum;\
+                 }",
+            )
+        })
+        .unwrap();
+    let call = || {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("layoutKernel").unwrap();
+            assert_eq!(function.call::<_, i32>((100, 0)).unwrap(), 165_580_141);
+        });
+    };
+    // Background compilation is far slower under sanitizer or coverage
+    // instrumentation; bound the waits by time rather than by iterations.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
+    while jit.metrics().native_entries == 0 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    // Queueing happens on this thread, so the call count is deterministic;
+    // the compile itself is timed by the (possibly contended) worker.
+    let mut calls = 0;
+    while jit.metrics().queued < 2 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        calls += 1;
+    }
+    assert!(
+        calls <= 60,
+        "the Tier2 trial was queued {calls} calls after the Baseline without host polling: {:?}",
+        jit.metrics()
+    );
+    while jit.metrics().tier2_entries == 0 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        // Give the worker time to compile between calls, as frames do.
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let metrics = jit.metrics();
+    assert_eq!(metrics.interpreter_demotions, 0, "{metrics:?}");
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn automatic_gpui_layout_kernel_keeps_baseline_until_tier2_trial() {
     use rquickjs::{Context, Function, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
 
@@ -2690,10 +2770,16 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         })
         .unwrap();
 
-    let mut saw_demotion = false;
+    // Each call runs for tens of microseconds, so native entry bookkeeping
+    // cannot make its Baseline slower than the interpreter. Exhausting the
+    // Tier2 profitability retries must fund the bounded trial while the
+    // Baseline keeps running; returning to the interpreter would stall the
+    // kernel for as long as the trial waits in the compile queue.
+    let mut native_before: Option<u64> = None;
     // Background compilation is far slower under sanitizer or coverage
     // instrumentation; bound the wait by time rather than by iterations.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
     while std::time::Instant::now() < deadline {
         let result = context.with(|ctx| {
             let function: Function = ctx.globals().get("layoutKernel").unwrap();
@@ -2708,17 +2794,21 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         assert_eq!(result, 165_580_141);
         jit.poll();
         let metrics = jit.metrics();
-        saw_demotion |= metrics.interpreter_demotions > 0;
-        if saw_demotion && metrics.tier2_entries > 0 {
+        // `terminalHost` may still be demoted on its own call-only path, so
+        // check the kernel through its native entries rather than the
+        // runtime-wide demotion count.
+        if let Some(before) = native_before {
+            assert!(
+                metrics.native_entries > before,
+                "Baseline stopped entering native code before Tier2: {metrics:?}"
+            );
+        }
+        if metrics.native_entries > 0 {
+            native_before = Some(metrics.native_entries);
+        }
+        if metrics.tier2_entries > 0 {
             assert!(metrics.profitability_rejected >= 5, "{metrics:?}");
             assert_eq!(metrics.deopts, 0, "{metrics:?}");
-            // The profitable kernel queues its Baseline and Tier2 trials. The
-            // terminal host function is rejected synchronously before it can
-            // consume a worker queue slot.
-            assert!(
-                metrics.queued >= 2,
-                "kernel Baseline and Tier2 trials were not queued: {metrics:?}"
-            );
             assert!(
                 metrics.compile_failures > 0,
                 "terminal host function must remain unsupported without blocking the profitable kernel: {metrics:?}"
@@ -2728,7 +2818,7 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
     panic!(
-        "harmful Tier1 never reached bounded Tier2 trial: {:?}",
+        "layout kernel never reached its Tier2 trial: {:?}",
         jit.metrics()
     );
 }
@@ -2770,7 +2860,8 @@ fn automatic_call_heavy_promotes_the_direct_edge_caller() {
         })
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     while std::time::Instant::now() < deadline {
         jit.poll();
         let before = jit.metrics();
@@ -2879,7 +2970,8 @@ fn stable_float64_loop_stays_native_without_a_side_path() {
             5000.5
         );
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while std::time::Instant::now() < deadline {
         jit.poll();
         if jit.metrics().installed >= 2 {
@@ -4548,7 +4640,8 @@ fn production_tier2_runs_the_int_arith_kernel_end_to_end() {
                 .unwrap_or_else(|error| panic!("{error} {:?}", ctx.catch()))
         })
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
     while std::time::Instant::now() < deadline {
         assert_eq!(run(), expected);
         jit.poll();
@@ -4864,7 +4957,8 @@ fn signature_completes_when_the_first_invocation_returns_natively() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
     let mut saw_tier2 = false;
     while std::time::Instant::now() < deadline {
         let result = context.with(|ctx| {
@@ -4978,7 +5072,8 @@ fn bool_argument_tagged_tier2_preserves_branches_and_type_change_deopt() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     while jit.metrics().tier2_entries == 0 {
         context.with(|ctx| {
             let function: Function = ctx.globals().get("incrementIf").unwrap();
@@ -5276,7 +5371,8 @@ fn semantic_frame_state_deopt_preserves_phi_and_parameter_assignment() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -5387,7 +5483,8 @@ fn semantic_values_execute_both_phi_edges_and_loop_entry_natively() {
         .unwrap();
         let context = Context::full(&runtime).unwrap();
         context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
         while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
             assert_eq!(
                 context.with(|ctx| ctx.eval::<i32, _>(warm)).unwrap(),
@@ -5485,7 +5582,8 @@ fn semantic_float_mode_checks_a_phi_with_an_unobserved_integer_edge() {
             ctx.eval::<(), _>("function target(flag,a,b){let x;if(flag)x=a;else x=1;return x+b}")
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -5649,7 +5747,8 @@ fn semantic_cfg_facts_deopt_on_an_unchecked_float_phi_edge() {
             ctx.eval::<(), _>("function target(flag,a,b){let x;if(flag)x=a+1;else x=b;return x*2}")
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -5777,7 +5876,8 @@ fn semantic_comparisons_preserve_nan_and_negative_zero_natively() {
         context
             .with(|ctx| ctx.eval::<(), _>(format!("function target(a,b){{return a{operator}b}}")))
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
         while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
             assert_eq!(
                 context
@@ -5917,7 +6017,8 @@ fn semantic_postfix_overflow_restores_pre_update_state() {
             )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -6546,7 +6647,8 @@ fn mixed_scalar_loops_amortize_polls_and_remain_interruptible() {
     )
         })
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -6627,7 +6729,8 @@ fn deferred_scalar_locals_restore_dirty_values_after_poll_and_overflow() {
     context.with(|ctx| ctx.eval::<(), _>(
         "function dirtyLocals(n,a,enabled){let value=a,last=0;for(let i=0;i<n;i++){last=value;value=enabled?value+1:value-1;}return value+last}"
     )).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context
@@ -6672,7 +6775,8 @@ fn mixed_integer_update_overflow_recovers_without_wrapping() {
     context.with(|ctx| ctx.eval::<(), _>(
         "function updateOverflow(n,enabled){let x=2147483646;for(let i=0;i<n;i++){x++}return enabled?x:0}"
     )).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while jit.metrics().tier2_entries < 10 && std::time::Instant::now() < deadline {
         assert_eq!(
             context

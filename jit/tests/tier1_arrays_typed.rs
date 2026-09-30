@@ -66,7 +66,8 @@ fn arrays_typed_arrays_proxy_and_accessor_enter_native_with_exact_checksum() {
 
     // Keep the stable workload identity while allowing instrumented builds to
     // drain the bounded set of hot call and loop compilations.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     let mut checksum = 0_i32;
     while Instant::now() < deadline {
         checksum = context.with(|ctx| ctx.eval("elementKernel(a,t,p,1,40)").unwrap());
@@ -140,7 +141,8 @@ fn packed_and_typed_element_hits_skip_get_set_helpers_and_fallbacks_stay_exact()
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while Instant::now() < deadline {
         context.with(|ctx| {
             let globals = ctx.globals();
@@ -282,7 +284,8 @@ fn arrays_typed_workload_keeps_native_entries_bounded_per_invocation() {
     // slower, and this workload discovers many hot functions at once. Keep the
     // multi-install precondition while allowing the single compiler worker to
     // make progress through that queue.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while Instant::now() < deadline {
         context.with(|ctx| {
             let workload: Function<'_> = ctx.globals().get("workload").unwrap();
@@ -343,7 +346,8 @@ fn assert_automatic_mixed_array_trial(mutation: &str) {
     // Background compilation under sanitizers can outlast a fixed number of
     // quick interpreter calls. Allow the same bounded deadline as the array
     // workload test above, while continuing to execute and poll for Tier2.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while Instant::now() < deadline {
         context.with(|ctx| {
             assert_eq!(

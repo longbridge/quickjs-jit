@@ -30,7 +30,8 @@ fn tier1_enters_for_json_global_lookup() {
         .unwrap()
     });
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = String::new();
     while Instant::now() < deadline {
         result = context.with(|ctx| ctx.eval("stringifyKernel({answer:42})").unwrap());

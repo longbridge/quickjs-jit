@@ -66,7 +66,8 @@ fn exercise_cleanup(force_tier2: bool, stress_gc: bool) {
         ctx.eval::<(), _>("globalThis.state={hits:0};function caller(f,x,enabled,o){let result=f(x,enabled,o);return result;}").unwrap();
     });
     let invoke = || context.with(|ctx| ctx.eval::<i32, _>("caller(effect,17,true,state)").unwrap());
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics();
         assert_eq!(invoke(), 17);
@@ -271,7 +272,8 @@ fn tier2_generic_call_preserves_primitive_live_prefix() {
             caller.call::<_, i32>((effect, 41)).unwrap()
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics().tier2_entries;
         assert_eq!(invoke(), 42);
