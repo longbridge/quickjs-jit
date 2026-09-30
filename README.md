@@ -76,8 +76,142 @@ is profitable. See the [repository rules](AGENTS.md#performance-reporting) and
 [next optimization targets](docs/PERFORMANCE_NEXT.md).
 
 <!-- BEGIN JIT_MATRIX -->
+**Complete 35-scenario Linux x86_64 matrix, measured 2026-09-30: V8/Bun roadmap P0–P4.**
 
-**Complete 30-scenario Linux x86_64 matrix, measured 2026-09-16: bounded facts, effects, and exact recovery.**
+The measured candidate is `main` revision `889f7c19adb46976e98ff00729d606d77cd933d2`
+(PR #30). The previous-JIT regression baseline is the `82d3808` (v0.12.9) runtime built with the
+identical `shared-js-multibatch-v3` worker harness (`cfd5667`); the later harness changes only add
+workloads and tests. QuickJS is the candidate binary with the JIT detached, so the profitability
+comparison uses the same QuickJS-NG `fd0a0210b7be00957751871e7e01b8291268fc29` runtime and
+benchmark harness. Bun 1.4.0 runs the same JavaScript from a file wrapper with default flags.
+
+Relative to the previous automatic JIT, 28 scenarios are significantly faster, 2 are
+significantly slower (`quickjs-fibonacci`, `calls-recursion-closures`), and 5 are statistically
+tied. Relative to same-version QuickJS, 25 are faster, 5 are slower (`strings-json`, `adversarial`,
+`strings-regexp`, `calls-recursion-closures`, `exceptions-promises-async`), and 5 are tied.
+Relative to Bun, all 35 are slower: the closest are `fibonacci-recursive` (0.72x Bun speed),
+`generic-call-entry` (0.65x), `float64-dense` (0.65x), `quickjs-bitops` (0.61x) and
+`exceptions-sync` (0.57x); the widest gaps are `methods-dynamic` (0.013x), `calls-recursion-closures`
+(0.019x), `arrays-typed` (0.024x) and `objects-polymorphic` (0.025x). The table retains every losing,
+fallback-only and inconclusive scenario.
+
+Timings are medians across processes of the per-process upper median of 16 timed batches,
+in **ms per ten workload calls**. Ratios are paired geometric means of reference latency /
+candidate latency with 95% confidence intervals; values above 1.00x mean quickjs-jit is faster.
+An interval crossing 1.00x is explicitly described as statistically tied. Production automatic
+tiering is used for both JIT columns.
+
+| Workload | Previous JIT ms | QuickJS ms | Bun ms | quickjs-jit ms | JIT / previous speed [95% CI] | JIT / QuickJS speed [95% CI] | JIT / Bun speed [95% CI] |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| scalar-control-flow | 0.054621 | 2.131417 | 0.023760 | 0.043710 | 1.2630x [1.2485, 1.2907] | 48.7677x [48.6759, 48.8647] | 0.5434x [0.5420, 0.5447] |
+| scalar-expressions | 0.050537 | 2.158171 | 0.020066 | 0.045207 | 1.1176x [1.1156, 1.1197] | 47.6430x [47.5283, 47.7611] | 0.4491x [0.4442, 0.4552] |
+| host-compute | 0.070864 | 2.161068 | 0.028049 | 0.051536 | 1.3579x [1.3342, 1.3777] | 41.5627x [40.8803, 42.0642] | 0.5221x [0.4806, 0.5514] |
+| mixed-quotes | 2.546494 | 2.761754 | 0.059345 | 0.643744 | 3.9680x [3.9502, 3.9873] | 4.2927x [4.2795, 4.3060] | 0.0920x [0.0914, 0.0926] |
+| quickjs-int-arith | 1.342332 | 5.823383 | 0.048088 | 0.318585 | 4.3075x [4.2072, 4.5015] | 18.2948x [18.2545, 18.3358] | 0.1518x [0.1509, 0.1529] |
+| quickjs-bitops | 0.062732 | 1.192999 | 0.015960 | 0.027838 | 2.2462x [2.2286, 2.2565] | 42.7671x [42.4153, 42.9879] | 0.6102x [0.5715, 0.6689] |
+| quickjs-fibonacci | 0.365476 | 0.946928 | 0.013173 | 0.373399 | 0.9673x [0.9601, 0.9737] | 2.5246x [2.5131, 2.5350] | 0.0337x [0.0313, 0.0352] |
+| numeric | 0.029334 | 0.538238 | 0.011468 | 0.021027 | 1.3961x [1.3934, 1.3992] | 25.6003x [25.5656, 25.6371] | 0.5386x [0.5016, 0.5608] |
+| scalar-loop | 0.029346 | 0.538416 | 0.011425 | 0.021011 | 1.3990x [1.3957, 1.4030] | 25.6258x [25.5865, 25.6656] | 0.5611x [0.5529, 0.5701] |
+| call-heavy | 0.060496 | 1.284650 | 0.020687 | 0.039006 | 1.5539x [1.5501, 1.5582] | 32.9546x [32.9060, 33.0047] | 0.4863x [0.4326, 0.5277] |
+| generic-call-entry | 0.032429 | 0.971108 | 0.016968 | 0.026006 | 1.2167x [1.1972, 1.2339] | 36.4619x [35.8865, 36.9691] | 0.6487x [0.5823, 0.6989] |
+| generic-call-fallback | 9.006540 | 1.289410 | 0.023828 | 0.205905 | 43.3173x [42.1355, 43.9784] | 6.2178x [6.0818, 6.3039] | 0.1074x [0.1033, 0.1113] |
+| property-heavy | 0.098770 | 1.067904 | 0.008183 | 0.028202 | 3.4817x [3.4534, 3.5026] | 37.7459x [37.4132, 38.0094] | 0.3721x [0.3205, 0.4393] |
+| fibonacci-iterative | 0.988808 | 35.507209 | 0.180796 | 0.780361 | 1.2684x [1.2637, 1.2728] | 45.4855x [45.3434, 45.6230] | 0.2178x [0.2125, 0.2232] |
+| fibonacci-recursive | 9.836284 | 9.899155 | 0.267479 | 0.361470 | 26.3771x [25.3245, 27.0684] | 26.5257x [25.4691, 27.2042] | 0.7199x [0.6911, 0.7431] |
+| collections | 1.643369 | 1.577042 | 0.042527 | 1.598388 | 1.0141x [0.9811, 1.0416]; statistically tied (between 1.89% slower and 4.16% faster) | 0.9912x [0.9639, 1.0220]; statistically tied (between 3.61% slower and 2.20% faster) | 0.0294x [0.0261, 0.0349] |
+| for-of-array | 0.513846 | 0.458836 | 0.042276 | 0.169520 | 3.0306x [2.8831, 3.2171] | 2.6151x [2.4899, 2.7182] | 0.1731x [0.1460, 0.2058] |
+| strings-json | 2.004900 | 1.895814 | 0.070878 | 1.992261 | 1.0098x [1.0047, 1.0165] | 0.9506x [0.9482, 0.9531] | 0.0370x [0.0359, 0.0383] |
+| calls-closures | 3.463190 | 3.196535 | 0.094103 | 3.195755 | 1.0727x [1.0659, 1.0795] | 0.9999x [0.9955, 1.0041]; statistically tied (between 0.45% slower and 0.41% faster) | 0.0318x [0.0302, 0.0336] |
+| adversarial | 0.952296 | 0.937205 | 0.035868 | 0.951392 | 1.0065x [0.9947, 1.0232]; statistically tied (between 0.53% slower and 2.32% faster) | 0.9814x [0.9766, 0.9851] | 0.0376x [0.0373, 0.0379] |
+| float64-dense | 0.128974 | 2.280728 | 0.065531 | 0.101439 | 1.2740x [1.2666, 1.2816] | 22.4382x [22.3543, 22.5200] | 0.6454x [0.6428, 0.6478] |
+| strings-regexp | 20.132023 | 19.248259 | 0.996785 | 19.888096 | 1.0115x [1.0082, 1.0145] | 0.9702x [0.9647, 0.9771] | 0.0504x [0.0498, 0.0510] |
+| arrays-typed | 2.988435 | 4.120533 | 0.044649 | 1.888215 | 1.5846x [1.5795, 1.5916] | 2.1826x [2.1793, 2.1861] | 0.0243x [0.0237, 0.0252] |
+| packed-array-traversal | 0.048532 | 0.825986 | 0.015133 | 0.030085 | 1.6136x [1.6056, 1.6190] | 27.4010x [27.2518, 27.4922] | 0.4727x [0.4324, 0.5012] |
+| int32array-traversal | 0.049806 | 1.031324 | 0.014990 | 0.028082 | 1.7587x [1.7392, 1.7736] | 36.5336x [36.0967, 36.9448] | 0.5327x [0.5257, 0.5394] |
+| float64array-traversal | 1.125629 | 1.511168 | 0.008301 | 0.057100 | 19.6557x [19.5644, 19.7384] | 26.3889x [26.2994, 26.4612] | 0.1447x [0.1442, 0.1453] |
+| typed-convert-traversal | 1.100261 | 1.492665 | 0.008115 | 0.057070 | 19.5495x [19.1304, 20.2989] | 26.0429x [25.9243, 26.1376] | 0.1417x [0.1411, 0.1423] |
+| objects-polymorphic | 23.777315 | 6.118516 | 0.120685 | 4.804849 | 4.9652x [4.9312, 4.9992] | 1.2723x [1.2645, 1.2797] | 0.0253x [0.0249, 0.0257] |
+| property-polymorphic | 1.870452 | 1.858583 | 0.023377 | 0.564089 | 3.3123x [3.3011, 3.3220] | 3.2875x [3.2774, 3.2966] | 0.0414x [0.0412, 0.0415] |
+| calls-recursion-closures | 6.425094 | 6.452665 | 0.125962 | 6.483280 | 0.9919x [0.9879, 0.9965] | 0.9941x [0.9910, 0.9968] | 0.0194x [0.0193, 0.0195] |
+| json-codec | 80.346902 | 79.366868 | 7.688941 | 80.205933 | 0.9863x [0.9656, 1.0027]; statistically tied (between 3.44% slower and 0.27% faster) | 0.9846x [0.9592, 1.0096]; statistically tied (between 4.08% slower and 0.96% faster) | 0.0949x [0.0919, 0.0975] |
+| map-set-bigint | 17.234838 | 17.618333 | 0.864529 | 17.583354 | 0.9775x [0.9542, 1.0090]; statistically tied (between 4.58% slower and 0.90% faster) | 1.0105x [0.9926, 1.0340]; statistically tied (between 0.74% slower and 3.40% faster) | 0.0489x [0.0480, 0.0498] |
+| exceptions-promises-async | 3.657682 | 2.323574 | 0.207743 | 2.417241 | 1.5190x [1.5110, 1.5282] | 0.9686x [0.9639, 0.9741] | 0.0863x [0.0857, 0.0869] |
+| methods-dynamic | 13.140204 | 12.907402 | 0.150761 | 12.816118 | 1.0035x [0.9846, 1.0184]; statistically tied (between 1.54% slower and 1.84% faster) | 0.9983x [0.9815, 1.0094]; statistically tied (between 1.85% slower and 0.94% faster) | 0.0132x [0.0122, 0.0144] |
+| exceptions-sync | 2.952581 | 2.921384 | 0.360353 | 0.620405 | 4.7230x [4.6109, 4.8112] | 4.6741x [4.5611, 4.7642] | 0.5725x [0.5602, 0.5806] |
+
+Protocol `shared-js-multibatch-v3`: each fresh process performs one initial call, 64 untimed
+ten-call warmup batches, then 16 timed ten-call batches; the process latency is the upper
+median of those batches. Result consumption and the checksum are outside the timed boundary,
+and inputs, scripts and driver (`60408ad6…`) are equivalent across engines; every checksum
+agrees. Each workload/configuration has five discarded and 30 retained processes, and
+configuration order reverses on alternating pairs. All 6,125 process records are archived;
+timing samples are not filtered by native readiness and outlier batches are counted, never
+dropped. Confidence intervals use 10,000 deterministic paired percentile-bootstrap resamples
+(seed 20260909). v3 timings are not comparable with the historical v2 matrices below.
+
+Automatic native coverage and the paired interpreter control (diagnostics). Native-entry counts
+aggregate the shared driver and the workload. The interpreter control shows that some
+previous-JIT gains on `calls-closures` (1.08x) and `for-of-array` (1.09x) come from runtime
+changes that also speed up the interpreter.
+
+| Workload | First-timed-batch native entries (min–max) | Timed-window compilation-quiet samples / 30 | Outlier batches (processes) | Candidate / previous interpreter speed [95% CI] |
+| --- | ---: | ---: | ---: | --- |
+| scalar-control-flow | 20–20 | 30 | 0 (0) | 1.0008x [0.9990, 1.0023]; statistically tied (between 0.10% slower and 0.23% faster) |
+| scalar-expressions | 20–20 | 14 | 8 (8) | 1.0016x [0.9996, 1.0037]; statistically tied (between 0.04% slower and 0.37% faster) |
+| host-compute | 20–20 | 30 | 0 (0) | 1.0034x [1.0015, 1.0051] |
+| mixed-quotes | 6990–6990 | 30 | 0 (0) | 1.0017x [0.9991, 1.0043]; statistically tied (between 0.09% slower and 0.43% faster) |
+| quickjs-int-arith | 20–20 | 30 | 0 (0) | 0.9997x [0.9968, 1.0031]; statistically tied (between 0.32% slower and 0.31% faster) |
+| quickjs-bitops | 20–20 | 30 | 0 (0) | 1.0000x [0.9978, 1.0023]; statistically tied (between 0.22% slower and 0.23% faster) |
+| quickjs-fibonacci | 20–20 | 30 | 0 (0) | 1.0015x [1.0000, 1.0039] |
+| numeric | 20–20 | 30 | 0 (0) | 1.0010x [0.9998, 1.0022]; statistically tied (between 0.02% slower and 0.22% faster) |
+| scalar-loop | 20–20 | 30 | 0 (0) | 1.0005x [0.9991, 1.0019]; statistically tied (between 0.09% slower and 0.19% faster) |
+| call-heavy | 10–10 | 0 | 6 (6) | 0.9957x [0.9937, 0.9975] |
+| generic-call-entry | 10–10 | 0 | 6 (6) | 0.9905x [0.9895, 0.9915] |
+| generic-call-fallback | 10–10 | 30 | 0 (0) | 0.9890x [0.9799, 0.9964] |
+| property-heavy | 10–10 | 0 | 9 (9) | 1.0013x [0.9985, 1.0043]; statistically tied (between 0.15% slower and 0.43% faster) |
+| fibonacci-iterative | 20–20 | 30 | 0 (0) | 0.9996x [0.9990, 1.0002]; statistically tied (between 0.10% slower and 0.02% faster) |
+| fibonacci-recursive | 20–20 | 30 | 0 (0) | 0.9921x [0.9895, 0.9957] |
+| collections | 10–10 | 30 | 0 (0) | 1.0188x [1.0050, 1.0278] |
+| for-of-array | 20–20 | 5 | 19 (18) | 1.0901x [1.0885, 1.0917] |
+| strings-json | 10–10 | 30 | 0 (0) | 1.0116x [1.0085, 1.0153] |
+| calls-closures | 10–10 | 30 | 0 (0) | 1.0784x [1.0732, 1.0842] |
+| adversarial | 10–10 | 30 | 0 (0) | 1.0133x [1.0006, 1.0330] |
+| float64-dense | 20–20 | 12 | 15 (13) | 1.0007x [1.0000, 1.0014] |
+| strings-regexp | 10–10 | 30 | 0 (0) | 1.0131x [1.0061, 1.0183] |
+| arrays-typed | 30–30 | 30 | 0 (0) | 1.0007x [0.9991, 1.0021]; statistically tied (between 0.09% slower and 0.21% faster) |
+| packed-array-traversal | 10–10 | 0 | 4 (4) | 1.0003x [0.9993, 1.0014]; statistically tied (between 0.07% slower and 0.14% faster) |
+| int32array-traversal | 10–10 | 0 | 5 (5) | 0.9986x [0.9913, 1.0035]; statistically tied (between 0.87% slower and 0.35% faster) |
+| float64array-traversal | 10–10 | 0 | 24 (24) | 1.0205x [1.0185, 1.0224] |
+| typed-convert-traversal | 10–10 | 0 | 22 (22) | 1.0190x [1.0162, 1.0220] |
+| objects-polymorphic | 20–20 | 30 | 0 (0) | 1.0264x [1.0208, 1.0324] |
+| property-polymorphic | 10–10 | 30 | 0 (0) | 0.9998x [0.9984, 1.0012]; statistically tied (between 0.16% slower and 0.12% faster) |
+| calls-recursion-closures | 10–10 | 30 | 0 (0) | 0.9956x [0.9917, 0.9999] |
+| json-codec | 10–10 | 30 | 0 (0) | 1.0087x [0.9808, 1.0420]; statistically tied (between 1.92% slower and 4.20% faster) |
+| map-set-bigint | 10–10 | 30 | 0 (0) | 1.0051x [0.9800, 1.0214]; statistically tied (between 2.00% slower and 2.14% faster) |
+| exceptions-promises-async | 10–10 | 30 | 0 (0) | 1.0144x [1.0091, 1.0204] |
+| methods-dynamic | 10–10 | 30 | 0 (0) | 1.0051x [0.9938, 1.0237]; statistically tied (between 0.62% slower and 2.37% faster) |
+| exceptions-sync | 20–20 | 30 | 0 (0) | 0.9982x [0.9865, 1.0050]; statistically tied (between 1.35% slower and 0.50% faster) |
+
+Host: 13th Gen Intel Core i7-13700KF, Linux 7.2.5 x86_64, CPU 8 pinned, `powersave`
+governor. Toolchain: rustc 1.98.1 / LLVM 22.1.8. Bun 1.4.0, default flags. Candidate binary
+`d0ba09cf…`, previous binary `9660bcbf…`; the two worktrees used their own untracked Cargo.lock
+files (hashes recorded in the manifest). `host-compute` is the equivalent pure-JavaScript render
+kernel; it excludes GPUI allocation and snapshot work, so no Bun result is divided by a
+host-inclusive timing.
+
+[All raw process records and metadata](benchmarks/results/roadmap-889f7c1-paired-x86_64.tar.gz),
+[machine-readable comparisons](benchmarks/results/roadmap-889f7c1-paired-x86_64.json),
+[collection metadata](benchmarks/results/roadmap-889f7c1-metadata-x86_64.json), and
+[verified hashes and provenance](benchmarks/results/roadmap-889f7c1-manifest-x86_64.json).
+
+<!-- END JIT_MATRIX -->
+
+<!-- BEGIN HISTORICAL_FACTS_EFFECTS_JIT_MATRIX -->
+
+**Historical 30-scenario Linux x86_64 matrix, measured 2026-09-16: bounded facts, effects, and exact recovery.**
+These measurements apply only to the `6165383` candidate and use the retired `shared-js-fixed-warmup-v2` protocol.
+Its Bun column was launched with `bun -e` and timed one batch that hit a deterministic JSC stall, inflating Bun latency
+by 1.2x–32x; do not compare its Bun ratios or absolute timings with the current v3 matrix.
 
 The measured candidate is implementation revision `6165383e01ba971ff99c70b1c4d6949b38a6349c`.
 The previous-JIT regression baseline is `e174b52eeaccefcf5891fe28fa5bbc960742846e`.
@@ -150,7 +284,7 @@ and snapshot work, so no Bun result is divided by a host-inclusive timing.
 [collection metadata](benchmarks/results/facts-effects-6165383-metadata-x86_64.json), and
 [verified hashes and provenance](benchmarks/results/facts-effects-6165383-manifest-x86_64.json).
 
-<!-- END JIT_MATRIX -->
+<!-- END HISTORICAL_FACTS_EFFECTS_JIT_MATRIX -->
 
 <!-- BEGIN HISTORICAL_INLINE_JIT_MATRIX -->
 
