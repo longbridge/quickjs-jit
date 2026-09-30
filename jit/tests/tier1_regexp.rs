@@ -30,7 +30,8 @@ fn tier1_enters_for_strings_regexp_literal() {
         .unwrap()
     });
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = (false, true);
     while Instant::now() < deadline {
         result = context.with(|ctx| {

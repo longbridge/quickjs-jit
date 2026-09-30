@@ -73,7 +73,8 @@ fn exercise(policy: JitTierPolicy, force_tier2: bool, miss: (&str, &str, &str, &
         })
     };
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = call_count(&context);
         let entries = jit.metrics().native_entries;
@@ -172,7 +173,8 @@ fn exercise_bool_result(policy: JitTierPolicy, force_tier2: bool) {
         })
     };
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = call_count(&context);
         let entries = jit.metrics().native_entries;
@@ -282,7 +284,8 @@ impl Effectful {
 
     /// Warm until one complete invocation no longer reaches the generic CALL.
     fn wait_for_link(&self, expression: &str, force_tier2: bool) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let before = call_count(&self.context);
             let entries = self.jit.metrics().native_entries;
@@ -441,7 +444,8 @@ fn exercise_production_site(setup: &str, run: &str, expected: &str) {
                 })
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = call_count(&context);
         assert_eq!(eval(run), expected);

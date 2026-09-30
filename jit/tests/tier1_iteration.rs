@@ -396,7 +396,8 @@ fn for_of_inside_a_try_region_closes_the_iterator_before_the_handler() {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(definition).unwrap());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     for iteration in 0.. {
         let result: String = context.with(|ctx| ctx.eval(expression).unwrap());
         assert_eq!(result, expected);
@@ -434,7 +435,8 @@ fn production_tiering_enters_native_code_for_a_for_of_kernel() {
         ctx.eval("(function(n){let s=0;for(let i=0;i<n;i++)s+=(i*17)&1023;return String(s)})(500)")
             .unwrap()
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     let mut result = String::new();
     while Instant::now() < deadline {
         result = context.with(|ctx| ctx.eval("kernel(500)").unwrap());

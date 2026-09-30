@@ -37,7 +37,8 @@ fn foreground_submission_never_waits_for_blocked_compiler() {
     assert_eq!(coordinator.drain_completions().drained(), 0);
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while workers.live_usage().0 != 0 && Instant::now() < deadline {
         std::thread::yield_now();
     }
@@ -171,7 +172,8 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
         assert!(control.next_request().is_some());
         control.complete(CompiledArtifact::fake(Tier::Baseline));
     }
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while coordinator.metrics().completion_queue_saturated == 0 && Instant::now() < deadline {
         std::thread::yield_now();
     }
@@ -239,7 +241,8 @@ fn production_backend_receives_owned_snapshots_automatically() {
             .unwrap();
         assert_eq!(value, 42);
     });
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while Instant::now() < deadline {
         jit.poll();
         if jit.metrics().installed >= 1 {
@@ -338,7 +341,8 @@ fn two_production_runtimes_compile_install_execute_and_retire_independently() {
     let environment_a = jit_a.test_artifact_environment();
     let environment_b = jit_b.test_artifact_environment();
     assert_ne!(environment_a.runtime_id, environment_b.runtime_id);
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 50 } else { 10 });
     while Instant::now() < deadline
         && (jit_a.metrics().installed == 0 || jit_b.metrics().installed == 0)
     {
@@ -428,7 +432,8 @@ fn pending_job_poll_installs_without_an_additional_eligible_function_call() {
         )
         .unwrap();
     });
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     while Instant::now() < deadline && jit.metrics().installed == 0 {
         let _ = runtime.execute_pending_job();
         std::thread::yield_now();

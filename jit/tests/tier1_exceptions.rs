@@ -195,7 +195,8 @@ fn production_with(
         context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
         // Slow (sanitizer) builds may still be compiling after `rounds`; keep
         // evaluating until the queued compilation has been installed.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 600 } else { 120 });
         let mut round = 0;
         let result = loop {
             let result = context.with(|ctx| ctx.eval::<String, _>(expression).unwrap());

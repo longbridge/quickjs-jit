@@ -45,7 +45,8 @@ fn tier2_case(definition: &str, warm: &str, probe: &str) {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(definition)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 25 } else { 5 });
     for _ in 0..300 {
         context.with(|ctx| ctx.eval::<(), _>(warm)).unwrap();
         jit.poll();

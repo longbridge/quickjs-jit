@@ -66,7 +66,8 @@ fn prepared_length_reader(definition: &str) -> (Runtime, Jit, Context) {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(definition)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics();
         assert_eq!(
@@ -349,7 +350,8 @@ fn prepared_typed_store(source: &str, warmup: &str) -> (Runtime, Jit, Context) {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics();
         context.with(|ctx| ctx.eval::<(), _>(warmup)).unwrap();
@@ -522,7 +524,8 @@ fn packed_hoist_edge_cases_match_the_same_version_interpreter() {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(SOURCE)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics();
         assert_eq!(
@@ -596,7 +599,8 @@ fn stale_bound_writes_and_reentry_match_the_same_version_interpreter() {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(SOURCE)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     let mut entered_tier2 = false;
     while Instant::now() < deadline {
         let before = jit.metrics();
@@ -667,7 +671,8 @@ fn detached_and_resizable_views_match_the_same_version_interpreter() {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(SOURCE)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     let mut entered_tier2 = false;
     while Instant::now() < deadline {
         let before = jit.metrics();

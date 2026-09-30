@@ -439,7 +439,7 @@ fn first_invocation_osr_executes_helper_with_side_effect_gc_and_reentry() {
         // until native helpers have actually run, rather than racing a fixed
         // iteration count against worker scheduling. Keep a bounded deadline
         // so broken OSR still fails instead of hanging the test.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 150 } else { 30 });
         ctx.globals().set("paceUntilNative", rquickjs::function::Func::from(
             move |ctx: rquickjs::Ctx<'_>| -> rquickjs::Result<()> {
                 let mut counters: rquickjs_core::qjs::JSJitHelperCounters =

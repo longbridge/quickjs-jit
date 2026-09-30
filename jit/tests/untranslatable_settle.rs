@@ -158,7 +158,8 @@ fn native_entry_windows_after_install(source: &str, call: &str, expected: &str) 
 /// background, and unoptimized (debug, coverage) builds or a busy host may
 /// install it only after many calls.
 fn wait_for_native_entry(jit: &rquickjs_jit::Jit, run: impl Fn()) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while jit.metrics().native_entries == 0 {
         assert!(
             std::time::Instant::now() < deadline,

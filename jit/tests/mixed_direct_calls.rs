@@ -110,7 +110,8 @@ fn exercise_mixed_edge(
             caller.call::<_, i32>((leaf, 7, enabled, 128)).unwrap()
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     // The timed Tier-2 profitability trial needs eight optimized caller
     // executions and may demote the caller once it decides, which briefly
     // reroutes the edge through generic CALL until the replacement installs.

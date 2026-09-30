@@ -87,7 +87,8 @@ impl FrameInline {
     }
 
     fn wait_for_tier2(&self, expression: &str, expected: f64) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             assert_eq!(self.number(expression), expected, "{expression}");
             self.jit.poll();
@@ -112,7 +113,8 @@ impl FrameInline {
         input: &str,
         expected: f64,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             assert_eq!(
                 self.caller_number(callee_name, object_name, input),
@@ -148,7 +150,8 @@ impl FrameInline {
         input: i32,
         expected: f64,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             self.jit.poll();
             let before = self.jit.metrics();
@@ -169,7 +172,8 @@ impl FrameInline {
     }
 
     fn wait_for_compiled_artifact(&self, expression: &str, expected: f64) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         let installed = self.jit.metrics().installed;
         loop {
             assert_eq!(self.number(expression), expected, "{expression}");
@@ -188,7 +192,8 @@ impl FrameInline {
 
     fn wait_for_native_nested_plain_caller(&self) {
         let expression = "caller(nestedOuter,plain,7)";
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             self.jit.poll();
             let before = self.jit.metrics();

@@ -268,7 +268,8 @@ fn generic_call_fails_closed_for_a_mixed_unknown_phi_inside_a_loop() {
         })
     };
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now()
+        + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     let mut disposition = None;
     let mut invocations = 0;
     for iteration in 0..10_000 {

@@ -27,7 +27,8 @@ fn setup(source: &str) -> (Runtime, Jit, Context) {
 }
 
 fn warm(jit: &Jit, mut call: impl FnMut()) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     loop {
         call();
         jit.poll();
@@ -486,7 +487,8 @@ fn replacing_an_owned_local_keeps_property_effects_and_releases_the_old_value() 
     };
     // An object-producing call may retain its general bridge. Replacing its
     // owning result must still release that result and commit prior writes.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     while jit.metrics().native_entries < 32 {
         call();
         jit.poll();
@@ -666,7 +668,8 @@ fn loop_backedge_alias_store_invalidates_a_preheader_seed() {
         "globalThis.left={x:0};globalThis.right={x:0};
          function target(a,b,n){a.x=1;let s=0;for(let i=0;i<n;i++){s+=a.x;b.x=2;}return s}",
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if cfg!(rquickjs_sanitizer) { 75 } else { 15 });
     loop {
         context.with(|ctx| {
             let f: Function = ctx.globals().get("target").unwrap();

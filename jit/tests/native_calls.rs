@@ -102,7 +102,8 @@ impl Harness {
     /// wrapper with an exception region, which Tier 2 leaves on Tier 1): they
     /// enter the recursion's root, and every recursive call is still native.
     fn warm_native_from(&self, expression: &str, expected: &str, outside_calls: u64) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let calls = generic_calls(&self.context);
             let before = self.jit.metrics();
@@ -409,7 +410,8 @@ fn monomorphic_callers_link_to_a_published_native_entry() {
         let harness = Harness::new(&source, force);
         // Publish the callee's native entry before the caller's Tier 2.
         harness.warm_native("fib(15)", "610");
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let calls = generic_calls(&harness.context);
             let before = harness.jit.metrics();
@@ -455,7 +457,8 @@ fn shallow_recursion_stays_out_of_native_code() {
          function drive(k){let s=0;for(let i=0;i<k;i++)s+=shallow(i&3);return s;}",
         false,
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     while harness.jit.metrics().generic_call_rejections == 0 {
         assert_eq!(harness.eval_string("drive(64)"), "160");
         harness.jit.poll();
@@ -721,7 +724,8 @@ fn native_call_sites_release_the_global_callee_on_every_edge() {
     for force in [false, true] {
         let harness = Harness::new(source, force);
         harness.warm_native("acc(40,1)", "41");
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             let calls = generic_calls(&harness.context);
             let before = harness.jit.metrics();
@@ -791,7 +795,8 @@ fn granted_fast_entries_keep_native_chain_failures_exact() {
         })
     };
     let steady = |n: i32| {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline =
+            Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
         loop {
             harness.jit.poll();
             let before = harness.jit.metrics();

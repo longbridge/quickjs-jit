@@ -37,7 +37,8 @@ fn prepared(source: &str, warmup: &str) -> (Runtime, Jit, Context) {
     .unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| ctx.eval::<(), _>(source)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(rquickjs_sanitizer) { 300 } else { 60 });
     loop {
         let before = jit.metrics();
         context.with(|ctx| ctx.eval::<(), _>(warmup)).unwrap();
