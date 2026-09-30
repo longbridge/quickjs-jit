@@ -863,12 +863,23 @@ struct ProductionBackend {
     fast_entry: Arc<FastEntryShared>,
     // C brackets each native invocation with a synchronous enter/exit pair.
     // Keep active records through retirement and preserve each invocation's tier.
-    execution_starts: Vec<(runtime::FunctionKey, std::time::Instant, runtime::Tier)>,
+    // The flag marks an OSR entry, which times only the rest of one call.
+    execution_starts: Vec<(
+        runtime::FunctionKey,
+        std::time::Instant,
+        runtime::Tier,
+        bool,
+    )>,
     execution_profiles: rustc_hash::FxHashMap<runtime::FunctionKey, ProductionProfile>,
     profitability_evaluations: u64,
     profitability_approved: u64,
     profitability_rejected: u64,
     profitability_backoff: std::collections::HashMap<runtime::FunctionKey, (u8, u64)>,
+    /// Earliest future `profitability_backoff` retry clock (`u64::MAX` when
+    /// none). Retries are evaluated by maintenance, so reaching one makes
+    /// maintenance due; otherwise quiet native code would stretch each short
+    /// backoff to a full `HOT_MAINTENANCE_INTERVAL`.
+    next_profitability_retry: u64,
     /// Baseline was measured harmful and unpublished.  This is deliberately
     /// not a terminal function blacklist: stable feedback may still justify
     /// one of the coordinator's bounded optimizing-tier trials.
@@ -955,6 +966,11 @@ struct ProductionProfile {
     helper_calls: u64,
     baseline_executions: u64,
     baseline_ns: u64,
+    /// Fastest complete Baseline invocation (entered at its first
+    /// instruction, not through OSR); zero until one is observed.
+    /// Preemption only lengthens a sample, so the minimum still shows whether
+    /// entry cost can dominate the body.
+    baseline_min_ns: u64,
     /// Baseline entries not nested in an active execution of the same
     /// function: `baseline_executions / baseline_outermost` estimates how many
     /// calls one outside entry performs through self recursion.
@@ -969,7 +985,14 @@ struct ProductionProfile {
 
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
 impl ProductionProfile {
-    fn record_baseline(&mut self, elapsed_ns: u64) {
+    fn record_baseline(&mut self, elapsed_ns: u64, complete: bool) {
+        if complete {
+            let elapsed_ns = elapsed_ns.max(1);
+            self.baseline_min_ns = match self.baseline_min_ns {
+                0 => elapsed_ns,
+                fastest => fastest.min(elapsed_ns),
+            };
+        }
         self.baseline_executions = self.baseline_executions.saturating_add(1);
         self.baseline_ns = self.baseline_ns.saturating_add(elapsed_ns);
     }
@@ -1128,7 +1151,7 @@ fn automatic_deferred_tier1_rejection(
     })
 }
 
-/// Baseline time per execution below which exhausted Tier2 profitability
+/// Fastest Baseline execution below which exhausted Tier2 profitability
 /// retries still return a function to the interpreter. Native entry and exit
 /// bookkeeping (including two `Instant` reads) costs a fraction of a
 /// microsecond, so it can outweigh a body as short as `return a + b` (about
@@ -1860,7 +1883,7 @@ mod production_osr_validation_tests {
     fn tier2_profitability_trial_is_classified_exactly_once() {
         let mut profile = ProductionProfile::default();
         for _ in 0..8 {
-            profile.record_baseline(100);
+            profile.record_baseline(100, true);
         }
         for _ in 0..7 {
             profile.record_optimized(80);
@@ -1877,7 +1900,7 @@ mod production_osr_validation_tests {
 
         let mut slow = ProductionProfile::default();
         for _ in 0..8 {
-            slow.record_baseline(100);
+            slow.record_baseline(100, true);
         }
         for _ in 0..8 {
             slow.record_optimized(125);
@@ -1893,7 +1916,7 @@ mod production_osr_validation_tests {
         // not condemn a Tier-2 version whose steady state is faster.
         let mut profile = ProductionProfile::default();
         for _ in 0..8 {
-            profile.record_baseline(600);
+            profile.record_baseline(600, true);
         }
         for _ in 0..7 {
             profile.record_optimized(400);
@@ -2498,6 +2521,7 @@ impl ProductionBackend {
             profitability_approved: 0,
             profitability_rejected: 0,
             profitability_backoff: std::collections::HashMap::new(),
+            next_profitability_retry: u64::MAX,
             profitability_blacklisted: rustc_hash::FxHashSet::default(),
             tier2_untranslatable: rustc_hash::FxHashSet::default(),
             native_recursive: rustc_hash::FxHashSet::default(),
@@ -2545,9 +2569,20 @@ impl ProductionBackend {
         let due = self.hot_ticks_since_maintenance >= HOT_MAINTENANCE_INTERVAL
             || self.coordinator.has_pending_work()
             || self.feedback.version() != self.last_scan_feedback_version
-            || self.coordinator.installed_count() != self.last_scan_installed;
+            || self.coordinator.installed_count() != self.last_scan_installed
+            || self.clock >= self.next_profitability_retry;
         if due {
             self.maintenance();
+            // Only future retries can make the next maintenance due; one the
+            // scan did not reach waits for ordinary maintenance.
+            let clock = self.clock;
+            self.next_profitability_retry = self
+                .profitability_backoff
+                .values()
+                .map(|&(_, retry_at)| retry_at)
+                .filter(|&retry_at| retry_at > clock)
+                .min()
+                .unwrap_or(u64::MAX);
         } else {
             self.clock = self.clock.saturating_add(1);
             self.coordinator.advance_clock(self.clock);
@@ -3271,20 +3306,26 @@ impl ProductionBackend {
                         .or_insert((0, self.clock));
                     entry.0 = entry.0.saturating_add(1);
                     if entry.0 >= 5 {
+                        // Queue the funded trial at the next maintenance
+                        // instead of the next periodic one.
+                        entry.1 = self.clock.saturating_add(1);
+                        self.next_profitability_retry = self.next_profitability_retry.min(entry.1);
                         // Exhausted retries fund one bounded Tier2 trial
                         // (below, through the blacklist). Only a Baseline
                         // whose entry cost can dominate its body goes back to
                         // the interpreter meanwhile; demoting a long-running
                         // one would stall it until the queued trial installs.
                         self.profitability_blacklisted.insert(key);
-                        if measured.baseline_ns
-                            < ENTRY_DOMINATED_BASELINE_NS
-                                .saturating_mul(measured.baseline_executions.max(1))
+                        // No complete execution yet: keep the conservative
+                        // demotion.
+                        if measured.baseline_min_ns == 0
+                            || measured.baseline_min_ns < ENTRY_DOMINATED_BASELINE_NS
                         {
                             self.coordinator.demote_baseline_to_interpreter(key);
                         }
                     } else {
                         entry.1 = self.clock.saturating_add(1u64 << entry.0.min(20));
+                        self.next_profitability_retry = self.next_profitability_retry.min(entry.1);
                     }
                     continue;
                 }
@@ -4088,14 +4129,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
             && self
                 .execution_starts
                 .last()
-                .is_none_or(|(parent, _, _)| *parent != key)
+                .is_none_or(|(parent, _, _, _)| *parent != key)
         {
             if let Some(profile) = self.execution_profiles.get_mut(&key) {
                 profile.baseline_outermost = profile.baseline_outermost.saturating_add(1);
             }
         }
         self.execution_starts
-            .push((key, std::time::Instant::now(), tier));
+            .push((key, std::time::Instant::now(), tier, pc != 0));
     }
 
     fn entry_fast_grant(
@@ -4139,11 +4180,11 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         // An unmatched callback must not discard a different active timer.
         // Actual C invocations, including recursive and OSR entries, are LIFO.
         let mut measured_tier2_loss = false;
-        if let Some((_, start, tier)) = self
+        if let Some((_, start, tier, osr)) = self
             .execution_starts
             .last()
             .copied()
-            .filter(|(active, _, _)| !unpaired && *active == key)
+            .filter(|(active, _, _, _)| !unpaired && *active == key)
         {
             self.execution_starts.pop();
             let elapsed = start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
@@ -4184,7 +4225,7 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                     }
                 }
             } else {
-                profile.record_baseline(elapsed);
+                profile.record_baseline(elapsed, !osr);
             }
         }
         if measured_tier2_loss && self.coordinator.demote_unprofitable_optimized(key) {

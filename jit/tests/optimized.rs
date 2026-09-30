@@ -2658,6 +2658,74 @@ fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
+fn automatic_layout_kernel_reaches_tier2_without_host_polling() {
+    use rquickjs::{Context, Function, Runtime};
+    use rquickjs_jit::{Jit, JitConfig};
+
+    // gpui-shell never calls `Jit::poll`: maintenance runs only when hot
+    // probes find it due. Profitability retries must still follow their
+    // short backoff instead of waiting a full periodic interval each.
+    let runtime = Runtime::new().unwrap();
+    let jit = Jit::attach(&runtime, JitConfig::default()).unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context
+        .with(|ctx| {
+            ctx.eval::<(), _>(
+                "function layoutKernel(batches,seed){\
+                 let checksum=seed;\
+                 for(let batch=0;batch<batches;batch+=1){\
+                   let a=0;let b=1;\
+                   for(let i=0;i<40;i+=1){const next=a+b;a=b;b=next;}\
+                   checksum=b;\
+                 }\
+                 return checksum;\
+                 }",
+            )
+        })
+        .unwrap();
+    let call = || {
+        context.with(|ctx| {
+            let function: Function = ctx.globals().get("layoutKernel").unwrap();
+            assert_eq!(function.call::<_, i32>((100, 0)).unwrap(), 165_580_141);
+        });
+    };
+    // Background compilation is far slower under sanitizer or coverage
+    // instrumentation; bound the waits by time rather than by iterations.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while jit.metrics().native_entries == 0 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    // Queueing happens on this thread, so the call count is deterministic;
+    // the compile itself is timed by the (possibly contended) worker.
+    let mut calls = 0;
+    while jit.metrics().queued < 2 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        calls += 1;
+    }
+    assert!(
+        calls <= 60,
+        "the Tier2 trial was queued {calls} calls after the Baseline without host polling: {:?}",
+        jit.metrics()
+    );
+    while jit.metrics().tier2_entries == 0 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", jit.metrics());
+        call();
+        // Give the worker time to compile between calls, as frames do.
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let metrics = jit.metrics();
+    assert_eq!(metrics.interpreter_demotions, 0, "{metrics:?}");
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
 fn automatic_gpui_layout_kernel_keeps_baseline_until_tier2_trial() {
     use rquickjs::{Context, Function, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
