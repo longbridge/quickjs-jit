@@ -10,7 +10,15 @@ pub const DEFAULT_MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_IR_BYTES: usize = 64 * 1024 * 1024;
-pub const DEFAULT_COMPILE_TIMEOUT_MS: u64 = 30_000;
+/// Per-compile budget. Sanitizer-instrumented test builds run the compiler an
+/// order of magnitude slower, where a single Tier 1 compile can exceed the
+/// production budget on CI runners and then time out on every retry, so
+/// their default budget is ten minutes.
+pub const DEFAULT_COMPILE_TIMEOUT_MS: u64 = if cfg!(rquickjs_sanitizer) {
+    600_000
+} else {
+    30_000
+};
 pub const DEFAULT_MAX_QUEUE_LEN: usize = 256;
 pub const DEFAULT_WORKERS: usize = 1;
 pub const DEFAULT_MAX_COMPILE_ATTEMPTS: u8 = 4;

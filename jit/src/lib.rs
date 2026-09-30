@@ -4206,6 +4206,12 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 // function identity. The coordinator only acts on a loss when
                 // that baseline is still installed to fall back to.
                 measured_tier2_loss = classify_tier2_trial(profile) == Some(true);
+                // A forced test tier must stay optimized: under sanitizer or
+                // loaded hosts, timing noise alone can classify a loss.
+                #[cfg(feature = "test-support")]
+                if self.config.force_optimized() {
+                    measured_tier2_loss = false;
+                }
                 if exit_kind == rquickjs_core::qjs::JSJitExitKind_JS_JIT_EXIT_DONE {
                     if let Some(baseline_average) =
                         profile.baseline_ns.checked_div(profile.baseline_executions)
