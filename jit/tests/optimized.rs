@@ -2658,7 +2658,7 @@ fn automatic_profitability_blacklist_unpublishes_harmful_baseline() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[test]
-fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
+fn automatic_gpui_layout_kernel_keeps_baseline_until_tier2_trial() {
     use rquickjs::{Context, Function, Runtime};
     use rquickjs_jit::{Jit, JitConfig};
 
@@ -2690,7 +2690,12 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         })
         .unwrap();
 
-    let mut saw_demotion = false;
+    // Each call runs for tens of microseconds, so native entry bookkeeping
+    // cannot make its Baseline slower than the interpreter. Exhausting the
+    // Tier2 profitability retries must fund the bounded trial while the
+    // Baseline keeps running; returning to the interpreter would stall the
+    // kernel for as long as the trial waits in the compile queue.
+    let mut native_before: Option<u64> = None;
     // Background compilation is far slower under sanitizer or coverage
     // instrumentation; bound the wait by time rather than by iterations.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -2708,17 +2713,21 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         assert_eq!(result, 165_580_141);
         jit.poll();
         let metrics = jit.metrics();
-        saw_demotion |= metrics.interpreter_demotions > 0;
-        if saw_demotion && metrics.tier2_entries > 0 {
+        // `terminalHost` may still be demoted on its own call-only path, so
+        // check the kernel through its native entries rather than the
+        // runtime-wide demotion count.
+        if let Some(before) = native_before {
+            assert!(
+                metrics.native_entries > before,
+                "Baseline stopped entering native code before Tier2: {metrics:?}"
+            );
+        }
+        if metrics.native_entries > 0 {
+            native_before = Some(metrics.native_entries);
+        }
+        if metrics.tier2_entries > 0 {
             assert!(metrics.profitability_rejected >= 5, "{metrics:?}");
             assert_eq!(metrics.deopts, 0, "{metrics:?}");
-            // The profitable kernel queues its Baseline and Tier2 trials. The
-            // terminal host function is rejected synchronously before it can
-            // consume a worker queue slot.
-            assert!(
-                metrics.queued >= 2,
-                "kernel Baseline and Tier2 trials were not queued: {metrics:?}"
-            );
             assert!(
                 metrics.compile_failures > 0,
                 "terminal host function must remain unsupported without blocking the profitable kernel: {metrics:?}"
@@ -2728,7 +2737,7 @@ fn automatic_gpui_layout_kernel_enters_tier2_after_harmful_baseline_demotion() {
         std::thread::sleep(std::time::Duration::from_micros(50));
     }
     panic!(
-        "harmful Tier1 never reached bounded Tier2 trial: {:?}",
+        "layout kernel never reached its Tier2 trial: {:?}",
         jit.metrics()
     );
 }

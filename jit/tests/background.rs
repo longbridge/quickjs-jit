@@ -102,7 +102,7 @@ fn stale_completion_after_reload_is_discarded() {
 }
 
 #[test]
-fn saturated_worker_mailbox_rolls_request_back_to_queue() {
+fn busy_workers_leave_backlog_queued_without_saturating_the_mailbox() {
     let (compiler, control) = FakeCompiler::new(2);
     let mut workers = BackgroundCompiler::new(Arc::new(compiler), 1, 1).unwrap();
     let mut coordinator = Coordinator::with_limits(3, 3, 4, 1024);
@@ -113,12 +113,24 @@ fn saturated_worker_mailbox_rolls_request_back_to_queue() {
     }
     assert!(workers.dispatch_next(&mut coordinator).unwrap());
     let _first = control.next_request().unwrap();
-    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    // The only worker is busy: the backlog stays in the coordinator queue,
+    // where a later Tier2 request can still overtake it.
     assert!(!workers.dispatch_next(&mut coordinator).unwrap());
-    assert_eq!(coordinator.metrics().worker_queue_saturated, 1);
+    assert_eq!(coordinator.metrics().worker_queue_saturated, 0);
+    assert_eq!(
+        coordinator.state(FunctionKey::new(2, 1)),
+        CompileState::Queued(Tier::Baseline)
+    );
 
     control.complete(CompiledArtifact::fake(Tier::Baseline));
-    let _ = control.next_request().unwrap();
+    while workers.live_usage().0 != 0 {
+        std::thread::yield_now();
+    }
+    assert!(workers.dispatch_next(&mut coordinator).unwrap());
+    assert_eq!(
+        control.next_request().unwrap().key(),
+        FunctionKey::new(2, 1)
+    );
     control.complete(CompiledArtifact::fake(Tier::Baseline));
     workers.shutdown(&mut coordinator);
     assert_eq!(
@@ -150,7 +162,12 @@ fn saturated_completion_mailbox_does_not_deadlock_shutdown() {
         coordinator
             .queue(FunctionKey::new(id, 1), Tier::Baseline, snapshot(id, 1))
             .unwrap();
-        workers.dispatch_next(&mut coordinator).unwrap();
+        // Dispatch waits for an idle worker; the previous job may still be
+        // releasing its usage after the fake compiler returned.
+        while workers.live_usage().0 != 0 {
+            std::thread::yield_now();
+        }
+        assert!(workers.dispatch_next(&mut coordinator).unwrap());
         assert!(control.next_request().is_some());
         control.complete(CompiledArtifact::fake(Tier::Baseline));
     }
@@ -495,9 +512,11 @@ fn snapshot_quota_falls_back_without_disabling_runtime() {
 fn pending_snapshot_and_ir_quotas_are_total_and_release_via_raii() {
     let (compiler, control) = FakeCompiler::new(1);
     let bytes = snapshot(1, 1).snapshot().owned_bytes();
+    // Two workers, so the second request is dispatchable while the first is
+    // pending and reaches the total quota check.
     let mut workers = BackgroundCompiler::new_with_resource_limits(
         Arc::new(compiler),
-        1,
+        2,
         2,
         std::time::Duration::from_secs(30),
         bytes,

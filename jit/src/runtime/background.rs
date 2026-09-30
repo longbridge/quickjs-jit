@@ -30,6 +30,10 @@ pub struct BackgroundCompiler {
     max_snapshot_bytes: usize,
     max_ir_bytes: usize,
     overflow: Arc<Mutex<VecDeque<super::CompileCompletion>>>,
+    /// Jobs handed to the channel never exceed the workers that can run them:
+    /// the backlog stays in the coordinator queue, where a Tier2 request can
+    /// still be taken ahead of first Baseline compiles.
+    worker_count: usize,
 }
 
 struct WorkerStartup {
@@ -111,6 +115,7 @@ impl BackgroundCompiler {
             max_snapshot_bytes,
             max_ir_bytes,
             overflow,
+            worker_count,
         })
     }
 
@@ -203,6 +208,9 @@ impl BackgroundCompiler {
         self.drain_overflow(coordinator, super::DEFAULT_COMPLETION_DRAIN_BUDGET);
         if self.sender.is_none() {
             return Err(BackgroundCompilerError::Shutdown);
+        }
+        if self.usage.jobs.load(Ordering::Acquire) >= self.worker_count {
+            return Ok(false);
         }
         *self
             .completion_slot
@@ -357,6 +365,42 @@ mod tests {
         let mut coordinator = Coordinator::with_limits(1, 1, 1, 1);
         background.shutdown(&mut coordinator);
         assert_eq!(coordinator.metrics().queued, 0);
+    }
+
+    struct BlockingCompiler(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+
+    impl Compiler for BlockingCompiler {
+        fn compile(&self, request: CompileRequest) -> Result<CompiledArtifact, CompileFailure> {
+            let _ = self.0.lock().unwrap().recv();
+            Ok(CompiledArtifact::fake(request.tier()))
+        }
+    }
+
+    #[test]
+    fn dispatch_keeps_the_backlog_in_the_coordinator_while_workers_are_busy() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut background = BackgroundCompiler::new(
+            Arc::new(BlockingCompiler(std::sync::Mutex::new(blocked))),
+            1,
+            8,
+        )
+        .unwrap();
+        let mut coordinator = Coordinator::with_limits(8, 8, 4, 1 << 20);
+        for id in 1..=3 {
+            coordinator
+                .queue(FunctionKey::new(id, 1), Tier::Baseline, snapshot())
+                .unwrap();
+        }
+
+        assert!(background.dispatch_next(&mut coordinator).unwrap());
+        // The single worker is busy: later requests stay reorderable.
+        assert!(!background.dispatch_next(&mut coordinator).unwrap());
+        assert_eq!(coordinator.metrics().compiling, 1);
+
+        for _ in 0..3 {
+            release.send(()).unwrap();
+        }
+        background.shutdown(&mut coordinator);
     }
 
     #[test]

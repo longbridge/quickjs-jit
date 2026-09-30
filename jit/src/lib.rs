@@ -1032,6 +1032,16 @@ fn automatic_closure_creation_unprofitable(
             .any(|instruction| matches!(instruction.opcode().name(), "fclosure" | "fclosure8"))
 }
 
+/// Baseline time per execution below which exhausted Tier2 profitability
+/// retries still return a function to the interpreter. Native entry and exit
+/// bookkeeping (including two `Instant` reads) costs a fraction of a
+/// microsecond, so it can outweigh a body as short as `return a + b` (about
+/// 0.5 us per Baseline execution, bookkeeping included). A Baseline that runs
+/// for longer cannot lose to the interpreter through entry cost; it keeps
+/// running while its bounded Tier2 trial waits for the compile queue.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const ENTRY_DOMINATED_BASELINE_NS: u64 = 10_000;
+
 /// Minimum observed self-recursive calls per outside entry before a pure
 /// recursive function is admitted to the native-call convention.
 #[cfg(all(feature = "compiler", not(target_family = "wasm")))]
@@ -2568,9 +2578,9 @@ impl ProductionBackend {
         self.optimizing_snapshots.remove(&key);
         self.feedback_disabled.insert(key);
         self.tier2_untranslatable.insert(key);
-        if self.profitability_blacklisted.insert(key) {
-            self.coordinator.demote_baseline_to_interpreter(key);
-        }
+        // A Baseline retained for a Tier2 trial is demoted here too.
+        self.profitability_blacklisted.insert(key);
+        self.coordinator.demote_baseline_to_interpreter(key);
     }
 
     fn maintenance(&mut self) {
@@ -3017,10 +3027,9 @@ impl ProductionBackend {
                 self.generic_call_rejections = self.generic_call_rejections.saturating_add(1);
                 self.optimizing_snapshots.remove(&key);
                 self.feedback_disabled.insert(key);
-                if !self.profitability_blacklisted.contains(&key) {
-                    self.profitability_blacklisted.insert(key);
-                    self.coordinator.demote_baseline_to_interpreter(key);
-                }
+                // A Baseline retained for a Tier2 trial is demoted here too.
+                self.profitability_blacklisted.insert(key);
+                self.coordinator.demote_baseline_to_interpreter(key);
                 continue;
             }
             let numeric_candidate = snapshot.instructions().iter().any(|instruction| {
@@ -3166,8 +3175,18 @@ impl ProductionBackend {
                         .or_insert((0, self.clock));
                     entry.0 = entry.0.saturating_add(1);
                     if entry.0 >= 5 {
+                        // Exhausted retries fund one bounded Tier2 trial
+                        // (below, through the blacklist). Only a Baseline
+                        // whose entry cost can dominate its body goes back to
+                        // the interpreter meanwhile; demoting a long-running
+                        // one would stall it until the queued trial installs.
                         self.profitability_blacklisted.insert(key);
-                        self.coordinator.demote_baseline_to_interpreter(key);
+                        if measured.baseline_ns
+                            < ENTRY_DOMINATED_BASELINE_NS
+                                .saturating_mul(measured.baseline_executions.max(1))
+                        {
+                            self.coordinator.demote_baseline_to_interpreter(key);
+                        }
                     } else {
                         entry.1 = self.clock.saturating_add(1u64 << entry.0.min(20));
                     }
@@ -3229,6 +3248,18 @@ impl ProductionBackend {
                 {
                     self.optimizing_snapshots.insert(key, snapshot);
                 } else {
+                    // A trial funded by exhausted retries while its
+                    // long-running Baseline was retained: the function is
+                    // proven hot and slow, so compile it ahead of first
+                    // Baselines queued by other functions.
+                    if self.profitability_blacklisted.contains(&key)
+                        && matches!(
+                            self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                            runtime::CompileState::Installed(_)
+                        )
+                    {
+                        self.coordinator.prioritize(key, runtime::Tier::Optimizing);
+                    }
                     self.tier2_deferred.remove(&key);
                     self.tier2_sources.insert(key, snapshot);
                 }
@@ -3815,9 +3846,15 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
         // Profitability-demoted functions have no publishable native entry.
         // Avoid running global maintenance at every subsequent call/OSR probe;
         // this keeps the fail-open interpreter path close to unattached cost.
+        // A blacklisted function whose long-running Baseline was retained for
+        // its Tier2 trial still enters that Baseline.
         if self.profitability_blacklisted.contains(&key)
             && !matches!(
                 self.coordinator.tier_state(key, runtime::Tier::Optimizing),
+                runtime::CompileState::Installed(_)
+            )
+            && !matches!(
+                self.coordinator.tier_state(key, runtime::Tier::Baseline),
                 runtime::CompileState::Installed(_)
             )
         {
