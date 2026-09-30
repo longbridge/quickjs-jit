@@ -1032,6 +1032,102 @@ fn automatic_closure_creation_unprofitable(
             .any(|instruction| matches!(instruction.opcode().name(), "fclosure" | "fclosure8"))
 }
 
+/// Opcodes Tier 1 has compiled since roadmap P2, each with the reason
+/// automatic tiering rejected it at 0.12.9. Their helper-bridged Baselines
+/// are shorter than native entry bookkeeping in host UI code (gpui-shell's
+/// panel builder ran 0.8x the interpreter's speed) and settle through extra
+/// compiles that delay hot kernels. Until profitability measures the
+/// interpreter, automatic tiering keeps such functions interpreted; explicit
+/// tier policies and forced test tiers still compile them.
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+const AUTOMATIC_DEFERRED_TIER1_OPCODES: &[(&str, bytecode::FallbackReason)] = &[
+    ("fclosure", bytecode::FallbackReason::UnsupportedOpcode),
+    ("push_this", bytecode::FallbackReason::ExtendedFrame),
+    (
+        "special_object",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    ("dup1", bytecode::FallbackReason::UnsupportedOpcode),
+    ("dup2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("perm4", bytecode::FallbackReason::UnsupportedOpcode),
+    ("swap2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("rot3l", bytecode::FallbackReason::UnsupportedOpcode),
+    ("rot3r", bytecode::FallbackReason::UnsupportedOpcode),
+    ("throw", bytecode::FallbackReason::UnsupportedOpcode),
+    ("throw_error", bytecode::FallbackReason::UnsupportedOpcode),
+    ("get_var_undef", bytecode::FallbackReason::UnsupportedOpcode),
+    ("put_var", bytecode::FallbackReason::UnsupportedOpcode),
+    ("set_name", bytecode::FallbackReason::ExtendedFrame),
+    ("get_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref_check", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref_check", bytecode::FallbackReason::ClosureFrame),
+    ("close_loc", bytecode::FallbackReason::UnsupportedOpcode),
+    ("catch", bytecode::FallbackReason::ExceptionRegion),
+    ("gosub", bytecode::FallbackReason::ExceptionRegion),
+    ("ret", bytecode::FallbackReason::ExceptionRegion),
+    ("nip_catch", bytecode::FallbackReason::ExceptionRegion),
+    ("to_object", bytecode::FallbackReason::UnsupportedOpcode),
+    ("to_propkey2", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_in_start", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_of_start", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_in_next", bytecode::FallbackReason::UnsupportedOpcode),
+    ("for_of_next", bytecode::FallbackReason::UnsupportedOpcode),
+    (
+        "iterator_close",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    ("typeof", bytecode::FallbackReason::UnsupportedOpcode),
+    ("delete", bytecode::FallbackReason::UnsupportedOpcode),
+    ("delete_var", bytecode::FallbackReason::UnsupportedOpcode),
+    ("pow", bytecode::FallbackReason::UnsupportedOpcode),
+    ("instanceof", bytecode::FallbackReason::UnsupportedOpcode),
+    ("in", bytecode::FallbackReason::UnsupportedOpcode),
+    ("fclosure8", bytecode::FallbackReason::UnsupportedOpcode),
+    ("get_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("get_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("put_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref0", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref1", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref2", bytecode::FallbackReason::ClosureFrame),
+    ("set_var_ref3", bytecode::FallbackReason::ClosureFrame),
+    (
+        "typeof_is_undefined",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+    (
+        "typeof_is_function",
+        bytecode::FallbackReason::UnsupportedOpcode,
+    ),
+];
+
+#[cfg(all(feature = "compiler", not(target_family = "wasm")))]
+fn automatic_deferred_tier1_rejection(
+    config: &JitConfig,
+    verified: &bytecode::VerifiedFunction,
+) -> Option<bytecode::FallbackReason> {
+    #[cfg(feature = "test-support")]
+    if config.force_optimized() {
+        return None;
+    }
+    if config.tier_policy() != JitTierPolicy::Automatic {
+        return None;
+    }
+    verified.instructions().iter().find_map(|instruction| {
+        let name = instruction.opcode().name();
+        AUTOMATIC_DEFERRED_TIER1_OPCODES
+            .iter()
+            .find(|(deferred, _)| *deferred == name)
+            .map(|(_, reason)| *reason)
+    })
+}
+
 /// Baseline time per execution below which exhausted Tier2 profitability
 /// retries still return a function to the interpreter. Native entry and exit
 /// bookkeeping (including two `Instant` reads) costs a fraction of a
@@ -3737,6 +3833,14 @@ unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
                 runtime::Tier::Baseline,
                 bytecode::FallbackReason::ClosureFrame,
             );
+            self.feedback_disabled.insert(key);
+            self.clear_failed_request(key);
+            self.maintenance();
+            return;
+        }
+        if let Some(reason) = automatic_deferred_tier1_rejection(&self.config, &verified) {
+            self.coordinator
+                .reject_tier1(key, runtime::Tier::Baseline, reason);
             self.feedback_disabled.insert(key);
             self.clear_failed_request(key);
             self.maintenance();

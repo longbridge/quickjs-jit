@@ -22,71 +22,35 @@ fn automatic_runtime() -> (rquickjs::Runtime, rquickjs_jit::Jit, rquickjs::Conte
 }
 
 #[test]
-fn untranslatable_loop_settles_its_baseline_decision_once() {
-    // `typeof` has no optimized classification, so Tier 2 can never compile
-    // this function. Its baseline decision must be taken a bounded number of
-    // times instead of rebuilding feedback snapshots at every maintenance.
-    let (_runtime, jit, context) = automatic_runtime();
-    context.with(|ctx| {
-        ctx.eval::<(), _>(
-            "globalThis.kinds = function(items) { let n = 0; \
-               for (let i = 0; i < items.length; i++) { if (typeof items[i] === 'string') n++; } \
-               return n; }; \
-             globalThis.items = ['a', 1, 'b', {}, 'c'];",
-        )
-        .unwrap();
-    });
-    let run = || {
-        let value = context.with(|ctx| ctx.eval::<i32, _>("kinds(items)").unwrap());
-        assert_eq!(value, 3);
-        jit.poll();
-    };
-    wait_for_native_entry(&jit, run);
-    let mut evaluations = Vec::new();
-    let mut entries = Vec::new();
-    for _ in 0..4 {
-        for _ in 0..1_000 {
-            run();
-        }
-        let metrics = jit.metrics();
-        evaluations.push(metrics.profitability_evaluations);
-        entries.push(metrics.native_entries);
-    }
-    let metrics = jit.metrics();
-    assert_eq!(metrics.tier2_entries, 0, "{metrics:?}");
-    assert_eq!(metrics.unsupported_opcode_failures, 0, "{metrics:?}");
-    assert!(
-        evaluations.windows(2).all(|pair| pair[0] == pair[1]) && evaluations[0] <= 5,
-        "untranslatable candidate kept re-evaluating: {evaluations:?} {metrics:?}"
+fn automatic_tiering_keeps_typeof_loops_interpreted() {
+    // `typeof` is one of the opcodes Tier 1 gained in roadmap P2. Automatic
+    // tiering defers them until profitability can measure the interpreter, so
+    // this loop stays interpreted as it did at 0.12.9 and never reaches the
+    // untranslatable settle.
+    let metrics = interpreted_after_rounds(
+        "globalThis.kinds = function(items) { let n = 0; \
+           for (let i = 0; i < items.length; i++) { if (typeof items[i] === 'string') n++; } \
+           return '' + n; }; \
+         globalThis.items = ['a', 1, 'b', {}, 'c'];",
+        "kinds(items)",
+        "3",
     );
-    // The settled generation runs in the interpreter with its probes off,
-    // exactly where a failed bounded Tier 2 trial used to leave it. The
-    // first window, starting at install, serves the short baseline warmup.
-    assert!(
-        entries.windows(2).all(|pair| pair[0] == pair[1]),
-        "settled generation kept entering native code: {entries:?} {metrics:?}"
-    );
+    assert_eq!(metrics.profitability_evaluations, 0, "{metrics:?}");
 }
 
 #[test]
-fn untranslatable_call_only_method_returns_to_the_interpreter() {
-    let (_runtime, jit, context) = automatic_runtime();
-    context.with(|ctx| {
-        ctx.eval::<(), _>(
-            "function Box(v) { this.v = v; } \
-             Box.prototype.twice = function() { return this.add(this.v); }; \
-             Box.prototype.add = function(x) { return this.v + x; }; \
-             globalThis.box = new Box(21);",
-        )
-        .unwrap();
-    });
-    for _ in 0..4_000 {
-        let value = context.with(|ctx| ctx.eval::<i32, _>("box.twice()").unwrap());
-        assert_eq!(value, 42);
-        jit.poll();
-    }
-    let metrics = jit.metrics();
-    assert!(metrics.generic_call_rejections > 0, "{metrics:?}");
+fn automatic_tiering_keeps_this_methods_interpreted() {
+    // `push_this` is deferred with the other P2 opcodes, so a call-only method
+    // is rejected before it can reach the generic-call demotion.
+    let metrics = interpreted_after_rounds(
+        "function Box(v) { this.v = v; } \
+         Box.prototype.twice = function() { return this.add(this.v); }; \
+         Box.prototype.add = function(x) { return this.v + x; }; \
+         globalThis.box = new Box(21);",
+        "'' + box.twice()",
+        "42",
+    );
+    assert_eq!(metrics.generic_call_rejections, 0, "{metrics:?}");
 }
 
 #[test]
@@ -138,14 +102,10 @@ fn untranslatable_object_loops_stay_exact_after_their_bounded_trial() {
 }
 
 #[test]
-fn untranslatable_property_loop_settles_instead_of_taking_a_terminal_baseline_refresh() {
-    // Interaction regression (P2b settle x P4c terminal baseline refresh):
-    // `typeof` keeps Tier 2 out, and the `get_field` sites acquire property
-    // feedback, so the function is also a terminal-baseline refresh
-    // candidate. The settle owns it: a refresh queued before the settle
-    // leaves no installed baseline to demote, and its later install kept the
-    // generation entering native code with its probes off.
-    let entries = native_entry_windows_after_install(
+fn automatic_tiering_keeps_typeof_property_loops_interpreted() {
+    // The P2b settle x P4c terminal-refresh interaction cannot arise while
+    // automatic tiering defers `typeof`: the loop is never installed.
+    interpreted_after_rounds(
         "globalThis.points = [{ x: 1, y: 'a' }, { x: 2, y: 3 }, { x: 3, y: 'b' }]; \
          globalThis.f = function(items) { let n = 0; \
            for (let i = 0; i < items.length; i++) { \
@@ -154,12 +114,22 @@ fn untranslatable_property_loop_settles_instead_of_taking_a_terminal_baseline_re
         "f(points)",
         "4",
     );
-    // `entries[0]` is sampled at install; the first window serves the short
-    // baseline warmup before the settle.
-    assert!(
-        entries[1..].windows(2).all(|pair| pair[0] == pair[1]),
-        "settled generation kept entering native code: {entries:?}"
-    );
+}
+
+/// Runs `call` for 4,000 rounds under automatic tiering and asserts it stays
+/// exact and interpreted, rejected at Tier 1.
+fn interpreted_after_rounds(source: &str, call: &str, expected: &str) -> rquickjs_jit::JitMetrics {
+    let (_runtime, jit, context) = automatic_runtime();
+    context.with(|ctx| ctx.eval::<(), _>(source).unwrap());
+    for _ in 0..4_000 {
+        let value = context.with(|ctx| ctx.eval::<String, _>(call).unwrap());
+        assert_eq!(value, expected);
+        jit.poll();
+    }
+    let metrics = jit.metrics();
+    assert_eq!(metrics.native_entries, 0, "{metrics:?}");
+    assert!(metrics.tier1_rejections > 0, "{metrics:?}");
+    metrics
 }
 
 /// Runs `call` repeatedly under automatic tiering and returns the
