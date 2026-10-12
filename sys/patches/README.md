@@ -196,6 +196,18 @@ The patch also fixes an upstream `js_array_push` fast path that appended at
 `length` when a fast array kept `count < length` after `length` grew, leaving
 uninitialized element slots (a crash in the unmodified interpreter).
 
+`0033-map-hash-mix.patch` backports quickjs-ng PR #1815 by Gabriel Elkind
+(pixelpax), https://github.com/quickjs-ng/quickjs/pull/1815, which is not in
+a quickjs-ng release yet. `map_hash_key` hashes an object or symbol key as
+its address times 3163 and a number as `(lo ^ hi) * 3163` over its double,
+and the bucket is the low bits of that hash. Heap pointers are 16-byte
+aligned, so object and symbol keys use at most 1 bucket in 16; integers below
+2048 all land in one bucket. The patch runs both hashes through the lowbias32
+finalizer, a bijection on `uint32_t`, before the tag is mixed in. Equality is
+still `js_same_value_zero` and iteration still follows the record list, so
+only bucket placement changes. Drop this patch when the baseline moves to a
+quickjs-ng release that contains #1815.
+
 The build accepts only the patch names and byte digests listed in
 `build_support/patch.rs`, then verifies the complete patched source manifest.
 Keeping the baseline and patch separate makes

@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Spread Map, Set, WeakMap and WeakSet keys across hash buckets
+  (`0033-map-hash-mix.patch`, a backport of quickjs-ng
+  [#1815](https://github.com/quickjs-ng/quickjs/pull/1815) by Gabriel Elkind).
+  Object and symbol keys used at most 1 bucket in 16 and small integer keys
+  shared one bucket.
+
 - Benchmark forced Tier 2 direct calls only after the required caller/callee
   publications settle; reject compilation during the timed batch and refresh
   stale local workload checksums.
