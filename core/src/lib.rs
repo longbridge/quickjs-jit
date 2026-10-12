@@ -145,3 +145,73 @@ To remove this warning remove the use of the feature when specifying the depende
     )]
     mod allocator {}
 }
+
+#[cfg(test)]
+mod map_keys {
+    use crate::test_with;
+
+    // `0033-map-hash-mix.patch` changes only which bucket a key lands in.
+    // Every key family must still be found, equal keys must still meet, and
+    // deletes must still unlink the right record.
+    #[test]
+    fn every_key_family_is_found_after_mixing() {
+        test_with(|ctx| {
+            let ok: bool = ctx
+                .eval(
+                    r#"
+                    const check = (what, cond) => { if (!cond) throw new Error(what); };
+                    const n = 5000;
+                    const ints = new Map();
+                    for (let i = 0; i < n; i++) ints.set(i, i);
+                    for (let i = 0; i < n; i++) check("int " + i, ints.get(i) === i);
+                    check("-0", ints.get(-0) === 0);
+                    check("1.0", ints.get(1.0) === 1);
+                    ints.set(NaN, "nan");
+                    check("NaN", ints.get(0 / 0) === "nan");
+                    check("size", ints.size === n + 1);
+                    for (let i = 0; i < n; i += 2) ints.delete(i);
+                    for (let i = 0; i < n; i++) check("deleted " + i, ints.has(i) === (i % 2 === 1));
+
+                    const doubles = new Set();
+                    for (let i = 0; i < n; i++) doubles.add(i + 0.5);
+                    for (let i = 0; i < n; i++) check("double " + i, doubles.has(i + 0.5));
+                    check("big", new Map([[2 ** 53 + 2, 1]]).get(2 ** 53 + 2) === 1);
+                    check("bigint", new Map([[10n ** 30n, 1]]).get(10n ** 30n) === 1);
+
+                    const objects = [];
+                    const byObject = new Map();
+                    const weak = new WeakMap();
+                    for (let i = 0; i < n; i++) {
+                        const o = { i };
+                        objects.push(o);
+                        byObject.set(o, i);
+                        weak.set(o, i);
+                    }
+                    for (let i = 0; i < n; i++) {
+                        check("object " + i, byObject.get(objects[i]) === i);
+                        check("weak " + i, weak.get(objects[i]) === i);
+                    }
+                    check("fresh object", !byObject.has({ i: 0 }));
+                    for (let i = 0; i < n; i += 3) byObject.delete(objects[i]);
+                    for (let i = 0; i < n; i++) check("object deleted " + i, byObject.has(objects[i]) === (i % 3 !== 0));
+
+                    const symbols = [];
+                    const bySymbol = new Map();
+                    for (let i = 0; i < n; i++) {
+                        const s = Symbol(i);
+                        symbols.push(s);
+                        bySymbol.set(s, i);
+                    }
+                    for (let i = 0; i < n; i++) check("symbol " + i, bySymbol.get(symbols[i]) === i);
+                    check("registered symbol", new Map([[Symbol.for("k"), 1]]).get(Symbol.for("k")) === 1);
+
+                    const order = [...new Map([[3, 0], [1, 0], [2, 0]]).keys()].join();
+                    check("insertion order", order === "3,1,2");
+                    true
+                    "#,
+                )
+                .unwrap();
+            assert!(ok);
+        });
+    }
+}
