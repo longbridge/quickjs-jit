@@ -59,6 +59,14 @@ pub const JIT_BINDGEN_BINDINGS: Option<&str> = None;
 #[cfg(not(feature = "bindgen"))]
 include!(concat!("bindings/", bindings_env!("TARGET"), ".rs"));
 
+// Bindings generated for one target and bundled for another can silently get
+// `size_t` wrong: Windows is LLP64, so a copy of the Linux file declares it as
+// a 32-bit `c_ulong`, and every `size_t*` out-parameter overruns its slot.
+const _: () = assert!(
+    ::core::mem::size_of::<size_t>() == ::core::mem::size_of::<usize>(),
+    "the bundled bindings declare `size_t` with the wrong width for this target"
+);
+
 #[cfg(target_pointer_width = "64")]
 include!("inlines/ptr_64.rs");
 

@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Declare `size_t` as 64-bit in the bundled `x86_64-pc-windows-msvc`,
+  `aarch64-pc-windows-msvc` and `x86_64-pc-windows-gnu` bindings. They declared
+  it as `c_ulong`, which is 32-bit on Windows, so `size_t*` out-parameters
+  overran their slots and typed array bytes read from Rust came back empty. A
+  compile-time check now rejects bindings whose `size_t` is not `usize`-wide.
+
 - Benchmark forced Tier 2 direct calls only after the required caller/callee
   publications settle; reject compilation during the timed batch and refresh
   stale local workload checksums.
