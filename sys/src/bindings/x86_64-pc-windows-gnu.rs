@@ -130,7 +130,7 @@ pub const JS_JIT_INLINE_RESUME_INSTRUCTION: u32 = 0;
 pub const JS_JIT_INLINE_RESUME_EXCEPTION: u32 = 1;
 pub const JS_JIT_INLINE_MAX_DEPTH: u32 = 16;
 pub const JS_JIT_INLINE_MAX_BYTES: u32 = 1048576;
-pub type size_t = ::core::ffi::c_ulong;
+pub type size_t = ::core::ffi::c_ulonglong;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct JSRuntime {
