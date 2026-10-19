@@ -107,7 +107,7 @@ jobs:
           else
             cargo build --manifest-path sys/Cargo.toml --target ${{ matrix.target }} --features bindgen,update-bindings,logging${{ (((startsWith(matrix.target, 'x86_64-') || startsWith(matrix.target, 'aarch64-')) && (contains(matrix.target, '-linux-') || contains(matrix.target, 'apple-darwin') || contains(matrix.target, 'windows'))) || matrix.target == 'wasm32-wasip1') && ',jit-abi,jit-test-support' || '' }}
           fi
-          cat "sys/src/bindings/${{ matrix.target }}.rs" | head -n 20
+          head -n 20 "sys/src/bindings/${{ matrix.target }}.rs"
 
       - name: Upload bindings
         uses: actions/upload-artifact@v7

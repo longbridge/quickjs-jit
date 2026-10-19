@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - update-bindings
   pull_request:
 
 # Only run on the latest ref
@@ -141,6 +142,41 @@ jobs:
         run: CC=clang RUSTFLAGS=-Zsanitizer=address cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
       - name: Run tests with thread sanitizer
         run: CC=clang RUSTFLAGS=-Zsanitizer=thread cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
+
+  stdlib:
+    # quickjs-jit-stdlib (vendored LLRT) on the desktop hosts; the cross-target
+    # matrix excludes it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Verify the vendored sources are what the import script produces
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rev=$(python3 -c "import json;print(json.load(open('stdlib/UPSTREAM.json'))['revision'])")
+          git clone --filter=blob:none https://github.com/awslabs/llrt ../llrt
+          git -C ../llrt checkout -q "$rev"
+          python3 scripts/import-stdlib.py ../llrt
+          git diff --exit-code -- stdlib
+      - name: Clippy
+        run: cargo clippy -p quickjs-jit-stdlib --all-targets -- -D warnings
+      - name: Test default modules
+        run: cargo test -p quickjs-jit-stdlib
+      - name: Test every module
+        shell: bash
+        run: >-
+          cargo test -p quickjs-jit-stdlib --features
+          abort,assert,async_hooks,buffer,child_process,compression,console,context,crypto,dgram,dns,dns_cache,encoding,events,exceptions,fetch,fs,hooking,http,intl,json,logging,navigator,net,numbers,os,path,perf_hooks,process,stream,stream_web,string_decoder,temporal,timers,tls,tty,url,util,utils,zlib,zlib-zstd
 
   jit-semantics:
     runs-on: ubuntu-latest
@@ -548,9 +584,9 @@ jobs:
             export RUST_TEST_THREADS=1
           fi
           if [ "${{ matrix.builder }}" = "zigbuild" ]; then
-            cargo-zigbuild test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+            cargo-zigbuild test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --exclude quickjs-jit-stdlib --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           elif [ "${{ matrix.wasi }}" = "true" ]; then
-            cargo test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --exclude module-loader --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+            cargo test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --exclude quickjs-jit-stdlib --exclude module-loader --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           else
-            cargo test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+            cargo test ${{ matrix.optimization && '--release' || '' }} --all --exclude quickjs-jit-runtime --exclude rquickjs-jit-benchmarks --exclude quickjs-jit-stdlib --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           fi
