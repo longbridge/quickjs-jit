@@ -190,39 +190,6 @@ pub fn xorshift(mut state: u64) -> u64 {
     state ^ (state << 17)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn summary_preserves_dispersion_and_tail() {
-        let (median, mad, p95, p99, ci) = summarize((1..=100).collect());
-        assert_eq!(median, 51);
-        assert!(mad >= 25);
-        assert_eq!(p95, 96);
-        assert_eq!(p99, 100);
-        assert!(ci[0] <= median && median <= ci[1]);
-    }
-
-    #[test]
-    fn timed_batch_summary_uses_the_median_and_counts_but_keeps_spikes() {
-        // A single one-off stall (the old fixed-batch artifact) no longer
-        // determines the reported latency, but it stays visible.
-        let mut batches = vec![5_000u64; 16];
-        batches[0] = 187_000;
-        let (median, outliers) = timed_batch_summary(&batches);
-        assert_eq!(median, 5_000);
-        assert_eq!(outliers, 1);
-        // Exactly 5x the median is not an outlier; above it is.
-        batches[0] = 25_000;
-        assert_eq!(timed_batch_summary(&batches).1, 0);
-        batches[0] = 25_001;
-        assert_eq!(timed_batch_summary(&batches).1, 1);
-        // Even K uses the harness-wide upper median.
-        assert_eq!(timed_batch_summary(&[1, 2, 3, 4]), (3, 0));
-        assert_eq!(timed_batch_summary(&[]), (0, 0));
-    }
-}
-
 /// Legacy timing protocol: 64 warmup batches, then one timed batch.
 #[allow(dead_code)]
 pub const PROTOCOL_FIXED_WARMUP_V2: &str = "shared-js-fixed-warmup-v2";
@@ -292,4 +259,37 @@ pub fn timed_batch_summary(batches: &[u64]) -> (u64, u32) {
     let threshold = median.saturating_mul(OUTLIER_RATIO);
     let outliers = batches.iter().filter(|&&ns| ns > threshold).count();
     (median, u32::try_from(outliers).unwrap_or(u32::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn summary_preserves_dispersion_and_tail() {
+        let (median, mad, p95, p99, ci) = summarize((1..=100).collect());
+        assert_eq!(median, 51);
+        assert!(mad >= 25);
+        assert_eq!(p95, 96);
+        assert_eq!(p99, 100);
+        assert!(ci[0] <= median && median <= ci[1]);
+    }
+
+    #[test]
+    fn timed_batch_summary_uses_the_median_and_counts_but_keeps_spikes() {
+        // A single one-off stall (the old fixed-batch artifact) no longer
+        // determines the reported latency, but it stays visible.
+        let mut batches = vec![5_000u64; 16];
+        batches[0] = 187_000;
+        let (median, outliers) = timed_batch_summary(&batches);
+        assert_eq!(median, 5_000);
+        assert_eq!(outliers, 1);
+        // Exactly 5x the median is not an outlier; above it is.
+        batches[0] = 25_000;
+        assert_eq!(timed_batch_summary(&batches).1, 0);
+        batches[0] = 25_001;
+        assert_eq!(timed_batch_summary(&batches).1, 1);
+        // Even K uses the harness-wide upper median.
+        assert_eq!(timed_batch_summary(&[1, 2, 3, 4]), (3, 0));
+        assert_eq!(timed_batch_summary(&[]), (0, 0));
+    }
 }
