@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- Based on rquickjs 0.14.0 and quickjs-ng `0fdea21` (0.16.2+) instead of rquickjs 0.12.2 and
+  quickjs-ng 0.15.1, with rquickjs 0.14's API (`ArrayBuffer::as_raw` returns `NonNull<[u8]>`,
+  unsafe `as_bytes` / `as_slice`, the resizable `JS_NewArrayBuffer`, `wasm32-unknown-unknown`).
+  QuickJS bytecode format 28 instead of 26. The JIT patch set is rebased onto it.
+
 ### Added
 
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`

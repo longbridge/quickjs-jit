@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index cfc8a94..60ef6a4 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -20098,8 +20098,6 @@
+@@ -20583,8 +20583,6 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          var_buf[i] = JS_UNDEFINED;
  
      stack_buf = var_buf + b->var_count;
@@ -10,7 +11,7 @@ diff --git a/quickjs.c b/quickjs.c
      sf->var_refs = (JSVarRef **)(stack_buf + stack_allocated_size);
      sf->var_ref_count = b->var_ref_count;
      for(i = 0; i < b->var_ref_count; i++)
-@@ -20118,8 +20116,7 @@
+@@ -20605,8 +20603,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #endif
  
  #ifdef CONFIG_JIT_ABI
@@ -20,7 +21,7 @@ diff --git a/quickjs.c b/quickjs.c
          uint32_t call_types[8];
          for (i = 0; i < argc; i++) {
              qjsjit_unpoison_slot(&arg_buf[i]);
-@@ -20255,6 +20252,10 @@
+@@ -20742,6 +20739,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  goto restart;
              }
  
@@ -31,7 +32,7 @@ diff --git a/quickjs.c b/quickjs.c
              memset(&frame, 0, sizeof(frame));
              frame.struct_size = sizeof(frame);
              frame.flags = b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0;
-@@ -20899,10 +20900,12 @@
+@@ -21386,10 +21387,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              ret_val = *--sp;
  #ifdef CONFIG_JIT_ABI
              {
@@ -48,7 +49,7 @@ diff --git a/quickjs.c b/quickjs.c
              }
  #endif
              goto done;
-@@ -20910,10 +20913,12 @@
+@@ -21397,10 +21400,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              ret_val = JS_UNDEFINED;
  #ifdef CONFIG_JIT_ABI
              {
@@ -65,7 +66,7 @@ diff --git a/quickjs.c b/quickjs.c
              }
  #endif
              goto done;
-@@ -21500,13 +21505,15 @@
+@@ -21987,13 +21992,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #ifdef CONFIG_JIT_ABI
                  uint8_t *next_pc;
                  uint32_t condition_type;
@@ -82,7 +83,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
-@@ -21514,10 +21521,12 @@
+@@ -22001,10 +22008,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      res = JS_ToBoolFree(ctx, op1);
                  }
  #ifdef CONFIG_JIT_ABI
@@ -99,7 +100,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  sp--;
                  if (res) {
-@@ -21541,13 +21550,15 @@
+@@ -22028,13 +22037,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #ifdef CONFIG_JIT_ABI
                  uint8_t *next_pc;
                  uint32_t condition_type;
@@ -116,7 +117,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
-@@ -21555,10 +21566,12 @@
+@@ -22042,10 +22053,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      res = JS_ToBoolFree(ctx, op1);
                  }
  #ifdef CONFIG_JIT_ABI
@@ -133,7 +134,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  sp--;
                  if (!res) {
-@@ -21582,13 +21595,15 @@
+@@ -22069,13 +22082,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #ifdef CONFIG_JIT_ABI
                  uint8_t *next_pc;
                  uint32_t condition_type;
@@ -150,7 +151,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
-@@ -21596,10 +21611,12 @@
+@@ -22083,10 +22098,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      res = JS_ToBoolFree(ctx, op1);
                  }
  #ifdef CONFIG_JIT_ABI
@@ -167,7 +168,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  sp--;
                  if (res) {
-@@ -21623,13 +21640,15 @@
+@@ -22110,13 +22127,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #ifdef CONFIG_JIT_ABI
                  uint8_t *next_pc;
                  uint32_t condition_type;
@@ -184,7 +185,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
-@@ -21637,10 +21656,12 @@
+@@ -22124,10 +22143,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      res = JS_ToBoolFree(ctx, op1);
                  }
  #ifdef CONFIG_JIT_ABI
@@ -201,7 +202,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  sp--;
                  if (!res) {
-@@ -22749,10 +22770,12 @@
+@@ -23322,10 +23343,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  uint32_t tag;
  #ifdef CONFIG_JIT_ABI
                  uint32_t conversion_types[2];
@@ -215,7 +216,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  tag = JS_VALUE_GET_TAG(op1);
                  if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag)) {
-@@ -22762,10 +22785,12 @@
+@@ -23335,10 +23358,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                          goto exception;
                  }
  #ifdef CONFIG_JIT_ABI
@@ -232,7 +233,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
              }
              BREAK;
-@@ -22777,10 +22802,12 @@
+@@ -23350,10 +23375,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  double d;
  #ifdef CONFIG_JIT_ABI
                  uint32_t conversion_types[2];
@@ -246,7 +247,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  tag = JS_VALUE_GET_TAG(op1);
                  if (tag == JS_TAG_INT) {
-@@ -22805,10 +22832,12 @@
+@@ -23378,10 +23405,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                          goto exception;
                  }
  #ifdef CONFIG_JIT_ABI

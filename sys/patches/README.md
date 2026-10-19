@@ -3,6 +3,13 @@
 Patches in this directory are applied in lexical order to the public QuickJS
 submodule baseline after its sources are copied into Cargo's `OUT_DIR`.
 
+The baseline is quickjs-ng `0fdea21` (v0.16.2 plus 26 commits), the revision
+rquickjs 0.14.0 pins. The patches were written against v0.15.1 (`fd0a021`) and
+rebased onto it one by one; `0033-quickjs-ng-0.16.patch` holds what 0.16 needs
+beyond the textual rebase (see below). Regenerate this directory and the
+fingerprints in `build_support/patch.rs` from a branch of `sys/quickjs` with
+one commit per patch with `scripts/regen-quickjs-patches.py BRANCH`.
+
 `0001-rquickjs-jit.patch` is generated from quickjs-ng v0.15.1 (`fd0a021`)
 through the reviewed rquickjs JIT integration commits ending at `eb389a3`.
 `0002-runtime-feedback.patch` adds the versioned runtime type-feedback ABI and
@@ -201,3 +208,15 @@ The build accepts only the patch names and byte digests listed in
 Keeping the baseline and patch separate makes
 upstream QuickJS upgrades an explicit rebase instead of requiring an
 unpublished submodule commit.
+
+`0033-quickjs-ng-0.16.patch` adapts the patch set to quickjs-ng 0.16's arena
+allocator, which moved every reference count (and GC type and mark) out of the
+object into the allocator block header four bytes before the payload
+(`js_rc()`): the inline-refcount layout now pins that negative offset, and
+the JIT's code generator uses it (`REF_COUNT_OFFSET`). Shape properties follow
+the hash table (`get_shape_prop()`), so the shape-retention and object
+fast-path helpers address them through it, and the shape generation field sits
+before the trailing hash table. The source revision in the ABI identity is
+`0fdea21`. The rebase itself kept array feedback ahead of 0.16's new
+`get_array_el` fast path and took upstream's fix for appending to a fast array
+whose `length` grew (the same fix `0032` carried).

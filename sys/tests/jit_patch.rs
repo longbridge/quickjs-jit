@@ -65,6 +65,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0028-tier1-iteration.patch",
         "0029-native-call-convention.patch",
         "0032-object-fast-paths.patch",
+        "0033-quickjs-ng-0.16.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }

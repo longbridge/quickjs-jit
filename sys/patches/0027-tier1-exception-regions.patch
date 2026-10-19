@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 8c8e448..67d4b68 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -644,6 +644,28 @@
+@@ -644,6 +644,28 @@ typedef struct JSJitInlineAPI {
   * table only after validating the main JIT ABI, table size/version and effects. */
  JS_EXTERN const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version);
  
@@ -31,9 +32,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  }
  #endif
 diff --git a/quickjs.c b/quickjs.c
+index 8fa2989..ef199d3 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -21120,6 +21120,155 @@
+@@ -21603,6 +21603,155 @@ const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version)
      return version == QJSJIT_INLINE_RECOVERY_VERSION ? &api : NULL;
  }
  
@@ -189,7 +191,7 @@ diff --git a/quickjs.c b/quickjs.c
  static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      JSValueConst this_obj, JSValueConst new_target, int argc,
      JSValueConst *argv, int flags)
-@@ -21385,12 +21534,25 @@
+@@ -21871,12 +22020,25 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              b->jit_feedback_disabled = 1;
          if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
              JSJitFunctionSnapshot *snapshot = NULL;

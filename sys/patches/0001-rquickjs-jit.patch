@@ -1,10 +1,10 @@
 diff --git a/api-test.c b/api-test.c
-index a45dfb3..884e849 100644
+index 2425cad..f52718c 100644
 --- a/api-test.c
 +++ b/api-test.c
-@@ -6,6 +6,78 @@
- #include <string.h>
+@@ -8,6 +8,78 @@
  #include "quickjs.h"
+ #include "quickjs-libc.h"
  #include "cutils.h"
 +#ifdef CONFIG_JIT_ABI
 +#include "quickjs-jit.h"
@@ -81,7 +81,7 @@ index a45dfb3..884e849 100644
  
  static JSRuntime *new_runtime(void)
  {
-@@ -1133,6 +1205,9 @@ static void new_symbol(void)
+@@ -2161,6 +2233,9 @@ void new_typed_array(void)
  
  int main(void)
  {
@@ -642,7 +642,7 @@ index 0000000..d9c1503
 +
 +#endif /* QUICKJS_JIT_H */
 diff --git a/quickjs.c b/quickjs.c
-index 11caae0..065896a 100644
+index 508a3ca..062f40c 100644
 --- a/quickjs.c
 +++ b/quickjs.c
 @@ -45,6 +45,9 @@
@@ -655,7 +655,7 @@ index 11caae0..065896a 100644
  #include "libregexp.h"
  #include "dtoa.h"
  
-@@ -354,6 +357,33 @@ struct JSRuntime {
+@@ -422,6 +425,33 @@ struct JSRuntime {
      void *user_opaque;
      void *libc_opaque;
      JSRuntimeFinalizerState *finalizers;
@@ -688,8 +688,8 @@ index 11caae0..065896a 100644
 +#endif
  };
  
- struct JSClass {
-@@ -812,6 +842,10 @@ typedef struct JSFunctionBytecode {
+ typedef struct JSStackFrame {
+@@ -888,6 +918,10 @@ typedef struct JSFunctionBytecode {
      int pc2line_len;
      uint8_t *pc2line_buf;
      char *source;
@@ -700,7 +700,7 @@ index 11caae0..065896a 100644
  } JSFunctionBytecode;
  
  typedef struct JSBoundFunction {
-@@ -1968,6 +2002,22 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+@@ -2323,6 +2357,22 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
      rt = mf->js_calloc(opaque, 1, sizeof(JSRuntime));
      if (!rt)
          return NULL;
@@ -723,7 +723,7 @@ index 11caae0..065896a 100644
      rt->mf = *mf;
      if (!rt->mf.js_malloc_usable_size) {
          /* use dummy function if none provided */
-@@ -2036,6 +2086,697 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
+@@ -2392,6 +2442,697 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
      rt->user_opaque = opaque;
  }
  
@@ -1421,7 +1421,7 @@ index 11caae0..065896a 100644
  int JS_AddRuntimeFinalizer(JSRuntime *rt, JSRuntimeFinalizer *finalizer,
                             void *arg)
  {
-@@ -2291,8 +3032,14 @@ void JS_FreeRuntime(JSRuntime *rt)
+@@ -2647,8 +3388,14 @@ void JS_FreeRuntime(JSRuntime *rt)
      bool leak = false;
      int i;
  
@@ -1436,9 +1436,9 @@ index 11caae0..065896a 100644
  
      list_for_each_safe(el, el1, &rt->job_list) {
          JSJobEntry *e = list_entry(el, JSJobEntry, link);
-@@ -2523,7 +3270,11 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
-     ctx->error_stack_trace_limit = js_int32(10);
-     init_list_head(&ctx->loaded_modules);
+@@ -2887,7 +3634,11 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
+         ctx->random_state = 1;
+     ctx->hash_seed = xorshift64star(&ctx->random_state);
  
 -    if (JS_AddIntrinsicBasicObjects(ctx)) {
 +    if (JS_AddIntrinsicBasicObjects(ctx)
@@ -1449,7 +1449,7 @@ index 11caae0..065896a 100644
          JS_FreeContext(ctx);
          return NULL;
      }
-@@ -8240,6 +8991,19 @@ static inline __exception int js_poll_interrupts(JSContext *ctx)
+@@ -8667,6 +9418,19 @@ static inline __exception int js_poll_interrupts(JSContext *ctx)
      }
  }
  
@@ -1469,8 +1469,8 @@ index 11caae0..065896a 100644
  /* return -1 (exception) or true/false */
  static int JS_SetPrototypeInternal(JSContext *ctx, JSValueConst obj,
                                     JSValueConst proto_val, bool throw_flag)
-@@ -17546,6 +18310,720 @@ static bool needs_backtrace(JSValue exc)
-     return !find_own_property1(p, JS_ATOM_stack);
+@@ -18030,6 +18794,720 @@ static bool needs_backtrace(JSValue exc)
+     return can_store_error_stack(exc) || can_add_backtrace(exc);
  }
  
 +#ifdef CONFIG_JIT_ABI
@@ -2190,7 +2190,7 @@ index 11caae0..065896a 100644
  /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
  static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                 JSValueConst this_obj, JSValueConst new_target,
-@@ -17557,10 +19035,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18041,10 +19519,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      JSFunctionBytecode *b;
      JSStackFrame sf_s, *sf = &sf_s;
      uint8_t *pc;
@@ -2206,7 +2206,7 @@ index 11caae0..065896a 100644
  
  #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_STEP
  #define DUMP_BYTECODE_OR_DONT(pc) \
-@@ -17602,6 +19084,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18086,6 +19568,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              local_buf = arg_buf = sf->arg_buf;
              var_buf = sf->var_buf;
              stack_buf = sf->var_buf + b->var_count;
@@ -2219,7 +2219,7 @@ index 11caae0..065896a 100644
              sp = sf->cur_sp;
              sf->cur_sp = NULL; /* cur_sp is NULL if the function is running */
              pc = sf->cur_pc;
-@@ -17634,8 +19122,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18118,8 +19606,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          arg_allocated_size = 0;
      }
  
@@ -2236,7 +2236,7 @@ index 11caae0..065896a 100644
          sizeof(JSVarRef *) * b->var_ref_count;
      if (js_check_stack_overflow(rt, alloca_size))
          return JS_ThrowStackOverflow(caller_ctx);
-@@ -17664,7 +19159,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18149,7 +19644,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          var_buf[i] = JS_UNDEFINED;
  
      stack_buf = var_buf + b->var_count;
@@ -2247,7 +2247,7 @@ index 11caae0..065896a 100644
      sf->var_ref_count = b->var_ref_count;
      for(i = 0; i < b->var_ref_count; i++)
          sf->var_refs[i] = NULL;
-@@ -17681,6 +19178,282 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18168,6 +19665,282 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          print_func_name(b);
  #endif
  
@@ -2530,7 +2530,7 @@ index 11caae0..065896a 100644
   restart:
      for(;;) {
          int call_argc;
-@@ -18662,27 +20435,63 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -19149,27 +20922,63 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              BREAK;
  
          CASE(OP_goto):
@@ -2603,7 +2603,7 @@ index 11caae0..065896a 100644
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
                  } else {
-@@ -18694,15 +20503,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -19181,15 +20990,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  }
                  if (unlikely(js_poll_interrupts(ctx)))
                      goto exception;
@@ -2632,7 +2632,7 @@ index 11caae0..065896a 100644
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
                  } else {
-@@ -18714,15 +20536,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -19201,15 +21023,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  }
                  if (unlikely(js_poll_interrupts(ctx)))
                      goto exception;
@@ -2661,7 +2661,7 @@ index 11caae0..065896a 100644
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
                  } else {
-@@ -18734,15 +20569,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -19221,15 +21056,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  }
                  if (unlikely(js_poll_interrupts(ctx)))
                      goto exception;
@@ -2690,7 +2690,7 @@ index 11caae0..065896a 100644
                  if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
                      res = JS_VALUE_GET_INT(op1);
                  } else {
-@@ -18754,6 +20602,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -19241,6 +21089,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  }
                  if (unlikely(js_poll_interrupts(ctx)))
                      goto exception;
@@ -2704,7 +2704,7 @@ index 11caae0..065896a 100644
              }
              BREAK;
          CASE(OP_catch):
-@@ -20319,12 +22174,32 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -20892,12 +22747,32 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          }
      }
   exception:
@@ -2739,8 +2739,8 @@ index 11caae0..065896a 100644
      if (!JS_IsUncatchableError(rt->current_exception)) {
          while (sp > stack_buf) {
              JSValue val = *--sp;
-@@ -20564,7 +22439,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
-     sf->is_strict_mode = b->is_strict_mode;
+@@ -21138,7 +23013,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
+     sf->is_constructor = false;
      sf->cur_pc = b->byte_code_buf;
      arg_buf_len = max_int(b->arg_count, argc);
 +#ifdef CONFIG_JIT_ABI
@@ -2752,10 +2752,10 @@ index 11caae0..065896a 100644
      alloc_size = sizeof(JSValue) * max_int(local_count, 1) +
          sizeof(JSVarRef *) * b->var_ref_count;
      sf->arg_buf = js_malloc(ctx, alloc_size);
-@@ -20576,7 +22456,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
-     sf->arg_count = arg_buf_len;
-     sf->var_buf = sf->arg_buf + arg_buf_len;
+@@ -21152,7 +23032,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
      sf->cur_sp = sf->var_buf + b->var_count;
+     /* set by the caller once the owning coroutine GC object exists */
+     sf->cur_gc_obj = NULL;
 +#ifdef CONFIG_JIT_ABI
 +    sf->var_refs = (JSVarRef **)(sf->cur_sp + b->stack_size +
 +                                 JS_JIT_HELPER_SCRATCH_SLOTS);
@@ -2765,7 +2765,7 @@ index 11caae0..065896a 100644
      sf->var_ref_count = b->var_ref_count;
      for(i = 0; i < b->var_ref_count; i++)
          sf->var_refs[i] = NULL;
-@@ -20585,6 +22470,10 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
+@@ -21161,6 +23046,10 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
      n = arg_buf_len + b->var_count;
      for(i = argc; i < n; i++)
          sf->arg_buf[i] = JS_UNDEFINED;
@@ -2776,7 +2776,7 @@ index 11caae0..065896a 100644
      return 0;
  }
  
-@@ -36316,6 +38205,12 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
+@@ -37137,6 +39026,12 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
  {
      int i;
  
