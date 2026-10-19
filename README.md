@@ -5,18 +5,20 @@ package is named `quickjs-jit`, while its Rust library name remains `rquickjs`
 for source compatibility:
 
 ```toml
-rquickjs = { package = "quickjs-jit", version = "=0.12.2" }
-rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.12.2", features = ["compiler"] }
+rquickjs = { package = "quickjs-jit", version = "=0.14.0" }
+rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.0", features = ["compiler"] }
+# Optional: LLRT's standard modules (buffer, crypto, path, url, zlib, ...)
+quickjs-jit-stdlib = { version = "=0.14.0" }
 ```
 
-The distribution and JIT runtime must use the same patch version. The JIT ABI
-includes internal QuickJS structure layouts, so mixing runtime, core, or sys
-crate patch versions may compile but will be rejected during JIT startup.
-`quickjs-jit-runtime` 0.12.3 has not been published yet. Consumers testing the
-0.12.3 source must pin the distribution and runtime to the same Git revision
-and use Cargo source patches from that revision for both `quickjs-jit-core` and
-`quickjs-jit-sys`. Do not combine the published 0.12.2 runtime with 0.12.3
-core or sys crates.
+quickjs-jit 0.14 is based on rquickjs 0.14.0 and quickjs-ng `0fdea21`
+(0.16.2+). All crates of a release share one version and pin each other
+exactly. The JIT ABI includes internal QuickJS structure layouts, so mixing
+runtime, core, or sys crates from different releases may compile but is
+rejected during JIT startup.
+
+The optional [`quickjs-jit-stdlib`](stdlib/README.md) package vendors LLRT's
+standard modules as source, one Cargo feature per module, on the same VM.
 
 [![github](https://img.shields.io/badge/github-longbridge/rquickjs-8da0cb.svg?style=for-the-badge&logo=github)](https://github.com/longbridge/rquickjs)
 [![crates](https://img.shields.io/crates/v/quickjs-jit.svg?style=for-the-badge&color=fc8d62&logo=rust)](https://crates.io/crates/quickjs-jit)

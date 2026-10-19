@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## quickjs-jit 0.14.0 - 2026-10-20
+
+All quickjs-jit crates share this version and pin each other exactly. The entries below
+cover quickjs-jit since 0.12.11; the merged upstream changes are listed under rquickjs
+0.13.0 and 0.14.0 below.
+
 ### Breaking Changes
 
 - Based on rquickjs 0.14.0 and quickjs-ng `0fdea21` (0.16.2+) instead of rquickjs 0.12.2 and
@@ -16,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `quickjs-jit-stdlib` vendors LLRT's standard modules and libraries (revision `d9fd873e`) as
+  source, one Cargo feature per module, pure-Rust backends by default and zstd behind
+  `zlib-zstd`; it is published with the other crates. Buffer storage and every byte array the
+  modules hand to JS are allocated by QuickJS, so `Runtime::set_memory_limit` bounds them;
+  PBKDF2 work (iterations times output blocks) is capped at 10,000,000.
+- `scripts/regen-quickjs-patches.py` regenerates `sys/patches` and their fingerprints from a
+  branch of `sys/quickjs`; `make publish-dry-run` verifies the whole release set.
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
 - JIT M2: Tier 1 and Tier 2 now support the remaining comparison, bitwise, shift, `%`, unary
   numeric, constant, stack-shuffle, tail-call, `null`, and empty-string opcodes; the JIT ABI

@@ -31,7 +31,7 @@ if sys.version_info < (3, 11):
 import tomllib
 
 REVISION = "d9fd873e793c6551c5d92b2e31480f3279e3cd8d"
-VERSION = "0.12.11"
+VERSION = "0.14.0"
 # `llrt_build` is replaced by this package's `[lints]` (it only declares `rust_nightly`).
 SKIP = {"llrt_build"}
 # The test helpers (`llrt_test_tls`: certificates for fetch / tls / http) are compiled

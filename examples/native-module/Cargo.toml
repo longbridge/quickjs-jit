@@ -1,6 +1,6 @@
 [package]
 name = "native-module"
-version = "0.12.11"
+version = "0.14.0"
 authors = ["K. <kayo@illumium.org>"]
 edition = "2018"
 publish = false
