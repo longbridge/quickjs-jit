@@ -102,11 +102,6 @@ pub struct JSContext {
 pub struct JSObject {
     _unused: [u8; 0],
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct JSClass {
-    _unused: [u8; 0],
-}
 pub type JSClassID = u32;
 pub type JSAtom = u32;
 pub const JS_TAG_FIRST: _bindgen_ty_3 = -9;
@@ -415,14 +410,6 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn js_malloc_usable_size(ctx: *mut JSContext, ptr: *const ::core::ffi::c_void) -> size_t;
-}
-unsafe extern "C" {
-    pub fn js_realloc2(
-        ctx: *mut JSContext,
-        ptr: *mut ::core::ffi::c_void,
-        size: size_t,
-        pslack: *mut size_t,
-    ) -> *mut ::core::ffi::c_void;
 }
 unsafe extern "C" {
     pub fn js_mallocz(ctx: *mut JSContext, size: size_t) -> *mut ::core::ffi::c_void;
@@ -1320,19 +1307,21 @@ unsafe extern "C" {
         space0: JSValue,
     ) -> JSValue;
 }
-pub type JSFreeArrayBufferDataFunc = ::core::option::Option<
+pub type JSReallocArrayBufferDataFunc = ::core::option::Option<
     unsafe extern "C" fn(
         rt: *mut JSRuntime,
         opaque: *mut ::core::ffi::c_void,
         ptr: *mut ::core::ffi::c_void,
-    ),
+        size: size_t,
+    ) -> *mut ::core::ffi::c_void,
 >;
 unsafe extern "C" {
     pub fn JS_NewArrayBuffer(
         ctx: *mut JSContext,
         buf: *mut u8,
         len: size_t,
-        free_func: JSFreeArrayBufferDataFunc,
+        max_len: size_t,
+        realloc_func: JSReallocArrayBufferDataFunc,
         opaque: *mut ::core::ffi::c_void,
         is_shared: bool,
     ) -> JSValue;
@@ -1393,7 +1382,7 @@ unsafe extern "C" {
         ctx: *mut JSContext,
         buf: *mut u8,
         len: size_t,
-        free_func: JSFreeArrayBufferDataFunc,
+        realloc_func: JSReallocArrayBufferDataFunc,
         opaque: *mut ::core::ffi::c_void,
         is_shared: bool,
     ) -> JSValue;
@@ -1451,6 +1440,14 @@ unsafe extern "C" {
     pub fn JS_NewPromiseCapability(ctx: *mut JSContext, resolving_funcs: *mut JSValue) -> JSValue;
 }
 unsafe extern "C" {
+    pub fn JS_PromiseThen(
+        ctx: *mut JSContext,
+        promise: JSValue,
+        on_fulfilled: JSValue,
+        on_rejected: JSValue,
+    ) -> JSValue;
+}
+unsafe extern "C" {
     pub fn JS_PromiseState(ctx: *mut JSContext, promise: JSValue) -> JSPromiseStateEnum;
 }
 unsafe extern "C" {
@@ -1458,6 +1455,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn JS_IsPromise(val: JSValue) -> bool;
+}
+unsafe extern "C" {
+    pub fn JS_PromiseMarkAsHandled(ctx: *mut JSContext, promise: JSValue);
 }
 unsafe extern "C" {
     pub fn JS_NewSettledPromise(ctx: *mut JSContext, is_reject: bool, value: JSValue) -> JSValue;

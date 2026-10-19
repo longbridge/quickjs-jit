@@ -40,6 +40,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.14.0] - 2026-09-17
+
+### Breaking Changes
+
+- Removed unused trait `StaticJsFunction`.
+
+### Added
+
+- Added `Exception::throw_dom`, `PredefinedAtom::DOMException`, and `intrinsic::DOMException`.
+- Support for `wasm32-unknown-unknown` from [@mrchantey]
+
+### Fixed
+
+- Fixed `Params::is_constructor` to return the suggested value instead of `false`.
+- Fixed `ExoticMethod` to fix type checking for `&Ctx`
+- Fixed `Ctx::execute_pending_job` treating a job that threw the same as one that ran successfully, leaving the exception pending on the runtime instead of clearing it.
+- Fixed `Object::instance_of` leaving a pending exception on the runtime when the checked object isn't an instance of the given Rust class.
+
+## [0.13.0] - 2026-09-07
+
+### Breaking Changes
+
+- `TypedArray::as_bytes`, `ArrayBuffer::as_bytes` and `ArrayBuffer::as_slice` are now `unsafe fn`, and the unsound safe `AsRef<[T]>` impls for `TypedArray` and `ArrayBuffer` were removed in favor of the new `unsafe fn TypedArray::as_slice` #[736](https://github.com/DelSkayn/rquickjs/issues/736)
+- `TypedArray::as_raw` and `ArrayBuffer::as_raw` now return `NonNull<[u8]>` slice pointers, and the unnameable `RawArrayBuffer` type has been removed.
+
+### Added
+
+- Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
+- `ArrayBuffer::new`-backed buffers now support `ArrayBuffer.prototype.transfer` to a different length instead of always failing
+
+### Fixed
+
+- Fixed deadlock when dropping a `Context` while the runtime lock is held under the `parallel` feature
+- Updated `sys/quickjs` to `2c620e4` (quickjs-ng 0.16.2) and adapted `ArrayBuffer` callbacks to the new `JSReallocArrayBufferDataFunc` contract
+- Removed stale `RefCountHeader` cast in `drop_context` (field moved to allocator header in quickjs-ng)
+
+### Security
+
+- Fixed `TypedArray`/`ArrayBuffer` byte-slice accessors returning a safe `&[u8]` that could be mutated, detached or reallocated by JS running while the slice was still borrowed #[736](https://github.com/DelSkayn/rquickjs/issues/736)
+
 ## [0.12.2] - 2026-07-27
 
 ### Added
