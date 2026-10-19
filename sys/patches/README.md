@@ -220,3 +220,7 @@ before the trailing hash table. The source revision in the ABI identity is
 `0fdea21`. The rebase itself kept array feedback ahead of 0.16's new
 `get_array_el` fast path and took upstream's fix for appending to a fast array
 whose `length` grew (the same fix `0032` carried).
+
+`0034-portable-slot-none.patch` spells `JS_JIT_SLOT_NONE` as the literal
+`0xFFFFFFFFu`: MSVC's `UINT32_MAX` (`0xffffffffui32`) is not an expression
+bindgen evaluates, so bindings generated on Windows lost the constant.

@@ -656,6 +656,77 @@ where
     .unwrap();
 }
 
+/// bindgen numbers anonymous enums (`_bindgen_ty_N`) in the order it meets them,
+/// system headers included, so the JIT ABI's anonymous enums would be named
+/// differently per target: name them after their first constant instead.
+#[cfg(feature = "bindgen")]
+fn name_anonymous_jit_enums(bindings: &str) -> String {
+    let mut out = bindings.to_owned();
+    for line in bindings.lines() {
+        let Some(anonymous) = line
+            .strip_prefix("pub type ")
+            .and_then(|rest| rest.split_once(" = "))
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("_bindgen_ty_"))
+        else {
+            continue;
+        };
+        let typed = format!(": {anonymous} = ");
+        let first = bindings
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .find_map(|line| line.split_once(&typed).map(|(constant, _)| constant));
+        if let Some(first) = first.filter(|first| first.starts_with("JS_JIT_")) {
+            let name = format!("JSJitAnonymousEnum_{first}");
+            out = out.replace(&typed, &format!(": {name} = ")).replace(
+                &format!("pub type {anonymous} = "),
+                &format!("pub type {name} = "),
+            );
+        }
+    }
+    out
+}
+
+/// MSVC gives every C enum the type `int`, other compilers give an enum without
+/// negative values `unsigned int`: declare those enums as the latter on MSVC too,
+/// so every bundled target has the same Rust declarations (the values and the
+/// size are the same).
+#[cfg(feature = "bindgen")]
+fn unsigned_enums(bindings: &str) -> String {
+    let signed: Vec<&str> = bindings
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("pub type ")?
+                .strip_suffix(" = ::core::ffi::c_int;")
+        })
+        .collect();
+    let mut out = bindings.to_owned();
+    for name in signed {
+        let typed = format!(": {name} = ");
+        let mut values = bindings
+            .lines()
+            .filter(|line| line.starts_with("pub const ") && line.contains(&typed))
+            .map(|line| {
+                line.rsplit(" = ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(';')
+            });
+        let mut any = false;
+        if values.all(|value| {
+            any = true;
+            !value.starts_with('-')
+        }) && any
+        {
+            out = out.replace(
+                &format!("pub type {name} = ::core::ffi::c_int;"),
+                &format!("pub type {name} = ::core::ffi::c_uint;"),
+            );
+        }
+    }
+    out
+}
+
 #[cfg(feature = "bindgen")]
 fn bindgen<'a, D, H, X, K, V>(out_dir: D, header_file: H, defines: X, add_cflags: Vec<String>)
 where
@@ -731,9 +802,11 @@ where
 
     let bindings_file = out_dir.join("bindings.rs");
 
-    bindings
-        .write_to_file(&bindings_file)
-        .expect("Couldn't write bindings");
+    let mut text = name_anonymous_jit_enums(&bindings.to_string());
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        text = unsigned_enums(&text);
+    }
+    fs::write(&bindings_file, text).expect("Couldn't write bindings");
 
     // Special case to support bundled bindings
     if env::var("CARGO_FEATURE_UPDATE_BINDINGS").is_ok() {
