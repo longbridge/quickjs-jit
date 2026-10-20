@@ -1,0 +1,10 @@
+quickjs-jit-stdlib
+
+This package redistributes source code of LLRT (https://github.com/awslabs/llrt),
+revision d9fd873e793c6551c5d92b2e31480f3279e3cd8d, under the Apache License 2.0, with modifications
+(module paths, feature names, and the patches listed in UPSTREAM.json).
+
+The NOTICE file of LLRT follows.
+
+LLRT
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.

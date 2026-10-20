@@ -147,11 +147,6 @@ pub struct JSContext {
 pub struct JSObject {
     _unused: [u8; 0],
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct JSClass {
-    _unused: [u8; 0],
-}
 pub type JSClassID = u32;
 pub type JSAtom = u32;
 pub const JS_TAG_FIRST: _bindgen_ty_1 = -9;
@@ -460,14 +455,6 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn js_malloc_usable_size(ctx: *mut JSContext, ptr: *const ::core::ffi::c_void) -> size_t;
-}
-unsafe extern "C" {
-    pub fn js_realloc2(
-        ctx: *mut JSContext,
-        ptr: *mut ::core::ffi::c_void,
-        size: size_t,
-        pslack: *mut size_t,
-    ) -> *mut ::core::ffi::c_void;
 }
 unsafe extern "C" {
     pub fn js_mallocz(ctx: *mut JSContext, size: size_t) -> *mut ::core::ffi::c_void;
@@ -1365,19 +1352,21 @@ unsafe extern "C" {
         space0: JSValue,
     ) -> JSValue;
 }
-pub type JSFreeArrayBufferDataFunc = ::core::option::Option<
+pub type JSReallocArrayBufferDataFunc = ::core::option::Option<
     unsafe extern "C" fn(
         rt: *mut JSRuntime,
         opaque: *mut ::core::ffi::c_void,
         ptr: *mut ::core::ffi::c_void,
-    ),
+        size: size_t,
+    ) -> *mut ::core::ffi::c_void,
 >;
 unsafe extern "C" {
     pub fn JS_NewArrayBuffer(
         ctx: *mut JSContext,
         buf: *mut u8,
         len: size_t,
-        free_func: JSFreeArrayBufferDataFunc,
+        max_len: size_t,
+        realloc_func: JSReallocArrayBufferDataFunc,
         opaque: *mut ::core::ffi::c_void,
         is_shared: bool,
     ) -> JSValue;
@@ -1438,7 +1427,7 @@ unsafe extern "C" {
         ctx: *mut JSContext,
         buf: *mut u8,
         len: size_t,
-        free_func: JSFreeArrayBufferDataFunc,
+        realloc_func: JSReallocArrayBufferDataFunc,
         opaque: *mut ::core::ffi::c_void,
         is_shared: bool,
     ) -> JSValue;
@@ -1496,6 +1485,14 @@ unsafe extern "C" {
     pub fn JS_NewPromiseCapability(ctx: *mut JSContext, resolving_funcs: *mut JSValue) -> JSValue;
 }
 unsafe extern "C" {
+    pub fn JS_PromiseThen(
+        ctx: *mut JSContext,
+        promise: JSValue,
+        on_fulfilled: JSValue,
+        on_rejected: JSValue,
+    ) -> JSValue;
+}
+unsafe extern "C" {
     pub fn JS_PromiseState(ctx: *mut JSContext, promise: JSValue) -> JSPromiseStateEnum;
 }
 unsafe extern "C" {
@@ -1503,6 +1500,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn JS_IsPromise(val: JSValue) -> bool;
+}
+unsafe extern "C" {
+    pub fn JS_PromiseMarkAsHandled(ctx: *mut JSContext, promise: JSValue);
 }
 unsafe extern "C" {
     pub fn JS_NewSettledPromise(ctx: *mut JSContext, is_reject: bool, value: JSValue) -> JSValue;
@@ -2857,11 +2857,11 @@ pub const JSJitExitKind_JS_JIT_EXIT_DEOPT: JSJitExitKind = 3;
 pub const JSJitExitKind_JS_JIT_EXIT_RETRY_INTERPRETER: JSJitExitKind = 4;
 pub type JSJitExitKind = ::core::ffi::c_uint;
 pub type JSJitHelperStatus = i32;
-pub const JS_JIT_HELPER_OK: _bindgen_ty_2 = 0;
-pub const JS_JIT_HELPER_GUARD_MISS: _bindgen_ty_2 = 1;
-pub const JS_JIT_HELPER_MATERIALIZED: _bindgen_ty_2 = 2;
-pub const JS_JIT_HELPER_EXCEPTION: _bindgen_ty_2 = -1;
-pub type _bindgen_ty_2 = ::core::ffi::c_int;
+pub const JS_JIT_HELPER_OK: JSJitAnonymousEnum_JS_JIT_HELPER_OK = 0;
+pub const JS_JIT_HELPER_GUARD_MISS: JSJitAnonymousEnum_JS_JIT_HELPER_OK = 1;
+pub const JS_JIT_HELPER_MATERIALIZED: JSJitAnonymousEnum_JS_JIT_HELPER_OK = 2;
+pub const JS_JIT_HELPER_EXCEPTION: JSJitAnonymousEnum_JS_JIT_HELPER_OK = -1;
+pub type JSJitAnonymousEnum_JS_JIT_HELPER_OK = ::core::ffi::c_int;
 pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_ARGUMENT: JSJitOwnerSourceKind = 0;
 pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_LOCAL: JSJitOwnerSourceKind = 1;
 pub const JSJitOwnerSourceKind_JS_JIT_OWNER_SOURCE_OWNED_STACK: JSJitOwnerSourceKind = 2;
@@ -2876,11 +2876,11 @@ pub const JSJitHelperOwnership_JS_JIT_HELPER_BORROWED: JSJitHelperOwnership = 1;
 pub const JSJitHelperOwnership_JS_JIT_HELPER_CONSUMED: JSJitHelperOwnership = 2;
 pub const JSJitHelperOwnership_JS_JIT_HELPER_OWNED: JSJitHelperOwnership = 3;
 pub type JSJitHelperOwnership = ::core::ffi::c_uint;
-pub const JS_JIT_HELPER_THROWING: _bindgen_ty_3 = 1;
-pub const JS_JIT_HELPER_ALLOCATING: _bindgen_ty_3 = 2;
-pub const JS_JIT_HELPER_REENTRANT: _bindgen_ty_3 = 4;
-pub const JS_JIT_HELPER_FINALIZING: _bindgen_ty_3 = 8;
-pub type _bindgen_ty_3 = ::core::ffi::c_uint;
+pub const JS_JIT_HELPER_THROWING: JSJitAnonymousEnum_JS_JIT_HELPER_THROWING = 1;
+pub const JS_JIT_HELPER_ALLOCATING: JSJitAnonymousEnum_JS_JIT_HELPER_THROWING = 2;
+pub const JS_JIT_HELPER_REENTRANT: JSJitAnonymousEnum_JS_JIT_HELPER_THROWING = 4;
+pub const JS_JIT_HELPER_FINALIZING: JSJitAnonymousEnum_JS_JIT_HELPER_THROWING = 8;
+pub type JSJitAnonymousEnum_JS_JIT_HELPER_THROWING = ::core::ffi::c_uint;
 pub const JSJitCompareOp_JS_JIT_COMPARE_LT: JSJitCompareOp = 0;
 pub const JSJitCompareOp_JS_JIT_COMPARE_LTE: JSJitCompareOp = 1;
 pub const JSJitCompareOp_JS_JIT_COMPARE_GT: JSJitCompareOp = 2;
@@ -4027,12 +4027,12 @@ const _: () = {
     ["Offset of field: JSJitBackendVTable::entry_fast_grant"]
         [::core::mem::offset_of!(JSJitBackendVTable, entry_fast_grant) - 48usize];
 };
-pub const JS_JIT_BACKEND_OK: _bindgen_ty_4 = 0;
-pub const JS_JIT_BACKEND_INVALID_ARGUMENT: _bindgen_ty_4 = -1;
-pub const JS_JIT_BACKEND_ALREADY_ATTACHED: _bindgen_ty_4 = -2;
-pub const JS_JIT_BACKEND_INVALID_VTABLE: _bindgen_ty_4 = -3;
-pub const JS_JIT_BACKEND_BUSY: _bindgen_ty_4 = -4;
-pub type _bindgen_ty_4 = ::core::ffi::c_int;
+pub const JS_JIT_BACKEND_OK: JSJitAnonymousEnum_JS_JIT_BACKEND_OK = 0;
+pub const JS_JIT_BACKEND_INVALID_ARGUMENT: JSJitAnonymousEnum_JS_JIT_BACKEND_OK = -1;
+pub const JS_JIT_BACKEND_ALREADY_ATTACHED: JSJitAnonymousEnum_JS_JIT_BACKEND_OK = -2;
+pub const JS_JIT_BACKEND_INVALID_VTABLE: JSJitAnonymousEnum_JS_JIT_BACKEND_OK = -3;
+pub const JS_JIT_BACKEND_BUSY: JSJitAnonymousEnum_JS_JIT_BACKEND_OK = -4;
+pub type JSJitAnonymousEnum_JS_JIT_BACKEND_OK = ::core::ffi::c_int;
 unsafe extern "C" {
     pub fn JS_GetJitABIInfo(out: *mut JSJitABIInfo) -> ::core::ffi::c_int;
 }

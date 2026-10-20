@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index 624c6a6..ec6a3f5 100644
 --- a/quickjs-jit-helpers.h
 +++ b/quickjs-jit-helpers.h
-@@ -151,7 +151,10 @@
+@@ -151,7 +151,10 @@ typedef enum JSJitVarRefMode {
      X(CLOSE_LOC, close_loc, JS_JitHelperCloseLoc, MAP_IN, 0, NONE, NONE,    \
        NONE, NONE, NONE, 0)                                                  \
      X(SET_NAME, set_name, JS_JitHelperSetName, MAP_OUT_INDEX, 1, BORROWED,  \
@@ -14,9 +15,10 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
  typedef enum JSJitHelperId {
  #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
 diff --git a/quickjs.c b/quickjs.c
+index 251282d..8fa2989 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -402,6 +402,8 @@
+@@ -470,6 +470,8 @@ struct JSRuntime {
  #endif
      /* Runtime-owned root; boundary throws always duplicate this value. */
      JSValue jit_uncatchable_exception;
@@ -25,7 +27,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  };
  
-@@ -20367,6 +20369,310 @@
+@@ -20850,6 +20852,310 @@ JSJitHelperStatus JS_JitHelperUnaryArithSlow(JSJitExecFrame *frame,
      return qjsjit_finish_output(frame, out);
  }
  
@@ -336,7 +338,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
  #ifdef CONFIG_JIT_ABI
-@@ -21216,7 +21522,8 @@
+@@ -21702,7 +22008,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  jit_vtable->native_enter(jit_opaque, entry_function_id,
                                           entry_generation, entry_pc_offset);
              }

@@ -1,16 +1,78 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index d84b8bc..290b744 100644
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -23,9 +23,17 @@
+ typedef int32_t JSJitHelperStatus;
+ enum {
+     JS_JIT_HELPER_OK = 0,
++    JS_JIT_HELPER_GUARD_MISS = 1,
++    JS_JIT_HELPER_MATERIALIZED = 2,
+     JS_JIT_HELPER_EXCEPTION = -1,
+ };
+ 
++typedef enum JSJitOwnerSourceKind {
++    JS_JIT_OWNER_SOURCE_ARGUMENT = 0,
++    JS_JIT_OWNER_SOURCE_LOCAL = 1,
++    JS_JIT_OWNER_SOURCE_OWNED_STACK = 2,
++} JSJitOwnerSourceKind;
++
+ typedef enum JSJitHelperABIType {
+     JS_JIT_HELPER_ABI_NONE = 0,
+     JS_JIT_HELPER_ABI_STATUS = 1,
+@@ -91,7 +99,20 @@ typedef enum JSJitCompareOp {
+     X(NEW_ARRAY, new_array, JS_JitHelperNewArray, MAP_OUT, 1, OWNED, NONE,  \
+       NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)                  \
+     X(NEW_OBJECT, new_object, JS_JitHelperNewObject, MAP_OUT, 1, OWNED,      \
+-      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)            \
++    X(SHAPE_GUARD, shape_guard, JS_JitHelperShapeGuard, MAP_SHAPE_GUARD, 1, \
++      BORROWED, NONE, NONE, NONE, NONE, 0)                                  \
++    X(MATERIALIZE_OWNER, materialize_owner, JS_JitHelperMaterializeOwner,   \
++      MAP_MATERIALIZE_OWNER, 1, OWNED, NONE, NONE, NONE, OWNED, 0)          \
++    X(GET_ELEMENT, get_element, JS_JitHelperGetElement, MAP_OUT_TWO, 3,     \
++      OWNED, CONSUMED, CONSUMED, NONE, OWNED,                              \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                      \
++    X(SET_ELEMENT, set_element, JS_JitHelperSetElement, MAP_OUT_TWO, 3,     \
++      CONSUMED, CONSUMED, CONSUMED, NONE, NONE,                            \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                      \
++    X(TO_PROPKEY, to_propkey, JS_JitHelperToPropKey, MAP_OUT_IN, 2, OWNED, \
++      CONSUMED, NONE, NONE, OWNED,                                         \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)
+ 
+ typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
+@@ -148,6 +169,16 @@ typedef struct JSJitHelperInfo {
+     JS_EXTERN JSJitHelperStatus name(                                       \
+         JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t output,       \
+         uint32_t function, uint32_t this_value, uint32_t argv, uint32_t argc)
++#define QJSJIT_DECLARE_MAP_SHAPE_GUARD(name)                                 \
++    JS_EXTERN JSJitHelperStatus name(                                       \
++        JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t object,       \
++        uint32_t identity_lo, uint32_t identity_hi,                          \
++        uint32_t generation_lo, uint32_t generation_hi)
++#define QJSJIT_DECLARE_MAP_MATERIALIZE_OWNER(name)                           \
++    JS_EXTERN JSJitHelperStatus name(                                       \
++        JSJitExecFrame *frame, uint32_t stack_map_id,                       \
++        uint32_t output_stack_index, uint32_t source_kind,                  \
++        uint32_t source_index)
+ #define QJSJIT_DECLARE(id, field, c_name, signature, value_arity, own0, own1, \
+                        own2, own3, output, flags)                            \
+     QJSJIT_DECLARE_##signature(c_name);
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index d9c1503..545fb87 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
+@@ -17,7 +17,7 @@ extern "C" {
  #endif
  
  #define QJSJIT_ABI_MAJOR 1u
 -#define QJSJIT_ABI_MINOR 4u
-+#define QJSJIT_ABI_MINOR 8u
++#define QJSJIT_ABI_MINOR 12u
  
  /* Frame flags are append-only. Stress collection is a test/debug contract:
   * every helper performs an allocating cycle-GC point before and after its
-@@ -71,6 +71,49 @@
+@@ -71,6 +71,49 @@ typedef struct JSJitHotEvent {
      JSJitFunctionId callee;
  } JSJitHotEvent;
  
@@ -60,7 +122,35 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  typedef enum JSJitOperandFormat {
  #define FMT(format) JS_JIT_FMT_##format,
  #define DEF(id, size, n_pop, n_push, format)
-@@ -335,6 +365,7 @@
+@@ -173,7 +216,7 @@ typedef struct JSJitExecFrame JSJitExecFrame;
+  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
+  */
+ #define QJSJIT_RUNTIME_API_MAJOR 1u
+-#define QJSJIT_RUNTIME_API_MINOR 1u
++#define QJSJIT_RUNTIME_API_MINOR 4u
+ 
+ #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
+@@ -211,6 +254,18 @@ typedef struct JSJitExecFrame JSJitExecFrame;
+                                uint32_t stack_map_id, uint32_t output,      \
+                                uint32_t function, uint32_t this_value,      \
+                                uint32_t argv, uint32_t argc)
++#define QJSJIT_RUNTIME_FIELD_MAP_SHAPE_GUARD(field)                         \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t object,      \
++                               uint32_t identity_lo, uint32_t identity_hi,  \
++                               uint32_t generation_lo,                      \
++                               uint32_t generation_hi)
++#define QJSJIT_RUNTIME_FIELD_MAP_MATERIALIZE_OWNER(field)                   \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id,                       \
++                               uint32_t output_stack_index,                 \
++                               uint32_t source_kind,                        \
++                               uint32_t source_index)
+ 
+ typedef struct JSJitRuntimeAPI {
+     uint32_t struct_size;
+@@ -335,6 +390,7 @@ typedef struct JSJitBackendVTable {
                           uint32_t pc);
      void (*native_exit)(void *opaque, uint64_t id, uint64_t generation,
                          uint32_t pc, uint32_t exit_kind);
@@ -68,10 +158,36 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  } JSJitBackendVTable;
  
  enum {
+@@ -364,6 +420,8 @@ int JS_JitGetExecutionTraceLength(JSRuntime *rt, uint32_t *length,
+                                   uint32_t *overflowed);
+ #endif
+ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable, void *opaque);
++int JS_SetJitSuspended(JSRuntime *rt, int suspended);
++int JS_IsJitSuspended(JSRuntime *rt);
+ const JSJitOpcodeInfo *JS_JitGetOpcodeTable(uint32_t *count,
+                                             uint64_t *fingerprint);
+ int JS_JitSnapshotFunction(JSContext *ctx, JSValueConst function,
 diff --git a/quickjs.c b/quickjs.c
+index 062f40c..08cf2bc 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -2252,7 +2252,8 @@
+@@ -429,6 +429,7 @@ struct JSRuntime {
+     const JSJitBackendVTable *jit_backend_vtable;
+     void *jit_backend_opaque;
+     uint32_t jit_backend_active_depth;
++    uint8_t jit_suspended;
+     uint32_t jit_active_stack_map_count;
+     uint32_t jit_active_helper_abi_version;
+     uint64_t jit_next_function_id;
+@@ -921,6 +922,7 @@ typedef struct JSFunctionBytecode {
+ #ifdef CONFIG_JIT_ABI
+     uint64_t jit_function_id;
+     uint64_t jit_generation;
++    uint8_t jit_feedback_disabled;
+ #endif
+ } JSFunctionBytecode;
+ 
+@@ -2608,7 +2610,8 @@ static uint64_t qjsjit_backend_vtable_layout(void)
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, function_retire);
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, memory_used);
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_enter);
@@ -81,7 +197,11 @@ diff --git a/quickjs.c b/quickjs.c
  }
  
  static uint64_t qjsjit_abi_info_layout(void)
-@@ -2317,6 +2318,121 @@
+@@ -2670,9 +2673,201 @@ static int qjsjit_ensure_function_identity(JSRuntime *rt,
+         return -1;
+     b->jit_function_id = ++rt->jit_next_function_id;
+     b->jit_generation = ++rt->jit_next_generation;
++    b->jit_feedback_disabled = 0;
      return 0;
  }
  
@@ -111,7 +231,7 @@ diff --git a/quickjs.c b/quickjs.c
 +{
 +    JSJitFeedbackEvent event;
 +    const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
-+    if (!vtable || !vtable->record_feedback ||
++    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
 +        qjsjit_ensure_function_identity(rt, b))
 +        return;
 +    memset(&event, 0, sizeof(event));
@@ -168,7 +288,7 @@ diff --git a/quickjs.c b/quickjs.c
 +    JSFunctionBytecode *callee;
 +    uint32_t types[9];
 +    int i;
-+    if (!vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
++    if (rt->jit_suspended || caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
 +        JS_VALUE_GET_TAG(callee_value) != JS_TAG_OBJECT)
 +        return;
 +    callee_object = JS_VALUE_GET_OBJ(callee_value);
@@ -200,423 +320,6 @@ diff --git a/quickjs.c b/quickjs.c
 +    rt->jit_backend_active_depth--;
 +}
 +
- static void qjsjit_retire_identity(JSRuntime *rt, uint64_t id,
-                                    uint64_t generation)
- {
-@@ -19179,6 +19249,13 @@
- #endif
- 
- #ifdef CONFIG_JIT_ABI
-+    if (argc >= 0 && argc <= 8 && rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
-+        uint32_t call_types[8];
-+        for (i = 0; i < argc; i++)
-+            call_types[i] = qjsjit_feedback_type(arg_buf[i]);
-+        qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
-+                               call_types, (uint32_t)argc, 0);
-+    }
-  jit_poll:
-     jit_probe_budget = 64; if (rt->jit_backend_vtable)
-         JS_SetUncatchableError(ctx, rt->jit_uncatchable_exception);
-@@ -19822,6 +19945,12 @@
-                                           vc(call_argv), 0);
-                 if (unlikely(JS_IsException(ret_val)))
-                     goto exception;
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_callsite_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf -
-+                        ((opcode >= OP_call0 && opcode <= OP_call3) ? 1 : 3)),
-+                    call_argv[-1], call_argc, vc(call_argv), ret_val);
-+#endif
-                 if (opcode == OP_tail_call)
-                     goto done;
-                 for(i = -1; i < call_argc; i++)
-@@ -19859,6 +19987,11 @@
-                                           vc(call_argv), 0);
-                 if (unlikely(JS_IsException(ret_val)))
-                     goto exception;
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_callsite_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf - 3),
-+                    call_argv[-1], call_argc, vc(call_argv), ret_val);
-+#endif
-                 if (opcode == OP_tail_call_method)
-                     goto done;
-                 for(i = -2; i < call_argc; i++)
-@@ -19899,9 +20032,25 @@
-             BREAK;
-         CASE(OP_return):
-             ret_val = *--sp;
-+#ifdef CONFIG_JIT_ABI
-+            {
-+                uint32_t return_type = qjsjit_feedback_type(ret_val);
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
-+                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
-+                    &return_type, 1, 0);
-+            }
-+#endif
-             goto done;
-         CASE(OP_return_undef):
-             ret_val = JS_UNDEFINED;
-+#ifdef CONFIG_JIT_ABI
-+            {
-+                uint32_t return_type = JS_JIT_VALUE_UNDEFINED;
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
-+                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
-+                    &return_type, 1, 0);
-+            }
-+#endif
-             goto done;
- 
-         CASE(OP_check_ctor_return):
-@@ -21433,8 +21526,15 @@
-         CASE(OP_add):
-             {
-                 JSValue op1, op2;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t jit_lhs_type, jit_rhs_type;
-+#endif
-                 op1 = sp[-2];
-                 op2 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                jit_lhs_type = qjsjit_feedback_type(op1);
-+                jit_rhs_type = qjsjit_feedback_type(op2);
-+#endif
-                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
-                     int64_t r;
-                     r = (int64_t)JS_VALUE_GET_INT(op1) + JS_VALUE_GET_INT(op2);
-@@ -21455,6 +21555,11 @@
-                         goto exception;
-                     sp--;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_binary_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf - 1),
-+                    jit_lhs_type, jit_rhs_type, sp[-1]);
-+#endif
-             }
-             BREAK;
-         CASE(OP_add_loc):
-@@ -21503,8 +21608,15 @@
-         CASE(OP_sub):
-             {
-                 JSValue op1, op2;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t jit_lhs_type, jit_rhs_type;
-+#endif
-                 op1 = sp[-2];
-                 op2 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                jit_lhs_type = qjsjit_feedback_type(op1);
-+                jit_rhs_type = qjsjit_feedback_type(op2);
-+#endif
-                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
-                     int64_t r;
-                     r = (int64_t)JS_VALUE_GET_INT(op1) - JS_VALUE_GET_INT(op2);
-@@ -21520,16 +21632,31 @@
-                     JS_X87_FPCW_RESTORE(fpcw);
-                     sp--;
-                 } else {
--                    goto binary_arith_slow;
-+                    sf->cur_pc = pc;
-+                    if (js_binary_arith_slow(ctx, sp, opcode))
-+                        goto exception;
-+                    sp--;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_binary_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf - 1),
-+                    jit_lhs_type, jit_rhs_type, sp[-1]);
-+#endif
-             }
-             BREAK;
-         CASE(OP_mul):
-             {
-                 JSValue op1, op2;
-                 double d;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t jit_lhs_type, jit_rhs_type;
-+#endif
-                 op1 = sp[-2];
-                 op2 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                jit_lhs_type = qjsjit_feedback_type(op1);
-+                jit_rhs_type = qjsjit_feedback_type(op2);
-+#endif
-                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
-                     int32_t v1, v2;
-                     int64_t r;
-@@ -21555,15 +21682,30 @@
-                     sp[-2] = js_float64(d);
-                     sp--;
-                 } else {
--                    goto binary_arith_slow;
-+                    sf->cur_pc = pc;
-+                    if (js_binary_arith_slow(ctx, sp, opcode))
-+                        goto exception;
-+                    sp--;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_binary_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf - 1),
-+                    jit_lhs_type, jit_rhs_type, sp[-1]);
-+#endif
-             }
-             BREAK;
-         CASE(OP_div):
-             {
-                 JSValue op1, op2;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t jit_lhs_type, jit_rhs_type;
-+#endif
-                 op1 = sp[-2];
-                 op2 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                jit_lhs_type = qjsjit_feedback_type(op1);
-+                jit_rhs_type = qjsjit_feedback_type(op2);
-+#endif
-                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
-                     int v1, v2;
-                     v1 = JS_VALUE_GET_INT(op1);
-@@ -21571,8 +21713,16 @@
-                     sp[-2] = js_number((double)v1 / (double)v2);
-                     sp--;
-                 } else {
--                    goto binary_arith_slow;
-+                    sf->cur_pc = pc;
-+                    if (js_binary_arith_slow(ctx, sp, opcode))
-+                        goto exception;
-+                    sp--;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_binary_feedback(rt, b,
-+                    (uint32_t)(pc - b->byte_code_buf - 1),
-+                    jit_lhs_type, jit_rhs_type, sp[-1]);
-+#endif
-             }
-             BREAK;
-         CASE(OP_mod):
-@@ -21897,13 +22047,29 @@
-             }
-             BREAK;
- 
-+#ifdef CONFIG_JIT_ABI
-+#define QJSJIT_CMP_DECLARE uint32_t jit_lhs_type, jit_rhs_type;
-+#define QJSJIT_CMP_CAPTURE(op1, op2)                       \
-+                jit_lhs_type = qjsjit_feedback_type(op1); \
-+                jit_rhs_type = qjsjit_feedback_type(op2);
-+#define QJSJIT_CMP_RECORD()                                \
-+                qjsjit_record_binary_feedback(rt, b,      \
-+                    (uint32_t)(pc - b->byte_code_buf - 1),\
-+                    jit_lhs_type, jit_rhs_type, sp[-1]);
-+#else
-+#define QJSJIT_CMP_DECLARE
-+#define QJSJIT_CMP_CAPTURE(op1, op2)
-+#define QJSJIT_CMP_RECORD()
-+#endif
- 
- #define OP_CMP(opcode, binary_op, slow_call)              \
-             CASE(opcode):                                 \
-                 {                                         \
-                 JSValue op1, op2;                         \
-+                QJSJIT_CMP_DECLARE                        \
-                 op1 = sp[-2];                             \
--                op2 = sp[-1];                                   \
-+                op2 = sp[-1];                             \
-+                QJSJIT_CMP_CAPTURE(op1, op2)              \
-                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {           \
-                     sp[-2] = js_bool(JS_VALUE_GET_INT(op1) binary_op JS_VALUE_GET_INT(op2)); \
-                     sp--;                                               \
-@@ -21913,6 +22079,7 @@
-                         goto exception;                                 \
-                     sp--;                                               \
-                 }                                                       \
-+                QJSJIT_CMP_RECORD()                                     \
-                 }                                                       \
-             BREAK
- 
-@@ -21925,6 +22092,10 @@
-             OP_CMP(OP_strict_eq, ==, js_strict_eq_slow(ctx, sp, 0));
-             OP_CMP(OP_strict_neq, !=, js_strict_eq_slow(ctx, sp, 1));
- 
-+#undef QJSJIT_CMP_RECORD
-+#undef QJSJIT_CMP_CAPTURE
-+#undef QJSJIT_CMP_DECLARE
-+
-         CASE(OP_in):
-             sf->cur_pc = pc;
-             if (js_operator_in(ctx, sp))
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -20635,18 +20635,26 @@
-                 JSValue op1;
- #ifdef CONFIG_JIT_ABI
-                 uint8_t *next_pc;
-+                uint32_t condition_type;
- #endif
- 
-                 op1 = sp[-1];
-                 pc += 4;
- #ifdef CONFIG_JIT_ABI
-                 next_pc = pc;
-+                condition_type = qjsjit_feedback_type(op1);
- #endif
-                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
-                     res = JS_VALUE_GET_INT(op1);
-                 } else {
-                     res = JS_ToBoolFree(ctx, op1);
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
-+                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
-+                    &condition_type, 1,
-+                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
-+#endif
-                 sp--;
-                 if (res) {
-                     pc += (int32_t)get_u32(pc - 4) - 4;
-@@ -20668,18 +20676,26 @@
-                 JSValue op1;
- #ifdef CONFIG_JIT_ABI
-                 uint8_t *next_pc;
-+                uint32_t condition_type;
- #endif
- 
-                 op1 = sp[-1];
-                 pc += 4;
- #ifdef CONFIG_JIT_ABI
-                 next_pc = pc;
-+                condition_type = qjsjit_feedback_type(op1);
- #endif
-                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
-                     res = JS_VALUE_GET_INT(op1);
-                 } else {
-                     res = JS_ToBoolFree(ctx, op1);
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
-+                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
-+                    &condition_type, 1,
-+                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
-+#endif
-                 sp--;
-                 if (!res) {
-                     pc += (int32_t)get_u32(pc - 4) - 4;
-@@ -20701,18 +20717,26 @@
-                 JSValue op1;
- #ifdef CONFIG_JIT_ABI
-                 uint8_t *next_pc;
-+                uint32_t condition_type;
- #endif
- 
-                 op1 = sp[-1];
-                 pc += 1;
- #ifdef CONFIG_JIT_ABI
-                 next_pc = pc;
-+                condition_type = qjsjit_feedback_type(op1);
- #endif
-                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
-                     res = JS_VALUE_GET_INT(op1);
-                 } else {
-                     res = JS_ToBoolFree(ctx, op1);
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
-+                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
-+                    &condition_type, 1,
-+                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
-+#endif
-                 sp--;
-                 if (res) {
-                     pc += (int8_t)pc[-1] - 1;
-@@ -20734,18 +20758,26 @@
-                 JSValue op1;
- #ifdef CONFIG_JIT_ABI
-                 uint8_t *next_pc;
-+                uint32_t condition_type;
- #endif
- 
-                 op1 = sp[-1];
-                 pc += 1;
- #ifdef CONFIG_JIT_ABI
-                 next_pc = pc;
-+                condition_type = qjsjit_feedback_type(op1);
- #endif
-                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
-                     res = JS_VALUE_GET_INT(op1);
-                 } else {
-                     res = JS_ToBoolFree(ctx, op1);
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
-+                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
-+                    &condition_type, 1,
-+                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
-+#endif
-                 sp--;
-                 if (!res) {
-                     pc += (int8_t)pc[-1] - 1;
-@@ -21815,7 +21847,13 @@
-             {
-                 JSValue op1;
-                 uint32_t tag;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t conversion_types[2];
-+#endif
-                 op1 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                conversion_types[0] = qjsjit_feedback_type(op1);
-+#endif
-                 tag = JS_VALUE_GET_TAG(op1);
-                 if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag)) {
-                 } else {
-@@ -21823,6 +21861,12 @@
-                     if (js_unary_arith_slow(ctx, sp, opcode))
-                         goto exception;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
-+                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
-+                    conversion_types, 2, 0);
-+#endif
-             }
-             BREAK;
-         CASE(OP_neg):
-@@ -21831,7 +21875,13 @@
-                 uint32_t tag;
-                 int val;
-                 double d;
-+#ifdef CONFIG_JIT_ABI
-+                uint32_t conversion_types[2];
-+#endif
-                 op1 = sp[-1];
-+#ifdef CONFIG_JIT_ABI
-+                conversion_types[0] = qjsjit_feedback_type(op1);
-+#endif
-                 tag = JS_VALUE_GET_TAG(op1);
-                 if (tag == JS_TAG_INT) {
-                     val = JS_VALUE_GET_INT(op1);
-@@ -21854,6 +21904,12 @@
-                     if (js_unary_arith_slow(ctx, sp, opcode))
-                         goto exception;
-                 }
-+#ifdef CONFIG_JIT_ABI
-+                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
-+                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
-+                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
-+                    conversion_types, 2, 0);
-+#endif
-             }
-             BREAK;
-         CASE(OP_inc):
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -2433,6 +2433,82 @@ static void qjsjit_record_callsite_feedback(JSRuntime *rt,
-     rt->jit_backend_active_depth--;
- }
- 
 +static uint64_t qjsjit_shape_generation(const JSShape *shape)
 +{
 +    uint64_t hash = UINT64_C(1469598103934665603);
@@ -665,7 +368,7 @@ diff --git a/quickjs.c b/quickjs.c
 +    JSJitFeedbackEvent event;
 +    const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
 +    uint32_t types[2];
-+    if (!vtable || !vtable->record_feedback || !receiver || !owner ||
++    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
 +        !shape_property || !property || qjsjit_ensure_function_identity(rt, b))
 +        return;
 +    types[0] = JS_JIT_VALUE_OBJECT;
@@ -696,171 +399,73 @@ diff --git a/quickjs.c b/quickjs.c
  static void qjsjit_retire_identity(JSRuntime *rt, uint64_t id,
                                     uint64_t generation)
  {
-@@ -21096,6 +21171,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                 JSObject *p;
-                 JSProperty *pr;
-                 JSShapeProperty *prs;
-+#ifdef CONFIG_JIT_ABI
-+                JSObject *receiver;
-+#endif
- 
-                 atom = get_u32(pc);
-                 pc += 4;
-@@ -21103,6 +21182,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                 obj = sp[-1];
-                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
-                     p = JS_VALUE_GET_OBJ(obj);
-+#ifdef CONFIG_JIT_ABI
-+                    receiver = p;
-+#endif
-                     for(;;) {
-                         prs = find_own_property(&pr, p, atom);
-                         if (prs) {
-@@ -21110,6 +21191,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                             if (unlikely(prs->flags & JS_PROP_TMASK))
-                                 goto get_field_slow_path;
-                             val = js_dup(pr->u.value);
-+#ifdef CONFIG_JIT_ABI
-+                            qjsjit_record_property_feedback(rt, b,
-+                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
-+                                receiver, p, prs, pr, val, 0);
-+#endif
-                             break;
-                         }
-                         if (unlikely(p->is_exotic)) {
-@@ -21144,6 +21230,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                 JSObject *p;
-                 JSProperty *pr;
-                 JSShapeProperty *prs;
-+#ifdef CONFIG_JIT_ABI
-+                JSObject *receiver;
-+#endif
- 
-                 atom = get_u32(pc);
-                 pc += 4;
-@@ -21151,6 +21241,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                 obj = sp[-1];
-                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
-                     p = JS_VALUE_GET_OBJ(obj);
-+#ifdef CONFIG_JIT_ABI
-+                    receiver = p;
-+#endif
-                     for(;;) {
-                         prs = find_own_property(&pr, p, atom);
-                         if (prs) {
-@@ -21158,6 +21250,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                             if (unlikely(prs->flags & JS_PROP_TMASK))
-                                 goto get_field2_slow_path;
-                             val = js_dup(pr->u.value);
-+#ifdef CONFIG_JIT_ABI
-+                            qjsjit_record_property_feedback(rt, b,
-+                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
-+                                receiver, p, prs, pr, val, 0);
-+#endif
-                             break;
-                         }
-                         if (unlikely(p->is_exotic)) {
-@@ -21206,6 +21303,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
-                                               JS_PROP_LENGTH)) == JS_PROP_WRITABLE)) {
-                         /* fast path */
-                         set_value(ctx, &pr->u.value, sp[-1]);
-+#ifdef CONFIG_JIT_ABI
-+                        qjsjit_record_property_feedback(rt, b,
-+                            (uint32_t)(pc - b->byte_code_buf - 5), atom,
-+                            p, p, prs, pr, pr->u.value,
-+                            JS_JIT_FEEDBACK_PROPERTY_STORE);
-+#endif
-                     } else {
-                         goto put_field_slow_path;
-                     }
-diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
---- a/quickjs-jit-helpers.h
-+++ b/quickjs-jit-helpers.h
-@@ -23,6 +23,7 @@
- typedef int32_t JSJitHelperStatus;
- enum {
-     JS_JIT_HELPER_OK = 0,
-+    JS_JIT_HELPER_GUARD_MISS = 1,
-     JS_JIT_HELPER_EXCEPTION = -1,
- };
- 
-@@ -91,7 +92,9 @@
-     X(NEW_ARRAY, new_array, JS_JitHelperNewArray, MAP_OUT, 1, OWNED, NONE,  \
-       NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)                  \
-     X(NEW_OBJECT, new_object, JS_JitHelperNewObject, MAP_OUT, 1, OWNED,      \
--      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)
-+      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)            \
-+    X(SHAPE_GUARD, shape_guard, JS_JitHelperShapeGuard, MAP_SHAPE_GUARD, 1, \
-+      BORROWED, NONE, NONE, NONE, NONE, 0)
- 
- typedef enum JSJitHelperId {
- #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
-@@ -148,6 +151,11 @@
-     JS_EXTERN JSJitHelperStatus name(                                       \
-         JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t output,       \
-         uint32_t function, uint32_t this_value, uint32_t argv, uint32_t argc)
-+#define QJSJIT_DECLARE_MAP_SHAPE_GUARD(name)                                 \
-+    JS_EXTERN JSJitHelperStatus name(                                       \
-+        JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t object,       \
-+        uint32_t identity_lo, uint32_t identity_hi,                          \
-+        uint32_t generation_lo, uint32_t generation_hi)
- #define QJSJIT_DECLARE(id, field, c_name, signature, value_arity, own0, own1, \
-                        own2, own3, output, flags)                            \
-     QJSJIT_DECLARE_##signature(c_name);
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
- #endif
- 
- #define QJSJIT_ABI_MAJOR 1u
--#define QJSJIT_ABI_MINOR 8u
-+#define QJSJIT_ABI_MINOR 9u
- 
- /* Frame flags are append-only. Stress collection is a test/debug contract:
-  * every helper performs an allocating cycle-GC point before and after its
-@@ -216,7 +216,7 @@
-  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
-  */
- #define QJSJIT_RUNTIME_API_MAJOR 1u
--#define QJSJIT_RUNTIME_API_MINOR 1u
-+#define QJSJIT_RUNTIME_API_MINOR 2u
- 
- #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
-     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
-@@ -254,6 +254,12 @@
-                                uint32_t stack_map_id, uint32_t output,      \
-                                uint32_t function, uint32_t this_value,      \
-                                uint32_t argv, uint32_t argc)
-+#define QJSJIT_RUNTIME_FIELD_MAP_SHAPE_GUARD(field)                         \
-+    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
-+                               uint32_t stack_map_id, uint32_t object,      \
-+                               uint32_t identity_lo, uint32_t identity_hi,  \
-+                               uint32_t generation_lo,                      \
-+                               uint32_t generation_hi)
- 
- typedef struct JSJitRuntimeAPI {
-     uint32_t struct_size;
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -2539,6 +2539,7 @@
+@@ -2703,6 +2898,8 @@ static const JSJitOpcodeInfo qjsjit_opcode_table[] = {
  #define QJSJIT_ABI_COUNT_MAP_OUT_OBJECT_ATOM 6
  #define QJSJIT_ABI_COUNT_MAP_OBJECT_ATOM_VALUE 6
  #define QJSJIT_ABI_COUNT_MAP_CALL 8
 +#define QJSJIT_ABI_COUNT_MAP_SHAPE_GUARD 8
++#define QJSJIT_ABI_COUNT_MAP_MATERIALIZE_OWNER 6
  #define QJSJIT_ABI_TYPES_0                                               \
      JS_JIT_HELPER_ABI_STATUS, JS_JIT_HELPER_ABI_FRAME
  #define QJSJIT_ABI_TYPES_2 QJSJIT_ABI_TYPES_0, JS_JIT_HELPER_ABI_U32,   \
-@@ -2557,6 +2558,7 @@
+@@ -2721,6 +2918,8 @@ static const JSJitOpcodeInfo qjsjit_opcode_table[] = {
  #define QJSJIT_ABI_TYPES_MAP_OUT_OBJECT_ATOM QJSJIT_ABI_TYPES_4
  #define QJSJIT_ABI_TYPES_MAP_OBJECT_ATOM_VALUE QJSJIT_ABI_TYPES_4
  #define QJSJIT_ABI_TYPES_MAP_CALL QJSJIT_ABI_TYPES_6
 +#define QJSJIT_ABI_TYPES_MAP_SHAPE_GUARD QJSJIT_ABI_TYPES_6
++#define QJSJIT_ABI_TYPES_MAP_MATERIALIZE_OWNER QJSJIT_ABI_TYPES_4
  #define THROWING JS_JIT_HELPER_THROWING
  #define ALLOCATING JS_JIT_HELPER_ALLOCATING
  #define REENTRANT JS_JIT_HELPER_REENTRANT
-@@ -19214,6 +19216,40 @@
+@@ -2957,6 +3156,7 @@ int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function)
+ 
+     old_generation = b->jit_generation;
+     b->jit_generation = ++ctx->rt->jit_next_generation;
++    b->jit_feedback_disabled = 0;
+     qjsjit_retire_identity(ctx->rt, b->jit_function_id, old_generation);
+     return JS_JIT_BACKEND_OK;
+ }
+@@ -3116,6 +3316,7 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
+         old_opaque = rt->jit_backend_opaque;
+         rt->jit_backend_vtable = NULL;
+         rt->jit_backend_opaque = NULL;
++        rt->jit_suspended = 0;
+         if (old_vtable->runtime_detach)
+             old_vtable->runtime_detach(old_opaque, rt);
+         return JS_JIT_BACKEND_OK;
+@@ -3131,6 +3332,21 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
+     rt->jit_backend_opaque = opaque;
+     return JS_JIT_BACKEND_OK;
+ }
++
++int JS_SetJitSuspended(JSRuntime *rt, int suspended)
++{
++    if (!rt || rt->jit_backend_active_depth != 0)
++        return rt ? JS_JIT_BACKEND_BUSY : JS_JIT_BACKEND_INVALID_ARGUMENT;
++    rt->jit_suspended = suspended != 0;
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_IsJitSuspended(JSRuntime *rt)
++{
++    if (!rt)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    return rt->jit_suspended != 0;
++}
+ #endif /* CONFIG_JIT_ABI */
+ 
+ int JS_AddRuntimeFinalizer(JSRuntime *rt, JSRuntimeFinalizer *finalizer,
+@@ -19430,7 +19646,8 @@ JSJitHelperStatus JS_JitHelperCall(JSJitExecFrame *frame,
+     JSValue result;
+     uint32_t i;
+ 
+-    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++    (void)stack_map_id;
++    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
+         return JS_JIT_HELPER_EXCEPTION;
+     qjsjit_count_helper(frame, JS_JIT_HELPER_CALL);
+     if (!qjsjit_resolve_slot(frame, b, output, &out) ||
+@@ -19506,6 +19723,207 @@ JSJitHelperStatus JS_JitHelperNewObject(JSJitExecFrame *frame,
      qjsjit_count_helper(frame, JS_JIT_HELPER_NEW_OBJECT);
      return qjsjit_new_value(frame, stack_map_id, output, false);
  }
@@ -898,212 +503,6 @@ diff --git a/quickjs.c b/quickjs.c
 +        return JS_JIT_HELPER_GUARD_MISS;
 +    return JS_JIT_HELPER_OK;
 +}
- #endif
- 
- /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -845,6 +845,7 @@
- #ifdef CONFIG_JIT_ABI
-     uint64_t jit_function_id;
-     uint64_t jit_generation;
-+    uint8_t jit_feedback_disabled;
- #endif
- } JSFunctionBytecode;
- 
-@@ -2315,6 +2316,7 @@
-         return -1;
-     b->jit_function_id = ++rt->jit_next_function_id;
-     b->jit_generation = ++rt->jit_next_generation;
-+    b->jit_feedback_disabled = 0;
-     return 0;
- }
- 
-@@ -2344,7 +2346,7 @@
- {
-     JSJitFeedbackEvent event;
-     const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
--    if (!vtable || !vtable->record_feedback ||
-+    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
-         qjsjit_ensure_function_identity(rt, b))
-         return;
-     memset(&event, 0, sizeof(event));
-@@ -2401,7 +2403,7 @@
-     JSFunctionBytecode *callee;
-     uint32_t types[9];
-     int i;
--    if (!vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
-+    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
-         JS_VALUE_GET_TAG(callee_value) != JS_TAG_OBJECT)
-         return;
-     callee_object = JS_VALUE_GET_OBJ(callee_value);
-@@ -2481,7 +2483,7 @@
-     JSJitFeedbackEvent event;
-     const JSJitBackendVTable *vtable = rt->jit_backend_vtable;
-     uint32_t types[2];
--    if (!vtable || !vtable->record_feedback || !receiver || !owner ||
-+    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
-         !shape_property || !property || qjsjit_ensure_function_identity(rt, b))
-         return;
-     types[0] = JS_JIT_VALUE_OBJECT;
-@@ -2795,6 +2797,7 @@
- 
-     old_generation = b->jit_generation;
-     b->jit_generation = ++ctx->rt->jit_next_generation;
-+    b->jit_feedback_disabled = 0;
-     qjsjit_retire_identity(ctx->rt, b->jit_function_id, old_generation);
-     return JS_JIT_BACKEND_OK;
- }
-@@ -19421,7 +19424,8 @@
-     /* Identity is established before feedback and feedback is reported before
-      * native acquisition.  A call is counted once per invocation; a taken
-      * backedge sets jit_hot_kind after its successful interrupt poll. */
--    if (((jit_hot_kind == JS_JIT_HOT_CALL && !jit_call_recorded) ||
-+    if (!b->jit_feedback_disabled &&
-+        ((jit_hot_kind == JS_JIT_HOT_CALL && !jit_call_recorded) ||
-          jit_hot_kind == JS_JIT_HOT_LOOP) && rt->jit_backend_vtable &&
-         rt->jit_backend_vtable->record_hot &&
-         qjsjit_ensure_function_identity(rt, b) == 0) {
-@@ -19466,7 +19470,9 @@
-         if (jit_hot_kind == JS_JIT_HOT_CALL)
-             jit_call_recorded = 1;
-         jit_hot_kind = JS_JIT_HOT_CALL;
--        if (request_snapshot && hot_vtable->submit_snapshot) {
-+        if (request_snapshot & 2U)
-+            b->jit_feedback_disabled = 1;
-+        if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
-             JSJitFunctionSnapshot *snapshot = NULL;
-             if (JS_JitSnapshotFunction(ctx, func_obj, &snapshot) ==
-                     JS_JIT_SNAPSHOT_OK && snapshot) {
-@@ -19479,4 +19485,5 @@
-     }
- #endif
--    if (JS_IsUncatchableError(rt->jit_uncatchable_exception) &&
-+    if (!b->jit_feedback_disabled &&
-+        JS_IsUncatchableError(rt->jit_uncatchable_exception) &&
-         rt->jit_backend_vtable && rt->jit_backend_vtable->acquire_entry &&
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -19144,6 +19144,7 @@
-     uint32_t i;
- 
--    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
-+    (void)stack_map_id;
-+    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
-         return JS_JIT_HELPER_EXCEPTION;
-     qjsjit_count_helper(frame, JS_JIT_HELPER_CALL);
-     if (!qjsjit_resolve_slot(frame, b, output, &out) ||
-diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
---- a/quickjs-jit-helpers.h
-+++ b/quickjs-jit-helpers.h
-@@ -24,9 +24,16 @@
- enum {
-     JS_JIT_HELPER_OK = 0,
-     JS_JIT_HELPER_GUARD_MISS = 1,
-+    JS_JIT_HELPER_MATERIALIZED = 2,
-     JS_JIT_HELPER_EXCEPTION = -1,
- };
- 
-+typedef enum JSJitOwnerSourceKind {
-+    JS_JIT_OWNER_SOURCE_ARGUMENT = 0,
-+    JS_JIT_OWNER_SOURCE_LOCAL = 1,
-+    JS_JIT_OWNER_SOURCE_OWNED_STACK = 2,
-+} JSJitOwnerSourceKind;
-+
- typedef enum JSJitHelperABIType {
-     JS_JIT_HELPER_ABI_NONE = 0,
-     JS_JIT_HELPER_ABI_STATUS = 1,
-@@ -94,7 +101,18 @@
-     X(NEW_OBJECT, new_object, JS_JitHelperNewObject, MAP_OUT, 1, OWNED,      \
-       NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)            \
-     X(SHAPE_GUARD, shape_guard, JS_JitHelperShapeGuard, MAP_SHAPE_GUARD, 1, \
--      BORROWED, NONE, NONE, NONE, NONE, 0)
-+      BORROWED, NONE, NONE, NONE, NONE, 0)                                  \
-+    X(MATERIALIZE_OWNER, materialize_owner, JS_JitHelperMaterializeOwner,   \
-+      MAP_MATERIALIZE_OWNER, 1, OWNED, NONE, NONE, NONE, OWNED, 0)          \
-+    X(GET_ELEMENT, get_element, JS_JitHelperGetElement, MAP_OUT_TWO, 3,     \
-+      OWNED, CONSUMED, CONSUMED, NONE, OWNED,                              \
-+      THROWING | ALLOCATING | REENTRANT | FINALIZING)                      \
-+    X(SET_ELEMENT, set_element, JS_JitHelperSetElement, MAP_OUT_TWO, 3,     \
-+      CONSUMED, CONSUMED, CONSUMED, NONE, NONE,                            \
-+      THROWING | ALLOCATING | REENTRANT | FINALIZING)                      \
-+    X(TO_PROPKEY, to_propkey, JS_JitHelperToPropKey, MAP_OUT_IN, 2, OWNED, \
-+      CONSUMED, NONE, NONE, OWNED,                                         \
-+      THROWING | ALLOCATING | REENTRANT | FINALIZING)
- 
- typedef enum JSJitHelperId {
- #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
-@@ -156,6 +165,11 @@
-         JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t object,       \
-         uint32_t identity_lo, uint32_t identity_hi,                          \
-         uint32_t generation_lo, uint32_t generation_hi)
-+#define QJSJIT_DECLARE_MAP_MATERIALIZE_OWNER(name)                           \
-+    JS_EXTERN JSJitHelperStatus name(                                       \
-+        JSJitExecFrame *frame, uint32_t stack_map_id,                       \
-+        uint32_t output_stack_index, uint32_t source_kind,                  \
-+        uint32_t source_index)
- #define QJSJIT_DECLARE(id, field, c_name, signature, value_arity, own0, own1, \
-                        own2, own3, output, flags)                            \
-     QJSJIT_DECLARE_##signature(c_name);
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
- #endif
- 
- #define QJSJIT_ABI_MAJOR 1u
--#define QJSJIT_ABI_MINOR 9u
-+#define QJSJIT_ABI_MINOR 12u
- 
- /* Frame flags are append-only. Stress collection is a test/debug contract:
-  * every helper performs an allocating cycle-GC point before and after its
-@@ -216,7 +216,7 @@
-  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
-  */
- #define QJSJIT_RUNTIME_API_MAJOR 1u
--#define QJSJIT_RUNTIME_API_MINOR 2u
-+#define QJSJIT_RUNTIME_API_MINOR 4u
- 
- #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
-     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
-@@ -260,6 +260,12 @@
-                                uint32_t identity_lo, uint32_t identity_hi,  \
-                                uint32_t generation_lo,                      \
-                                uint32_t generation_hi)
-+#define QJSJIT_RUNTIME_FIELD_MAP_MATERIALIZE_OWNER(field)                   \
-+    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
-+                               uint32_t stack_map_id,                       \
-+                               uint32_t output_stack_index,                 \
-+                               uint32_t source_kind,                        \
-+                               uint32_t source_index)
- 
- typedef struct JSJitRuntimeAPI {
-     uint32_t struct_size;
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -2542,6 +2542,7 @@
- #define QJSJIT_ABI_COUNT_MAP_OBJECT_ATOM_VALUE 6
- #define QJSJIT_ABI_COUNT_MAP_CALL 8
- #define QJSJIT_ABI_COUNT_MAP_SHAPE_GUARD 8
-+#define QJSJIT_ABI_COUNT_MAP_MATERIALIZE_OWNER 6
- #define QJSJIT_ABI_TYPES_0                                               \
-     JS_JIT_HELPER_ABI_STATUS, JS_JIT_HELPER_ABI_FRAME
- #define QJSJIT_ABI_TYPES_2 QJSJIT_ABI_TYPES_0, JS_JIT_HELPER_ABI_U32,   \
-@@ -2561,6 +2562,7 @@
- #define QJSJIT_ABI_TYPES_MAP_OBJECT_ATOM_VALUE QJSJIT_ABI_TYPES_4
- #define QJSJIT_ABI_TYPES_MAP_CALL QJSJIT_ABI_TYPES_6
- #define QJSJIT_ABI_TYPES_MAP_SHAPE_GUARD QJSJIT_ABI_TYPES_6
-+#define QJSJIT_ABI_TYPES_MAP_MATERIALIZE_OWNER QJSJIT_ABI_TYPES_4
- #define THROWING JS_JIT_HELPER_THROWING
- #define ALLOCATING JS_JIT_HELPER_ALLOCATING
- #define REENTRANT JS_JIT_HELPER_REENTRANT
-@@ -19254,6 +19256,173 @@
-         return JS_JIT_HELPER_GUARD_MISS;
-     return JS_JIT_HELPER_OK;
- }
 +
 +JSJitHelperStatus JS_JitHelperMaterializeOwner(
 +    JSJitExecFrame *frame, uint32_t stack_map_id,
@@ -1274,84 +673,579 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
  /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -422,3 +422,5 @@
- int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable, void *opaque);
-+int JS_SetJitSuspended(JSRuntime *rt, int suspended);
-+int JS_IsJitSuspended(JSRuntime *rt);
- const JSJitOpcodeInfo *JS_JitGetOpcodeTable(uint32_t *count,
-                                             uint64_t *fingerprint);
-diff --git a/quickjs.c b/quickjs.c
---- a/quickjs.c
-+++ b/quickjs.c
-@@ -362,3 +362,4 @@ struct JSRuntime {
-     void *jit_backend_opaque;
-     uint32_t jit_backend_active_depth;
-+    uint8_t jit_suspended;
-     uint32_t jit_active_stack_map_count;
-@@ -2349,2 +2350,2 @@ static void qjsjit_record_feedback(JSRuntime *rt, JSFunctionBytecode *b,
--    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
-+    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback ||
-         qjsjit_ensure_function_identity(rt, b))
-@@ -2406,1 +2407,1 @@ static void qjsjit_record_callsite_feedback(JSRuntime *rt,
--    if (caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
-+    if (rt->jit_suspended || caller->jit_feedback_disabled || !vtable || !vtable->record_feedback || argc < 0 || argc > 8 ||
-@@ -2486,1 +2488,1 @@ static void qjsjit_record_property_feedback(JSRuntime *rt,
--    if (b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
-+    if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
-@@ -2960,2 +2962,3 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
-         rt->jit_backend_vtable = NULL;
-         rt->jit_backend_opaque = NULL;
-+        rt->jit_suspended = 0;
-@@ -2975,3 +2978,18 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
-     return JS_JIT_BACKEND_OK;
- }
-+
-+int JS_SetJitSuspended(JSRuntime *rt, int suspended)
-+{
-+    if (!rt || rt->jit_backend_active_depth != 0)
-+        return rt ? JS_JIT_BACKEND_BUSY : JS_JIT_BACKEND_INVALID_ARGUMENT;
-+    rt->jit_suspended = suspended != 0;
-+    return JS_JIT_BACKEND_OK;
-+}
-+
-+int JS_IsJitSuspended(JSRuntime *rt)
-+{
-+    if (!rt)
-+        return JS_JIT_BACKEND_INVALID_ARGUMENT;
-+    return rt->jit_suspended != 0;
-+}
- #endif /* CONFIG_JIT_ABI */
-@@ -19583,1 +19601,2 @@ restart:
--    if (argc >= 0 && argc <= 8 && rt->jit_backend_vtable && rt->jit_backend_vtable->record_feedback) {
+@@ -19666,6 +20084,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+ #endif
+ 
+ #ifdef CONFIG_JIT_ABI
 +    if (argc >= 0 && argc <= 8 && !rt->jit_suspended && rt->jit_backend_vtable &&
 +        rt->jit_backend_vtable->record_feedback) {
-@@ -19597,1 +19616,1 @@ restart:
--    if (!b->jit_feedback_disabled &&
++        uint32_t call_types[8];
++        for (i = 0; i < argc; i++)
++            call_types[i] = qjsjit_feedback_type(arg_buf[i]);
++        qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
++                               call_types, (uint32_t)argc, 0);
++    }
+  jit_poll:
+     jit_probe_budget = 64; if (rt->jit_backend_vtable)
+         JS_SetUncatchableError(ctx, rt->jit_uncatchable_exception);
+@@ -19673,7 +20099,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+     /* Identity is established before feedback and feedback is reported before
+      * native acquisition.  A call is counted once per invocation; a taken
+      * backedge sets jit_hot_kind after its successful interrupt poll. */
+-    if (((jit_hot_kind == JS_JIT_HOT_CALL && !jit_call_recorded) ||
 +    if (!rt->jit_suspended && !b->jit_feedback_disabled &&
-@@ -19657,1 +19676,1 @@ restart:
--    if (!b->jit_feedback_disabled &&
++        ((jit_hot_kind == JS_JIT_HOT_CALL && !jit_call_recorded) ||
+          jit_hot_kind == JS_JIT_HOT_LOOP) && rt->jit_backend_vtable &&
+         rt->jit_backend_vtable->record_hot &&
+         qjsjit_ensure_function_identity(rt, b) == 0) {
+@@ -19718,7 +20145,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         if (jit_hot_kind == JS_JIT_HOT_CALL)
+             jit_call_recorded = 1;
+         jit_hot_kind = JS_JIT_HOT_CALL;
+-        if (request_snapshot && hot_vtable->submit_snapshot) {
++        if (request_snapshot & 2U)
++            b->jit_feedback_disabled = 1;
++        if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
+             JSJitFunctionSnapshot *snapshot = NULL;
+             if (JS_JitSnapshotFunction(ctx, func_obj, &snapshot) ==
+                     JS_JIT_SNAPSHOT_OK && snapshot) {
+@@ -19730,7 +20159,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         }
+     }
+ #endif
+-    if (JS_IsUncatchableError(rt->jit_uncatchable_exception) &&
 +    if (!rt->jit_suspended && !b->jit_feedback_disabled &&
-@@ -20883,1 +20902,1 @@ CASE(OP_goto8):
++        JS_IsUncatchableError(rt->jit_uncatchable_exception) &&
+         rt->jit_backend_vtable && rt->jit_backend_vtable->acquire_entry &&
+         qjsjit_ensure_function_identity(rt, b) == 0) {
+         const JSJitBackendVTable *jit_vtable = rt->jit_backend_vtable;
+@@ -20309,6 +20739,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                           vc(call_argv), 0);
+                 if (unlikely(JS_IsException(ret_val)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_callsite_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf -
++                        ((opcode >= OP_call0 && opcode <= OP_call3) ? 1 : 3)),
++                    call_argv[-1], call_argc, vc(call_argv), ret_val);
++#endif
+                 if (opcode == OP_tail_call)
+                     goto done;
+                 for(i = -1; i < call_argc; i++)
+@@ -20346,6 +20782,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                           vc(call_argv), 0);
+                 if (unlikely(JS_IsException(ret_val)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_callsite_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 3),
++                    call_argv[-1], call_argc, vc(call_argv), ret_val);
++#endif
+                 if (opcode == OP_tail_call_method)
+                     goto done;
+                 for(i = -2; i < call_argc; i++)
+@@ -20386,9 +20827,25 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             BREAK;
+         CASE(OP_return):
+             ret_val = *--sp;
++#ifdef CONFIG_JIT_ABI
++            {
++                uint32_t return_type = qjsjit_feedback_type(ret_val);
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    &return_type, 1, 0);
++            }
++#endif
+             goto done;
+         CASE(OP_return_undef):
+             ret_val = JS_UNDEFINED;
++#ifdef CONFIG_JIT_ABI
++            {
++                uint32_t return_type = JS_JIT_VALUE_UNDEFINED;
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    &return_type, 1, 0);
++            }
++#endif
+             goto done;
+ 
+         CASE(OP_check_ctor_return):
+@@ -20928,7 +21385,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (diff < 0 && rt->jit_backend_vtable &&
 +                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -20898,1 +20917,1 @@ CASE(OP_goto16):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -20943,7 +21400,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (diff < 0 && rt->jit_backend_vtable &&
 +                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -20913,1 +20932,1 @@ CASE(OP_goto):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -20958,7 +21415,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (diff < 0 && rt->jit_backend_vtable &&
 +                if (diff < 0 && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -20954,1 +20973,1 @@ CASE(OP_if_false8):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -20972,18 +21429,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSValue op1;
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
++                uint32_t condition_type;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
++                condition_type = qjsjit_feedback_type(op1);
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
++                    &condition_type, 1,
++                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++#endif
+                 sp--;
+                 if (res) {
+                     pc += (int32_t)get_u32(pc - 4) - 4;
+@@ -20991,7 +21456,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (pc < next_pc && rt->jit_backend_vtable &&
 +                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -20995,1 +21014,1 @@ CASE(OP_if_true8):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -21005,18 +21470,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSValue op1;
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
++                uint32_t condition_type;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
++                condition_type = qjsjit_feedback_type(op1);
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
++                    &condition_type, 1,
++                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++#endif
+                 sp--;
+                 if (!res) {
+                     pc += (int32_t)get_u32(pc - 4) - 4;
+@@ -21024,7 +21497,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (pc < next_pc && rt->jit_backend_vtable &&
 +                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -21036,1 +21055,1 @@ CASE(OP_if_false):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -21038,18 +21511,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSValue op1;
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
++                uint32_t condition_type;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
++                condition_type = qjsjit_feedback_type(op1);
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
++                    &condition_type, 1,
++                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++#endif
+                 sp--;
+                 if (res) {
+                     pc += (int8_t)pc[-1] - 1;
+@@ -21057,7 +21538,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (pc < next_pc && rt->jit_backend_vtable &&
 +                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
-@@ -21077,1 +21096,1 @@ CASE(OP_if_true):
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -21071,18 +21552,26 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSValue op1;
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
++                uint32_t condition_type;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
++                condition_type = qjsjit_feedback_type(op1);
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
++                    &condition_type, 1,
++                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++#endif
+                 sp--;
+                 if (!res) {
+                     pc += (int8_t)pc[-1] - 1;
+@@ -21090,7 +21579,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
 -                if (pc < next_pc && rt->jit_backend_vtable &&
 +                if (pc < next_pc && !rt->jit_suspended && rt->jit_backend_vtable &&
+                     rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
+                     jit_hot_kind = JS_JIT_HOT_LOOP;
+                     goto jit_poll;
+@@ -21401,6 +21890,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSObject *p;
+                 JSProperty *pr;
+                 JSShapeProperty *prs;
++#ifdef CONFIG_JIT_ABI
++                JSObject *receiver;
++#endif
+ 
+                 atom = get_u32(pc);
+                 pc += 4;
+@@ -21408,6 +21900,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 obj = sp[-1];
+                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+                     p = JS_VALUE_GET_OBJ(obj);
++#ifdef CONFIG_JIT_ABI
++                    receiver = p;
++#endif
+                     for(;;) {
+                         prs = find_own_property(&pr, p, atom);
+                         if (prs) {
+@@ -21415,6 +21910,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                             if (unlikely(prs->flags & JS_PROP_TMASK))
+                                 goto get_field_slow_path;
+                             val = js_dup(pr->u.value);
++#ifdef CONFIG_JIT_ABI
++                            qjsjit_record_property_feedback(rt, b,
++                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                                receiver, p, prs, pr, val, 0);
++#endif
+                             break;
+                         }
+                         if (unlikely(p->is_exotic)) {
+@@ -21449,6 +21949,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 JSObject *p;
+                 JSProperty *pr;
+                 JSShapeProperty *prs;
++#ifdef CONFIG_JIT_ABI
++                JSObject *receiver;
++#endif
+ 
+                 atom = get_u32(pc);
+                 pc += 4;
+@@ -21456,6 +21959,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 obj = sp[-1];
+                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+                     p = JS_VALUE_GET_OBJ(obj);
++#ifdef CONFIG_JIT_ABI
++                    receiver = p;
++#endif
+                     for(;;) {
+                         prs = find_own_property(&pr, p, atom);
+                         if (prs) {
+@@ -21463,6 +21969,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                             if (unlikely(prs->flags & JS_PROP_TMASK))
+                                 goto get_field2_slow_path;
+                             val = js_dup(pr->u.value);
++#ifdef CONFIG_JIT_ABI
++                            qjsjit_record_property_feedback(rt, b,
++                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                                receiver, p, prs, pr, val, 0);
++#endif
+                             break;
+                         }
+                         if (unlikely(p->is_exotic)) {
+@@ -21511,6 +22022,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                               JS_PROP_LENGTH)) == JS_PROP_WRITABLE)) {
+                         /* fast path */
+                         set_value(ctx, &pr->u.value, sp[-1]);
++#ifdef CONFIG_JIT_ABI
++                        qjsjit_record_property_feedback(rt, b,
++                            (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                            p, p, prs, pr, pr->u.value,
++                            JS_JIT_FEEDBACK_PROPERTY_STORE);
++#endif
+                     } else {
+                         goto put_field_slow_path;
+                     }
+@@ -21955,8 +22472,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         CASE(OP_add):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+                     r = (int64_t)JS_VALUE_GET_INT(op1) + JS_VALUE_GET_INT(op2);
+@@ -21989,6 +22513,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                         goto exception;
+                     sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_add_loc):
+@@ -22037,8 +22566,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         CASE(OP_sub):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+                     r = (int64_t)JS_VALUE_GET_INT(op1) - JS_VALUE_GET_INT(op2);
+@@ -22065,16 +22601,31 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                     JS_X87_FPCW_RESTORE(fpcw);
+                     sp--;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_mul):
+             {
+                 JSValue op1, op2;
+                 double d;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int32_t v1, v2;
+                     int64_t r;
+@@ -22111,15 +22662,30 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                     JS_X87_FPCW_RESTORE(fpcw);
+                     goto mul_fp_res;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_div):
+             {
+                 JSValue op1, op2;
++#ifdef CONFIG_JIT_ABI
++                uint32_t jit_lhs_type, jit_rhs_type;
++#endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                jit_lhs_type = qjsjit_feedback_type(op1);
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int v1, v2;
+                     v1 = JS_VALUE_GET_INT(op1);
+@@ -22144,8 +22710,16 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                     JS_X87_FPCW_RESTORE(fpcw);
+                     sp--;
+                 } else {
+-                    goto binary_arith_slow;
++                    sf->cur_pc = pc;
++                    if (js_binary_arith_slow(ctx, sp, opcode))
++                        goto exception;
++                    sp--;
+                 }
++#ifdef CONFIG_JIT_ABI
++                qjsjit_record_binary_feedback(rt, b,
++                    (uint32_t)(pc - b->byte_code_buf - 1),
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#endif
+             }
+             BREAK;
+         CASE(OP_mod):
+@@ -22181,7 +22755,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             {
+                 JSValue op1;
+                 uint32_t tag;
++#ifdef CONFIG_JIT_ABI
++                uint32_t conversion_types[2];
++#endif
+                 op1 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                conversion_types[0] = qjsjit_feedback_type(op1);
++#endif
+                 tag = JS_VALUE_GET_TAG(op1);
+                 if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag)) {
+                 } else {
+@@ -22189,6 +22769,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                     if (js_unary_arith_slow(ctx, sp, opcode))
+                         goto exception;
+                 }
++#ifdef CONFIG_JIT_ABI
++                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    conversion_types, 2, 0);
++#endif
+             }
+             BREAK;
+         CASE(OP_neg):
+@@ -22197,7 +22783,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 uint32_t tag;
+                 int val;
+                 double d;
++#ifdef CONFIG_JIT_ABI
++                uint32_t conversion_types[2];
++#endif
+                 op1 = sp[-1];
++#ifdef CONFIG_JIT_ABI
++                conversion_types[0] = qjsjit_feedback_type(op1);
++#endif
+                 tag = JS_VALUE_GET_TAG(op1);
+                 if (tag == JS_TAG_INT) {
+                     val = JS_VALUE_GET_INT(op1);
+@@ -22220,6 +22812,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                     if (js_unary_arith_slow(ctx, sp, opcode))
+                         goto exception;
+                 }
++#ifdef CONFIG_JIT_ABI
++                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
++                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
++                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                    conversion_types, 2, 0);
++#endif
+             }
+             BREAK;
+         CASE(OP_inc):
+@@ -22470,13 +23068,29 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             }
+             BREAK;
+ 
++#ifdef CONFIG_JIT_ABI
++#define QJSJIT_CMP_DECLARE uint32_t jit_lhs_type, jit_rhs_type;
++#define QJSJIT_CMP_CAPTURE(op1, op2)                       \
++                jit_lhs_type = qjsjit_feedback_type(op1); \
++                jit_rhs_type = qjsjit_feedback_type(op2);
++#define QJSJIT_CMP_RECORD()                                \
++                qjsjit_record_binary_feedback(rt, b,      \
++                    (uint32_t)(pc - b->byte_code_buf - 1),\
++                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#else
++#define QJSJIT_CMP_DECLARE
++#define QJSJIT_CMP_CAPTURE(op1, op2)
++#define QJSJIT_CMP_RECORD()
++#endif
+ 
+ #define OP_CMP(opcode, binary_op, slow_call)              \
+             CASE(opcode):                                 \
+                 {                                         \
+                 JSValue op1, op2;                         \
++                QJSJIT_CMP_DECLARE                        \
+                 op1 = sp[-2];                             \
+-                op2 = sp[-1];                                   \
++                op2 = sp[-1];                             \
++                QJSJIT_CMP_CAPTURE(op1, op2)              \
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {           \
+                     sp[-2] = js_bool(JS_VALUE_GET_INT(op1) binary_op JS_VALUE_GET_INT(op2)); \
+                     sp--;                                               \
+@@ -22486,6 +23100,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                         goto exception;                                 \
+                     sp--;                                               \
+                 }                                                       \
++                QJSJIT_CMP_RECORD()                                     \
+                 }                                                       \
+             BREAK
+ 
+@@ -22498,6 +23113,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             OP_CMP(OP_strict_eq, ==, js_strict_eq_slow(ctx, sp, 0));
+             OP_CMP(OP_strict_neq, !=, js_strict_eq_slow(ctx, sp, 1));
+ 
++#undef QJSJIT_CMP_RECORD
++#undef QJSJIT_CMP_CAPTURE
++#undef QJSJIT_CMP_DECLARE
++
+         CASE(OP_in):
+             sf->cur_pc = pc;
+             if (js_operator_in(ctx, sp))

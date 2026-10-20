@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index ec6a3f5..fa21b98 100644
 --- a/quickjs-jit-helpers.h
 +++ b/quickjs-jit-helpers.h
-@@ -154,6 +154,9 @@
+@@ -154,6 +154,9 @@ typedef enum JSJitVarRefMode {
        NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)            \
      X(GENERIC_OP, generic_op, JS_JitHelperGenericOp, MAP_OUT_TWO_OP, 3,    \
        OWNED, CONSUMED, CONSUMED, NONE, OWNED,                               \
@@ -12,9 +13,10 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
  
  typedef enum JSJitHelperId {
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 67d4b68..6bd0eb5 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -134,6 +134,37 @@
+@@ -134,6 +134,37 @@ typedef struct JSJitArrayAPI {
  
  JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
  
@@ -53,9 +55,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  #define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
  #define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)
 diff --git a/quickjs.c b/quickjs.c
+index ef199d3..1f9e056 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -20673,6 +20673,124 @@
+@@ -21156,6 +21156,124 @@ static no_inline JSJitExit qjsjit_call_root_entry(JSRuntime *rt,
      return exit;
  }
  
@@ -180,7 +183,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
  #ifdef CONFIG_JIT_ABI
-@@ -63148,6 +63266,57 @@
+@@ -64528,6 +64646,57 @@ const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version)
      };
      return version == QJSJIT_ARRAY_API_VERSION ? &api : NULL;
  }

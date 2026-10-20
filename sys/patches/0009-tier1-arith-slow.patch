@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index f7bb0fb..03c9fd8 100644
 --- a/quickjs-jit-helpers.h
 +++ b/quickjs-jit-helpers.h
-@@ -123,7 +123,13 @@
+@@ -123,7 +123,13 @@ typedef enum JSJitCompareOp {
        THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
      X(ATOM_VALUE, atom_value, JS_JitHelperAtomValue, MAP_OUT_INDEX, 1,      \
        OWNED, NONE, NONE, NONE, OWNED,                                       \
@@ -16,7 +17,7 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
  
  typedef enum JSJitHelperId {
  #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
-@@ -159,6 +165,10 @@
+@@ -159,6 +165,10 @@ typedef struct JSJitHelperInfo {
                                       uint32_t stack_map_id, uint32_t output, \
                                       uint32_t input)
  #define QJSJIT_DECLARE_MAP_OUT_INDEX(name) QJSJIT_DECLARE_MAP_OUT_IN(name)
@@ -28,9 +29,10 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
      JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
                                       uint32_t stack_map_id, uint32_t output, \
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 02d2183..7495caa 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
+@@ -17,7 +17,7 @@ extern "C" {
  #endif
  
  #define QJSJIT_ABI_MAJOR 1u
@@ -39,7 +41,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  
  /* Frame flags are append-only. Stress collection is a test/debug contract:
   * every helper performs an allocating cycle-GC point before and after its
-@@ -217,7 +217,7 @@
+@@ -217,7 +217,7 @@ typedef struct JSJitExecFrame JSJitExecFrame;
   * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
   */
  #define QJSJIT_RUNTIME_API_MAJOR 1u
@@ -48,7 +50,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  
  #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
      JSJitHelperStatus (*field)(JSJitExecFrame *frame)
-@@ -233,6 +233,10 @@
+@@ -233,6 +233,10 @@ typedef struct JSJitExecFrame JSJitExecFrame;
                                 uint32_t input)
  #define QJSJIT_RUNTIME_FIELD_MAP_OUT_INDEX(field)                           \
      QJSJIT_RUNTIME_FIELD_MAP_OUT_IN(field)
@@ -60,9 +62,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
      JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
                                 uint32_t stack_map_id, uint32_t output,      \
 diff --git a/quickjs.c b/quickjs.c
+index 6d4088b..e0eac62 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -2613,6 +2613,7 @@
+@@ -2969,6 +2969,7 @@ static const JSJitOpcodeInfo qjsjit_opcode_table[] = {
  #define QJSJIT_ABI_COUNT_MAP_OUT 4
  #define QJSJIT_ABI_COUNT_MAP_OUT_IN 5
  #define QJSJIT_ABI_COUNT_MAP_OUT_INDEX 5
@@ -70,7 +73,7 @@ diff --git a/quickjs.c b/quickjs.c
  #define QJSJIT_ABI_COUNT_MAP_OUT_TWO 6
  #define QJSJIT_ABI_COUNT_MAP_OUT_TWO_OP 7
  #define QJSJIT_ABI_COUNT_MAP_OUT_OBJECT_ATOM 6
-@@ -2633,6 +2634,7 @@
+@@ -2989,6 +2990,7 @@ static const JSJitOpcodeInfo qjsjit_opcode_table[] = {
  #define QJSJIT_ABI_TYPES_MAP_OUT QJSJIT_ABI_TYPES_2
  #define QJSJIT_ABI_TYPES_MAP_OUT_IN QJSJIT_ABI_TYPES_3
  #define QJSJIT_ABI_TYPES_MAP_OUT_INDEX QJSJIT_ABI_TYPES_3
@@ -78,7 +81,7 @@ diff --git a/quickjs.c b/quickjs.c
  #define QJSJIT_ABI_TYPES_MAP_OUT_TWO QJSJIT_ABI_TYPES_4
  #define QJSJIT_ABI_TYPES_MAP_OUT_TWO_OP QJSJIT_ABI_TYPES_5
  #define QJSJIT_ABI_TYPES_MAP_OUT_OBJECT_ATOM QJSJIT_ABI_TYPES_4
-@@ -19677,6 +19679,125 @@
+@@ -20161,6 +20163,125 @@ JSJitHelperStatus JS_JitHelperAtomValue(JSJitExecFrame *frame,
      return qjsjit_finish_output(frame, out);
  }
  

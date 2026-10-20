@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 6bd0eb5..c7ae8bf 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -134,6 +134,53 @@
+@@ -134,6 +134,53 @@ typedef struct JSJitArrayAPI {
  
  JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
  
@@ -56,22 +57,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
   * values iterator. It performs no allocation, throw, finalization or VM
   * reentry. VALUE is returned only when the live iterator is an Array values
 diff --git a/quickjs.c b/quickjs.c
+index 12439de..920da63 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -47976,7 +47976,11 @@
-                        (p->shape->prop->flags & JS_PROP_WRITABLE))) {
-                 array_len = JS_VALUE_GET_INT(p->prop[0].u.value);
-                 new_len = array_len + argc;
--                if (likely(new_len >= array_len && new_len <= (uint32_t)INT32_MAX)) { /* no overflow and within fast-array bounds */
-+                /* A fast array may keep count < length after `length` grows
-+                   (set_array_length); appending at `length` would leave
-+                   uninitialized holes, so take the generic path. */
-+                if (likely(new_len >= array_len && new_len <= (uint32_t)INT32_MAX &&
-+                           array_len == p->u.array.count)) { /* no overflow and within fast-array bounds */
-                     if (unlikely(new_len > p->u.array.u1.size)) {
-                         if (expand_fast_array(ctx, p, new_len))
-                             return JS_EXCEPTION;
-@@ -48021,6 +48025,273 @@
+@@ -48910,6 +48910,273 @@ static JSValue js_array_push(JSContext *ctx, JSValueConst this_val,
      return JS_EXCEPTION;
  }
  

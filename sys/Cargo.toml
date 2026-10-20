@@ -1,6 +1,6 @@
 [package]
 name = "quickjs-jit-sys"
-version = "0.12.11"
+version = "0.14.1"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -41,6 +41,8 @@ include = [
     "tests/jit_patch.rs",
     "tests/inline_recovery.rs",
     "tests/typed_array_guard.rs",
+    "vendor/wasi-libc/**",
+    "wasm-shim/**",
 ]
 
 [lib]

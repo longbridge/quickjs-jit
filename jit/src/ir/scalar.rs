@@ -15,434 +15,6 @@ use super::{
 };
 use crate::compiler::CompileFailure;
 
-#[cfg(test)]
-mod representation_tests {
-    use super::*;
-
-    fn cyclic_graph(seed: ScalarValue) -> ScalarGraph {
-        let phi = |input| ScalarValue::Phi {
-            block_pc: 1,
-            slot: FrameSlot::Local(0),
-            inputs: vec![
-                ScalarPhiInput {
-                    predecessor: Some(0),
-                    value: ScalarValueId(0),
-                },
-                ScalarPhiInput {
-                    predecessor: Some(1),
-                    value: ScalarValueId(input),
-                },
-            ]
-            .into(),
-        };
-        ScalarGraph {
-            values: vec![seed, phi(2), phi(1)],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn cyclic_representation_requires_real_seed_and_all_edges() {
-        let graph = cyclic_graph(ScalarValue::Int32(1));
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100),
-            [Some(ScalarNumericMode::Int32); 3]
-        );
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 1),
-            [None; 3]
-        );
-        let mut graph = cyclic_graph(ScalarValue::Opaque);
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100),
-            [None; 3]
-        );
-        graph.values[0] = ScalarValue::Phi {
-            block_pc: 0,
-            slot: FrameSlot::Local(0),
-            inputs: vec![ScalarPhiInput {
-                predecessor: Some(1),
-                value: ScalarValueId(1),
-            }]
-            .into(),
-        };
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100),
-            [None; 3]
-        );
-    }
-
-    #[test]
-    fn known_argument_identity_requires_real_seed_and_agreeing_phi_edges() {
-        use crate::ir::KnownFacts;
-        let mut graph = cyclic_graph(ScalarValue::Input {
-            block_pc: 0,
-            slot: FrameSlot::Argument(2),
-        });
-        let facts = KnownFacts::analyze(&graph, &[], false, 100);
-        assert_eq!(facts.entry_argument(ScalarValueId(1)), Some(2));
-        assert_eq!(facts.entry_argument(ScalarValueId(2)), Some(2));
-        assert_eq!(
-            KnownFacts::analyze(&graph, &[], false, 1).entry_argument(ScalarValueId(1)),
-            None,
-        );
-        graph.values[2] = ScalarValue::Input {
-            block_pc: 0,
-            slot: FrameSlot::Argument(3),
-        };
-        assert_eq!(
-            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
-            None,
-        );
-        graph.values[0] = ScalarValue::Phi {
-            block_pc: 0,
-            slot: FrameSlot::Local(0),
-            inputs: vec![ScalarPhiInput {
-                predecessor: Some(1),
-                value: ScalarValueId(1),
-            }]
-            .into(),
-        };
-        graph.values[2] = graph.values[0].clone();
-        assert_eq!(
-            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
-            None,
-        );
-    }
-
-    #[test]
-    fn integer_update_selection_requires_seed_and_every_incoming_edge() {
-        let update = || ScalarValue::Update {
-            mode: ScalarNumericMode::Number,
-            input: ScalarValueId(1),
-            delta: 1,
-        };
-        let make = |seed| {
-            let mut graph = cyclic_graph(seed);
-            graph.values[2] = update();
-            graph
-        };
-        let mut graph = make(ScalarValue::Int32(0));
-        assert_eq!(graph.specialize_integer_updates(100), 1);
-        assert!(matches!(
-            graph.values[2],
-            ScalarValue::Update {
-                mode: ScalarNumericMode::Int32,
-                ..
-            }
-        ));
-        for seed in [ScalarValue::Opaque, update()] {
-            let mut graph = make(seed);
-            assert_eq!(graph.specialize_integer_updates(100), 0);
-        }
-        let mut graph = make(ScalarValue::Int32(0));
-        assert_eq!(graph.specialize_integer_updates(1), 0);
-        assert!(matches!(
-            graph.values[2],
-            ScalarValue::Update {
-                mode: ScalarNumericMode::Number,
-                ..
-            }
-        ));
-        graph.values.push(ScalarValue::Opaque);
-        if let ScalarValue::Phi { inputs, .. } = &mut graph.values[1] {
-            let mut edges = inputs.to_vec();
-            edges.push(ScalarPhiInput {
-                predecessor: Some(2),
-                value: ScalarValueId(3),
-            });
-            *inputs = edges.into();
-        }
-        assert_eq!(graph.specialize_integer_updates(100), 0);
-        let mut graph = make(ScalarValue::Int32(0));
-        graph.values[2] = ScalarValue::Update {
-            mode: ScalarNumericMode::Float64,
-            input: ScalarValueId(1),
-            delta: 1,
-        };
-        assert_eq!(graph.specialize_integer_updates(100), 0);
-    }
-
-    #[test]
-    fn numeric_phi_preserves_wider_representation_without_proving_int32() {
-        for mode in [ScalarNumericMode::Float64, ScalarNumericMode::Number] {
-            let mut graph = cyclic_graph(ScalarValue::Update {
-                mode,
-                input: ScalarValueId(1),
-                delta: 1,
-            });
-            assert_eq!(
-                graph.proven_numeric_values(&[], |_| false, false, 100),
-                [Some(mode); 3]
-            );
-            graph.values.push(ScalarValue::Int32(0));
-            if let ScalarValue::Phi { inputs, .. } = &mut graph.values[1] {
-                let mut extended = inputs.to_vec();
-                extended.push(ScalarPhiInput {
-                    predecessor: Some(2),
-                    value: ScalarValueId(3),
-                });
-                *inputs = extended.into();
-            }
-            assert_eq!(
-                graph.proven_numeric_values(&[], |_| false, false, 100),
-                [
-                    Some(mode),
-                    Some(ScalarNumericMode::Number),
-                    Some(ScalarNumericMode::Number),
-                    Some(ScalarNumericMode::Int32)
-                ]
-            );
-        }
-    }
-
-    #[test]
-    fn unsigned_shift_does_not_seed_an_int32_phi_proof() {
-        for op in [
-            ScalarBitwiseOp::Or,
-            ScalarBitwiseOp::And,
-            ScalarBitwiseOp::Xor,
-            ScalarBitwiseOp::Shl,
-            ScalarBitwiseOp::Sar,
-            ScalarBitwiseOp::Shr,
-        ] {
-            let graph = cyclic_graph(ScalarValue::Bitwise {
-                op,
-                lhs: ScalarValueId(1),
-                rhs: ScalarValueId(2),
-            });
-            assert_eq!(
-                graph.proven_numeric_values(&[], |_| false, false, 100),
-                [Some(if op == ScalarBitwiseOp::Shr {
-                    ScalarNumericMode::Number
-                } else {
-                    ScalarNumericMode::Int32
-                }); 3]
-            );
-        }
-    }
-
-    #[test]
-    fn argument_representation_requires_entry_guard() {
-        let graph = cyclic_graph(ScalarValue::Input {
-            block_pc: 0,
-            slot: FrameSlot::Argument(0),
-        });
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100),
-            [None; 3]
-        );
-        assert_eq!(
-            graph.proven_numeric_values(&[], |index| index == 0, false, 100),
-            [Some(ScalarNumericMode::Int32); 3]
-        );
-    }
-
-    #[test]
-    fn mixed_argument_proofs_follow_exact_guarded_slots() {
-        let graph = ScalarGraph {
-            values: (0..4)
-                .map(|index| ScalarValue::Input {
-                    block_pc: 0,
-                    slot: FrameSlot::Argument(index),
-                })
-                .collect(),
-            ..Default::default()
-        };
-        assert_eq!(
-            graph.proven_numeric_values(&[], |index| matches!(index, 0 | 2), false, 100),
-            [
-                Some(ScalarNumericMode::Int32),
-                None,
-                Some(ScalarNumericMode::Int32),
-                None
-            ]
-        );
-    }
-
-    #[test]
-    fn late_unknown_edge_invalidates_a_provisional_loop_fact() {
-        let mut graph = cyclic_graph(ScalarValue::Int32(1));
-        graph.values.push(ScalarValue::Opaque);
-        if let ScalarValue::Phi { inputs, .. } = &mut graph.values[2] {
-            let mut extended = inputs.to_vec();
-            extended.push(ScalarPhiInput {
-                predecessor: Some(2),
-                value: ScalarValueId(3),
-            });
-            *inputs = extended.into();
-        }
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100),
-            [Some(ScalarNumericMode::Int32), None, None, None]
-        );
-    }
-
-    #[test]
-    fn seeded_phi_cannot_hide_an_independent_seedless_incoming_cycle() {
-        let mut graph = cyclic_graph(ScalarValue::Int32(0));
-        graph.values[2] = ScalarValue::Phi {
-            block_pc: 1,
-            slot: FrameSlot::Local(0),
-            inputs: vec![ScalarPhiInput {
-                predecessor: Some(1),
-                value: ScalarValueId(2),
-            }]
-            .into(),
-        };
-        graph.values.push(ScalarValue::Update {
-            mode: ScalarNumericMode::Number,
-            input: ScalarValueId(1),
-            delta: 1,
-        });
-        assert_eq!(
-            graph.proven_numeric_values(&[], |_| false, false, 100)[1],
-            None
-        );
-        assert_eq!(graph.specialize_integer_updates(100), 0);
-    }
-
-    #[cfg(feature = "test-support")]
-    mod guarded_numeric {
-        use super::*;
-        use crate::{bytecode::VerifyLimits, ir::OptimizedIr, test_support::SnapshotFixture};
-
-        fn array_graph(source: &str) -> (ScalarGraph, Vec<OptimizedNode>) {
-            let fixture = SnapshotFixture::compile(source);
-            let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
-            let ir = OptimizedIr::translate(&verified, 1).unwrap();
-            (ir.scalar_graph().clone(), ir.nodes().to_vec())
-        }
-
-        fn primitive_array_permission(nodes: &[OptimizedNode], id: u32) -> bool {
-            matches!(nodes[id as usize].kind(), OptimizedNodeKind::Bytecode { opcode }
-                if matches!(opcode.as_ref(), "get_array_el" | "get_length"))
-                || matches!(
-                    nodes[id as usize].kind(),
-                    OptimizedNodeKind::GuardNumeric { .. }
-                )
-        }
-
-        #[test]
-        fn guarded_array_frame_reads_enable_seeded_checked_update_selection() {
-            let (mut graph, nodes) =
-                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
-            let update = nodes
-                .iter()
-                .find(|node| graph.update_operation(node.id()).is_some())
-                .unwrap()
-                .id();
-            assert_eq!(
-                graph.update_operation(update).unwrap().0,
-                ScalarNumericMode::Number
-            );
-            assert_eq!(graph.clone().specialize_integer_updates(100_000), 0);
-            assert_eq!(
-                graph.specialize_integer_updates_with_preserved_frame_reads(
-                    &nodes,
-                    |id| primitive_array_permission(&nodes, id),
-                    100_000
-                ),
-                1
-            );
-            assert_eq!(
-                graph.update_operation(update).unwrap().0,
-                ScalarNumericMode::Int32
-            );
-            let checks = graph.checks_for_node(update);
-            assert_eq!(checks.len(), 1);
-            assert_eq!(checks[0].mode, ScalarNumericMode::Int32);
-            assert!(!checks[0].eliminated);
-            assert_eq!(checks[0].frame_state_node, update);
-            let facts = graph.proven_numeric_values_with_preserved_frame_reads(
-                &nodes,
-                |_| false,
-                |id| primitive_array_permission(&nodes, id),
-                100_000,
-            );
-            assert_eq!(
-                facts[graph.update_operation(update).unwrap().1.index()],
-                Some(ScalarNumericMode::Int32)
-            );
-        }
-
-        #[test]
-        fn guarded_frame_identity_preserves_only_the_original_numeric_slot() {
-            let (graph, nodes) =
-                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
-            let access = nodes.iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "get_array_el")).unwrap().id();
-            let after = |slot| {
-                graph
-                    .frame_definitions_for_node(access)
-                    .iter()
-                    .find(|(candidate, _)| *candidate == slot)
-                    .unwrap()
-                    .1
-            };
-            let numeric = after(FrameSlot::Argument(1));
-            let receiver = after(FrameSlot::Argument(0));
-            let generic =
-                graph.proven_numeric_values(&nodes, |argument| argument == 1, true, 100_000);
-            assert_eq!(generic[numeric.index()], None);
-            let guarded = graph.proven_numeric_values_with_preserved_frame_reads(
-                &nodes,
-                |argument| argument == 1,
-                |id| primitive_array_permission(&nodes, id),
-                100_000,
-            );
-            assert_eq!(guarded[numeric.index()], Some(ScalarNumericMode::Int32));
-            assert_eq!(guarded[receiver.index()], None);
-            assert_eq!(guarded[graph.value_for_node(access).unwrap().index()], None);
-        }
-
-        #[test]
-        fn unknown_reentry_mixed_seeds_and_exhaustion_keep_update_contract() {
-            for source in [
-                "(function(a,n,f){let s=0;for(let i=0;i<n;i++){f();s+=a[i]}return s})",
-                "(function(a,n,f){let s=0;let i=0;if(f)i=0.5;for(;i<n;i++)s+=a[i];return s})",
-                "(function(a,n,f){let s=0;for(let i=f;i<n;i++)s+=a[i];return s})",
-            ] {
-                let (mut graph, nodes) = array_graph(source);
-                let before = graph.values.clone();
-                assert_eq!(
-                    graph.specialize_integer_updates_with_preserved_frame_reads(
-                        &nodes,
-                        |id| primitive_array_permission(&nodes, id),
-                        100_000
-                    ),
-                    0,
-                    "{source}"
-                );
-                assert_eq!(graph.values, before, "{source}");
-            }
-            let (original, nodes) =
-                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
-            for work in [0, 1, 64] {
-                let mut graph = original.clone();
-                assert_eq!(
-                    graph.specialize_integer_updates_with_preserved_frame_reads(
-                        &nodes,
-                        |id| primitive_array_permission(&nodes, id),
-                        work
-                    ),
-                    0
-                );
-                assert_eq!(graph.values, original.values);
-                assert_eq!(graph.checks, original.checks);
-                assert!(graph
-                    .proven_numeric_values_with_preserved_frame_reads(
-                        &nodes,
-                        |argument| argument == 1,
-                        |id| primitive_array_permission(&nodes, id),
-                        work
-                    )
-                    .iter()
-                    .all(Option::is_none));
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ScalarValueId(u32);
 
@@ -2305,4 +1877,432 @@ pub(crate) fn stack_permutation(name: &str) -> Option<(usize, &'static [usize])>
         "rot5l" => (5, &[1, 2, 3, 4, 0]),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod representation_tests {
+    use super::*;
+
+    fn cyclic_graph(seed: ScalarValue) -> ScalarGraph {
+        let phi = |input| ScalarValue::Phi {
+            block_pc: 1,
+            slot: FrameSlot::Local(0),
+            inputs: vec![
+                ScalarPhiInput {
+                    predecessor: Some(0),
+                    value: ScalarValueId(0),
+                },
+                ScalarPhiInput {
+                    predecessor: Some(1),
+                    value: ScalarValueId(input),
+                },
+            ]
+            .into(),
+        };
+        ScalarGraph {
+            values: vec![seed, phi(2), phi(1)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cyclic_representation_requires_real_seed_and_all_edges() {
+        let graph = cyclic_graph(ScalarValue::Int32(1));
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100),
+            [Some(ScalarNumericMode::Int32); 3]
+        );
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 1),
+            [None; 3]
+        );
+        let mut graph = cyclic_graph(ScalarValue::Opaque);
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100),
+            [None; 3]
+        );
+        graph.values[0] = ScalarValue::Phi {
+            block_pc: 0,
+            slot: FrameSlot::Local(0),
+            inputs: vec![ScalarPhiInput {
+                predecessor: Some(1),
+                value: ScalarValueId(1),
+            }]
+            .into(),
+        };
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100),
+            [None; 3]
+        );
+    }
+
+    #[test]
+    fn known_argument_identity_requires_real_seed_and_agreeing_phi_edges() {
+        use crate::ir::KnownFacts;
+        let mut graph = cyclic_graph(ScalarValue::Input {
+            block_pc: 0,
+            slot: FrameSlot::Argument(2),
+        });
+        let facts = KnownFacts::analyze(&graph, &[], false, 100);
+        assert_eq!(facts.entry_argument(ScalarValueId(1)), Some(2));
+        assert_eq!(facts.entry_argument(ScalarValueId(2)), Some(2));
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 1).entry_argument(ScalarValueId(1)),
+            None,
+        );
+        graph.values[2] = ScalarValue::Input {
+            block_pc: 0,
+            slot: FrameSlot::Argument(3),
+        };
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
+            None,
+        );
+        graph.values[0] = ScalarValue::Phi {
+            block_pc: 0,
+            slot: FrameSlot::Local(0),
+            inputs: vec![ScalarPhiInput {
+                predecessor: Some(1),
+                value: ScalarValueId(1),
+            }]
+            .into(),
+        };
+        graph.values[2] = graph.values[0].clone();
+        assert_eq!(
+            KnownFacts::analyze(&graph, &[], false, 100).entry_argument(ScalarValueId(1)),
+            None,
+        );
+    }
+
+    #[test]
+    fn integer_update_selection_requires_seed_and_every_incoming_edge() {
+        let update = || ScalarValue::Update {
+            mode: ScalarNumericMode::Number,
+            input: ScalarValueId(1),
+            delta: 1,
+        };
+        let make = |seed| {
+            let mut graph = cyclic_graph(seed);
+            graph.values[2] = update();
+            graph
+        };
+        let mut graph = make(ScalarValue::Int32(0));
+        assert_eq!(graph.specialize_integer_updates(100), 1);
+        assert!(matches!(
+            graph.values[2],
+            ScalarValue::Update {
+                mode: ScalarNumericMode::Int32,
+                ..
+            }
+        ));
+        for seed in [ScalarValue::Opaque, update()] {
+            let mut graph = make(seed);
+            assert_eq!(graph.specialize_integer_updates(100), 0);
+        }
+        let mut graph = make(ScalarValue::Int32(0));
+        assert_eq!(graph.specialize_integer_updates(1), 0);
+        assert!(matches!(
+            graph.values[2],
+            ScalarValue::Update {
+                mode: ScalarNumericMode::Number,
+                ..
+            }
+        ));
+        graph.values.push(ScalarValue::Opaque);
+        if let ScalarValue::Phi { inputs, .. } = &mut graph.values[1] {
+            let mut edges = inputs.to_vec();
+            edges.push(ScalarPhiInput {
+                predecessor: Some(2),
+                value: ScalarValueId(3),
+            });
+            *inputs = edges.into();
+        }
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+        let mut graph = make(ScalarValue::Int32(0));
+        graph.values[2] = ScalarValue::Update {
+            mode: ScalarNumericMode::Float64,
+            input: ScalarValueId(1),
+            delta: 1,
+        };
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+    }
+
+    #[test]
+    fn numeric_phi_preserves_wider_representation_without_proving_int32() {
+        for mode in [ScalarNumericMode::Float64, ScalarNumericMode::Number] {
+            let mut graph = cyclic_graph(ScalarValue::Update {
+                mode,
+                input: ScalarValueId(1),
+                delta: 1,
+            });
+            assert_eq!(
+                graph.proven_numeric_values(&[], |_| false, false, 100),
+                [Some(mode); 3]
+            );
+            graph.values.push(ScalarValue::Int32(0));
+            if let ScalarValue::Phi { inputs, .. } = &mut graph.values[1] {
+                let mut extended = inputs.to_vec();
+                extended.push(ScalarPhiInput {
+                    predecessor: Some(2),
+                    value: ScalarValueId(3),
+                });
+                *inputs = extended.into();
+            }
+            assert_eq!(
+                graph.proven_numeric_values(&[], |_| false, false, 100),
+                [
+                    Some(mode),
+                    Some(ScalarNumericMode::Number),
+                    Some(ScalarNumericMode::Number),
+                    Some(ScalarNumericMode::Int32)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_shift_does_not_seed_an_int32_phi_proof() {
+        for op in [
+            ScalarBitwiseOp::Or,
+            ScalarBitwiseOp::And,
+            ScalarBitwiseOp::Xor,
+            ScalarBitwiseOp::Shl,
+            ScalarBitwiseOp::Sar,
+            ScalarBitwiseOp::Shr,
+        ] {
+            let graph = cyclic_graph(ScalarValue::Bitwise {
+                op,
+                lhs: ScalarValueId(1),
+                rhs: ScalarValueId(2),
+            });
+            assert_eq!(
+                graph.proven_numeric_values(&[], |_| false, false, 100),
+                [Some(if op == ScalarBitwiseOp::Shr {
+                    ScalarNumericMode::Number
+                } else {
+                    ScalarNumericMode::Int32
+                }); 3]
+            );
+        }
+    }
+
+    #[test]
+    fn argument_representation_requires_entry_guard() {
+        let graph = cyclic_graph(ScalarValue::Input {
+            block_pc: 0,
+            slot: FrameSlot::Argument(0),
+        });
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100),
+            [None; 3]
+        );
+        assert_eq!(
+            graph.proven_numeric_values(&[], |index| index == 0, false, 100),
+            [Some(ScalarNumericMode::Int32); 3]
+        );
+    }
+
+    #[test]
+    fn mixed_argument_proofs_follow_exact_guarded_slots() {
+        let graph = ScalarGraph {
+            values: (0..4)
+                .map(|index| ScalarValue::Input {
+                    block_pc: 0,
+                    slot: FrameSlot::Argument(index),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            graph.proven_numeric_values(&[], |index| matches!(index, 0 | 2), false, 100),
+            [
+                Some(ScalarNumericMode::Int32),
+                None,
+                Some(ScalarNumericMode::Int32),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn late_unknown_edge_invalidates_a_provisional_loop_fact() {
+        let mut graph = cyclic_graph(ScalarValue::Int32(1));
+        graph.values.push(ScalarValue::Opaque);
+        if let ScalarValue::Phi { inputs, .. } = &mut graph.values[2] {
+            let mut extended = inputs.to_vec();
+            extended.push(ScalarPhiInput {
+                predecessor: Some(2),
+                value: ScalarValueId(3),
+            });
+            *inputs = extended.into();
+        }
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100),
+            [Some(ScalarNumericMode::Int32), None, None, None]
+        );
+    }
+
+    #[test]
+    fn seeded_phi_cannot_hide_an_independent_seedless_incoming_cycle() {
+        let mut graph = cyclic_graph(ScalarValue::Int32(0));
+        graph.values[2] = ScalarValue::Phi {
+            block_pc: 1,
+            slot: FrameSlot::Local(0),
+            inputs: vec![ScalarPhiInput {
+                predecessor: Some(1),
+                value: ScalarValueId(2),
+            }]
+            .into(),
+        };
+        graph.values.push(ScalarValue::Update {
+            mode: ScalarNumericMode::Number,
+            input: ScalarValueId(1),
+            delta: 1,
+        });
+        assert_eq!(
+            graph.proven_numeric_values(&[], |_| false, false, 100)[1],
+            None
+        );
+        assert_eq!(graph.specialize_integer_updates(100), 0);
+    }
+
+    #[cfg(feature = "test-support")]
+    mod guarded_numeric {
+        use super::*;
+        use crate::{bytecode::VerifyLimits, ir::OptimizedIr, test_support::SnapshotFixture};
+
+        fn array_graph(source: &str) -> (ScalarGraph, Vec<OptimizedNode>) {
+            let fixture = SnapshotFixture::compile(source);
+            let verified = fixture.snapshot().verify(VerifyLimits::default()).unwrap();
+            let ir = OptimizedIr::translate(&verified, 1).unwrap();
+            (ir.scalar_graph().clone(), ir.nodes().to_vec())
+        }
+
+        fn primitive_array_permission(nodes: &[OptimizedNode], id: u32) -> bool {
+            matches!(nodes[id as usize].kind(), OptimizedNodeKind::Bytecode { opcode }
+                if matches!(opcode.as_ref(), "get_array_el" | "get_length"))
+                || matches!(
+                    nodes[id as usize].kind(),
+                    OptimizedNodeKind::GuardNumeric { .. }
+                )
+        }
+
+        #[test]
+        fn guarded_array_frame_reads_enable_seeded_checked_update_selection() {
+            let (mut graph, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            let update = nodes
+                .iter()
+                .find(|node| graph.update_operation(node.id()).is_some())
+                .unwrap()
+                .id();
+            assert_eq!(
+                graph.update_operation(update).unwrap().0,
+                ScalarNumericMode::Number
+            );
+            assert_eq!(graph.clone().specialize_integer_updates(100_000), 0);
+            assert_eq!(
+                graph.specialize_integer_updates_with_preserved_frame_reads(
+                    &nodes,
+                    |id| primitive_array_permission(&nodes, id),
+                    100_000
+                ),
+                1
+            );
+            assert_eq!(
+                graph.update_operation(update).unwrap().0,
+                ScalarNumericMode::Int32
+            );
+            let checks = graph.checks_for_node(update);
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].mode, ScalarNumericMode::Int32);
+            assert!(!checks[0].eliminated);
+            assert_eq!(checks[0].frame_state_node, update);
+            let facts = graph.proven_numeric_values_with_preserved_frame_reads(
+                &nodes,
+                |_| false,
+                |id| primitive_array_permission(&nodes, id),
+                100_000,
+            );
+            assert_eq!(
+                facts[graph.update_operation(update).unwrap().1.index()],
+                Some(ScalarNumericMode::Int32)
+            );
+        }
+
+        #[test]
+        fn guarded_frame_identity_preserves_only_the_original_numeric_slot() {
+            let (graph, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            let access = nodes.iter().find(|node| matches!(node.kind(), OptimizedNodeKind::Bytecode { opcode } if opcode.as_ref() == "get_array_el")).unwrap().id();
+            let after = |slot| {
+                graph
+                    .frame_definitions_for_node(access)
+                    .iter()
+                    .find(|(candidate, _)| *candidate == slot)
+                    .unwrap()
+                    .1
+            };
+            let numeric = after(FrameSlot::Argument(1));
+            let receiver = after(FrameSlot::Argument(0));
+            let generic =
+                graph.proven_numeric_values(&nodes, |argument| argument == 1, true, 100_000);
+            assert_eq!(generic[numeric.index()], None);
+            let guarded = graph.proven_numeric_values_with_preserved_frame_reads(
+                &nodes,
+                |argument| argument == 1,
+                |id| primitive_array_permission(&nodes, id),
+                100_000,
+            );
+            assert_eq!(guarded[numeric.index()], Some(ScalarNumericMode::Int32));
+            assert_eq!(guarded[receiver.index()], None);
+            assert_eq!(guarded[graph.value_for_node(access).unwrap().index()], None);
+        }
+
+        #[test]
+        fn unknown_reentry_mixed_seeds_and_exhaustion_keep_update_contract() {
+            for source in [
+                "(function(a,n,f){let s=0;for(let i=0;i<n;i++){f();s+=a[i]}return s})",
+                "(function(a,n,f){let s=0;let i=0;if(f)i=0.5;for(;i<n;i++)s+=a[i];return s})",
+                "(function(a,n,f){let s=0;for(let i=f;i<n;i++)s+=a[i];return s})",
+            ] {
+                let (mut graph, nodes) = array_graph(source);
+                let before = graph.values.clone();
+                assert_eq!(
+                    graph.specialize_integer_updates_with_preserved_frame_reads(
+                        &nodes,
+                        |id| primitive_array_permission(&nodes, id),
+                        100_000
+                    ),
+                    0,
+                    "{source}"
+                );
+                assert_eq!(graph.values, before, "{source}");
+            }
+            let (original, nodes) =
+                array_graph("(function(a,n){let s=0;for(let i=0;i<n;i++)s+=a[i];return s})");
+            for work in [0, 1, 64] {
+                let mut graph = original.clone();
+                assert_eq!(
+                    graph.specialize_integer_updates_with_preserved_frame_reads(
+                        &nodes,
+                        |id| primitive_array_permission(&nodes, id),
+                        work
+                    ),
+                    0
+                );
+                assert_eq!(graph.values, original.values);
+                assert_eq!(graph.checks, original.checks);
+                assert!(graph
+                    .proven_numeric_values_with_preserved_frame_reads(
+                        &nodes,
+                        |argument| argument == 1,
+                        |id| primitive_array_permission(&nodes, id),
+                        work
+                    )
+                    .iter()
+                    .all(Option::is_none));
+            }
+        }
+    }
 }

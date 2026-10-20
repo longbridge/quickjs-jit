@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 7272fe8..20d30b6 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -852,6 +852,7 @@
+@@ -928,6 +928,7 @@ typedef struct JSFunctionBytecode {
      uint64_t jit_function_id;
      uint64_t jit_generation;
      uint8_t jit_feedback_disabled;
@@ -9,7 +10,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  } JSFunctionBytecode;
  
-@@ -2892,6 +2893,7 @@
+@@ -3248,6 +3249,7 @@ int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function)
      old_generation = b->jit_generation;
      b->jit_generation = ++ctx->rt->jit_next_generation;
      b->jit_feedback_disabled = 0;
@@ -17,7 +18,7 @@ diff --git a/quickjs.c b/quickjs.c
      qjsjit_retire_identity(ctx->rt, b->jit_function_id, old_generation);
      return JS_JIT_BACKEND_OK;
  }
-@@ -18691,12 +18693,18 @@
+@@ -19175,12 +19177,18 @@ static bool qjsjit_valid_pc(JSFunctionBytecode *b, const uint8_t *pc,
  
      if (value < start || (allow_end ? value > end : value >= end))
          return false;

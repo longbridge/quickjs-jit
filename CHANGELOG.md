@@ -7,10 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## quickjs-jit 0.14.1 - 2026-10-20
+
+### Fixed
+
+- `quickjs-jit-sys` packages `vendor/wasi-libc` and `wasm-shim`, so the published crate builds
+  for `wasm32-unknown-unknown` (0.14.0's package left them out and its build script stopped).
+
 ### Breaking Changes
+
+- `quickjs-jit-stdlib` vendors only LLRT's `buffer`, `crypto`, `path`, `url` and `zlib`
+  modules and the LLRT libraries they need (17 of 42 crates). Its features are
+  `buffer`, `crypto`, `path`, `url`, `zlib` (the defaults, as before) and `zlib-zstd`;
+  0.14.0's other features (`fetch`, `fs`, `http`, `os`, the backend selectors such as
+  `crypto-ring`, ...) and their modules are removed. Hosts using the defaults and
+  `zlib-zstd` need no change. The other crates are unchanged and keep the shared
+  version.
+
+## quickjs-jit 0.14.0 - 2026-10-20
+
+All quickjs-jit crates share this version and pin each other exactly. The entries below
+cover quickjs-jit since 0.12.11; the merged upstream changes are listed under rquickjs
+0.13.0 and 0.14.0 below.
+
+### Breaking Changes
+
+- Based on rquickjs 0.14.0 and quickjs-ng `0fdea21` (0.16.2+) instead of rquickjs 0.12.2 and
+  quickjs-ng 0.15.1, with rquickjs 0.14's API (`ArrayBuffer::as_raw` returns `NonNull<[u8]>`,
+  unsafe `as_bytes` / `as_slice`, the resizable `JS_NewArrayBuffer`, `wasm32-unknown-unknown`).
+  QuickJS bytecode format 28 instead of 26. The JIT patch set is rebased onto it.
 
 ### Added
 
+- `quickjs-jit-stdlib` vendors LLRT's standard modules and libraries (revision `d9fd873e`) as
+  source, one Cargo feature per module, pure-Rust backends by default and zstd behind
+  `zlib-zstd`; it is published with the other crates. Buffer storage and every byte array the
+  modules hand to JS are allocated by QuickJS, so `Runtime::set_memory_limit` bounds them;
+  PBKDF2 work (iterations times output blocks) is capped at 10,000,000.
+- `scripts/regen-quickjs-patches.py` regenerates `sys/patches` and their fingerprints from a
+  branch of `sys/quickjs`; `make publish-dry-run` verifies the whole release set.
 - Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
 - JIT M2: Tier 1 and Tier 2 now support the remaining comparison, bitwise, shift, `%`, unary
   numeric, constant, stack-shuffle, tail-call, `null`, and empty-string opcodes; the JIT ABI
@@ -39,6 +74,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale local workload checksums.
 
 ### Security
+
+## [0.14.0] - 2026-09-17
+
+### Breaking Changes
+
+- Removed unused trait `StaticJsFunction`.
+
+### Added
+
+- Added `Exception::throw_dom`, `PredefinedAtom::DOMException`, and `intrinsic::DOMException`.
+- Support for `wasm32-unknown-unknown` from [@mrchantey]
+
+### Fixed
+
+- Fixed `Params::is_constructor` to return the suggested value instead of `false`.
+- Fixed `ExoticMethod` to fix type checking for `&Ctx`
+- Fixed `Ctx::execute_pending_job` treating a job that threw the same as one that ran successfully, leaving the exception pending on the runtime instead of clearing it.
+- Fixed `Object::instance_of` leaving a pending exception on the runtime when the checked object isn't an instance of the given Rust class.
+
+## [0.13.0] - 2026-09-07
+
+### Breaking Changes
+
+- `TypedArray::as_bytes`, `ArrayBuffer::as_bytes` and `ArrayBuffer::as_slice` are now `unsafe fn`, and the unsound safe `AsRef<[T]>` impls for `TypedArray` and `ArrayBuffer` were removed in favor of the new `unsafe fn TypedArray::as_slice` #[736](https://github.com/DelSkayn/rquickjs/issues/736)
+- `TypedArray::as_raw` and `ArrayBuffer::as_raw` now return `NonNull<[u8]>` slice pointers, and the unnameable `RawArrayBuffer` type has been removed.
+
+### Added
+
+- Add pre-generated bindings for `riscv64gc-unknown-linux-gnu` and `riscv64a23-unknown-linux-gnu`
+- `ArrayBuffer::new`-backed buffers now support `ArrayBuffer.prototype.transfer` to a different length instead of always failing
+
+### Fixed
+
+- Fixed deadlock when dropping a `Context` while the runtime lock is held under the `parallel` feature
+- Updated `sys/quickjs` to `2c620e4` (quickjs-ng 0.16.2) and adapted `ArrayBuffer` callbacks to the new `JSReallocArrayBufferDataFunc` contract
+- Removed stale `RefCountHeader` cast in `drop_context` (field moved to allocator header in quickjs-ng)
+
+### Security
+
+- Fixed `TypedArray`/`ArrayBuffer` byte-slice accessors returning a safe `&[u8]` that could be mutated, detached or reallocated by JS running while the slice was still borrowed #[736](https://github.com/DelSkayn/rquickjs/issues/736)
 
 ## [0.12.2] - 2026-07-27
 

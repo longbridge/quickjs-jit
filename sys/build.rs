@@ -509,12 +509,29 @@ fn main() {
         }
     }
 
-    if target_os == "wasi" {
+    // wasm32-unknown-unknown takes the same emscripten-flavoured config as
+    // wasi, but ships no libc: headers and the prebuilt libc.a come from
+    // vendor/wasi-libc (see scripts/vendor-wasm-libc.sh), and the OS tail
+    // (clock, stdio, abort) is supplied by wasm-shim/shim.c.
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let is_wasm_unknown = target_arch == "wasm32" && target_os == "unknown";
+
+    if target_os == "wasi" || is_wasm_unknown {
         // pretend we're emscripten - there are already ifdefs that match
         // also, wasi doesn't ahve FE_DOWNWARD or FE_UPWARD
         defines.push(("EMSCRIPTEN".into(), Some("1")));
         defines.push(("FE_DOWNWARD".into(), Some("0")));
         defines.push(("FE_UPWARD".into(), Some("0")));
+    }
+
+    if is_wasm_unknown {
+        println!("cargo:rerun-if-changed=vendor/wasi-libc/include");
+        let vendor_include = Path::new("vendor/wasi-libc/include")
+            .canonicalize()
+            .expect("vendor/wasi-libc/include is missing; run scripts/vendor-wasm-libc.sh");
+        let flag = format!("-isystem{}", vendor_include.display());
+        builder.flag(&flag);
+        bindgen_cflags.push(flag);
     }
 
     for file in source_files
@@ -569,7 +586,27 @@ fn main() {
         builder.file(out_dir.join(src));
     }
 
+    if is_wasm_unknown {
+        // The shim goes into libquickjs.a rather than its own archive: lld
+        // resolves an archive to a fixpoint, so every definition here is
+        // picked up before libc.a is reached and the matching libc.a member
+        // (and whatever WASI import it would have needed) is never
+        // extracted.
+        println!("cargo:rerun-if-changed=wasm-shim/shim.c");
+        builder.file("wasm-shim/shim.c");
+    }
+
     builder.compile("libquickjs.a");
+
+    // Emitted after `compile` so `-lquickjs` precedes `-lc` on the link line.
+    if is_wasm_unknown {
+        println!("cargo:rerun-if-changed=vendor/wasi-libc/lib/libc.a");
+        let vendor_lib = Path::new("vendor/wasi-libc/lib")
+            .canonicalize()
+            .expect("vendor/wasi-libc/lib is missing; run scripts/vendor-wasm-libc.sh");
+        println!("cargo:rustc-link-search=native={}", vendor_lib.display());
+        println!("cargo:rustc-link-lib=static=c");
+    }
 }
 
 fn feature_to_cargo(name: impl AsRef<str>) -> String {
@@ -617,6 +654,77 @@ where
         ),
     )
     .unwrap();
+}
+
+/// bindgen numbers anonymous enums (`_bindgen_ty_N`) in the order it meets them,
+/// system headers included, so the JIT ABI's anonymous enums would be named
+/// differently per target: name them after their first constant instead.
+#[cfg(feature = "bindgen")]
+fn name_anonymous_jit_enums(bindings: &str) -> String {
+    let mut out = bindings.to_owned();
+    for line in bindings.lines() {
+        let Some(anonymous) = line
+            .strip_prefix("pub type ")
+            .and_then(|rest| rest.split_once(" = "))
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("_bindgen_ty_"))
+        else {
+            continue;
+        };
+        let typed = format!(": {anonymous} = ");
+        let first = bindings
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .find_map(|line| line.split_once(&typed).map(|(constant, _)| constant));
+        if let Some(first) = first.filter(|first| first.starts_with("JS_JIT_")) {
+            let name = format!("JSJitAnonymousEnum_{first}");
+            out = out.replace(&typed, &format!(": {name} = ")).replace(
+                &format!("pub type {anonymous} = "),
+                &format!("pub type {name} = "),
+            );
+        }
+    }
+    out
+}
+
+/// MSVC gives every C enum the type `int`, other compilers give an enum without
+/// negative values `unsigned int`: declare those enums as the latter on MSVC too,
+/// so every bundled target has the same Rust declarations (the values and the
+/// size are the same).
+#[cfg(feature = "bindgen")]
+fn unsigned_enums(bindings: &str) -> String {
+    let signed: Vec<&str> = bindings
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("pub type ")?
+                .strip_suffix(" = ::core::ffi::c_int;")
+        })
+        .collect();
+    let mut out = bindings.to_owned();
+    for name in signed {
+        let typed = format!(": {name} = ");
+        let mut values = bindings
+            .lines()
+            .filter(|line| line.starts_with("pub const ") && line.contains(&typed))
+            .map(|line| {
+                line.rsplit(" = ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(';')
+            });
+        let mut any = false;
+        if values.all(|value| {
+            any = true;
+            !value.starts_with('-')
+        }) && any
+        {
+            out = out.replace(
+                &format!("pub type {name} = ::core::ffi::c_int;"),
+                &format!("pub type {name} = ::core::ffi::c_uint;"),
+            );
+        }
+    }
+    out
 }
 
 #[cfg(feature = "bindgen")]
@@ -694,9 +802,11 @@ where
 
     let bindings_file = out_dir.join("bindings.rs");
 
-    bindings
-        .write_to_file(&bindings_file)
-        .expect("Couldn't write bindings");
+    let mut text = name_anonymous_jit_enums(&bindings.to_string());
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        text = unsigned_enums(&text);
+    }
+    fs::write(&bindings_file, text).expect("Couldn't write bindings");
 
     // Special case to support bundled bindings
     if env::var("CARGO_FEATURE_UPDATE_BINDINGS").is_ok() {

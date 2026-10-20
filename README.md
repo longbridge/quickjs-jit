@@ -5,18 +5,21 @@ package is named `quickjs-jit`, while its Rust library name remains `rquickjs`
 for source compatibility:
 
 ```toml
-rquickjs = { package = "quickjs-jit", version = "=0.12.2" }
-rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.12.2", features = ["compiler"] }
+rquickjs = { package = "quickjs-jit", version = "=0.14.1" }
+rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.1", features = ["compiler"] }
+# Optional: LLRT's buffer, crypto, path, url and zlib modules
+quickjs-jit-stdlib = { version = "=0.14.1" }
 ```
 
-The distribution and JIT runtime must use the same patch version. The JIT ABI
-includes internal QuickJS structure layouts, so mixing runtime, core, or sys
-crate patch versions may compile but will be rejected during JIT startup.
-`quickjs-jit-runtime` 0.12.3 has not been published yet. Consumers testing the
-0.12.3 source must pin the distribution and runtime to the same Git revision
-and use Cargo source patches from that revision for both `quickjs-jit-core` and
-`quickjs-jit-sys`. Do not combine the published 0.12.2 runtime with 0.12.3
-core or sys crates.
+quickjs-jit 0.14 is based on rquickjs 0.14.0 and quickjs-ng `0fdea21`
+(0.16.2+). All crates of a release share one version and pin each other
+exactly. The JIT ABI includes internal QuickJS structure layouts, so mixing
+runtime, core, or sys crates from different releases may compile but is
+rejected during JIT startup.
+
+The optional [`quickjs-jit-stdlib`](stdlib/README.md) package vendors LLRT's `buffer`,
+`crypto`, `path`, `url` and `zlib` modules as source, one Cargo feature per module, on
+the same VM.
 
 [![github](https://img.shields.io/badge/github-longbridge/rquickjs-8da0cb.svg?style=for-the-badge&logo=github)](https://github.com/longbridge/rquickjs)
 [![crates](https://img.shields.io/crates/v/quickjs-jit.svg?style=for-the-badge&color=fc8d62&logo=rust)](https://crates.io/crates/quickjs-jit)
@@ -1189,7 +1192,58 @@ See below for a list of supported platforms.
 | aarch64-apple-darwin           |          ✅          |     ❌     |            ✅            |
 | wasm32-wasip1                  |          ✅          |     ✅     |            ✅            |
 | wasm32-wasip2                  |          ✅          |     ✅     |            ✅            |
+| wasm32-unknown-unknown         |          ✅          |     ✅     |            ✅            |
 | other                          |          ❌          |     ❌     |         Unknown          |
+
+## wasm32-unknown-unknown
+
+`wasm32-unknown-unknown` is supported out of the box: add rquickjs as a dependency and build for the target. No feature flag, no extra crate, no wasi runtime.
+
+The target ships no libc, so `rquickjs-sys` supplies the whole OS tail itself:
+
+- quickjs is compiled with the same `EMSCRIPTEN` / `FE_DOWNWARD` / `FE_UPWARD` defines already used for wasi, against a vendored subset of wasi-libc's headers.
+- the pure-compute members of wasi-libc (`snprintf`, `strtod`, libm, dlmalloc) are linked statically from a vendored `libc.a`.
+- `sys/wasm-shim/shim.c` replaces every member that would otherwise reach for the host: the clock, `localtime_r`, `abort`/`__assert_fail`, and the stdio backends.
+
+The result imports **exactly one** host function and nothing else.
+
+### The `__rquickjs_host_now_us` import
+
+The embedder must supply a single import, `env.__rquickjs_host_now_us`, returning microseconds since the unix epoch as an `f64`. It backs `Date.now()`, `new Date()` and `performance`-adjacent internals.
+
+```js
+const instance = new WebAssembly.Instance(module, {
+  env: { __rquickjs_host_now_us: () => Date.now() * 1000 },
+});
+```
+
+Time zone data does not exist here, so scripts observe UTC: `getTimezoneOffset()` is always `0`.
+
+### `Runtime::set_max_stack_size` is mandatory
+
+`JS_DEFAULT_STACK_SIZE` is 1MB, which is exactly the size of the wasm shadow stack. The default computation of `stack_top - 1MB` therefore wraps, and stack-overflow detection is silently lost: deep recursion becomes a hard trap instead of a catchable `RangeError`. Always set an explicit limit:
+
+```rust
+let runtime = Runtime::new()?;
+runtime.set_max_stack_size(256 * 1024);
+```
+
+(Defining `__wasi__` would also stop the wrap, but quickjs's `__wasi__` path pins `stack_limit = 0`, disabling stack checking outright. That is why the header is patched instead.)
+
+### The vendored libc
+
+Rather than downloading a wasi-sysroot at build time, `sys/vendor/wasi-libc/` commits the subset actually needed: the prebuilt `libc.a` from the [wasi-sdk-24 release](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-24), plus the headers required to compile quickjs against it. It's populated (and updated, after bumping the pinned wasi-sdk version in the script) by `scripts/vendor-wasm-libc.sh`; see `sys/vendor/wasi-libc/NOTICE.md` for provenance and licensing.
+
+`wasi/api.h` guards itself with `#ifndef __wasi__` / `#error`, so the vendoring script writes a copy with that one `#error` commented out. The rest of the vendored headers are unmodified.
+
+### Testing
+
+`wasm-test/` builds the safe API as a cdylib and `wasm-test/runner.ts` drives a battery through it under [deno](https://deno.com), asserting the import list along the way:
+
+```sh
+cargo build --manifest-path wasm-test/Cargo.toml --release --target wasm32-unknown-unknown
+deno run --allow-read wasm-test/runner.ts
+```
 
 ## License
 
