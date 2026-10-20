@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## quickjs-jit 0.14.1 - 2026-10-20
+
+### Breaking Changes
+
+- `quickjs-jit-stdlib` vendors only LLRT's `buffer`, `crypto`, `path`, `url` and `zlib`
+  modules and the LLRT libraries they need (17 of 42 crates). Its features are
+  `buffer`, `crypto`, `path`, `url`, `zlib` (the defaults, as before) and `zlib-zstd`;
+  0.14.0's other features (`fetch`, `fs`, `http`, `os`, the backend selectors such as
+  `crypto-ring`, ...) and their modules are removed. Hosts using the defaults and
+  `zlib-zstd` need no change. The other crates are unchanged and keep the shared
+  version.
+
 ## quickjs-jit 0.14.0 - 2026-10-20
 
 All quickjs-jit crates share this version and pin each other exactly. The entries below

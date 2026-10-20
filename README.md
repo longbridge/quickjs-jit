@@ -5,10 +5,10 @@ package is named `quickjs-jit`, while its Rust library name remains `rquickjs`
 for source compatibility:
 
 ```toml
-rquickjs = { package = "quickjs-jit", version = "=0.14.0" }
-rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.0", features = ["compiler"] }
+rquickjs = { package = "quickjs-jit", version = "=0.14.1" }
+rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.1", features = ["compiler"] }
 # Optional: LLRT's buffer, crypto, path, url and zlib modules
-quickjs-jit-stdlib = { version = "=0.14.0" }
+quickjs-jit-stdlib = { version = "=0.14.1" }
 ```
 
 quickjs-jit 0.14 is based on rquickjs 0.14.0 and quickjs-ng `0fdea21`
