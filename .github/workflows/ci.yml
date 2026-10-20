@@ -355,6 +355,18 @@ jobs:
         run: cargo build --manifest-path wasm-test/Cargo.toml --release --target wasm32-unknown-unknown
       - name: Test
         run: deno run --allow-read wasm-test/runner.ts
+      - name: Build the packaged sys crate for wasm32
+        # What crates.io users get: the package's own file list, outside the
+        # workspace (0.14.0 shipped without the vendored wasi-libc and shim).
+        shell: bash
+        run: |
+          cargo package -p quickjs-jit-sys --no-verify
+          version=$(cargo pkgid -p quickjs-jit-sys | sed 's/.*[@#]//')
+          dir="$RUNNER_TEMP/package-check"
+          mkdir -p "$dir"
+          tar xzf "target/package/quickjs-jit-sys-$version.crate" -C "$dir"
+          cd "$dir/quickjs-jit-sys-$version"
+          CARGO_TARGET_DIR="$dir/target" cargo build --target wasm32-unknown-unknown
 
   test:
     needs:
