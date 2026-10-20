@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## quickjs-jit 0.14.1 - 2026-10-20
 
+### Fixed
+
+- `quickjs-jit-sys` packages `vendor/wasi-libc` and `wasm-shim`, so the published crate builds
+  for `wasm32-unknown-unknown` (0.14.0's package left them out and its build script stopped).
+
 ### Breaking Changes
 
 - `quickjs-jit-stdlib` vendors only LLRT's `buffer`, `crypto`, `path`, `url` and `zlib`

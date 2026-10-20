@@ -41,6 +41,8 @@ include = [
     "tests/jit_patch.rs",
     "tests/inline_recovery.rs",
     "tests/typed_array_guard.rs",
+    "vendor/wasi-libc/**",
+    "wasm-shim/**",
 ]
 
 [lib]
