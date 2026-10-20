@@ -25,7 +25,7 @@ use super::{
     to_name_and_maybe_object, EllipticCurve,
 };
 
-#[cfg(all(feature = "crypto-_subtle-full", feature = "crypto-openssl"))]
+#[cfg(all(feature = "crypto", any()))]
 fn provider_supports_generate_key(algorithm: &KeyAlgorithm) -> bool {
     if let KeyAlgorithm::Rsa { modulus_length, .. } = algorithm {
         return *modulus_length >= 512;
@@ -33,7 +33,7 @@ fn provider_supports_generate_key(algorithm: &KeyAlgorithm) -> bool {
     true
 }
 
-#[cfg(all(feature = "crypto-_subtle-full", not(feature = "crypto-openssl")))]
+#[cfg(all(feature = "crypto", not(any())))]
 fn provider_supports_generate_key(algorithm: &KeyAlgorithm) -> bool {
     if let KeyAlgorithm::Rsa { modulus_length, .. } = algorithm {
         return *modulus_length >= 1024;
@@ -41,46 +41,46 @@ fn provider_supports_generate_key(algorithm: &KeyAlgorithm) -> bool {
     true
 }
 
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 fn provider_supports_generate_key(algorithm: &KeyAlgorithm) -> bool {
     match algorithm {
         KeyAlgorithm::ChaCha20Poly1305
         | KeyAlgorithm::MlDsa(_)
         | KeyAlgorithm::MlKem(_)
         | KeyAlgorithm::HybridKem(_) => true,
-        #[cfg(feature = "crypto-graviola")]
+        #[cfg(any())]
         KeyAlgorithm::Aes { length, .. } => matches!(length, 128 | 256),
-        #[cfg(feature = "crypto-graviola")]
+        #[cfg(any())]
         KeyAlgorithm::Hmac { .. } => true,
         _ => false,
     }
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn provider_supports_sign(_algorithm: &SigningAlgorithm) -> bool {
     true
 }
 
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 fn provider_supports_sign(algorithm: &SigningAlgorithm) -> bool {
     match algorithm {
         SigningAlgorithm::MlDsa { .. } => true,
-        #[cfg(feature = "crypto-graviola")]
+        #[cfg(any())]
         SigningAlgorithm::Hmac => true,
         _ => false,
     }
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn provider_supports_encryption(_algorithm: &EncryptionAlgorithm) -> bool {
     true
 }
 
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 fn provider_supports_encryption(algorithm: &EncryptionAlgorithm) -> bool {
     match algorithm {
         EncryptionAlgorithm::ChaCha20Poly1305 { .. } => true,
-        #[cfg(feature = "crypto-graviola")]
+        #[cfg(any())]
         EncryptionAlgorithm::AesGcm { tag_length, .. } => *tag_length == 128,
         _ => false,
     }
@@ -121,12 +121,12 @@ fn supports_generate_key<'js>(ctx: &Ctx<'js>, algorithm: Value<'js>) -> Result<b
 
 fn supports_import_key<'js>(ctx: &Ctx<'js>, algorithm: Value<'js>) -> Result<bool> {
     normalize_key_algorithm_with_synthetic_usage(ctx, KeyAlgorithmMode::ValidateImport, algorithm)?;
-    Ok(cfg!(feature = "crypto-_subtle-full"))
+    Ok(cfg!(feature = "crypto"))
 }
 
 fn supports_export_key<'js>(ctx: &Ctx<'js>, algorithm: Value<'js>) -> Result<bool> {
     let name = algorithm_name(ctx, algorithm)?;
-    Ok(cfg!(feature = "crypto-_subtle-full")
+    Ok(cfg!(feature = "crypto")
         && synthetic_key_usage(&name).is_some()
         && !matches!(name.as_str(), "HKDF" | "PBKDF2"))
 }
@@ -170,7 +170,7 @@ fn supports_wrap<'js>(
         }
     };
     if directly_supported {
-        return Ok(cfg!(feature = "crypto-_subtle-full"));
+        return Ok(cfg!(feature = "crypto"));
     }
 
     let normalized = EncryptionAlgorithm::from_js(ctx, algorithm)?;
@@ -183,7 +183,7 @@ fn supports_wrap<'js>(
         EncryptionAlgorithm::AesKw => false,
         _ => true,
     };
-    if !valid_parameters || !cfg!(feature = "crypto-_subtle-full") {
+    if !valid_parameters || !cfg!(feature = "crypto") {
         return Ok(false);
     }
     Ok(true)
@@ -232,7 +232,7 @@ fn supports_derive_bits_with_length<'js>(
     length: Option<u32>,
 ) -> Result<bool> {
     let normalized = DeriveAlgorithm::from_js(ctx, algorithm)?;
-    Ok(cfg!(feature = "crypto-_subtle-full")
+    Ok(cfg!(feature = "crypto")
         && match normalized {
             DeriveAlgorithm::X25519 { .. } => length.is_none_or(|length| length <= 256),
             DeriveAlgorithm::Ecdh {
@@ -328,7 +328,7 @@ fn supports_get_public_key(name: &str) -> bool {
         || MlKemVariant::try_from(name).is_ok()
         || HybridKemVariant::try_from(name).is_ok();
     modern
-        || cfg!(feature = "crypto-_subtle-full")
+        || cfg!(feature = "crypto")
             && matches!(
                 name,
                 "ECDH"
@@ -399,12 +399,12 @@ pub fn subtle_supports<'js>(
     )
 }
 
-#[cfg(all(test, any(feature = "crypto-ring", feature = "crypto-graviola")))]
+#[cfg(all(test, any(any(), any())))]
 mod tests {
     use super::*;
     use crate::crypto::subtle::key_algorithm::AesAlgorithm;
 
-    #[cfg(feature = "crypto-ring")]
+    #[cfg(any())]
     #[test]
     fn pure_ring_reports_only_provider_independent_key_operations() {
         assert!(provider_supports_generate_key(&KeyAlgorithm::MlDsa(
@@ -423,7 +423,7 @@ mod tests {
         assert!(!supports_get_public_key("ECDSA"));
     }
 
-    #[cfg(feature = "crypto-graviola")]
+    #[cfg(any())]
     #[test]
     fn pure_graviola_reports_its_partial_symmetric_support() {
         assert!(provider_supports_generate_key(&KeyAlgorithm::Aes {

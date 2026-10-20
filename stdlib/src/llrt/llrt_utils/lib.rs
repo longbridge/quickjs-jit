@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod any_of;
 pub mod array_buffer;
-#[cfg(feature = "utils-bytearray-buffer")]
+#[cfg(any())]
 pub mod bytearray_buffer;
 pub mod bytes;
 pub mod class;
@@ -12,7 +12,7 @@ pub mod clone;
 pub mod ctx;
 pub mod error;
 pub mod error_messages;
-#[cfg(feature = "utils-fs")]
+#[cfg(any())]
 pub mod fs;
 pub mod hash;
 pub mod io;

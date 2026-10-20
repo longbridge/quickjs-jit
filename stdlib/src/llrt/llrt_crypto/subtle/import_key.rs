@@ -3,21 +3,21 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 use crate::exceptions::DOMException;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use crate::utils::bytes::ObjectBytes;
 use crate::utils::object::ObjectExt;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use rquickjs::FromJs;
 use rquickjs::{Array, Class, Ctx, Result, Value};
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use super::key_algorithm::{key_format_not_supported_error, KeyFormat};
 use super::{
     crypto_key::{CryptoKey, KeyKind},
     key_algorithm::{KeyAlgorithm, KeyAlgorithmMode, KeyAlgorithmWithUsages, KeyFormatData},
 };
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub async fn subtle_import_key<'js>(
     ctx: Ctx<'js>,
     format: Value<'js>,
@@ -107,7 +107,7 @@ pub fn import_key<'js>(
     )
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_import_algorithm<'js>(
     ctx: &Ctx<'js>,
     format: &KeyFormat,

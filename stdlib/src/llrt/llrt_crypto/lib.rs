@@ -4,22 +4,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Compile-time checks for conflicting crypto features
-#[cfg(all(feature = "crypto-rust", feature = "crypto-openssl"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-openssl` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-rust", feature = "crypto-ring"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-ring` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-rust", feature = "crypto-graviola"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-graviola` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-openssl", feature = "crypto-ring"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-openssl` and `crypto-ring` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-openssl", feature = "crypto-graviola"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-openssl` and `crypto-graviola` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-ring", feature = "crypto-graviola"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-ring` and `crypto-graviola` are mutually exclusive");
 
 mod crc32;

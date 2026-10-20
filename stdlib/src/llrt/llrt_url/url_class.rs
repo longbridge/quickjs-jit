@@ -287,7 +287,7 @@ impl<'js> URL<'js> {
     }
 
     /// Validate that a string parses as a URL without constructing a JS
-    /// instance. Used by callers (e.g. `crate::fetch`) that just need to know
+    /// instance. Used by callers (e.g. `llrt_fetch`) that just need to know
     /// whether a user-supplied string is a valid URL.
     pub fn is_valid(input: &str) -> bool {
         input.parse::<Url>().is_ok()

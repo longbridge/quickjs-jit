@@ -10,19 +10,19 @@ mod digest;
 mod encapsulation;
 mod encryption;
 mod encryption_algorithm;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 mod export_key;
 mod generate_key;
 mod get_public_key;
 mod import_key;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 mod key_algorithm;
 mod sign;
 mod sign_algorithm;
 mod supports;
 mod util;
 mod verify;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 mod wrapping;
 
 pub use crypto_key::CryptoKey;
@@ -35,26 +35,26 @@ pub use encapsulation::{
 };
 pub use encryption::subtle_decrypt;
 pub use encryption::subtle_encrypt;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub use export_key::subtle_export_key;
 pub use generate_key::subtle_generate_key;
 pub use get_public_key::subtle_get_public_key;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub use import_key::subtle_import_key;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use key_algorithm::KeyAlgorithm;
 pub use sign::subtle_sign;
 use supports::subtle_supports;
 pub use verify::subtle_verify;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub use wrapping::subtle_unwrap_key;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub use wrapping::subtle_wrap_key;
 
 // Stub implementations for limited crypto providers (no _subtle-full)
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 mod key_algorithm;
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 use key_algorithm::KeyAlgorithm;
 
 use crate::exceptions::DOMException;
@@ -298,13 +298,13 @@ pub fn algorithm_invalid_access_error<T>(ctx: &Ctx<'_>, expected_algorithm: &str
 }
 
 // Stub implementations for providers without _subtle-full
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 mod stubs;
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 pub use stubs::subtle_export_key;
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 pub use stubs::subtle_import_key;
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 pub use stubs::subtle_unwrap_key;
-#[cfg(not(feature = "crypto-_subtle-full"))]
+#[cfg(not(feature = "crypto"))]
 pub use stubs::subtle_wrap_key;

@@ -505,13 +505,13 @@ impl CryptoProvider for GraviolaProvider {
 }
 
 // Hybrid types for graviola-rust: Graviola for SHA256/384/512, RustCrypto for MD5/SHA1
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 pub enum GraviolaRustDigest {
     Graviola(GraviolaDigest),
     Rust(super::rust::RustDigest),
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 impl GraviolaRustDigest {
     pub fn new(algorithm: HashAlgorithm) -> Self {
         match algorithm {
@@ -523,7 +523,7 @@ impl GraviolaRustDigest {
     }
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 impl SimpleDigest for GraviolaRustDigest {
     fn update(&mut self, data: &[u8]) {
         match self {
@@ -539,13 +539,13 @@ impl SimpleDigest for GraviolaRustDigest {
     }
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 pub enum GraviolaRustHmac {
     Graviola(GraviolaHmac),
     Rust(super::rust::RustHmac),
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 impl GraviolaRustHmac {
     pub fn new(algorithm: HashAlgorithm, key: &[u8]) -> Self {
         match algorithm {
@@ -557,7 +557,7 @@ impl GraviolaRustHmac {
     }
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 impl HmacProvider for GraviolaRustHmac {
     fn update(&mut self, data: &[u8]) {
         match self {

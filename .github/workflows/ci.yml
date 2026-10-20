@@ -169,14 +169,18 @@ jobs:
           python3 scripts/import-stdlib.py ../llrt
           git diff --exit-code -- stdlib
       - name: Clippy
-        run: cargo clippy -p quickjs-jit-stdlib --all-targets -- -D warnings
+        run: cargo clippy -p quickjs-jit-stdlib --all-targets --features zlib-zstd -- -D warnings
       - name: Test default modules
         run: cargo test -p quickjs-jit-stdlib
-      - name: Test every module
+      - name: Test with zstd
+        run: cargo test -p quickjs-jit-stdlib --features zlib-zstd
+      - name: Build each module alone
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: >-
-          cargo test -p quickjs-jit-stdlib --features
-          abort,assert,async_hooks,buffer,child_process,compression,console,context,crypto,dgram,dns,dns_cache,encoding,events,exceptions,fetch,fs,hooking,http,intl,json,logging,navigator,net,numbers,os,path,perf_hooks,process,stream,stream_web,string_decoder,temporal,timers,tls,tty,url,util,utils,zlib,zlib-zstd
+        run: |
+          for feature in buffer crypto path url zlib zlib-zstd; do
+            cargo check -p quickjs-jit-stdlib --no-default-features --features "$feature"
+          done
 
   jit-semantics:
     runs-on: ubuntu-latest

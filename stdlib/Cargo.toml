@@ -17,188 +17,20 @@ features = ["buffer", "crypto", "path", "url", "zlib"]
 [features]
 default = ["buffer", "crypto", "path", "url", "zlib"]
 parallel = ["rquickjs/parallel"]
-_abort = ["_utils", "async_hooks", "events", "exceptions"]
-_assert = ["_utils"]
-_async_hooks = ["_utils", "dep:tracing", "hooking"]
-_buffer = ["_utils", "dep:itoa", "dep:ryu", "encoding", "rquickjs/futures", "stream_web"]
-_child_process = ["_utils", "buffer", "context", "dep:itoa", "dep:libc", "dep:tokio", "events", "stream", "tokio/process"]
-_compression = []
-_console = ["_utils", "logging"]
-_context = ["_utils", "dep:tokio", "dep:tracing", "rquickjs/futures", "tokio/sync"]
-_crypto = ["_utils", "buffer", "context", "dep:crc32c", "dep:crc32fast", "dep:ctutils", "dep:md-5", "dep:once_cell", "dep:rand", "encoding", "exceptions", "once_cell/std", "rand/std", "rand/std_rng", "rand/thread_rng"]
-_dgram = ["_utils", "buffer", "context", "dep:itoa", "dep:tokio", "dep:tracing", "events", "tokio/macros", "tokio/net"]
-_dns = ["_utils", "context", "dep:either", "dep:tokio", "hooking", "rquickjs/either", "rquickjs/macro", "tokio/net"]
-_dns_cache = ["_utils", "context", "dep:hyper-util", "dep:quick_cache", "dep:tokio", "dep:tower-service", "hyper-util/client", "hyper-util/client-legacy", "tokio/net"]
-_encoding = ["base64-simd/alloc", "dep:base64-simd", "dep:hex-simd", "dep:memchr", "dep:phf", "hex-simd/alloc", "phf/macros"]
-_events = ["_utils", "dep:tracing"]
-_exceptions = ["_utils"]
-_fetch = ["_compression", "_http", "_utils", "abort", "buffer", "context", "dep:bytes", "dep:either", "dep:http-body", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:itoa", "dep:once_cell", "dep:percent-encoding", "dep:pin-project-lite", "dep:rand", "dep:sha2", "dep:simdutf8", "dep:tokio", "dep:tracing", "dep:url", "encoding", "hyper-util/client-legacy", "hyper/client", "json", "once_cell/std", "percent-encoding/std", "rand/std", "rand/thread_rng", "simdutf8/aarch64_neon", "simdutf8/std", "stream_web", "tokio/macros", "tokio/sync", "url", "url/std"]
-_fs = ["_utils", "buffer", "dep:either", "dep:junction", "dep:rand", "dep:tokio", "encoding", "path", "rand/alloc", "rand/thread_rng", "rquickjs/either", "tokio/fs", "tokio/io-util", "tokio/rt", "utils-fs"]
-_hooking = ["_utils", "dep:once_cell", "once_cell/std"]
-_http = ["_tls", "_utils", "dep:bytes", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:once_cell", "dns_cache", "hyper-util/client-legacy", "hyper-util/tokio", "hyper/client", "once_cell/std", "rquickjs/either", "rquickjs/std"]
-_intl = ["dep:itoa", "dep:jiff", "utils"]
-_json = ["_utils", "dep:itoa", "dep:ryu", "dep:simd-json", "simd-json/big-int-as-float"]
-_logging = ["_utils", "context", "dep:itoa", "dep:ryu", "encoding", "json", "numbers"]
-_navigator = []
-_net = ["_utils", "buffer", "context", "dep:itoa", "dep:tokio", "dep:tracing", "events", "stream", "tokio/net"]
-_numbers = ["_utils", "dep:itoa", "dep:ryu"]
-_os = ["_utils", "dep:home", "dep:libc", "dep:num_cpus", "dep:once_cell", "dep:uzers", "dep:whoami", "dep:windows-registry", "dep:windows-result", "dep:windows-version", "once_cell/std", "rquickjs/std", "uzers/cache", "windows-registry/std", "windows-result/std"]
-_path = ["_utils", "dep:memchr", "rquickjs/std"]
-_perf_hooks = ["_utils", "events"]
-_process = ["_utils", "dep:libc", "rquickjs/std"]
-_stream = ["_utils", "buffer", "context", "dep:tokio", "events", "rquickjs/std", "tokio/io-util", "tokio/macros", "utils-bytearray-buffer"]
-_stream_web = ["_utils", "abort", "exceptions"]
-_string_decoder = ["_utils", "buffer", "encoding"]
-_temporal = ["_utils", "dep:jiff", "rquickjs/macro"]
-_timers = ["_utils", "context", "dep:once_cell", "dep:tokio", "hooking", "once_cell/std", "tokio/macros", "tokio/sync", "tokio/time"]
-_tls = ["dep:once_cell", "dep:tracing", "once_cell/std"]
-_tty = ["_utils", "dep:libc"]
-_url = ["_utils", "dep:url", "url/std"]
-_util = ["_utils", "context", "encoding", "logging", "stream_web"]
-_utils = ["dep:half", "dep:libc", "dep:memchr", "dep:simdutf8", "dep:tokio", "dep:tracing", "dep:windows-sys", "memchr/std", "rquickjs/half", "rquickjs/macro", "simdutf8/aarch64_neon", "simdutf8/std", "tokio/sync", "windows-sys/Win32_Foundation", "windows-sys/Win32_System_Threading"]
-_zlib = ["_compression", "_utils", "buffer", "context", "rquickjs/std"]
-abort = ["_abort", "abort-sleep-timers"]
-abort-llrt_timers = ["_abort", "timers"]
-abort-sleep-timers = ["_abort", "timers"]
-abort-sleep-tokio = ["_abort", "dep:tokio", "tokio/time"]
-abort-tokio = ["_abort", "dep:tokio", "tokio/time"]
-assert = ["_assert"]
-async_hooks = ["_async_hooks"]
-buffer = ["_buffer"]
-child_process = ["_child_process"]
-compression = ["_compression", "compression-brotli-rust", "compression-flate2-rust"]
-compression-all-c = ["_compression", "compression-brotli-c", "compression-flate2-c", "compression-zstd-c"]
-compression-all-rust = ["_compression", "compression-brotli-rust", "compression-flate2-rust", "compression-zstd-rust"]
-compression-brotli = ["_compression", "brotli/std", "dep:brotli"]
-compression-brotli-c = ["_compression", "dep:brotlic"]
-compression-brotli-rust = ["_compression", "brotli/std", "dep:brotli"]
-compression-brotlic = ["_compression", "dep:brotlic"]
-compression-flate2 = ["_compression", "dep:flate2"]
-compression-flate2-c = ["_compression", "dep:flate2", "flate2/zlib-ng"]
-compression-flate2-rust = ["_compression", "dep:flate2", "flate2/rust_backend"]
-compression-zstd = ["_compression", "dep:zstd"]
-compression-zstd-c = ["_compression", "dep:zstd"]
-compression-zstd-rust = ["_compression", "dep:zstd"]
-console = ["_console"]
-context = ["_context"]
-crypto = ["_crypto", "crypto-rust"]
-crypto-_modern-webcrypto = ["_crypto", "chacha20poly1305/alloc", "cshake/alloc", "dep:chacha20poly1305", "dep:cshake", "dep:keccak", "dep:p256", "dep:p384", "dep:sha3", "dep:shake", "dep:sponge-cursor", "dep:x25519-dalek", "p256/alloc", "p256/ecdh", "p256/ecdsa", "p256/pkcs8", "p384/alloc", "p384/ecdh", "p384/ecdsa", "p384/pkcs8", "x25519-dalek/static_secrets", "x25519-dalek/zeroize"]
-crypto-_rustcrypto = ["_crypto", "aes-gcm/alloc", "aes-gcm/hazmat", "aes-kw/oid", "cbc/alloc", "crypto-_subtle-full", "dep:aes", "dep:aes-gcm", "dep:aes-kw", "dep:cbc", "dep:ctr", "dep:ecdsa", "dep:elliptic-curve", "dep:hkdf", "dep:hmac", "dep:p256", "dep:p384", "dep:p521", "dep:pbkdf2", "dep:rsa", "dep:sha1", "elliptic-curve/alloc", "elliptic-curve/sec1", "p256/alloc", "p256/ecdh", "p256/ecdsa", "p256/pkcs8", "p384/alloc", "p384/ecdh", "p384/ecdsa", "p384/pkcs8", "p521/ecdh", "p521/ecdsa", "p521/pkcs8", "rsa/encoding", "rsa/sha2", "rsa/std", "sha1/oid"]
-crypto-_subtle-full = ["_crypto", "const-oid/db", "dep:const-oid", "dep:der", "dep:ed25519-dalek", "dep:pkcs8", "dep:spki", "dep:x25519-dalek", "der/alloc", "der/derive", "ed25519-dalek/alloc", "ed25519-dalek/pkcs8", "ed25519-dalek/rand_core", "json", "pkcs8/alloc", "spki/alloc", "x25519-dalek/static_secrets", "x25519-dalek/zeroize"]
-crypto-aes = ["_crypto", "dep:aes"]
-crypto-aes-gcm = ["_crypto", "aes-gcm/alloc", "aes-gcm/hazmat", "dep:aes-gcm"]
-crypto-aes-kw = ["_crypto", "aes-kw/oid", "dep:aes-kw"]
-crypto-cbc = ["_crypto", "cbc/alloc", "dep:cbc"]
-crypto-chacha20poly1305 = ["_crypto", "chacha20poly1305/alloc", "dep:chacha20poly1305"]
-crypto-const-oid = ["_crypto", "const-oid/db", "dep:const-oid"]
-crypto-cshake = ["_crypto", "cshake/alloc", "dep:cshake"]
-crypto-ctr = ["_crypto", "dep:ctr"]
-crypto-der = ["_crypto", "dep:der", "der/alloc", "der/derive"]
-crypto-ecdsa = ["_crypto", "dep:ecdsa"]
-crypto-ed25519-dalek = ["_crypto", "dep:ed25519-dalek", "ed25519-dalek/alloc", "ed25519-dalek/pkcs8", "ed25519-dalek/rand_core"]
-crypto-elliptic-curve = ["_crypto", "dep:elliptic-curve", "elliptic-curve/alloc", "elliptic-curve/sec1"]
-crypto-graviola = ["_crypto", "dep:graviola"]
-crypto-graviola-rust = ["_crypto", "crypto-_modern-webcrypto", "crypto-_rustcrypto", "dep:graviola"]
-crypto-hkdf = ["_crypto", "dep:hkdf"]
-crypto-hmac = ["_crypto", "dep:hmac"]
-crypto-keccak = ["_crypto", "dep:keccak"]
-crypto-llrt_json = ["_crypto", "json"]
-crypto-ml-dsa = ["_crypto", "dep:ml-dsa", "ml-dsa/alloc", "ml-dsa/pkcs8", "ml-dsa/rand_core"]
-crypto-ml-kem = ["_crypto", "dep:ml-kem", "ml-kem/alloc", "ml-kem/pkcs8"]
-crypto-openssl = ["_crypto", "dep:openssl"]
-crypto-openssl-sys = ["_crypto", "dep:openssl-sys"]
-crypto-p256 = ["_crypto", "dep:p256", "p256/alloc", "p256/ecdh", "p256/ecdsa", "p256/pkcs8"]
-crypto-p384 = ["_crypto", "dep:p384", "p384/alloc", "p384/ecdh", "p384/ecdsa", "p384/pkcs8"]
-crypto-p521 = ["_crypto", "dep:p521", "p521/ecdh", "p521/ecdsa", "p521/pkcs8"]
-crypto-pbkdf2 = ["_crypto", "dep:pbkdf2"]
-crypto-pkcs8 = ["_crypto", "dep:pkcs8", "pkcs8/alloc"]
-crypto-pqc = ["_crypto", "dep:ml-dsa", "dep:ml-kem", "ml-dsa/alloc", "ml-dsa/pkcs8", "ml-dsa/rand_core", "ml-kem/alloc", "ml-kem/pkcs8"]
-crypto-ring = ["_crypto", "dep:ring"]
-crypto-ring-rust = ["_crypto", "crypto-_modern-webcrypto", "crypto-_rustcrypto", "dep:ring"]
-crypto-rsa = ["_crypto", "dep:rsa", "rsa/encoding", "rsa/sha2", "rsa/std"]
-crypto-rust = ["_crypto", "crypto-_modern-webcrypto", "crypto-_rustcrypto"]
-crypto-sha1 = ["_crypto", "dep:sha1", "sha1/oid"]
-crypto-sha3 = ["_crypto", "dep:sha3"]
-crypto-shake = ["_crypto", "dep:shake"]
-crypto-spki = ["_crypto", "dep:spki", "spki/alloc"]
-crypto-sponge-cursor = ["_crypto", "dep:sponge-cursor"]
-crypto-x25519-dalek = ["_crypto", "dep:x25519-dalek", "x25519-dalek/static_secrets", "x25519-dalek/zeroize"]
-dgram = ["_dgram"]
-dns = ["_dns"]
-dns_cache = ["_dns_cache"]
-encoding = ["_encoding"]
-events = ["_events"]
-exceptions = ["_exceptions"]
-fetch = ["_fetch", "fetch-compression-rust", "fetch-http1", "fetch-http2", "fetch-tls-ring", "fetch-webpki-roots"]
-fetch-compression-c = ["_fetch", "compression-all-c"]
-fetch-compression-rust = ["_fetch", "compression-all-rust"]
-fetch-http1 = ["_fetch", "dep:hyper", "http-http1", "hyper/client", "hyper/http1"]
-fetch-http2 = ["_fetch", "dep:hyper", "http-http2", "hyper/client", "hyper/http2"]
-fetch-native-roots = ["_fetch", "http-native-roots"]
-fetch-tls-aws-lc = ["_fetch", "http-tls-aws-lc"]
-fetch-tls-graviola = ["_fetch", "http-tls-graviola"]
-fetch-tls-openssl = ["_fetch", "http-tls-openssl"]
-fetch-tls-ring = ["_fetch", "http-tls-ring"]
-fetch-webpki-roots = ["_fetch", "http-webpki-roots"]
-fs = ["_fs"]
-hooking = ["_hooking"]
-http = ["_http", "http-http1", "http-http2", "http-tls-ring", "http-webpki-roots"]
-http-http1 = ["_http", "dep:hyper", "dep:hyper-util", "hyper-rustls?/http1", "hyper-util/client-legacy", "hyper-util/http1", "hyper-util/tokio", "hyper/client", "hyper/http1"]
-http-http2 = ["_http", "dep:hyper", "dep:hyper-util", "hyper-rustls?/http2", "hyper-util/client-legacy", "hyper-util/http2", "hyper-util/tokio", "hyper/client", "hyper/http2"]
-http-native-roots = ["_http", "tls-native-roots"]
-http-tls-aws-lc = ["_http", "dep:hyper-rustls", "dep:rustls", "http-http1", "hyper-rustls/aws-lc-rs", "rustls/tls12", "tls-aws-lc"]
-http-tls-graviola = ["_http", "dep:hyper-rustls", "dep:rustls", "http-http1", "rustls/tls12", "tls-graviola"]
-http-tls-openssl = ["_http", "dep:hyper-openssl", "dep:openssl", "http-http1", "hyper-openssl/client-legacy", "tls-openssl"]
-http-tls-ring = ["_http", "dep:hyper-rustls", "dep:rustls", "http-http1", "hyper-rustls/ring", "rustls/tls12", "tls-ring"]
-http-webpki-roots = ["_http", "tls-webpki-roots"]
-intl = ["_intl"]
-json = ["_json"]
-logging = ["_logging"]
-navigator = ["_navigator"]
-net = ["_net"]
-numbers = ["_numbers"]
-os = ["_os", "os-network", "os-statistics", "os-system"]
-os-network = ["_os", "dep:sysinfo", "os-system", "sysinfo/network"]
-os-statistics = ["_os", "os-system"]
-os-sysinfo = ["_os", "dep:sysinfo"]
-os-system = ["_os", "dep:sysinfo", "sysinfo/system"]
-path = ["_path"]
-perf_hooks = ["_perf_hooks"]
-process = ["_process"]
-process-no-sdk = ["_process"]
-stream = ["_stream"]
-stream_web = ["_stream_web"]
-string_decoder = ["_string_decoder"]
-temporal = ["_temporal"]
-timers = ["_timers"]
-tls = ["_tls", "tls-ring", "tls-webpki-roots"]
-tls-aws-lc = ["_tls", "dep:rustls", "rustls/aws_lc_rs", "rustls/std", "rustls/tls12"]
-tls-graviola = ["_tls", "dep:rustls", "dep:rustls-graviola", "rustls/std", "rustls/tls12"]
-tls-native-roots = ["_tls", "dep:rustls-native-certs"]
-tls-openssl = ["_tls", "dep:openssl"]
-tls-ring = ["_tls", "dep:rustls", "rustls/ring", "rustls/std", "rustls/tls12"]
-tls-webpki-roots = ["_tls", "dep:webpki-roots"]
-tty = ["_tty"]
-url = ["_url"]
-util = ["_util"]
-utils = ["_utils", "utils-all"]
-utils-all = ["_utils", "utils-bytearray-buffer", "utils-fs"]
-utils-bytearray-buffer = ["_utils", "dep:tokio", "tokio/sync"]
-utils-fs = ["_utils", "dep:tokio", "tokio/fs", "tokio/sync"]
-zlib = ["_zlib", "zlib-compression-rust"]
-zlib-compression-c = ["_zlib", "compression-brotli-c", "compression-flate2-c", "compression-zstd-c", "zlib-zstd"]
-zlib-compression-rust = ["_zlib", "compression-brotli-rust", "compression-flate2-rust"]
-zlib-zstd = ["_zlib", "compression-zstd-rust"]
+buffer = ["base64-simd/alloc", "dep:base64-simd", "dep:half", "dep:hex-simd", "dep:itoa", "dep:libc", "dep:memchr", "dep:once_cell", "dep:phf", "dep:ryu", "dep:simdutf8", "dep:tokio", "dep:tracing", "dep:windows-sys", "hex-simd/alloc", "memchr/std", "once_cell/std", "phf/macros", "rquickjs/futures", "rquickjs/half", "rquickjs/macro", "simdutf8/aarch64_neon", "simdutf8/std", "tokio/macros", "tokio/sync", "tokio/time", "windows-sys/Win32_Foundation", "windows-sys/Win32_System_Threading"]
+crypto = ["buffer", "aes-gcm/alloc", "aes-gcm/hazmat", "aes-kw/oid", "cbc/alloc", "chacha20poly1305/alloc", "const-oid/db", "cshake/alloc", "dep:aes", "dep:aes-gcm", "dep:aes-kw", "dep:cbc", "dep:chacha20poly1305", "dep:const-oid", "dep:crc32c", "dep:crc32fast", "dep:cshake", "dep:ctr", "dep:ctutils", "dep:der", "dep:ecdsa", "dep:ed25519-dalek", "dep:elliptic-curve", "dep:hkdf", "dep:hmac", "dep:keccak", "dep:md-5", "dep:p256", "dep:p384", "dep:p521", "dep:pbkdf2", "dep:pkcs8", "dep:rand", "dep:rsa", "dep:sha1", "dep:sha3", "dep:shake", "dep:simd-json", "dep:spki", "dep:sponge-cursor", "dep:x25519-dalek", "der/alloc", "der/derive", "ed25519-dalek/alloc", "ed25519-dalek/pkcs8", "ed25519-dalek/rand_core", "elliptic-curve/alloc", "elliptic-curve/sec1", "p256/alloc", "p256/ecdh", "p256/ecdsa", "p256/pkcs8", "p384/alloc", "p384/ecdh", "p384/ecdsa", "p384/pkcs8", "p521/ecdh", "p521/ecdsa", "p521/pkcs8", "pkcs8/alloc", "rand/std", "rand/std_rng", "rand/thread_rng", "rsa/encoding", "rsa/sha2", "rsa/std", "sha1/oid", "simd-json/big-int-as-float", "spki/alloc", "x25519-dalek/static_secrets", "x25519-dalek/zeroize"]
+path = ["dep:half", "dep:libc", "dep:memchr", "dep:simdutf8", "dep:tokio", "dep:tracing", "dep:windows-sys", "memchr/std", "rquickjs/half", "rquickjs/macro", "rquickjs/std", "simdutf8/aarch64_neon", "simdutf8/std", "tokio/sync", "windows-sys/Win32_Foundation", "windows-sys/Win32_System_Threading"]
+url = ["dep:half", "dep:libc", "dep:memchr", "dep:simdutf8", "dep:tokio", "dep:tracing", "dep:url", "dep:windows-sys", "memchr/std", "rquickjs/half", "rquickjs/macro", "simdutf8/aarch64_neon", "simdutf8/std", "tokio/sync", "url/std", "windows-sys/Win32_Foundation", "windows-sys/Win32_System_Threading"]
+zlib = ["buffer", "brotli/std", "dep:brotli", "dep:flate2", "flate2/rust_backend", "rquickjs/std"]
+zlib-zstd = ["zlib", "dep:zstd"]
 
 [dependencies]
-rquickjs = { package = "quickjs-jit", version = "=0.14.0", path = "..", default-features = false, features = ["either", "futures", "half", "loader", "macro", "std"] }
+rquickjs = { package = "quickjs-jit", version = "=0.14.0", path = "..", default-features = false, features = ["futures", "half", "loader", "macro", "std"] }
 aes = { version = "0.9", default-features = true, optional = true }
 aes-gcm = { version = "0.11", default-features = false, optional = true }
 aes-kw = { version = "0.3", default-features = false, optional = true }
 base64-simd = { version = "0.8", default-features = false, optional = true }
 brotli = { version = "9", default-features = false, optional = true }
-brotlic = { version = "0.8", default-features = false, optional = true }
-bytes = { version = "1", default-features = false, optional = true }
 cbc = { version = "0.2", default-features = true, optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, optional = true }
 const-oid = { version = "0.10", default-features = false, optional = true }
@@ -210,92 +42,52 @@ ctutils = { version = "0.4", default-features = false, optional = true }
 der = { version = "0.8", default-features = false, optional = true }
 ecdsa = { version = "0.17", default-features = false, optional = true }
 ed25519-dalek = { version = "3.0.0-rc.1", default-features = false, optional = true }
-either = { version = "1", default-features = false, optional = true }
 elliptic-curve = { version = "0.14", default-features = false, optional = true }
 flate2 = { version = "1", default-features = false, optional = true }
-graviola = { version = "0.4", default-features = true, optional = true }
 half = { version = "2", default-features = false, optional = true }
 hex-simd = { version = "0.8", default-features = false, optional = true }
 hkdf = { version = "0.13", default-features = false, optional = true }
 hmac = { version = "0.13", default-features = false, optional = true }
-home = { version = "0.5", default-features = false, optional = true }
-http-body = { version = "1", default-features = false, optional = true }
-http-body-util = { version = "0.1", default-features = false, optional = true }
-hyper = { version = "1", default-features = false, optional = true }
-hyper-openssl = { version = "0.10", default-features = true, optional = true }
-hyper-rustls = { version = "0.27", default-features = false, optional = true }
-hyper-util = { version = "0.1, =0.1.21", default-features = false, optional = true }
-itoa = { version = "1, 1.0", default-features = false, optional = true }
-jiff = { version = "0.2", default-features = true, optional = true }
+itoa = { version = "1", default-features = false, optional = true }
 keccak = { version = "0.2", default-features = false, optional = true }
-libc = { version = "0.2", default-features = false, optional = true }
 md-5 = { version = "0.11", default-features = false, optional = true }
 memchr = { version = "2", default-features = false, optional = true }
-ml-dsa = { version = "0.1", default-features = false, optional = true }
-ml-kem = { version = "0.3", default-features = false, optional = true }
-num_cpus = { version = "1", default-features = false, optional = true }
 once_cell = { version = "1", default-features = false, optional = true }
-openssl = { version = "0.10", default-features = true, optional = true }
-openssl-sys = { version = "0.9", default-features = true, optional = true }
 p256 = { version = "0.14", default-features = false, optional = true }
 p384 = { version = "0.14.0-rc.15", default-features = false, optional = true }
 p521 = { version = "0.14.0-rc.15", default-features = false, optional = true }
 pbkdf2 = { version = "0.13", default-features = false, optional = true }
-percent-encoding = { version = "2", default-features = false, optional = true }
 phf = { version = "0.14", default-features = false, optional = true }
-pin-project-lite = { version = "0.2", default-features = false, optional = true }
 pkcs8 = { version = "0.11", default-features = false, optional = true }
-quick_cache = { version = "0.6", default-features = false, optional = true }
 rand = { version = "0.10", default-features = false, optional = true }
-ring = { version = "0.17", default-features = false, optional = true }
 rsa = { version = "0.10.0-rc.19", default-features = false, optional = true }
-rustls = { version = "0.23", default-features = false, optional = true }
-rustls-graviola = { version = "0.4", default-features = false, optional = true }
-rustls-native-certs = { version = "0.8", default-features = false, optional = true }
 ryu = { version = "1", default-features = false, optional = true }
 sha1 = { version = "0.11", default-features = false, optional = true }
-sha2 = { version = "0.11", default-features = false, optional = true }
 sha3 = { version = "0.12", default-features = false, optional = true }
 shake = { version = "0.1", default-features = false, optional = true }
 simd-json = { version = "0.18", default-features = false, optional = true }
 simdutf8 = { version = "0.1", default-features = false, optional = true }
 spki = { version = "0.8", default-features = false, optional = true }
 sponge-cursor = { version = "0.1", default-features = false, optional = true }
-sysinfo = { version = "0.39", default-features = false, optional = true }
 tokio = { version = "1", default-features = false, optional = true }
-tower-service = { version = "0.3", default-features = false, optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
 url = { version = "2", default-features = false, optional = true }
-webpki-roots = { version = "1", default-features = false, optional = true }
 x25519-dalek = { version = "3.0.0-rc.1", default-features = false, optional = true }
 zstd = { version = "0.14", default-features = false, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", default-features = false, optional = true }
-uzers = { version = "0.12", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-junction = { version = "2", default-features = true, optional = true }
 memchr = { version = "2", default-features = false, optional = true }
-whoami = { version = "2", default-features = false, optional = true }
-windows-registry = { version = "0.100", default-features = false, optional = true }
-windows-result = { version = "0.100", default-features = false, optional = true }
 windows-sys = { version = "0.61", default-features = false, optional = true }
-windows-version = { version = "0.100", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = [] }
-http = { version = "1", default-features = false }
-http-body-util = { version = "0.1", default-features = false }
-hyper = { version = "1", features = ["server"], default-features = false }
-hyper-util = { version = "0.1", features = ["server-auto", "tokio"], default-features = false }
 once_cell = { version = "1", features = ["std"], default-features = false }
 rand = { version = "0.10", features = ["alloc", "thread_rng"], default-features = false }
-rustls = { version = "0.23", features = ["ring", "tls12"], default-features = false }
-tokio = { version = "1", features = ["fs", "full", "macros", "net", "rt", "test-util"], default-features = true }
-tokio-rustls = { version = "0.26", default-features = false }
+tokio = { version = "1", features = ["fs", "full", "macros", "rt", "test-util"], default-features = true }
 uuid = { version = "1", features = ["v4"], default-features = false }
-wiremock = { version = "0.6", default-features = false }
 
 [[test]]
 name = "modules"

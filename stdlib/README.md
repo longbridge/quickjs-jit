@@ -1,20 +1,23 @@
 # quickjs-jit-stdlib
 
-LLRT's standard modules and libraries for quickjs-jit, vendored as source into one
-crate (no Git dependencies), each behind its own Cargo feature. The sources are LLRT
-revision `d9fd873e793c6551c5d92b2e31480f3279e3cd8d`, imported by
-`scripts/import-stdlib.py` (provenance and file hashes in `UPSTREAM.json`).
+LLRT's `buffer`, `crypto`, `path`, `url` and `zlib` modules for quickjs-jit, vendored as
+source into one crate (no Git dependencies). The sources are LLRT revision
+`d9fd873e793c6551c5d92b2e31480f3279e3cd8d`, imported by `scripts/import-stdlib.py`
+(provenance and file hashes in `UPSTREAM.json`). Only those modules and the LLRT
+libraries they depend on are vendored; each LLRT crate `llrt_<name>` is the module
+`quickjs_jit_stdlib::<name>`.
 
-Every LLRT crate `llrt_<name>` is the module `quickjs_jit_stdlib::<name>`:
+Features, one per module, with LLRT's pure-Rust backends (RustCrypto for `crypto`,
+Rust brotli / flate2 for `zlib`):
 
-- `<name>` enables it with its default backends: pure Rust wherever LLRT offers a
-  choice (RustCrypto for `crypto`, Rust brotli / flate2 for `zlib` and `compression`),
-- `_<name>` enables it alone, without LLRT's default features,
-- `<name>-<feature>` is LLRT's feature of that crate (`crypto-ring`, `zlib-zstd`,
-  `fetch-tls-ring`, `os-network`, ...).
-
-zstd has no Rust implementation: `zlib`'s `zstd*` functions are behind `zlib-zstd`
-(the C library). `fetch`, `http` and `tls` use rustls with ring by default.
+| Feature | Module |
+|---|---|
+| `buffer` | `Buffer`, `Blob`, `File` (and the libraries it needs) |
+| `crypto` | `crypto`, `crypto.subtle` |
+| `path` | `path` |
+| `url` | `url` |
+| `zlib` | `zlib` without zstd |
+| `zlib-zstd` | `zlib`'s `zstd*` functions (the zstd C library: there is no Rust implementation) |
 
 The default features are `buffer`, `crypto`, `path`, `url` and `zlib`, which also give
 `init`, `loader` and `resolver`:

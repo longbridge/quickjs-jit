@@ -51,11 +51,11 @@ pub(crate) fn chacha20_poly1305_decrypt(
 }
 
 // ML-DSA/ML-KEM/hybrid-KEM, gated behind `pqc` (~2% of binary size).
-#[cfg(feature = "crypto-pqc")]
+#[cfg(any())]
 mod pqc {
     use crate::crypto::provider::{CryptoError, HybridKemVariant, MlDsaVariant, MlKemVariant};
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     use ml_dsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
     use ml_dsa::{
         pkcs8::{der::AnyRef, spki::AssociatedAlgorithmIdentifier, DecodePublicKey},
@@ -197,7 +197,7 @@ mod pqc {
         )
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn import_ml_dsa_public_key_for<P: MlDsaParameterSet>(
         data: &[u8],
         spki: bool,
@@ -211,7 +211,7 @@ mod pqc {
         Ok(key.encode().to_vec())
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_dsa_public_key(
         variant: MlDsaVariant,
         data: &[u8],
@@ -220,7 +220,7 @@ mod pqc {
         dispatch_ml_dsa!(variant, import_ml_dsa_public_key_for, data, spki)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn import_ml_dsa_private_key_for<P: MlDsaParameterSet>(
         data: &[u8],
         pkcs8: bool,
@@ -233,7 +233,7 @@ mod pqc {
         Ok(key.to_seed().to_vec())
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_dsa_private_key(
         variant: MlDsaVariant,
         data: &[u8],
@@ -242,7 +242,7 @@ mod pqc {
         dispatch_ml_dsa!(variant, import_ml_dsa_private_key_for, data, pkcs8)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn export_ml_dsa_public_key_spki_for<P: MlDsaParameterSet>(
         public_key: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
@@ -252,7 +252,7 @@ mod pqc {
             .map_err(|_| CryptoError::InvalidKey(None))
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_dsa_public_key_spki(
         variant: MlDsaVariant,
         public_key: &[u8],
@@ -260,7 +260,7 @@ mod pqc {
         dispatch_ml_dsa!(variant, export_ml_dsa_public_key_spki_for, public_key,)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn export_ml_dsa_private_key_pkcs8_for<P: MlDsaParameterSet>(
         seed: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
@@ -270,7 +270,7 @@ mod pqc {
             .map_err(|_| CryptoError::InvalidKey(None))
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_dsa_private_key_pkcs8(
         variant: MlDsaVariant,
         seed: &[u8],
@@ -353,7 +353,7 @@ mod pqc {
         })
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_kem_private_key(
         variant: MlKemVariant,
         data: &[u8],
@@ -373,7 +373,7 @@ mod pqc {
         })
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_kem_public_key_spki(
         variant: MlKemVariant,
         public_key: &[u8],
@@ -389,7 +389,7 @@ mod pqc {
         })
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_kem_private_key_pkcs8(
         variant: MlKemVariant,
         seed: &[u8],
@@ -658,7 +658,7 @@ mod pqc {
         Ok(normalized)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_hybrid_kem_private_key(
         variant: HybridKemVariant,
         data: &[u8],
@@ -718,7 +718,7 @@ mod pqc {
 }
 
 // `pqc`-off fallback: same signatures, reports NotSupportedError.
-#[cfg(not(feature = "crypto-pqc"))]
+#[cfg(not(any()))]
 mod pqc {
     #![allow(dead_code)]
 
@@ -756,7 +756,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_dsa_public_key(
         _variant: MlDsaVariant,
         _data: &[u8],
@@ -765,7 +765,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_dsa_private_key(
         _variant: MlDsaVariant,
         _data: &[u8],
@@ -774,7 +774,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_dsa_public_key_spki(
         _variant: MlDsaVariant,
         _public_key: &[u8],
@@ -782,7 +782,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_dsa_private_key_pkcs8(
         _variant: MlDsaVariant,
         _seed: &[u8],
@@ -826,7 +826,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_ml_kem_private_key(
         _variant: MlKemVariant,
         _data: &[u8],
@@ -835,7 +835,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_kem_public_key_spki(
         _variant: MlKemVariant,
         _public_key: &[u8],
@@ -843,7 +843,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn export_ml_kem_private_key_pkcs8(
         _variant: MlKemVariant,
         _seed: &[u8],
@@ -871,7 +871,7 @@ mod pqc {
         Err(CryptoError::UnsupportedAlgorithm)
     }
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     pub(crate) fn import_hybrid_kem_private_key(
         _variant: HybridKemVariant,
         _data: &[u8],

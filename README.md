@@ -7,7 +7,7 @@ for source compatibility:
 ```toml
 rquickjs = { package = "quickjs-jit", version = "=0.14.0" }
 rquickjs-jit = { package = "quickjs-jit-runtime", version = "=0.14.0", features = ["compiler"] }
-# Optional: LLRT's standard modules (buffer, crypto, path, url, zlib, ...)
+# Optional: LLRT's buffer, crypto, path, url and zlib modules
 quickjs-jit-stdlib = { version = "=0.14.0" }
 ```
 
@@ -17,8 +17,9 @@ exactly. The JIT ABI includes internal QuickJS structure layouts, so mixing
 runtime, core, or sys crates from different releases may compile but is
 rejected during JIT startup.
 
-The optional [`quickjs-jit-stdlib`](stdlib/README.md) package vendors LLRT's
-standard modules as source, one Cargo feature per module, on the same VM.
+The optional [`quickjs-jit-stdlib`](stdlib/README.md) package vendors LLRT's `buffer`,
+`crypto`, `path`, `url` and `zlib` modules as source, one Cargo feature per module, on
+the same VM.
 
 [![github](https://img.shields.io/badge/github-longbridge/rquickjs-8da0cb.svg?style=for-the-badge&logo=github)](https://github.com/longbridge/rquickjs)
 [![crates](https://img.shields.io/crates/v/quickjs-jit.svg?style=for-the-badge&color=fc8d62&logo=rust)](https://crates.io/crates/quickjs-jit)

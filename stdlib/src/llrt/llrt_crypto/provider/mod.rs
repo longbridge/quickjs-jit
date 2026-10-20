@@ -4,40 +4,40 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Ensure only one crypto provider is selected
-#[cfg(all(feature = "crypto-rust", feature = "crypto-openssl"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-openssl` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-rust", feature = "crypto-ring"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-ring` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-rust", feature = "crypto-graviola"))]
+#[cfg(all(feature = "crypto", any()))]
 compile_error!("Features `crypto-rust` and `crypto-graviola` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-ring", feature = "crypto-openssl"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-ring` and `crypto-openssl` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-ring", feature = "crypto-graviola"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-ring` and `crypto-graviola` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-openssl", feature = "crypto-graviola"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-openssl` and `crypto-graviola` are mutually exclusive");
 
-#[cfg(all(feature = "crypto-ring-rust", feature = "crypto-graviola-rust"))]
+#[cfg(all(any(), any()))]
 compile_error!("Features `crypto-ring-rust` and `crypto-graviola-rust` are mutually exclusive");
 
-#[cfg(any(feature = "crypto-graviola", feature = "crypto-graviola-rust"))]
+#[cfg(any(any(), any()))]
 mod graviola;
 
-#[cfg(feature = "crypto-openssl")]
+#[cfg(any())]
 mod openssl;
 
-#[cfg(any(feature = "crypto-ring", feature = "crypto-ring-rust"))]
+#[cfg(any(any(), any()))]
 mod ring;
 
-#[cfg(feature = "crypto-_modern-webcrypto")]
+#[cfg(feature = "crypto")]
 pub(crate) mod modern;
 
-#[cfg(feature = "crypto-_rustcrypto")]
+#[cfg(feature = "crypto")]
 mod rust;
 
 use crate::crypto::hash::HashAlgorithm;
@@ -556,26 +556,26 @@ pub fn parse_rsa_public_exponent(public_exponent: &[u8]) -> Result<u64, CryptoEr
     }
 }
 
-#[cfg(feature = "crypto-openssl")]
+#[cfg(any())]
 pub type DefaultProvider = openssl::OpenSslProvider;
 
-#[cfg(feature = "crypto-rust")]
+#[cfg(feature = "crypto")]
 pub type DefaultProvider = rust::RustCryptoProvider;
 
-#[cfg(feature = "crypto-ring")]
+#[cfg(any())]
 pub type DefaultProvider = ring::RingProvider;
 
-#[cfg(feature = "crypto-ring-rust")]
+#[cfg(any())]
 pub type DefaultProvider = RingRustProvider;
 
-#[cfg(all(feature = "crypto-graviola", not(feature = "crypto-graviola-rust")))]
+#[cfg(all(any(), not(any())))]
 pub type DefaultProvider = graviola::GraviolaProvider;
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 pub type DefaultProvider = GraviolaRustProvider;
 
 // Macro to generate hybrid providers that delegate to RustCrypto
-#[cfg(any(feature = "crypto-ring-rust", feature = "crypto-graviola-rust"))]
+#[cfg(any(any(), any()))]
 macro_rules! impl_hybrid_provider {
     ($name:ident, $digest:ty, $hmac:ty, $digest_fn:expr, $hmac_fn:expr, $aes_encrypt:expr, $aes_decrypt:expr) => {
         pub struct $name;
@@ -894,7 +894,7 @@ macro_rules! impl_hybrid_provider {
     };
 }
 
-#[cfg(feature = "crypto-ring-rust")]
+#[cfg(any())]
 impl_hybrid_provider!(
     RingRustProvider,
     ring::RingDigestType,
@@ -905,7 +905,7 @@ impl_hybrid_provider!(
     |m, k, iv, d, aad| rust::RustCryptoProvider.aes_decrypt(m, k, iv, d, aad)
 );
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 fn graviola_aes_supported() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
@@ -921,7 +921,7 @@ fn graviola_aes_supported() -> bool {
     }
 }
 
-#[cfg(feature = "crypto-graviola-rust")]
+#[cfg(any())]
 impl_hybrid_provider!(
     GraviolaRustProvider,
     graviola::GraviolaRustDigest,
@@ -955,17 +955,17 @@ mod tests {
     use super::*;
 
     fn provider() -> impl CryptoProvider {
-        #[cfg(feature = "crypto-rust")]
+        #[cfg(feature = "crypto")]
         return rust::RustCryptoProvider;
-        #[cfg(feature = "crypto-ring-rust")]
+        #[cfg(any())]
         return RingRustProvider;
-        #[cfg(feature = "crypto-graviola-rust")]
+        #[cfg(any())]
         return GraviolaRustProvider;
-        #[cfg(feature = "crypto-openssl")]
+        #[cfg(any())]
         return openssl::OpenSslProvider;
-        #[cfg(feature = "crypto-ring")]
+        #[cfg(any())]
         return ring::RingProvider;
-        #[cfg(all(feature = "crypto-graviola", not(feature = "crypto-graviola-rust")))]
+        #[cfg(all(any(), not(any())))]
         return graviola::GraviolaProvider;
     }
 
@@ -1017,12 +1017,7 @@ mod tests {
     }
 
     // AES-GCM tests - only for providers that support AES
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_aes_gcm_128_roundtrip() {
         let p = provider();
@@ -1056,12 +1051,7 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_aes_gcm_256_roundtrip() {
         let p = provider();
@@ -1086,12 +1076,7 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_aes_gcm_wrong_key_fails() {
         let p = provider();
@@ -1115,7 +1100,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(all(feature = "crypto-graviola", not(feature = "crypto-graviola-rust")))]
+    #[cfg(all(any(), not(any())))]
     #[test]
     fn test_graviola_rejects_unsupported_aes_gcm_tag_length() {
         let p = provider();
@@ -1131,12 +1116,7 @@ mod tests {
     }
 
     // Key generation tests - only for providers that support key generation
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_generate_aes_key_128() {
         let p = provider();
@@ -1144,12 +1124,7 @@ mod tests {
         assert_eq!(key.len(), 16);
     }
 
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_generate_aes_key_256() {
         let p = provider();
@@ -1157,12 +1132,7 @@ mod tests {
         assert_eq!(key.len(), 32);
     }
 
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     #[test]
     fn test_generate_hmac_key() {
         let p = provider();
@@ -1171,12 +1141,7 @@ mod tests {
     }
 
     // Tests that require full crypto support
-    #[cfg(any(
-        feature = "crypto-rust",
-        feature = "crypto-openssl",
-        feature = "crypto-ring-rust",
-        feature = "crypto-graviola-rust"
-    ))]
+    #[cfg(any(feature = "crypto", any(), any(), any()))]
     mod full_provider_tests {
         use super::*;
 

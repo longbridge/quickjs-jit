@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""Vendor LLRT's standard modules and libraries into the `quickjs-jit-stdlib` crate.
+"""Vendor the LLRT modules quickjs-jit hosts use into the `quickjs-jit-stdlib` crate.
 
 Usage: python3 scripts/import-stdlib.py /path/to/llrt
 
 The checkout must be at REVISION with clean `libs/` and `modules/`; the script never
-downloads code. Every LLRT crate becomes one public module of the package (`llrt_url`
--> `quickjs_jit_stdlib::url`) behind its own Cargo feature:
-
-- `<module>` enables the module with its default backends (pure Rust where LLRT
-  offers a choice, see DEFAULTS),
-- `_<module>` enables the module alone (what LLRT's `default-features = false` is),
-- `<module>-<feature>` (or the LLRT feature name itself when it already starts with
-  `<module>-`) is one of LLRT's features of that crate.
-
-Dependencies between LLRT crates become feature dependencies, so enabling `zlib`
-enables `_buffer`, `_compression`, `_context` and `_utils` and nothing else. External
-dependencies are declared once, optional, without default features; each feature
-enables what its LLRT crate asked for.
+downloads code. The package has one Cargo feature per module in PUBLIC (`buffer`,
+`crypto`, `path`, `url`, `zlib`, plus `zlib-zstd`), each with LLRT's pure-Rust
+backends. Only the LLRT crates those features reach are vendored (the modules and the
+libraries they depend on), each as one module of the package (`llrt_url` ->
+`quickjs_jit_stdlib::url`). LLRT's per-crate features are resolved here: a vendored
+crate's code is compiled when a public feature that needs it is enabled, and its
+backend `cfg`s are those of the public features, so the package's features stay the
+public ones. External dependencies are declared once, optional, without default
+features; each public feature enables what its LLRT crates asked for.
 """
 import hashlib
 import json
@@ -34,15 +30,16 @@ REVISION = "d9fd873e793c6551c5d92b2e31480f3279e3cd8d"
 VERSION = "0.14.0"
 # `llrt_build` is replaced by this package's `[lints]` (it only declares `rust_nightly`).
 SKIP = {"llrt_build"}
-# The test helpers (`llrt_test_tls`: certificates for fetch / tls / http) are compiled
-# into the package's own unit tests only.
-TEST_ONLY = {"llrt_test", "llrt_test_tls"}
+# The test helpers are compiled into the package's own unit tests only, when a
+# vendored crate's tests use them.
+TEST_HELPERS = {"llrt_test", "llrt_test_tls"}
 # Default backends where LLRT's default is a C library and a Rust one exists.
 DEFAULTS = {
     "llrt_compression": ["brotli-rust", "flate2-rust"],
     "llrt_zlib": ["compression-rust"],
-    "llrt_fetch": ["http1", "http2", "compression-rust", "webpki-roots", "tls-ring"],
 }
+# The package's features: the modules hosts use, and zstd (the C library) for zlib.
+PUBLIC = ["buffer", "crypto", "path", "url", "zlib", "zlib-zstd"]
 # Facade defaults: what the old facade re-exported.
 PACKAGE_DEFAULT = ["buffer", "crypto", "path", "url", "zlib"]
 
@@ -251,7 +248,7 @@ def translate(crate, entry):
         dep, feat = entry.split("/", 1)
         weak = dep.endswith("?")
         dep = dep.rstrip("?")
-        if dep in SKIP or dep in TEST_ONLY:
+        if dep in SKIP or dep in TEST_HELPERS:
             return []
         if dep in crates:
             # Weak or not, a sibling module's feature enables that module.
@@ -266,7 +263,7 @@ def translate(crate, entry):
     raise SystemExit(f"{crate}: unknown feature entry {entry}")
 
 
-runtime = [c for c in crates if c not in TEST_ONLY]
+runtime = [c for c in crates if c not in TEST_HELPERS]
 features = {}
 local_features = {}  # crate -> {LLRT feature: package feature}
 for crate in runtime:
@@ -294,12 +291,64 @@ for crate in runtime:
     features[s] = sorted({"_" + s, *(names[f] for f in defaults)})
 if len(features) != len(set(features)):
     raise SystemExit("feature names collide")
+features["zlib-zstd"].append("zlib")
+
+
+# --- Public features ------------------------------------------------------------------
+def reach(feature):
+    """Every feature `feature` enables, itself included."""
+    seen, todo = set(), [feature]
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        todo += [e for e in features[f] if e in features]
+    return seen
+
+
+reaches = {p: reach(p) for p in PUBLIC}
+used = set().union(*reaches.values())
+runtime = [c for c in runtime if "_" + short(c) in used]
+TEST_ONLY = {h for h in TEST_HELPERS
+             if any(h in crates[c][1].get("dev-dependencies", {}) for c in runtime)}
+vendored = runtime + sorted(TEST_ONLY)
+
+
+def holders(feature):
+    """The public features that enable `feature`, without those that enable another."""
+    found = [p for p in PUBLIC if feature in reaches[p]]
+    return [p for p in found if not any(q != p and q in reaches[p] for q in found)]
+
+
+def predicate(feature):
+    """The `cfg` predicate that holds when `feature` would be enabled."""
+    found = holders(feature)
+    if not found:
+        return "any()"
+    if len(found) == 1:
+        return f'feature = "{found[0]}"'
+    return "any(" + ", ".join(f'feature = "{p}"' for p in found) + ")"
+
+
+public_features = {}
+for p in PUBLIC:
+    implied = [q for q in PUBLIC if q != p and q in reaches[p]]
+    implied = [q for q in implied if not any(r != q and q in reaches[r] for r in implied)]
+    provided = set().union(*(reaches[q] for q in implied)) if implied else set()
+    entries = {e for f in reaches[p] - provided for e in features[f] if e not in features}
+    entries -= {e for q in implied for f in reaches[q] for e in features[f]}
+    public_features[p] = sorted(implied) + sorted(entries)
+referenced = {e.split("/")[0].removeprefix("dep:").rstrip("?")
+              for es in public_features.values() for e in es if e not in PUBLIC}
 
 # --- External dependencies ----------------------------------------------------------
 merged = {}
 for crate in runtime:
     for target, dep, spec in deps_of(crates[crate][1]):
         if dep in crates or dep in SKIP or dep == "rquickjs":
+            continue
+        if dep not in referenced:
             continue
         decl = {k: v for k, v in spec.items() if k in ("version", "package")}
         key = (target, dep)
@@ -355,21 +404,24 @@ if vendor.exists():
     shutil.rmtree(vendor)
 vendor.mkdir(parents=True)
 provenance = {"repository": "https://github.com/awslabs/llrt", "revision": REVISION,
+              "crates": vendored, "features": public_features,
               "patches": sorted(SOURCE_PATCHES), "files": {}}
 rewritten = set()
 macro_names = {}
-for crate in crates:
+for crate in vendored:
     for p in (crates[crate][0] / "src").rglob("*.rs"):
         macro_names.setdefault(crate, []).extend(
             re.findall(r"#\[macro_export\]\s*macro_rules!\s+(\w+)", p.read_text()))
 all_macros = [m for ms in macro_names.values() for m in ms]
 if len(all_macros) != len(set(all_macros)):
     raise SystemExit(f"exported macros collide: {sorted(all_macros)}")
-names_by_len = sorted(crates, key=len, reverse=True)
+names_by_len = sorted(vendored, key=len, reverse=True)
 for crate in TEST_ONLY:
     if (crates[crate][0] / "data").is_dir():
         shutil.copytree(crates[crate][0] / "data", vendor / crate / "data")
-for crate, (path, data) in crates.items():
+applied = set()
+for crate in vendored:
+    path, data = crates[crate]
     src = path / "src"
     s = short(crate)
     for p in sorted(src.rglob("*")):
@@ -388,6 +440,7 @@ for crate, (path, data) in crates.items():
             if text.count(old) != (count[0] if count else 1):
                 raise SystemExit(f"patch of {rel} does not apply: {old[:40]!r}")
             text = text.replace(old, new)
+            applied.add(str(rel))
         # Every byte array handed to JS counts against the runtime's memory limit:
         # QuickJS copies it into its own allocation (`ArrayBuffer::new` would keep
         # Rust's allocation, outside the limit).
@@ -409,7 +462,7 @@ for crate, (path, data) in crates.items():
             f = m[1]
             if crate in TEST_ONLY:
                 return "all()" if f in defaults else "any()"
-            return f'feature = "{local[f]}"' if f in local else "any()"
+            return predicate(local[f]) if f in local else "any()"
 
         text = re.sub(r'feature\s*=\s*"([^"]+)"', cfg, text)
         if crate in TEST_ONLY:
@@ -422,6 +475,8 @@ for crate, (path, data) in crates.items():
         header += ", with local patches.\n" if str(rel) in SOURCE_PATCHES or str(rel) in rewritten else ".\n"
         out.write_text(header + text)
 
+if applied != set(SOURCE_PATCHES):
+    raise SystemExit(f"patches of files not vendored: {sorted(set(SOURCE_PATCHES) - applied)}")
 shutil.copy2(root / "LICENSE", dest / "LICENSE-APACHE")
 notice = (root / "NOTICE").read_text().rstrip() + "\n"
 (dest / "NOTICE").write_text(
@@ -460,8 +515,8 @@ lines = [
     "", "[package.metadata.docs.rs]", "all-features = false", f"features = {value(PACKAGE_DEFAULT)}",
     "", "[features]", f"default = {value(PACKAGE_DEFAULT)}", 'parallel = ["rquickjs/parallel"]',
 ]
-for name in sorted(features):
-    lines.append(f"{quoted(name)} = {value(features[name])}")
+for name in PUBLIC:
+    lines.append(f"{quoted(name)} = {value(public_features[name])}")
 lines += ["", "[dependencies]",
           entry("rquickjs", {"package": "quickjs-jit", "version": f"={VERSION}", "path": "..",
                              "default-features": False, "features": rquickjs_features})]
@@ -482,7 +537,7 @@ lines += ["", "[lints.rust]", 'unexpected_cfgs = { level = "warn", check-cfg = [
 
 modules = []
 for crate in sorted(runtime, key=short):
-    modules += [f'#[cfg(feature = "_{short(crate)}")]',
+    modules += [f'#[cfg({predicate("_" + short(crate))})]',
                 "#[allow(dead_code, unused_imports, unused_unsafe, unused_variables, private_interfaces, clippy::all)]",
                 f'#[path = "llrt/{crate}/lib.rs"]', f"pub mod {short(crate)};"]
 for crate in sorted(TEST_ONLY):

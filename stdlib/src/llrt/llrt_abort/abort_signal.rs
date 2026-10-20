@@ -209,7 +209,7 @@ impl<'js> AbortSignal<'js> {
             }),
         )?;
 
-        #[cfg(feature = "abort-sleep-timers")]
+        #[cfg(feature = "buffer")]
         {
             crate::timers::set_timeout_interval(
                 &ctx,
@@ -218,7 +218,7 @@ impl<'js> AbortSignal<'js> {
                 crate::utils::provider::ProviderType::Timeout,
             )?;
         }
-        #[cfg(all(not(feature = "abort-sleep-timers"), feature = "abort-sleep-tokio"))]
+        #[cfg(all(not(feature = "buffer"), any()))]
         {
             use crate::utils::ctx::CtxExtension;
             ctx.clone().spawn_exit_simple(async move {
@@ -227,10 +227,7 @@ impl<'js> AbortSignal<'js> {
                 Ok(())
             });
         }
-        #[cfg(all(
-            not(feature = "abort-sleep-tokio"),
-            not(feature = "abort-sleep-timers")
-        ))]
+        #[cfg(all(not(any()), not(feature = "buffer")))]
         {
             compile_error!("Either the `sleep-tokio` or `sleep-timers` feature must be enabled")
         }
@@ -261,7 +258,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "abort-sleep-timers")]
+    #[cfg(feature = "buffer")]
     #[tokio::test]
     async fn test_abort_signal() {
         test_async_with(|ctx| {

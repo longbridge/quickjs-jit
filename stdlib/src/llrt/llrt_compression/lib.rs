@@ -5,7 +5,7 @@
 
 pub mod streaming;
 
-#[cfg(any(feature = "compression-zstd-c", feature = "compression-zstd-rust"))]
+#[cfg(any(any(), feature = "zlib-zstd"))]
 pub mod zstd {
     use std::io::{BufReader, Read, Result};
 
@@ -21,7 +21,7 @@ pub mod zstd {
     }
 }
 
-#[cfg(any(feature = "compression-flate2-c", feature = "compression-flate2-rust"))]
+#[cfg(any(any(), feature = "zlib"))]
 pub mod deflate {
     use std::io::Read;
 
@@ -37,7 +37,7 @@ pub mod deflate {
     }
 }
 
-#[cfg(any(feature = "compression-flate2-c", feature = "compression-flate2-rust"))]
+#[cfg(any(any(), feature = "zlib"))]
 pub mod gz {
     use std::io::Read;
 
@@ -53,7 +53,7 @@ pub mod gz {
     }
 }
 
-#[cfg(any(feature = "compression-flate2-c", feature = "compression-flate2-rust"))]
+#[cfg(any(any(), feature = "zlib"))]
 pub mod zlib {
     use std::io::Read;
 
@@ -69,7 +69,7 @@ pub mod zlib {
     }
 }
 
-#[cfg(feature = "compression-brotli-c")]
+#[cfg(any())]
 pub mod brotli {
     use std::io::BufRead;
 
@@ -84,10 +84,7 @@ pub mod brotli {
     }
 }
 
-#[cfg(all(
-    not(feature = "compression-brotli-c"),
-    feature = "compression-brotli-rust"
-))]
+#[cfg(all(not(any()), feature = "zlib"))]
 pub mod brotli {
     use std::io::Read;
 

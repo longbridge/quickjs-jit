@@ -6,27 +6,27 @@
 
 use std::rc::Rc;
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use crate::encoding::bytes_from_b64_url_safe;
 use crate::exceptions::DOMException;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use crate::utils::result::ResultExt;
 use crate::utils::{bytes::ObjectBytes, object::ObjectExt, str_enum};
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use der::{
     asn1::{BitStringRef, OctetString, OctetStringRef},
     Decode, Encode,
 };
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use ed25519_dalek::SigningKey;
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use pkcs8::PrivateKeyInfoRef;
 use rquickjs::{
     atom::PredefinedAtom, Array, Coerced, Ctx, Exception, FromJs, Object, Result, TypedArray, Value,
 };
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use spki::{AlgorithmIdentifier, ObjectIdentifier};
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::crypto::{
@@ -37,7 +37,7 @@ use crate::crypto::{
     },
 };
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 use super::{algorithm_mismatch_error, util::DataError};
 use super::{
     algorithm_not_supported_error,
@@ -451,7 +451,7 @@ fn from_ed25519<'js>(
     private_usages: &mut Vec<String>,
     public_usages: &mut Vec<String>,
 ) -> Result<KeyAlgorithm> {
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     #[inline]
     fn import<'js>(
         ctx: &Ctx<'js>,
@@ -474,7 +474,7 @@ fn from_ed25519<'js>(
         }
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     #[inline]
     fn import<'js>(
         _ctx: &Ctx<'js>,
@@ -504,7 +504,7 @@ fn from_x25519<'js>(
     private_usages: &mut Vec<String>,
     public_usages: &mut Vec<String>,
 ) -> Result<KeyAlgorithm> {
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     #[inline]
     fn import<'js>(
         ctx: &Ctx<'js>,
@@ -527,7 +527,7 @@ fn from_x25519<'js>(
         }
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     #[inline]
     fn import<'js>(
         _ctx: &Ctx<'js>,
@@ -747,7 +747,7 @@ fn import_chacha20_poly1305<'js>(
     *kind = KeyKind::Secret;
     *data = match format {
         KeyFormatData::RawSecret(bytes) => bytes.into_bytes(ctx)?,
-        #[cfg(feature = "crypto-_subtle-full")]
+        #[cfg(feature = "crypto")]
         KeyFormatData::Jwk(object) => {
             validate_jwk_kty(ctx, &object, "oct")?;
             validate_jwk_use(ctx, &object, false)?;
@@ -803,7 +803,7 @@ fn from_ml_dsa<'js>(
     private_usages: &mut Vec<String>,
     public_usages: &mut Vec<String>,
 ) -> Result<KeyAlgorithm> {
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn import<'js>(
         ctx: &Ctx<'js>,
         mode: KeyAlgorithmMode<'_, 'js>,
@@ -889,7 +889,7 @@ fn from_ml_dsa<'js>(
         Ok(Some(*kind))
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     fn import<'js>(
         _ctx: &Ctx<'js>,
         _mode: KeyAlgorithmMode<'_, 'js>,
@@ -920,7 +920,7 @@ fn from_ml_kem<'js>(
     private_usages: &mut Vec<String>,
     public_usages: &mut Vec<String>,
 ) -> Result<KeyAlgorithm> {
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn import<'js>(
         ctx: &Ctx<'js>,
         mode: KeyAlgorithmMode<'_, 'js>,
@@ -1006,7 +1006,7 @@ fn from_ml_kem<'js>(
         Ok(Some(*kind))
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     fn import<'js>(
         _ctx: &Ctx<'js>,
         _mode: KeyAlgorithmMode<'_, 'js>,
@@ -1037,7 +1037,7 @@ fn from_hybrid_kem<'js>(
     private_usages: &mut Vec<String>,
     public_usages: &mut Vec<String>,
 ) -> Result<KeyAlgorithm> {
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     fn import<'js>(
         ctx: &Ctx<'js>,
         mode: KeyAlgorithmMode<'_, 'js>,
@@ -1097,7 +1097,7 @@ fn from_hybrid_kem<'js>(
         Ok(Some(*kind))
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     fn import<'js>(
         _ctx: &Ctx<'js>,
         _mode: KeyAlgorithmMode<'_, 'js>,
@@ -1132,7 +1132,7 @@ fn from_rsa<'js>(
     let hash = extract_sha_hash(ctx, &obj)?;
     let is_generate = mode == KeyAlgorithmMode::Generate;
 
-    #[cfg(feature = "crypto-_subtle-full")]
+    #[cfg(feature = "crypto")]
     #[inline]
     fn import<'js>(
         ctx: &Ctx<'js>,
@@ -1164,7 +1164,7 @@ fn from_rsa<'js>(
         }
     }
 
-    #[cfg(not(feature = "crypto-_subtle-full"))]
+    #[cfg(not(feature = "crypto"))]
     #[inline]
     fn import<'js>(
         ctx: &Ctx<'js>,
@@ -1326,7 +1326,7 @@ impl KeyAlgorithm {
     ) -> Result<KeyAlgorithmWithUsages> {
         let (name, obj) = to_name_and_maybe_object(ctx, value)?;
         let name = normalize_algorithm_name(&name);
-        #[cfg(not(feature = "crypto-_subtle-full"))]
+        #[cfg(not(feature = "crypto"))]
         if matches!(mode, KeyAlgorithmMode::Import { .. })
             && !matches!(
                 name.as_str(),
@@ -1622,14 +1622,14 @@ impl KeyAlgorithm {
             .map_err(NotSupportedError)
             .or_throw_dom(ctx)?;
 
-        #[cfg(feature = "crypto-_subtle-full")]
+        #[cfg(feature = "crypto")]
         let key_kind = if let KeyAlgorithmMode::Import { format, kind, data } = mode {
             import_ec_key(ctx, format, kind, data, algorithm_name, &curve, &curve_name)?;
             Some(kind)
         } else {
             None
         };
-        #[cfg(not(feature = "crypto-_subtle-full"))]
+        #[cfg(not(feature = "crypto"))]
         let key_kind: Option<&KeyKind> = None;
 
         KeyUsage::classify_and_check_usages(
@@ -1645,7 +1645,7 @@ impl KeyAlgorithm {
     }
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_ml_private_key_info(
     ctx: &Ctx<'_>,
     data: &[u8],
@@ -1725,7 +1725,7 @@ fn import_derive_key<'js>(
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn import_rsa_key<'js>(
     ctx: &Ctx<'js>,
     format: KeyFormatData<'js>,
@@ -1857,7 +1857,7 @@ fn import_symmetric_key<'js>(
     *kind = KeyKind::Secret;
 
     match format {
-        #[cfg(feature = "crypto-_subtle-full")]
+        #[cfg(feature = "crypto")]
         KeyFormatData::Jwk(object) => {
             validate_jwk_kty(ctx, &object, "oct")?;
 
@@ -1899,11 +1899,11 @@ fn import_symmetric_key<'js>(
 }
 
 // EC algorithm OID for validation
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 const EC_ALGORITHM_OID: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn import_ec_key<'js>(
     ctx: &Ctx<'js>,
     format: KeyFormatData<'js>,
@@ -2001,7 +2001,7 @@ fn import_ec_key<'js>(
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn import_okp_key<'js>(
     ctx: &Ctx<'js>,
     format: KeyFormatData<'js>,
@@ -2118,7 +2118,7 @@ fn import_okp_key<'js>(
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn get_jwk_required_string<'js>(
     ctx: &Ctx<'js>,
     object: &Object<'js>,
@@ -2129,7 +2129,7 @@ fn get_jwk_required_string<'js>(
         .or_throw_data_error(ctx)
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn get_jwk_required_bytes<'js>(
     ctx: &Ctx<'js>,
     object: &Object<'js>,
@@ -2139,7 +2139,7 @@ fn get_jwk_required_bytes<'js>(
     bytes_from_b64_url_safe(value.as_bytes()).or_throw_data_error(ctx)
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn get_jwk_optional_bytes<'js>(
     ctx: &Ctx<'js>,
     object: &Object<'js>,
@@ -2151,7 +2151,7 @@ fn get_jwk_optional_bytes<'js>(
         .transpose()
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_jwk_kty<'js>(ctx: &Ctx<'js>, object: &Object<'js>, expected: &str) -> Result<()> {
     let kty = get_jwk_required_string(ctx, object, "kty")?;
     if kty != expected {
@@ -2163,7 +2163,7 @@ fn validate_jwk_kty<'js>(ctx: &Ctx<'js>, object: &Object<'js>, expected: &str) -
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_jwk_crv<'js>(ctx: &Ctx<'js>, object: &Object<'js>, expected: &str) -> Result<()> {
     let crv = get_jwk_required_string(ctx, object, "crv")?;
     if crv != expected {
@@ -2175,7 +2175,7 @@ fn validate_jwk_crv<'js>(ctx: &Ctx<'js>, object: &Object<'js>, expected: &str) -
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_jwk_use(ctx: &Ctx<'_>, object: &Object<'_>, is_ed25519: bool) -> Result<()> {
     if let Some(use_) = object.get_optional::<_, String>("use")? {
         let expected = if is_ed25519 { "sig" } else { "enc" };
@@ -2189,7 +2189,7 @@ fn validate_jwk_use(ctx: &Ctx<'_>, object: &Object<'_>, is_ed25519: bool) -> Res
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_jwk_alg(ctx: &Ctx<'_>, object: &Object<'_>) -> Result<()> {
     if let Some(alg) = object.get_optional::<_, String>("alg")? {
         if alg != "Ed25519" && alg != "EdDSA" {
@@ -2202,7 +2202,7 @@ fn validate_jwk_alg(ctx: &Ctx<'_>, object: &Object<'_>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_jwk_bytes_len(
     ctx: &Ctx<'_>,
     algorithm_name: &str,
@@ -2219,7 +2219,7 @@ fn validate_jwk_bytes_len(
     Ok(())
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 fn validate_okp_jwk_key_pair<'js>(
     ctx: &Ctx<'js>,
     private_key: &[u8],
@@ -2265,7 +2265,7 @@ fn create_hash_object<'js>(ctx: &Ctx<'js>, hash: &HashAlgorithm) -> Result<Objec
     Ok(hash_obj)
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 pub fn hash_mismatch_error<T>(ctx: &Ctx<'_>, hash: &HashAlgorithm) -> Result<T> {
     Err(DOMException::type_mismatch_error(
         ctx,
@@ -2273,12 +2273,12 @@ pub fn hash_mismatch_error<T>(ctx: &Ctx<'_>, hash: &HashAlgorithm) -> Result<T> 
     ))
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 trait DataErrorResultExt<T> {
     fn or_throw_data_error(self, ctx: &Ctx<'_>) -> Result<T>;
 }
 
-#[cfg(feature = "crypto-_subtle-full")]
+#[cfg(feature = "crypto")]
 impl<T, E> DataErrorResultExt<T> for std::result::Result<T, E>
 where
     E: std::fmt::Display,
