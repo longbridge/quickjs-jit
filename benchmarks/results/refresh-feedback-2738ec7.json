@@ -1,0 +1,7778 @@
+[
+  {
+    "workload": "scalar-control-flow",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 65935.5,
+    "fixed_batch_median_ns": 65698.0,
+    "outlier_batches": 4,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 19.06259592115342,
+        "ci95": [
+          17.156855925100647,
+          21.081437495265025
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.19144778387286362,
+        "ci95": [
+          0.17025148144666136,
+          0.2128534498981057
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 19.32514359626417,
+        "ci95": [
+          17.421535185028038,
+          21.27350460168302
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-control-flow",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 64625.5,
+    "fixed_batch_median_ns": 63550.0,
+    "outlier_batches": 13,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.1092230417930204,
+        "ci95": [
+          0.9971934260294897,
+          1.244309936427462
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 21.144670632133028,
+        "ci95": [
+          20.25746504454292,
+          22.191543348633786
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.2123582931719906,
+        "ci95": [
+          0.19941673216471215,
+          0.2266505589381811
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 21.43589456293505,
+        "ci95": [
+          20.401307681742818,
+          22.77852956005419
+        ]
+      }
+    },
+    "compilation_quiet_samples": 27,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-control-flow",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1346365.5,
+    "fixed_batch_median_ns": 1344057.5,
+    "outlier_batches": 8,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.05245875242470612,
+        "ci95": [
+          0.04759559721300361,
+          0.05829830614588329
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0100431118964452,
+        "ci95": [
+          0.009490013575328188,
+          0.010607116171984397
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0137729234883166,
+        "ci95": [
+          0.9828955016709023,
+          1.0452858242164935
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-control-flow",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 13699.5,
+    "fixed_batch_median_ns": 22273.0,
+    "outlier_batches": 17,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 5.223356362610489,
+        "ci95": [
+          4.703732287031678,
+          5.8826880204836085
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 99.57073169262945,
+        "ci95": [
+          94.46747184495054,
+          105.31137392462092
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 100.94211176190781,
+        "ci95": [
+          95.38528685000261,
+          107.19859624046876
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-control-flow",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1362400.5,
+    "fixed_batch_median_ns": 1352541.0,
+    "outlier_batches": 8,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.0517460579280412,
+        "ci95": [
+          0.04704294198996052,
+          0.05724174420018353
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.986414192794847,
+        "ci95": [
+          0.9562672416324848,
+          1.017984470390043
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.00990666811448031,
+        "ci95": [
+          0.009319630235648208,
+          0.010479717925489823
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-expressions",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 63145.5,
+    "fixed_batch_median_ns": 63849.0,
+    "outlier_batches": 7,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 16.789650480669387,
+        "ci95": [
+          16.183569136082852,
+          17.420837574552063
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.17876806021347993,
+        "ci95": [
+          0.16803924898038292,
+          0.1929954797211398
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 16.89078599403929,
+        "ci95": [
+          16.28832322926063,
+          17.49930976251843
+        ]
+      }
+    },
+    "compilation_quiet_samples": 23,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-expressions",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 61799.0,
+    "fixed_batch_median_ns": 62010.5,
+    "outlier_batches": 7,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.03474769115241,
+        "ci95": [
+          0.9812182325409549,
+          1.089488558566133
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 17.373052070128598,
+        "ci95": [
+          16.671123132196563,
+          18.165141638642023
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.18497983755769334,
+        "ci95": [
+          0.1730324077617542,
+          0.20141041578998117
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 17.477701809081623,
+        "ci95": [
+          16.69417419240861,
+          18.290040882709345
+        ]
+      }
+    },
+    "compilation_quiet_samples": 24,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-expressions",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1070200.5,
+    "fixed_batch_median_ns": 1076013.5,
+    "outlier_batches": 18,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.05956050134285649,
+        "ci95": [
+          0.057370907222539756,
+          0.06183516012122793
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010647515290404816,
+        "ci95": [
+          0.010123716529231863,
+          0.011485024721169494
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.006023681879879,
+        "ci95": [
+          0.9891916975671983,
+          1.022711941072788
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-expressions",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 10951.0,
+    "fixed_batch_median_ns": 20247.0,
+    "outlier_batches": 34,
+    "outlier_processes": 24,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 5.5938404142542435,
+        "ci95": [
+          5.188073809367068,
+          5.952301019670112
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 93.91862539997163,
+        "ci95": [
+          86.93505032372556,
+          98.7762481643584
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 94.48436132197656,
+        "ci95": [
+          87.82884583875739,
+          99.49733171268872
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-expressions",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1079694.0,
+    "fixed_batch_median_ns": 1074557.5,
+    "outlier_batches": 11,
+    "outlier_processes": 10,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.05920387602761038,
+        "ci95": [
+          0.05710960317178281,
+          0.061353783944868984
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9940123856044593,
+        "ci95": [
+          0.9775912443279131,
+          1.0102689867679824
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010583762074575249,
+        "ci95": [
+          0.010057417334594511,
+          0.011399341514607126
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "host-compute",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 82899.5,
+    "fixed_batch_median_ns": 77840.0,
+    "outlier_batches": 8,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 20.81545282876999,
+        "ci95": [
+          19.047837280606867,
+          22.894971886957183
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.20507139504224176,
+        "ci95": [
+          0.17651789043351157,
+          0.23979488065432658
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 20.29606796459188,
+        "ci95": [
+          18.15609969991031,
+          22.62543310632818
+        ]
+      }
+    },
+    "compilation_quiet_samples": 28,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "host-compute",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 80805.0,
+    "fixed_batch_median_ns": 79368.5,
+    "outlier_batches": 10,
+    "outlier_processes": 8,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.02682476939712,
+        "ci95": [
+          0.9325241425623109,
+          1.1331126054355587
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 21.373822550798376,
+        "ci95": [
+          20.141875393063515,
+          22.86896801764104
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.21057238792419555,
+        "ci95": [
+          0.18688549733642057,
+          0.23777211977614127
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 20.84050530741033,
+        "ci95": [
+          19.505276588358775,
+          22.397284265527507
+        ]
+      }
+    },
+    "compilation_quiet_samples": 24,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "host-compute",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1664441.5,
+    "fixed_batch_median_ns": 1631291.0,
+    "outlier_batches": 4,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.048041232070524756,
+        "ci95": [
+          0.043563714966603655,
+          0.0524779799151416
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.009851882480250597,
+        "ci95": [
+          0.008847892012416382,
+          0.011084608372854281
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9750481112061015,
+        "ci95": [
+          0.930528226861234,
+          1.0105052145622988
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "host-compute",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 15523.0,
+    "fixed_batch_median_ns": 15852.5,
+    "outlier_batches": 37,
+    "outlier_processes": 30,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 4.876350501219414,
+        "ci95": [
+          4.158851218386974,
+          5.641176801451058
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 101.50344383468159,
+        "ci95": [
+          90.04875621317608,
+          112.89800951094384
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 98.97074119192085,
+        "ci95": [
+          87.0749188808314,
+          111.20578354589976
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "host-compute",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1649031.0,
+    "fixed_batch_median_ns": 1638813.0,
+    "outlier_batches": 4,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.049270627283303364,
+        "ci95": [
+          0.044124383852728,
+          0.05497157168552891
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0255904180595088,
+        "ci95": [
+          0.9883900864690285,
+          1.0739136257597306
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010103996271593363,
+        "ci95": [
+          0.009008859956584327,
+          0.011464747629090966
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1029410.0,
+    "fixed_batch_median_ns": 993607.5,
+    "outlier_batches": 12,
+    "outlier_processes": 9,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 2.2708694303068024,
+        "ci95": [
+          2.1784618656306183,
+          2.372741727277662
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0759989953394533,
+        "ci95": [
+          0.06861153254477075,
+          0.08397460189170199
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 2.22664207805328,
+        "ci95": [
+          2.119939167291702,
+          2.338714416565845
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      6990,
+      6990
+    ]
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1028603.0,
+    "fixed_batch_median_ns": 1015131.5,
+    "outlier_batches": 9,
+    "outlier_processes": 9,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.986411740769798,
+        "ci95": [
+          0.9427428117954111,
+          1.027386397389849
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 2.240012267809852,
+        "ci95": [
+          2.1734763053999515,
+          2.3127823574597173
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.07496630128954589,
+        "ci95": [
+          0.06782408042416511,
+          0.08292914747296407
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 2.196385888283816,
+        "ci95": [
+          2.12248645504556,
+          2.271869949589014
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      6990,
+      6990
+    ]
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2299939.5,
+    "fixed_batch_median_ns": 2273444.5,
+    "outlier_batches": 7,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.44035997255240544,
+        "ci95": [
+          0.42171529746367886,
+          0.458587262494195
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.033466915501692035,
+        "ci95": [
+          0.030294033391297465,
+          0.03711190565166383
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9805240443755734,
+        "ci95": [
+          0.9546144825927448,
+          1.005236136498212
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 68882.5,
+    "fixed_batch_median_ns": 286309.5,
+    "outlier_batches": 22,
+    "outlier_processes": 19,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 13.158068676216708,
+        "ci95": [
+          11.911982794542835,
+          14.59434460430199
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 29.88025591869802,
+        "ci95": [
+          26.992970468147064,
+          32.99569405781857
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 29.29830938037895,
+        "ci95": [
+          26.645243412317395,
+          32.050844350427255
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "mixed-quotes",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2281624.0,
+    "fixed_batch_median_ns": 2225398.0,
+    "outlier_batches": 6,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.4491067557989765,
+        "ci95": [
+          0.4274895958452918,
+          0.471118888077093
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.019862802688158,
+        "ci95": [
+          0.995297656288812,
+          1.047604261040421
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0341316622408834,
+        "ci95": [
+          0.03123012222814826,
+          0.03755318180214347
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-int-arith",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 361969.5,
+    "fixed_batch_median_ns": 410371.5,
+    "outlier_batches": 2,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 8.764487877937265,
+        "ci95": [
+          8.066861413184952,
+          9.526407822732862
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.11938274279418083,
+        "ci95": [
+          0.11136578657902874,
+          0.1274231102440023
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 8.675266853397279,
+        "ci95": [
+          7.893972429208163,
+          9.514906762418935
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-int-arith",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 330445.0,
+    "fixed_batch_median_ns": 347568.0,
+    "outlier_batches": 3,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0243361615364532,
+        "ci95": [
+          0.9535961834001025,
+          1.097889063400928
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 8.977781870719033,
+        "ci95": [
+          8.225049651808387,
+          9.782927439432386
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.12228806050748488,
+        "ci95": [
+          0.1131943443369857,
+          0.13166255365570478
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 8.886389548913394,
+        "ci95": [
+          8.110840946596893,
+          9.72731353026334
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-int-arith",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 3070377.0,
+    "fixed_batch_median_ns": 3055606.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.11409679765971123,
+        "ci95": [
+          0.10486207750210715,
+          0.12394356090319206
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013621188648648993,
+        "ci95": [
+          0.012398779426937127,
+          0.014865198713748622
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9898201668160691,
+        "ci95": [
+          0.8978435606663688,
+          1.0859409520973426
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-int-arith",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 42476.5,
+    "fixed_batch_median_ns": 45856.0,
+    "outlier_batches": 11,
+    "outlier_processes": 9,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 8.376420046941188,
+        "ci95": [
+          7.853977588071368,
+          8.971159865076139
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 73.41503196192677,
+        "ci95": [
+          67.27011984656937,
+          80.49780336300681
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 72.66767918336137,
+        "ci95": [
+          66.91404397804104,
+          78.77695975931607
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-int-arith",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 3217098.0,
+    "fixed_batch_median_ns": 3436918.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.1152702293657278,
+        "ci95": [
+          0.10534242988736028,
+          0.12643907572805377
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0102845279629695,
+        "ci95": [
+          0.9187031011790305,
+          1.1126038135444483
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01376127614419491,
+        "ci95": [
+          0.012673770735233935,
+          0.014935767383140662
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-bitops",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 34518.5,
+    "fixed_batch_median_ns": 45878.5,
+    "outlier_batches": 3,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 11.31324862048057,
+        "ci95": [
+          10.388323710886148,
+          12.3334036245336
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.37052391045441363,
+        "ci95": [
+          0.3447965577122758,
+          0.39670684296791786
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 11.908312339393369,
+        "ci95": [
+          10.821462967869966,
+          13.104605133864752
+        ]
+      }
+    },
+    "compilation_quiet_samples": 29,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-bitops",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 31795.5,
+    "fixed_batch_median_ns": 32803.0,
+    "outlier_batches": 3,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9956338301075952,
+        "ci95": [
+          0.9041896003774834,
+          1.098128960055143
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 11.263853054968537,
+        "ci95": [
+          10.273078177174721,
+          12.375340716348108
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.3689061401121715,
+        "ci95": [
+          0.33981404203944393,
+          0.4000723417881926
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 11.856318624587757,
+        "ci95": [
+          10.662765102529972,
+          13.162050821162383
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-bitops",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 386549.5,
+    "fixed_batch_median_ns": 450450.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.08839194059517819,
+        "ci95": [
+          0.08113293955493978,
+          0.09634975498547273
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.03275132748197965,
+        "ci95": [
+          0.030406951447396965,
+          0.035135149818037774
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0525988368924861,
+        "ci95": [
+          0.9476781571231933,
+          1.1692555560002331
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-bitops",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 13881.5,
+    "fixed_batch_median_ns": 16759.5,
+    "outlier_batches": 10,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 2.698881156613055,
+        "ci95": [
+          2.524918725348105,
+          2.8933125935591355
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 30.533113521893654,
+        "ci95": [
+          28.45787995950675,
+          32.865756411427434
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 32.13911977985149,
+        "ci95": [
+          29.799748999496884,
+          34.79228028806771
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-bitops",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 422658.5,
+    "fixed_batch_median_ns": 387213.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.08397495560239411,
+        "ci95": [
+          0.07633528717310052,
+          0.09234114417173737
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.950029550623702,
+        "ci95": [
+          0.8545459650328314,
+          1.0554830382978109
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.03111472893003483,
+        "ci95": [
+          0.02870801007534603,
+          0.033634814416562915
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-fibonacci",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 508161.0,
+    "fixed_batch_median_ns": 510343.5,
+    "outlier_batches": 17,
+    "outlier_processes": 12,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.7989465152959443,
+        "ci95": [
+          1.7579322258162353,
+          1.8428551318250288
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013869212657294587,
+        "ci95": [
+          0.011958663070449271,
+          0.016364876792996568
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.8062640904207625,
+        "ci95": [
+          1.728151159513482,
+          1.8815613790846455
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-fibonacci",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 516305.0,
+    "fixed_batch_median_ns": 523265.0,
+    "outlier_batches": 16,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9880967903412624,
+        "ci95": [
+          0.9481617433889696,
+          1.0264818561249038
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.7775332777595214,
+        "ci95": [
+          1.7274549870652736,
+          1.831760383276725
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01370412451123319,
+        "ci95": [
+          0.011764497420918554,
+          0.016097371377278454
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.7847637502534353,
+        "ci95": [
+          1.7209832687209141,
+          1.8492086357976543
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "quickjs-fibonacci",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 905885.5,
+    "fixed_batch_median_ns": 901432.5,
+    "outlier_batches": 12,
+    "outlier_processes": 11,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.5558808955670871,
+        "ci95": [
+          0.5425494958749286,
+          0.5693099076371435
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0077096303527472935,
+        "ci95": [
+          0.006655590651338116,
+          0.009096787562028403
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0040677002137635,
+        "ci95": [
+          0.9709878034934093,
+          1.0365901517140834
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-fibonacci",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 5843.0,
+    "fixed_batch_median_ns": 13176.5,
+    "outlier_batches": 29,
+    "outlier_processes": 19,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 72.10214629408286,
+        "ci95": [
+          60.983162511644245,
+          83.52507176239718
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 129.70790482109877,
+        "ci95": [
+          110.03162387410028,
+          150.49606761493368
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 130.23551769326636,
+        "ci95": [
+          111.15015988363353,
+          150.52886347836477
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "quickjs-fibonacci",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 920665.5,
+    "fixed_batch_median_ns": 902035.5,
+    "outlier_batches": 22,
+    "outlier_processes": 16,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.553628899175565,
+        "ci95": [
+          0.5309638651991284,
+          0.5782442204011812
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9959487789390123,
+        "ci95": [
+          0.9643328287089905,
+          1.029709045896812
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.007678396935889813,
+        "ci95": [
+          0.006640284305933041,
+          0.00900030805908559
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "numeric",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 35524.5,
+    "fixed_batch_median_ns": 35494.0,
+    "outlier_batches": 5,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 13.328965268734375,
+        "ci95": [
+          11.804349342322592,
+          14.678489648863845
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.16231576190350722,
+        "ci95": [
+          0.1403687249314563,
+          0.18818635341149909
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 13.243471643445924,
+        "ci95": [
+          11.6936410851929,
+          14.609607323569533
+        ]
+      }
+    },
+    "compilation_quiet_samples": 18,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "numeric",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 35884.0,
+    "fixed_batch_median_ns": 35675.0,
+    "outlier_batches": 9,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0493118962610073,
+        "ci95": [
+          0.9594296953863056,
+          1.1720694831724205
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 13.98624182133277,
+        "ci95": [
+          13.126191792028624,
+          14.754922730409348
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.1703198599160193,
+        "ci95": [
+          0.15386280812332964,
+          0.19115635233399797
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 13.896532343263118,
+        "ci95": [
+          12.890314369532042,
+          14.915052655312584
+        ]
+      }
+    },
+    "compilation_quiet_samples": 18,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "numeric",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 488903.0,
+    "fixed_batch_median_ns": 487305.5,
+    "outlier_batches": 21,
+    "outlier_processes": 16,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.0750245784153771,
+        "ci95": [
+          0.06810188685742485,
+          0.08494598570544089
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.012177671606981355,
+        "ci95": [
+          0.011135359981380485,
+          0.013550879506594856
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9935858768055318,
+        "ci95": [
+          0.9516417593339745,
+          1.033556676156617
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "numeric",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 5584.0,
+    "fixed_batch_median_ns": 5840.0,
+    "outlier_batches": 32,
+    "outlier_processes": 24,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 6.160831137240238,
+        "ci95": [
+          5.315799876206202,
+          7.115106628401514
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 82.11750425481243,
+        "ci95": [
+          73.66375777441054,
+          89.75765360152621
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 81.59079246609976,
+        "ci95": [
+          73.61354185110389,
+          89.19541567744834
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "numeric",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 483964.0,
+    "fixed_batch_median_ns": 478760.0,
+    "outlier_batches": 23,
+    "outlier_processes": 16,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.0755089018138904,
+        "ci95": [
+          0.06838270755384185,
+          0.08594027467479447
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0064555297576192,
+        "ci95": [
+          0.9672418920488087,
+          1.0501903593765547
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.012256284928418744,
+        "ci95": [
+          0.011209563453415963,
+          0.013585312336551941
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 35901.0,
+    "fixed_batch_median_ns": 35326.5,
+    "outlier_batches": 8,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 13.019535849439189,
+        "ci95": [
+          12.022912995171282,
+          13.79649626135343
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.15827369228133342,
+        "ci95": [
+          0.14467038806191446,
+          0.17399973919464398
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 13.018619987396145,
+        "ci95": [
+          11.991351506035267,
+          13.848192827042709
+        ]
+      }
+    },
+    "compilation_quiet_samples": 24,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 35786.5,
+    "fixed_batch_median_ns": 35953.5,
+    "outlier_batches": 11,
+    "outlier_processes": 6,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0262133257607433,
+        "ci95": [
+          0.9097490564897243,
+          1.138925373139849
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 13.360821183914213,
+        "ci95": [
+          12.057671371533377,
+          14.46765976368671
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.1624225721364597,
+        "ci95": [
+          0.14297496545550514,
+          0.18310647331137297
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 13.359881314081083,
+        "ci95": [
+          12.124384623251165,
+          14.449914449570594
+        ]
+      }
+    },
+    "compilation_quiet_samples": 18,
+    "native_entry_range": [
+      10,
+      20
+    ]
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 482140.0,
+    "fixed_batch_median_ns": 480748.0,
+    "outlier_batches": 21,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.07680765363406365,
+        "ci95": [
+          0.07242864599845765,
+          0.08310848838588387
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.012156630936129037,
+        "ci95": [
+          0.011323382760814169,
+          0.013215397044146576
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9999296547854213,
+        "ci95": [
+          0.9773272042860034,
+          1.025334918522043
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 5607.5,
+    "fixed_batch_median_ns": 5395.0,
+    "outlier_batches": 23,
+    "outlier_processes": 19,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 6.318169403810253,
+        "ci95": [
+          5.730417595499672,
+          6.923281157172168
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 82.2596330557374,
+        "ci95": [
+          75.56349476296498,
+          88.25758598672682
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 82.25384648419892,
+        "ci95": [
+          75.54710665384445,
+          88.39852284657123
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "scalar-loop",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 482223.5,
+    "fixed_batch_median_ns": 478401.0,
+    "outlier_batches": 25,
+    "outlier_processes": 21,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.07681305706504535,
+        "ci95": [
+          0.07214856364482695,
+          0.08351557998644413
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.000070350163376,
+        "ci95": [
+          0.9755883781440972,
+          1.0227853416850656
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.012157486157101497,
+        "ci95": [
+          0.011324203314668808,
+          0.013219462648905217
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 56557.5,
+    "fixed_batch_median_ns": 58043.0,
+    "outlier_batches": 12,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 22.29682178814822,
+        "ci95": [
+          21.234568135551896,
+          23.238091535780065
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.22675385399012257,
+        "ci95": [
+          0.20193128338632577,
+          0.2536428395444078
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 22.117463111015496,
+        "ci95": [
+          21.1602969029114,
+          22.95895796258464
+        ]
+      }
+    },
+    "compilation_quiet_samples": 25,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 54917.0,
+    "fixed_batch_median_ns": 55146.5,
+    "outlier_batches": 6,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0746826252362238,
+        "ci95": [
+          1.0246237582398723,
+          1.1370677196587768
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 23.962006973711368,
+        "ci95": [
+          22.875697775189664,
+          25.30615603927364
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.24368842708853627,
+        "ci95": [
+          0.21753168377369772,
+          0.27504153055585423
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 23.769253319711467,
+        "ci95": [
+          22.975614622441217,
+          24.725646501839737
+        ]
+      }
+    },
+    "compilation_quiet_samples": 26,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1292753.5,
+    "fixed_batch_median_ns": 1306823.5,
+    "outlier_batches": 6,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04484944130160944,
+        "ci95": [
+          0.04302097132739729,
+          0.047016365374074574
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010169783664443717,
+        "ci95": [
+          0.009126243434530676,
+          0.011361978556322044
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9919558635380017,
+        "ci95": [
+          0.9575806352351516,
+          1.026450284874625
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 14283.0,
+    "fixed_batch_median_ns": 13693.0,
+    "outlier_batches": 20,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 4.41006837327475,
+        "ci95": [
+          3.9281889728566233,
+          4.934124560174776
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 98.33050859245586,
+        "ci95": [
+          88.19744431017068,
+          109.77482687167969
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 97.53952456296044,
+        "ci95": [
+          87.527798321542,
+          108.73903205366965
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "call-heavy",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1274550.0,
+    "fixed_batch_median_ns": 1273933.5,
+    "outlier_batches": 9,
+    "outlier_processes": 8,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.045213141985617454,
+        "ci95": [
+          0.04351749565030557,
+          0.04733205671861391
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0081093693355543,
+        "ci95": [
+          0.9732852503774879,
+          1.043261678691242
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010252254196241376,
+        "ci95": [
+          0.009192605251728776,
+          0.01141849276307211
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-entry",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 41956.5,
+    "fixed_batch_median_ns": 40272.5,
+    "outlier_batches": 9,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 24.003130585001845,
+        "ci95": [
+          22.77627900765459,
+          24.99867487903967
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.22326385439024146,
+        "ci95": [
+          0.19665825384669244,
+          0.2540580417330486
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 24.126114024129837,
+        "ci95": [
+          22.86421580467967,
+          25.153408005140257
+        ]
+      }
+    },
+    "compilation_quiet_samples": 17,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "generic-call-entry",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 40128.0,
+    "fixed_batch_median_ns": 38761.0,
+    "outlier_batches": 8,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0770940139820178,
+        "ci95": [
+          1.0322350102168172,
+          1.1347171043442663
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 25.853628269934173,
+        "ci95": [
+          25.255774019352867,
+          26.474791934752535
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.2404761611022819,
+        "ci95": [
+          0.21184978717454367,
+          0.2737401376885846
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 25.986092996037858,
+        "ci95": [
+          25.424129000312455,
+          26.570827338820685
+        ]
+      }
+    },
+    "compilation_quiet_samples": 22,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "generic-call-entry",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1030044.0,
+    "fixed_batch_median_ns": 1023631.5,
+    "outlier_batches": 32,
+    "outlier_processes": 23,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04166123233212095,
+        "ci95": [
+          0.03998331187541111,
+          0.043937975322158526
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.00930144730911667,
+        "ci95": [
+          0.008261232765310812,
+          0.010518221972198434
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0051236416305145,
+        "ci95": [
+          0.9942087048526468,
+          1.015852867697312
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-entry",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 9780.5,
+    "fixed_batch_median_ns": 9608.5,
+    "outlier_batches": 18,
+    "outlier_processes": 16,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 4.479005357723988,
+        "ci95": [
+          3.9303627586137893,
+          5.065357936265662
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 107.51015049237179,
+        "ci95": [
+          94.81699270645544,
+          121.08149907584634
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 108.06099397513745,
+        "ci95": [
+          95.27785290687916,
+          121.62234703648376
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-entry",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1042806.5,
+    "fixed_batch_median_ns": 1034213.5,
+    "outlier_batches": 16,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04144886321103538,
+        "ci95": [
+          0.03975627916542052,
+          0.043727266715018136
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9949024762543611,
+        "ci95": [
+          0.9842887377522451,
+          1.0056762064995908
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.009254032960589636,
+        "ci95": [
+          0.008215054902065859,
+          0.010503624747080009
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 368616.0,
+    "fixed_batch_median_ns": 356202.5,
+    "outlier_batches": 18,
+    "outlier_processes": 14,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 3.805006417439953,
+        "ci95": [
+          3.6225963426180305,
+          3.9670309261734342
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.03572825602209201,
+        "ci95": [
+          0.030651372797043885,
+          0.04217963372657815
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 3.79886070787218,
+        "ci95": [
+          3.615080888192269,
+          3.9695903402557553
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 365341.0,
+    "fixed_batch_median_ns": 358261.5,
+    "outlier_batches": 18,
+    "outlier_processes": 11,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.037552924540279,
+        "ci95": [
+          0.9814822950816366,
+          1.0999637187346234
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 3.9478955363093524,
+        "ci95": [
+          3.807511803898423,
+          4.070597085282031
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.037069956524445405,
+        "ci95": [
+          0.03207496533556341,
+          0.04357547550983984
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 3.941519037373935,
+        "ci95": [
+          3.804308369607889,
+          4.069402613505086
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1469650.5,
+    "fixed_batch_median_ns": 1448996.0,
+    "outlier_batches": 18,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.2628116461030334,
+        "ci95": [
+          0.25184465969311315,
+          0.2760378365491822
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.009389801777556616,
+        "ci95": [
+          0.008039329215982646,
+          0.011138471194357846
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9983848359520224,
+        "ci95": [
+          0.985753742458244,
+          1.011122972041136
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 11016.5,
+    "fixed_batch_median_ns": 10878.0,
+    "outlier_batches": 19,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 27.98905156136548,
+        "ci95": [
+          23.829199591735698,
+          32.62147601546836
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 106.4985208090534,
+        "ci95": [
+          90.22354982393728,
+          124.81149846949066
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 106.3265082270798,
+        "ci95": [
+          89.80618329408615,
+          124.19403134509186
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "generic-call-fallback",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1470146.5,
+    "fixed_batch_median_ns": 1436673.5,
+    "outlier_batches": 11,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.2632368167455449,
+        "ci95": [
+          0.2519731101729014,
+          0.27625343341044767
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0016177770232633,
+        "ci95": [
+          0.9890020829709966,
+          1.0145836206272727
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.009404992383125347,
+        "ci95": [
+          0.008035925204492613,
+          0.011195816976774194
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 45825.0,
+    "fixed_batch_median_ns": 46158.0,
+    "outlier_batches": 9,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 27.33699450501031,
+        "ci95": [
+          26.20875573004588,
+          28.403835666167193
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.20902616901386267,
+        "ci95": [
+          0.19684289361711058,
+          0.22161228505050304
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 27.705217738629973,
+        "ci95": [
+          26.40316838964935,
+          28.97051550142674
+        ]
+      }
+    },
+    "compilation_quiet_samples": 17,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 45374.5,
+    "fixed_batch_median_ns": 46490.5,
+    "outlier_batches": 18,
+    "outlier_processes": 10,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0090696901968557,
+        "ci95": [
+          0.9497245850880746,
+          1.0728813971369755
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 27.584932576083897,
+        "ci95": [
+          25.987971029480526,
+          28.892124532745324
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.21092197160985401,
+        "ci95": [
+          0.19805422478584211,
+          0.22443095317967057
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 27.956495480355766,
+        "ci95": [
+          26.33588055368888,
+          29.330334674252065
+        ]
+      }
+    },
+    "compilation_quiet_samples": 23,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1293136.0,
+    "fixed_batch_median_ns": 1310181.0,
+    "outlier_batches": 26,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.03658046607196415,
+        "ci95": [
+          0.03516533332288509,
+          0.038151532720560405
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.00764627468376425,
+        "ci95": [
+          0.007282788875467351,
+          0.008059388289815958
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0134697775043329,
+        "ci95": [
+          0.9957868752544052,
+          1.031102078669698
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 9518.5,
+    "fixed_batch_median_ns": 9361.5,
+    "outlier_batches": 23,
+    "outlier_processes": 22,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 4.7840899764740925,
+        "ci95": [
+          4.506577743095038,
+          5.085517054879637
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 130.78264139834712,
+        "ci95": [
+          124.04755733046844,
+          137.31888684211376
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 132.54425447941185,
+        "ci95": [
+          125.33205513607722,
+          139.75493060007716
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-heavy",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1302618.5,
+    "fixed_batch_median_ns": 1290018.0,
+    "outlier_batches": 21,
+    "outlier_processes": 17,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.03609428409601269,
+        "ci95": [
+          0.03447340249047354,
+          0.03787060690409418
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9867092459949796,
+        "ci95": [
+          0.9703907317467284,
+          1.0043459580825624
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0075446499278875225,
+        "ci95": [
+          0.007160711159713525,
+          0.007975212058966914
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-iterative",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1315818.0,
+    "fixed_batch_median_ns": 1346730.5,
+    "outlier_batches": 20,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 34.30758583156269,
+        "ci95": [
+          33.0333736891405,
+          35.62859782771941
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.18020610779430796,
+        "ci95": [
+          0.16383520190733813,
+          0.2003906851278678
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 34.47280232580567,
+        "ci95": [
+          32.858750001294574,
+          36.07294182189266
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "fibonacci-iterative",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1301886.5,
+    "fixed_batch_median_ns": 1282919.5,
+    "outlier_batches": 19,
+    "outlier_processes": 12,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.012933787827393,
+        "ci95": [
+          0.9955149869401335,
+          1.0319226235521062
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 34.7513128675782,
+        "ci95": [
+          33.52641129521976,
+          36.01646905531504
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.18253685535771985,
+        "ci95": [
+          0.16669396509028828,
+          0.20179544408586664
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 34.91866623690329,
+        "ci95": [
+          33.231760432171455,
+          36.62919633755154
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "fibonacci-iterative",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 46179360.5,
+    "fixed_batch_median_ns": 45303435.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.029148072525698045,
+        "ci95": [
+          0.028051895401944933,
+          0.030289776219210637
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.005252660699562248,
+        "ci95": [
+          0.004778145456368356,
+          0.005794448958336885
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.004815742356636,
+        "ci95": [
+          0.9745556255122637,
+          1.0336014585292053
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-iterative",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 240191.0,
+    "fixed_batch_median_ns": 240379.5,
+    "outlier_batches": 34,
+    "outlier_processes": 23,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 5.549201479571528,
+        "ci95": [
+          5.0026470028254915,
+          6.101089901584534
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 190.3797060570349,
+        "ci95": [
+          172.26794265015204,
+          209.7201215241656
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 191.2965256713376,
+        "ci95": [
+          174.40778039472673,
+          208.20866466248685
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-iterative",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 46659396.5,
+    "fixed_batch_median_ns": 46293119.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.029008375662323792,
+        "ci95": [
+          0.02769759792778032,
+          0.030364358782445408
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9952073378693874,
+        "ci95": [
+          0.9667940590439386,
+          1.0263483206915966
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0052274864715425,
+        "ci95": [
+          0.00479927633636788,
+          0.0057223604640281355
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-recursive",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 612483.0,
+    "fixed_batch_median_ns": 612847.5,
+    "outlier_batches": 20,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 23.11356042561523,
+        "ci95": [
+          21.411805337524825,
+          24.74349350543068
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.6852120756891508,
+        "ci95": [
+          0.649873537747127,
+          0.7274818576595464
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 22.35015030157753,
+        "ci95": [
+          20.82595666242361,
+          23.8725650237928
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "fibonacci-recursive",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 625268.5,
+    "fixed_batch_median_ns": 604531.0,
+    "outlier_batches": 22,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9579148205120823,
+        "ci95": [
+          0.9086957322249644,
+          1.0029250324054242
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 22.140822086498382,
+        "ci95": [
+          20.0914810429986,
+          24.19549250743781
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.6563748024964843,
+        "ci95": [
+          0.6091563052280593,
+          0.7100018880379674
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 21.409540214553708,
+        "ci95": [
+          19.52837156175628,
+          23.376707736306994
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "fibonacci-recursive",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 15224296.5,
+    "fixed_batch_median_ns": 14161216.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04326464558406009,
+        "ci95": [
+          0.040451794445639094,
+          0.046555437288890215
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.029645457604609262,
+        "ci95": [
+          0.027164931223462717,
+          0.03256167800479178
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9669713315482257,
+        "ci95": [
+          0.9276547875835788,
+          1.0067059817499735
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-recursive",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 394390.0,
+    "fixed_batch_median_ns": 1151064.0,
+    "outlier_batches": 15,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.459402184344536,
+        "ci95": [
+          1.3722303169705519,
+          1.5393238353409893
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 33.731980573122286,
+        "ci95": [
+          30.58519730039405,
+          36.868020090577
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 32.61785817055093,
+        "ci95": [
+          29.65508494947393,
+          35.7104279684594
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "fibonacci-recursive",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 14528095.5,
+    "fixed_batch_median_ns": 10894551.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04474242841800565,
+        "ci95": [
+          0.0418150493809485,
+          0.04805260889649997
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0341568228283373,
+        "ci95": [
+          0.9929772076133662,
+          1.0790834664901636
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.030658052247674896,
+        "ci95": [
+          0.027955824992945705,
+          0.033717309880769875
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "collections",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1828217.0,
+    "fixed_batch_median_ns": 1839320.0,
+    "outlier_batches": 34,
+    "outlier_processes": 20,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.980177021783249,
+        "ci95": [
+          0.9666891813627095,
+          0.9971626379951238
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05412080113297258,
+        "ci95": [
+          0.050128524763366565,
+          0.05881866074605084
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9845665530390637,
+        "ci95": [
+          0.9728609530083873,
+          0.9984148917415608
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "collections",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1828048.5,
+    "fixed_batch_median_ns": 1816845.5,
+    "outlier_batches": 26,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.989651323543425,
+        "ci95": [
+          0.9755580081714188,
+          1.002530884248261
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9700334869146449,
+        "ci95": [
+          0.9523473875622586,
+          0.9880368384556123
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.053560722472476806,
+        "ci95": [
+          0.049580995813899444,
+          0.058052000623927666
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9743775923316972,
+        "ci95": [
+          0.9604885716314701,
+          0.9892643602946688
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "collections",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1760528.0,
+    "fixed_batch_median_ns": 1756283.0,
+    "outlier_batches": 33,
+    "outlier_processes": 20,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0202238756634865,
+        "ci95": [
+          1.0037904045130603,
+          1.0344770838058457
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05521533348589408,
+        "ci95": [
+          0.050833031197627,
+          0.060165355108513834
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0044783045901533,
+        "ci95": [
+          0.9912265218898481,
+          1.018243828771933
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "collections",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 91400.0,
+    "fixed_batch_median_ns": 113449.0,
+    "outlier_batches": 32,
+    "outlier_processes": 19,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 18.47718398593253,
+        "ci95": [
+          16.979380394486636,
+          19.97838369160033
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 18.110911170272495,
+        "ci95": [
+          16.578772785772177,
+          19.655464634815306
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 18.19201734689818,
+        "ci95": [
+          16.71282261245227,
+          19.682461124617348
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "collections",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1773318.5,
+    "fixed_batch_median_ns": 1739673.5,
+    "outlier_batches": 37,
+    "outlier_processes": 21,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0156753719830294,
+        "ci95": [
+          1.001682723487846,
+          1.0278305838736594
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9955416612089192,
+        "ci95": [
+          0.9816357252402663,
+          1.009248582267126
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05496916482275147,
+        "ci95": [
+          0.05081397272387087,
+          0.059812646008738084
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "for-of-array",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 680080.5,
+    "fixed_batch_median_ns": 700633.5,
+    "outlier_batches": 26,
+    "outlier_processes": 22,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9755662582429753,
+        "ci95": [
+          0.9574048648340111,
+          0.9938777334426095
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05041961599121622,
+        "ci95": [
+          0.0429344836384718,
+          0.0593200500869634
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9643001663769126,
+        "ci95": [
+          0.9474729910021863,
+          0.9816366599584172
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "for-of-array",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 686559.5,
+    "fixed_batch_median_ns": 680118.0,
+    "outlier_batches": 32,
+    "outlier_processes": 26,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9909255192910992,
+        "ci95": [
+          0.9756548227680051,
+          1.0063634791062646
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9667135010522948,
+        "ci95": [
+          0.9511122838695723,
+          0.9832626638228505
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.049962084158553736,
+        "ci95": [
+          0.04265434115026355,
+          0.05835427342976425
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9555496431195355,
+        "ci95": [
+          0.9379168407090384,
+          0.9733744787622101
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "for-of-array",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 659360.5,
+    "fixed_batch_median_ns": 652575.5,
+    "outlier_batches": 23,
+    "outlier_processes": 22,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0250457019711103,
+        "ci95": [
+          1.0055916592007217,
+          1.0446323343373405
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05168241066683004,
+        "ci95": [
+          0.04401879086795065,
+          0.0606489753338678
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9884517409546809,
+        "ci95": [
+          0.9687473975072168,
+          1.008154433522105
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "for-of-array",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 41332.5,
+    "fixed_batch_median_ns": 50988.5,
+    "outlier_batches": 16,
+    "outlier_processes": 14,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 19.833550500944185,
+        "ci95": [
+          16.850438905998637,
+          23.412351258141683
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 19.34894264987921,
+        "ci95": [
+          16.49571241407144,
+          22.71283913033752
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 19.12549604790538,
+        "ci95": [
+          16.409956814387836,
+          22.285975815376478
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "for-of-array",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 660262.5,
+    "fixed_batch_median_ns": 646888.0,
+    "outlier_batches": 18,
+    "outlier_processes": 18,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0370214948289591,
+        "ci95": [
+          1.0188824253900506,
+          1.0553163180062013
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0116831794278245,
+        "ci95": [
+          0.9917430850433141,
+          1.0320028274798805
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.052286225543913135,
+        "ci95": [
+          0.04474005865226639,
+          0.061263441378722194
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-json",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2900709.5,
+    "fixed_batch_median_ns": 2851306.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9384696588360393,
+        "ci95": [
+          0.9075488991430121,
+          0.9668886076871107
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.07660311548819135,
+        "ci95": [
+          0.06984884731747243,
+          0.0845528800562129
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9673265898530127,
+        "ci95": [
+          0.9273920878796108,
+          1.0146918996157892
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "strings-json",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2858068.0,
+    "fixed_batch_median_ns": 2828775.0,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0394321054601525,
+        "ci95": [
+          1.0138113132141,
+          1.0707230266536736
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9754754933944154,
+        "ci95": [
+          0.9628022863374813,
+          0.9886823725693047
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.07962373761669796,
+        "ci95": [
+          0.07331619941431304,
+          0.08732130526196889
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0054703139585066,
+        "ci95": [
+          0.9729935610501526,
+          1.0473004648047806
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "strings-json",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2799001.5,
+    "fixed_batch_median_ns": 2816562.5,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.06556455031298,
+        "ci95": [
+          1.034563609011165,
+          1.1017714094808673
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.08162556430774788,
+        "ci95": [
+          0.07529659003463844,
+          0.08950044233274322
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.030748922722514,
+        "ci95": [
+          0.9976088508769706,
+          1.07548216073013
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-json",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 219072.5,
+    "fixed_batch_median_ns": 620326.0,
+    "outlier_batches": 20,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 13.05429934052948,
+        "ci95": [
+          11.799459702842803,
+          14.30852977177293
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 12.251063848450237,
+        "ci95": [
+          11.184935093050507,
+          13.271323976825322
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 12.627770863994819,
+        "ci95": [
+          11.48734337535031,
+          13.805862808951051
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-json",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2817991.0,
+    "fixed_batch_median_ns": 5279243.5,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0337770205944117,
+        "ci95": [
+          0.9861124882150115,
+          1.0794292957051763
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9701683678297748,
+        "ci95": [
+          0.931177630980428,
+          1.001980104689316
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.07919054049763206,
+        "ci95": [
+          0.07236985220037867,
+          0.08716574891225493
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-closures",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 8120236.5,
+    "fixed_batch_median_ns": 9612716.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.8991080311761026,
+        "ci95": [
+          0.764927607518525,
+          1.060653864876743
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.015547718590808625,
+        "ci95": [
+          0.013134677203659925,
+          0.018658795690243382
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.8979983670339827,
+        "ci95": [
+          0.7822707605720681,
+          1.0393498237168644
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "calls-closures",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 8035767.5,
+    "fixed_batch_median_ns": 9999102.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9658802170525432,
+        "ci95": [
+          0.8408581441647485,
+          1.106786347601628
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.8684306603060589,
+        "ci95": [
+          0.7690167518366811,
+          0.979407445715195
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.015017233807162108,
+        "ci95": [
+          0.012861285037300949,
+          0.01762862214773919
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.8673588576636128,
+        "ci95": [
+          0.7481357280527196,
+          1.00732457632286
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "calls-closures",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 6861440.5,
+    "fixed_batch_median_ns": 5755699.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.112213399642224,
+        "ci95": [
+          0.9479711590474794,
+          1.3057756701275909
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01729238095056388,
+        "ci95": [
+          0.015003690444985566,
+          0.019969614940079313
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9987658166720318,
+        "ci95": [
+          0.8675059124325076,
+          1.145401445589871
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-closures",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 115339.0,
+    "fixed_batch_median_ns": 465630.0,
+    "outlier_batches": 19,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 64.31811806724956,
+        "ci95": [
+          53.89185284015923,
+          76.54489873842785
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 57.828936504396836,
+        "ci95": [
+          50.07922530460529,
+          66.85960156100741
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 57.75756499508898,
+        "ci95": [
+          49.22054291356953,
+          67.37158964589065
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-closures",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 7347697.0,
+    "fixed_batch_median_ns": 7041133.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.1135877711035493,
+        "ci95": [
+          0.9634048295444336,
+          1.27492981612995
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0012357084186967,
+        "ci95": [
+          0.8728246704010144,
+          1.1497026361521838
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.017313749291283802,
+        "ci95": [
+          0.014850939622762438,
+          0.02031941025018943
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "adversarial",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 856331.5,
+    "fixed_batch_median_ns": 856449.5,
+    "outlier_batches": 34,
+    "outlier_processes": 26,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9681760957784459,
+        "ci95": [
+          0.9525617463476785,
+          0.984852434219633
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05892503396153342,
+        "ci95": [
+          0.056215112650086704,
+          0.062247028632333744
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9721307255471097,
+        "ci95": [
+          0.9556292050174184,
+          0.9909374888116186
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "adversarial",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 865721.5,
+    "fixed_batch_median_ns": 841287.5,
+    "outlier_batches": 25,
+    "outlier_processes": 21,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9891825977028158,
+        "ci95": [
+          0.9747003413250948,
+          1.00333651259821
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9577029454558932,
+        "ci95": [
+          0.9415399611030019,
+          0.9743977624813441
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05828761816379627,
+        "ci95": [
+          0.05541384258850824,
+          0.0618417738828358
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.961614796403413,
+        "ci95": [
+          0.9429059805512627,
+          0.980622526060951
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "adversarial",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 819585.0,
+    "fixed_batch_median_ns": 819977.0,
+    "outlier_batches": 24,
+    "outlier_processes": 20,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0328699545055042,
+        "ci95": [
+          1.0155501714543265,
+          1.0498165498957381
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06086189714708432,
+        "ci95": [
+          0.05798297235463057,
+          0.06455048000545295
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0040846182692458,
+        "ci95": [
+          0.9860057654567078,
+          1.0227410015054743
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "adversarial",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 48306.5,
+    "fixed_batch_median_ns": 53039.0,
+    "outlier_batches": 32,
+    "outlier_processes": 24,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 16.970715717411473,
+        "ci95": [
+          16.077052718525938,
+          17.79106217142531
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 16.430641285849344,
+        "ci95": [
+          15.500853770022694,
+          17.285871087207976
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 16.497754183420952,
+        "ci95": [
+          15.502769902772032,
+          17.381248035547245
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "adversarial",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 828531.0,
+    "fixed_batch_median_ns": 822987.5,
+    "outlier_batches": 25,
+    "outlier_processes": 21,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.028668237429905,
+        "ci95": [
+          1.009448662390172,
+          1.0467675636542326
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9959319979661808,
+        "ci95": [
+          0.9778939836486124,
+          1.0141277104362219
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.060614310825707875,
+        "ci95": [
+          0.05753954708881462,
+          0.06435997912291122
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64-dense",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 187810.0,
+    "fixed_batch_median_ns": 191267.5,
+    "outlier_batches": 24,
+    "outlier_processes": 15,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 15.130949316849055,
+        "ci95": [
+          14.580306893228826,
+          15.679614147577293
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.36201677450337627,
+        "ci95": [
+          0.34148864749171204,
+          0.3852468973917412
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 15.112996838861255,
+        "ci95": [
+          14.41453614919703,
+          15.893183698335536
+        ]
+      }
+    },
+    "compilation_quiet_samples": 16,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "float64-dense",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 194266.5,
+    "fixed_batch_median_ns": 207266.5,
+    "outlier_batches": 14,
+    "outlier_processes": 11,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9065650863791398,
+        "ci95": [
+          0.8108035782100536,
+          0.9998316601449396
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 13.71719037442765,
+        "ci95": [
+          12.467407151101801,
+          14.980200430420796
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.3281917684483509,
+        "ci95": [
+          0.2952904762198057,
+          0.36360453440859364
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 13.700915284669922,
+        "ci95": [
+          12.407313608801726,
+          14.91823027473606
+        ]
+      }
+    },
+    "compilation_quiet_samples": 14,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "float64-dense",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2882586.5,
+    "fixed_batch_median_ns": 2815379.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.06608970653853495,
+        "ci95": [
+          0.06374742968598154,
+          0.0686122015461831
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.023925582388955122,
+        "ci95": [
+          0.0228078504011972,
+          0.025152093450014876
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9988135259981467,
+        "ci95": [
+          0.9612187085473071,
+          1.0376692506289373
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64-dense",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 66830.0,
+    "fixed_batch_median_ns": 375357.5,
+    "outlier_batches": 28,
+    "outlier_processes": 21,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 2.762302938508374,
+        "ci95": [
+          2.5944515059828417,
+          2.93494851264822
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 41.79626576035343,
+        "ci95": [
+          39.77329103115779,
+          43.86311846983443
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 41.74667557765422,
+        "ci95": [
+          39.426813213786694,
+          43.96000083884722
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64-dense",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2860399.5,
+    "fixed_batch_median_ns": 2831544.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.06616821340348726,
+        "ci95": [
+          0.06296600233662683,
+          0.06945167507682957
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0011878833946184,
+        "ci95": [
+          0.9641006413791597,
+          1.0390607774646283
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.02395400319098153,
+        "ci95": [
+          0.022757546645569875,
+          0.025386733435662837
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-regexp",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 22294431.0,
+    "fixed_batch_median_ns": 20618292.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9001117025888561,
+        "ci95": [
+          0.8009627975469463,
+          1.0123321405728998
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05632719686748687,
+        "ci95": [
+          0.049764664244643424,
+          0.06352132351170434
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9477477470332857,
+        "ci95": [
+          0.8203721465702988,
+          1.1010767882132226
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "strings-regexp",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 22175191.0,
+    "fixed_batch_median_ns": 22144890.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.1025715055298806,
+        "ci95": [
+          1.0113639616276247,
+          1.2094974991011158
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9924375150684591,
+        "ci95": [
+          0.9286447089754769,
+          1.07261729868498
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06210476225246297,
+        "ci95": [
+          0.056790057066920155,
+          0.0680440366256232
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.044959660309042,
+        "ci95": [
+          0.9384868141571948,
+          1.189670186798932
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "strings-regexp",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 20376926.0,
+    "fixed_batch_median_ns": 20040564.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.1109732237941694,
+        "ci95": [
+          0.989291536690496,
+          1.249154132996616
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06257800749116073,
+        "ci95": [
+          0.05826931416788198,
+          0.06760924489583017
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0529223698652301,
+        "ci95": [
+          0.9638380717995457,
+          1.176732227823245
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-regexp",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1315793.5,
+    "fixed_batch_median_ns": 1619513.5,
+    "outlier_batches": 2,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 17.753413193142922,
+        "ci95": [
+          15.799962869353763,
+          20.090624465940103
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 15.980054976043334,
+        "ci95": [
+          14.815777769923274,
+          17.145427399297642
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 16.825757355952213,
+        "ci95": [
+          15.499986402950466,
+          18.5685915488981
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "strings-regexp",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 20473884.5,
+    "fixed_batch_median_ns": 22370157.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0551330806433237,
+        "ci95": [
+          0.9084131782507132,
+          1.2129115925789933
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9497376336756868,
+        "ci95": [
+          0.8522753310284022,
+          1.0419418095278528
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.059432688754794384,
+        "ci95": [
+          0.053891664863754594,
+          0.0645946432828055
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1875886.5,
+    "fixed_batch_median_ns": 2073986.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 2.3602483701025094,
+        "ci95": [
+          2.151477519268685,
+          2.6267801494246634
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0343347450699927,
+        "ci95": [
+          0.0316098847283984,
+          0.03724890539052433
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 2.423639092913475,
+        "ci95": [
+          2.177914622671687,
+          2.7264559890959235
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      30,
+      30
+    ]
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1788450.0,
+    "fixed_batch_median_ns": 1966700.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0039740310199932,
+        "ci95": [
+          0.9484647587886547,
+          1.063627736319356
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 2.369628070340185,
+        "ci95": [
+          2.1951678230845952,
+          2.5929811097034055
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0344711924119644,
+        "ci95": [
+          0.03186157154600418,
+          0.03724361497344761
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 2.433270709849981,
+        "ci95": [
+          2.2411172532328454,
+          2.6672065102886537
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      30,
+      30
+    ]
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 4115031.0,
+    "fixed_batch_median_ns": 3702915.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.4236842243668485,
+        "ci95": [
+          0.3807116532951467,
+          0.4637694299229706
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.014547089833813325,
+        "ci95": [
+          0.013013536730513565,
+          0.016089456396104745
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0268576492262178,
+        "ci95": [
+          0.9603347975352184,
+          1.0983585400019646
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 61940.0,
+    "fixed_batch_median_ns": 288499.5,
+    "outlier_batches": 12,
+    "outlier_processes": 12,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 29.12501601399578,
+        "ci95": [
+          26.83891665837492,
+          31.677561641476412
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 68.74227157624306,
+        "ci95": [
+          62.32802275627354,
+          77.03159771423745
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 70.58852739325116,
+        "ci95": [
+          64.02791030104977,
+          78.40501668154913
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "arrays-typed",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 4288814.5,
+    "fixed_batch_median_ns": 4120577.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.41260268615237283,
+        "ci95": [
+          0.3669682060619061,
+          0.4608753210264217
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9738448174910551,
+        "ci95": [
+          0.9116254184352239,
+          1.0402535820167507
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01416660804423593,
+        "ci95": [
+          0.01279756823067955,
+          0.015618900434063127
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "packed-array-traversal",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 42783.0,
+    "fixed_batch_median_ns": 42489.0,
+    "outlier_batches": 3,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 19.261383521398955,
+        "ci95": [
+          17.876300269682364,
+          20.96976114879325
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.25901981418631165,
+        "ci95": [
+          0.21339962100924384,
+          0.31471952854499424
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 18.6845686495322,
+        "ci95": [
+          16.80206775920385,
+          20.6843070509857
+        ]
+      }
+    },
+    "compilation_quiet_samples": 23,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "packed-array-traversal",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 44297.0,
+    "fixed_batch_median_ns": 45743.5,
+    "outlier_batches": 5,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9745075652673209,
+        "ci95": [
+          0.8768003133791721,
+          1.0837784262289882
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 18.77036395911859,
+        "ci95": [
+          17.642820892071157,
+          20.130614557049782
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.2524167684786964,
+        "ci95": [
+          0.20647398675279593,
+          0.3099045348250755
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 18.208253502725732,
+        "ci95": [
+          16.76995286797228,
+          19.814868276899603
+        ]
+      }
+    },
+    "compilation_quiet_samples": 24,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "packed-array-traversal",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 781069.5,
+    "fixed_batch_median_ns": 785004.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.05191735053138956,
+        "ci95": [
+          0.04785097340519495,
+          0.056065225328005217
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01344762248768613,
+        "ci95": [
+          0.011155421626751795,
+          0.01623776562788364
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9700533001055749,
+        "ci95": [
+          0.903416012847768,
+          1.0430129511011188
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "packed-array-traversal",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 8265.5,
+    "fixed_batch_median_ns": 8073.0,
+    "outlier_batches": 7,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 3.8607085065728026,
+        "ci95": [
+          3.1673789346949457,
+          4.674423096478796
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 74.36258720942614,
+        "ci95": [
+          61.526962747934164,
+          89.29777632125555
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 72.13567312689247,
+        "ci95": [
+          59.87364881565796,
+          87.282845670384
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "packed-array-traversal",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 755151.5,
+    "fixed_batch_median_ns": 756335.0,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.05352010093232935,
+        "ci95": [
+          0.048107886146537215,
+          0.05962186176776955
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0308711901615777,
+        "ci95": [
+          0.9587200559791754,
+          1.1068851887257947
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013862766598724591,
+        "ci95": [
+          0.011502483446650981,
+          0.0167475204469685
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "int32array-traversal",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 43921.0,
+    "fixed_batch_median_ns": 46251.5,
+    "outlier_batches": 5,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 28.316593330140673,
+        "ci95": [
+          25.224105258634797,
+          31.50996523714059
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.2045418571785123,
+        "ci95": [
+          0.17455880494499912,
+          0.24176673332108314
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 28.742654516655126,
+        "ci95": [
+          25.679256319173955,
+          32.17035955766587
+        ]
+      }
+    },
+    "compilation_quiet_samples": 26,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "int32array-traversal",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 43889.0,
+    "fixed_batch_median_ns": 43747.0,
+    "outlier_batches": 3,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0014973854831664,
+        "ci95": [
+          0.8838359827086765,
+          1.1480147137577204
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 28.358994185925944,
+        "ci95": [
+          26.171001565630217,
+          30.833169361311576
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.2048481351861513,
+        "ci95": [
+          0.17891759228654203,
+          0.2346333750841141
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 28.78569335027602,
+        "ci95": [
+          26.555787101819863,
+          31.319542266363186
+        ]
+      }
+    },
+    "compilation_quiet_samples": 28,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "int32array-traversal",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1193303.5,
+    "fixed_batch_median_ns": 1247027.0,
+    "outlier_batches": 2,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.035314982573683484,
+        "ci95": [
+          0.03167790642240604,
+          0.039484681139258716
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.007223392121848017,
+        "ci95": [
+          0.0062990202953543285,
+          0.008396100781110496
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0150463433770807,
+        "ci95": [
+          0.9556643933594003,
+          1.0877725929084225
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "int32array-traversal",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 7681.0,
+    "fixed_batch_median_ns": 9574.5,
+    "outlier_batches": 16,
+    "outlier_processes": 13,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 4.888974871912197,
+        "ci95": [
+          4.1491766422820096,
+          5.739555496255751
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 138.4391132492143,
+        "ci95": [
+          119.4606020052368,
+          159.43366431001567
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 140.52211568398053,
+        "ci95": [
+          122.18955994551295,
+          160.40416922580758
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "int32array-traversal",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1232407.5,
+    "fixed_batch_median_ns": 1256888.5,
+    "outlier_batches": 7,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.03479149775190539,
+        "ci95": [
+          0.03111240606126145,
+          0.03887489603489927
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9851766931872085,
+        "ci95": [
+          0.9225148846768573,
+          1.0462070548366473
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.007116317564196763,
+        "ci95": [
+          0.006228117543321839,
+          0.008180671446649426
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64array-traversal",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 87906.0,
+    "fixed_batch_median_ns": 85904.5,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 23.54637998281713,
+        "ci95": [
+          21.448724153456315,
+          25.981880073842724
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.15678711882019328,
+        "ci95": [
+          0.14333720584997917,
+          0.1715896599431642
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 23.375447812021115,
+        "ci95": [
+          21.20675700611652,
+          25.778069077980433
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "float64array-traversal",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 89537.0,
+    "fixed_batch_median_ns": 77977.0,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9879419225682066,
+        "ci95": [
+          0.8889090233855504,
+          1.1026420855207608
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 23.26245590974589,
+        "ci95": [
+          21.204205650940466,
+          25.605329025508706
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.15489656760115159,
+        "ci95": [
+          0.14282103117238987,
+          0.1685561655110494
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 23.093584852300918,
+        "ci95": [
+          20.857506156021717,
+          25.593310055085457
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "float64array-traversal",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1823213.0,
+    "fixed_batch_median_ns": 1982597.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.042469373242500365,
+        "ci95": [
+          0.038551332209183144,
+          0.04668228588387258
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.006658650668791044,
+        "ci95": [
+          0.006323375133110826,
+          0.007013748989838331
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9927406178393136,
+        "ci95": [
+          0.9316606350391715,
+          1.052534349239703
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64array-traversal",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 11937.5,
+    "fixed_batch_median_ns": 12284.0,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 6.378074981700638,
+        "ci95": [
+          5.821884040247424,
+          6.972014735338887
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 150.1805770780226,
+        "ci95": [
+          142.3268465027128,
+          158.25894368633342
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 149.09035887590073,
+        "ci95": [
+          140.98114357891941,
+          157.08901519301165
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "float64array-traversal",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1864811.5,
+    "fixed_batch_median_ns": 1721321.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.04277992909661982,
+        "ci95": [
+          0.03870155352987559,
+          0.04726139111269457
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0073124661469846,
+        "ci95": [
+          0.9505087465529545,
+          1.072321869683981
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.006707341826391176,
+        "ci95": [
+          0.006357168975893562,
+          0.007086935434943484
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "typed-convert-traversal",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 64887.0,
+    "fixed_batch_median_ns": 66101.5,
+    "outlier_batches": 7,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 25.42703597678075,
+        "ci95": [
+          23.20444287936565,
+          27.738856422524126
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.3516335104451015,
+        "ci95": [
+          0.27185596400975676,
+          0.4533900306550201
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 25.37154288286474,
+        "ci95": [
+          23.305448472210795,
+          27.59060863433177
+        ]
+      }
+    },
+    "compilation_quiet_samples": 25,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "typed-convert-traversal",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 71992.5,
+    "fixed_batch_median_ns": 80775.5,
+    "outlier_batches": 5,
+    "outlier_processes": 5,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0027828190264665,
+        "ci95": [
+          0.9140135238796034,
+          1.0997987686305686
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 25.497794816283584,
+        "ci95": [
+          23.68911008123203,
+          27.448768670972278
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.35261204286831127,
+        "ci95": [
+          0.270667031892018,
+          0.45926314441555205
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 25.44214729512999,
+        "ci95": [
+          23.510522561980416,
+          27.534380059032365
+        ]
+      }
+    },
+    "compilation_quiet_samples": 22,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "typed-convert-traversal",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1835107.0,
+    "fixed_batch_median_ns": 1780557.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.039328217449850295,
+        "ci95": [
+          0.035988719141872405,
+          0.04320807317171383
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013829119161439153,
+        "ci95": [
+          0.010526492622502754,
+          0.018026629292059067
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9978175555355062,
+        "ci95": [
+          0.927886249919092,
+          1.0734893167508972
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "typed-convert-traversal",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 30979.0,
+    "fixed_batch_median_ns": 47745.5,
+    "outlier_batches": 3,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 2.843870024600867,
+        "ci95": [
+          2.186651701925747,
+          3.695763483389115
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 72.31118542881462,
+        "ci95": [
+          54.707313020083284,
+          94.27920629806611
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 72.15337028245452,
+        "ci95": [
+          56.083950843050026,
+          92.432237961837
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "typed-convert-traversal",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1802623.0,
+    "fixed_batch_median_ns": 1583295.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.03941423683284839,
+        "ci95": [
+          0.03625471629305479,
+          0.0429309027488847
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.002187217946193,
+        "ci95": [
+          0.9323177261645289,
+          1.077563526626061
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013859366459049095,
+        "ci95": [
+          0.010805681012156532,
+          0.017880355041096776
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "objects-polymorphic",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 8254532.5,
+    "fixed_batch_median_ns": 8403883.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.175332554909108,
+        "ci95": [
+          1.0584326743713086,
+          1.3047015110685267
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.020525823789812877,
+        "ci95": [
+          0.017863204298432613,
+          0.023658968697788364
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0844664911075814,
+        "ci95": [
+          0.9820087539305438,
+          1.1958171496590315
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "objects-polymorphic",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 7880637.5,
+    "fixed_batch_median_ns": 8509727.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9922484932189886,
+        "ci95": [
+          0.9048844334583563,
+          1.0919583172984253
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.1662219566397865,
+        "ci95": [
+          1.0608360001936805,
+          1.2860182319529725
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.020366717727520297,
+        "ci95": [
+          0.017964294833333855,
+          0.02309328058518302
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0760602417479814,
+        "ci95": [
+          0.9844052872848734,
+          1.1800544569096392
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      20,
+      20
+    ]
+  },
+  {
+    "workload": "objects-polymorphic",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 10128726.0,
+    "fixed_batch_median_ns": 9579430.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.8508230252137728,
+        "ci95": [
+          0.7698839991258054,
+          0.9444956180178369
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.017463843491853422,
+        "ci95": [
+          0.015506352808029698,
+          0.01962608449957303
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9226890607071175,
+        "ci95": [
+          0.8455675212231525,
+          1.0082416290028617
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "objects-polymorphic",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 173504.5,
+    "fixed_batch_median_ns": 170049.5,
+    "outlier_batches": 13,
+    "outlier_processes": 10,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 48.719116476889354,
+        "ci95": [
+          42.25081031707488,
+          55.99061633531175
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 57.26116364169677,
+        "ci95": [
+          51.049225452701066,
+          64.5038715014701
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 52.83424929555377,
+        "ci95": [
+          45.82806351495556,
+          60.30514759896574
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "objects-polymorphic",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 8919831.0,
+    "fixed_batch_median_ns": 8504499.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.922112401074454,
+        "ci95": [
+          0.8343557179483526,
+          1.0191167435585093
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.08378872426821,
+        "ci95": [
+          0.9922518638499536,
+          1.182365988010707
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0189271166588555,
+        "ci95": [
+          0.016571593078269043,
+          0.0217563167124645
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-polymorphic",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 854637.0,
+    "fixed_batch_median_ns": 764034.0,
+    "outlier_batches": 3,
+    "outlier_processes": 3,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.7664866611665777,
+        "ci95": [
+          1.664665866801988,
+          1.874557316315407
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.038599714989681275,
+        "ci95": [
+          0.03514340872059203,
+          0.042396955648243015
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.8014058742888897,
+        "ci95": [
+          1.6751035620419013,
+          1.9327607758462158
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "property-polymorphic",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 909762.0,
+    "fixed_batch_median_ns": 922910.0,
+    "outlier_batches": 5,
+    "outlier_processes": 4,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9857497593915545,
+        "ci95": [
+          0.927263836421547,
+          1.0412441943124988
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.7413138012133447,
+        "ci95": [
+          1.6423890647385802,
+          1.8416734782629636
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.038049659763660905,
+        "ci95": [
+          0.03483997031083582,
+          0.04156190889636132
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.7757354071468057,
+        "ci95": [
+          1.6660929473825852,
+          1.8928704000611316
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "property-polymorphic",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1534181.5,
+    "fixed_batch_median_ns": 1473337.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.5660954152575405,
+        "ci95": [
+          0.5332954486460543,
+          0.6006189216207674
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.021851121685906336,
+        "ci95": [
+          0.01999992664752352,
+          0.023827845242464448
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0197676064529415,
+        "ci95": [
+          0.9651204723828853,
+          1.0775324447454633
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-polymorphic",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 37731.5,
+    "fixed_batch_median_ns": 35495.5,
+    "outlier_batches": 2,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 25.906927039936072,
+        "ci95": [
+          23.48210004128385,
+          28.521246637526062
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 45.76424104786281,
+        "ci95": [
+          41.8860181907833,
+          49.92801517841749
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 46.668890554514526,
+        "ci95": [
+          42.924517859132024,
+          50.836967658100804
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "property-polymorphic",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1543912.5,
+    "fixed_batch_median_ns": 1523194.5,
+    "outlier_batches": 6,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.5551219823765442,
+        "ci95": [
+          0.5176136119295337,
+          0.5966733632426098
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9806155771885133,
+        "ci95": [
+          0.9292595840978913,
+          1.0361832659854906
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.02142755030424148,
+        "ci95": [
+          0.019697523023306535,
+          0.02328776773518202
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-recursion-closures",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 6267563.0,
+    "fixed_batch_median_ns": 6031546.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.8429326443542176,
+        "ci95": [
+          0.7493753499324243,
+          0.9375025026396738
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.027104630812316392,
+        "ci95": [
+          0.023957585585638513,
+          0.030676736301627008
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.8309934552054828,
+        "ci95": [
+          0.7376497401906624,
+          0.923659880227769
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "calls-recursion-closures",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 5633302.0,
+    "fixed_batch_median_ns": 5578527.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.09471483305069,
+        "ci95": [
+          0.9789155877851273,
+          1.2452998606767713
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.922770869037204,
+        "ci95": [
+          0.8530158469720628,
+          0.995438814612911
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.02967184139460552,
+        "ci95": [
+          0.026291648896579103,
+          0.03365506160041458
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9097008615814862,
+        "ci95": [
+          0.8350713164068222,
+          0.9878372117168879
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "calls-recursion-closures",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 4930192.5,
+    "fixed_batch_median_ns": 5158755.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.1863344084462573,
+        "ci95": [
+          1.0668813600568003,
+          1.332299503098575
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.03215515616088356,
+        "ci95": [
+          0.02938904435812117,
+          0.03514113739357395
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9858361291039078,
+        "ci95": [
+          0.9195638526325778,
+          1.059785109182558
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-recursion-closures",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 190418.0,
+    "fixed_batch_median_ns": 409534.5,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 36.89406459451195,
+        "ci95": [
+          32.557451805530164,
+          41.835936736148625
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 31.099211429627275,
+        "ci95": [
+          28.451884030053368,
+          33.97807878632157
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 30.658726213967764,
+        "ci95": [
+          27.97593558853688,
+          33.37139759494095
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "calls-recursion-closures",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 5097047.0,
+    "fixed_batch_median_ns": 4913715.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.203378911994832,
+        "ci95": [
+          1.0852394606198836,
+          1.3574801112319144
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0143673684479049,
+        "ci95": [
+          0.9442790109206536,
+          1.0876301319324306
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.032617141136946894,
+        "ci95": [
+          0.029891738044810563,
+          0.03580033598279401
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "json-codec",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 97740652.5,
+    "fixed_batch_median_ns": 95000483.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9995589910320491,
+        "ci95": [
+          0.9373508720459,
+          1.0657934437408254
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0651344194774643,
+        "ci95": [
+          0.05898986564911406,
+          0.07293689788656148
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9941614313749858,
+        "ci95": [
+          0.9267602139410288,
+          1.0648121212255888
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "json-codec",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 96385822.0,
+    "fixed_batch_median_ns": 95849172.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9949276299535602,
+        "ci95": [
+          0.9389513921002504,
+          1.0551938147856301
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9944888579462886,
+        "ci95": [
+          0.9326652203575182,
+          1.0575981955530693
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06480403359911456,
+        "ci95": [
+          0.05893827998905468,
+          0.07148185101215604
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9891186767091537,
+        "ci95": [
+          0.9104000104360542,
+          1.0676680827342944
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "json-codec",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 100327119.0,
+    "fixed_batch_median_ns": 95840125.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.00044120354267,
+        "ci95": [
+          0.9387923753490903,
+          1.065587954655598
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06516315701408751,
+        "ci95": [
+          0.06077076102842253,
+          0.07044305278277614
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9946000589204942,
+        "ci95": [
+          0.9354959293553866,
+          1.0562320259184865
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "json-codec",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 6312821.5,
+    "fixed_batch_median_ns": 6378516.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 15.352865781600887,
+        "ci95": [
+          13.761672951397252,
+          16.979069154589244
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 15.346095030107454,
+        "ci95": [
+          14.17117580334686,
+          16.463257717590555
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 15.263227021144376,
+        "ci95": [
+          14.018077927198894,
+          16.45336655059934
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "json-codec",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 101932316.5,
+    "fixed_batch_median_ns": 95587760.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.005872857707766,
+        "ci95": [
+          0.9356946290017385,
+          1.0792580619893681
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0054292587568985,
+        "ci95": [
+          0.9461807217802359,
+          1.0682292503668593
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.06551694465493339,
+        "ci95": [
+          0.06067816151049309,
+          0.0712599428488037
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "map-set-bigint",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 20396532.5,
+    "fixed_batch_median_ns": 19296112.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.01738446075788,
+        "ci95": [
+          0.9232303416340296,
+          1.1252759954949068
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.050265148844137124,
+        "ci95": [
+          0.04557637045818454,
+          0.05561520336565264
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0401527251668128,
+        "ci95": [
+          0.9171287441245688,
+          1.196293784553432
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "map-set-bigint",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 19984518.5,
+    "fixed_batch_median_ns": 19533619.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0019299671381896,
+        "ci95": [
+          0.8992998814272234,
+          1.1161307235161282
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0193479793340472,
+        "ci95": [
+          0.9161371613196092,
+          1.1253536408755682
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05036215892960251,
+        "ci95": [
+          0.04481722242353743,
+          0.05624089411076947
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.042160185745083,
+        "ci95": [
+          0.9287877644742896,
+          1.180311296404956
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "map-set-bigint",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 20251070.5,
+    "fixed_batch_median_ns": 20240878.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9829125945712502,
+        "ci95": [
+          0.8907633090531072,
+          1.0857494459562937
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0494062478669009,
+        "ci95": [
+          0.04530701907447631,
+          0.05349647736352911
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0223792138440684,
+        "ci95": [
+          0.9267975850040979,
+          1.1302325062284693
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "map-set-bigint",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1015994.0,
+    "fixed_batch_median_ns": 1321988.5,
+    "outlier_batches": 2,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 19.894499926794488,
+        "ci95": [
+          17.972227118340246,
+          21.91729761101539
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 20.240355080069488,
+        "ci95": [
+          18.683730040919375,
+          22.043430442232275
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 20.693318314686238,
+        "ci95": [
+          19.285294354537772,
+          22.340199493480192
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "map-set-bigint",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 20198241.5,
+    "fixed_batch_median_ns": 20274585.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9613972792693752,
+        "ci95": [
+          0.8378824140492769,
+          1.0916571997631934
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9781106525435662,
+        "ci95": [
+          0.8856696268649814,
+          1.0806911253470588
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.04832477734082362,
+        "ci95": [
+          0.0448665032532108,
+          0.05180994294951085
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-promises-async",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2970299.0,
+    "fixed_batch_median_ns": 3179120.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.930302222758767,
+        "ci95": [
+          0.8599023786229169,
+          1.0041418476441013
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05585798883948311,
+        "ci95": [
+          0.050578331226547354,
+          0.06146692081701584
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9633311461034116,
+        "ci95": [
+          0.8964029497119801,
+          1.0411126581514683
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "exceptions-promises-async",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2989109.5,
+    "fixed_batch_median_ns": 3019320.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.9199847578068661,
+        "ci95": [
+          0.8277348165387981,
+          1.0068780450862498
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.8558638650919134,
+        "ci95": [
+          0.7546290505871791,
+          0.9514622041945198
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05138849833407049,
+        "ci95": [
+          0.044943607717633,
+          0.05761692080624382
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.8862499711357579,
+        "ci95": [
+          0.7932482686721221,
+          0.9736445785115904
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "exceptions-promises-async",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2708720.0,
+    "fixed_batch_median_ns": 2865237.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.074919499853013,
+        "ci95": [
+          0.997940004044065,
+          1.1612511774041279
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.060042841426132365,
+        "ci95": [
+          0.05617196943920901,
+          0.06417068117007009
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.035503433762309,
+        "ci95": [
+          0.9756801914161494,
+          1.100739402630218
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-promises-async",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 162122.0,
+    "fixed_batch_median_ns": 191137.5,
+    "outlier_batches": 10,
+    "outlier_processes": 7,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 17.902542156926923,
+        "ci95": [
+          16.260859510527226,
+          19.749938071785675
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 16.654774761621645,
+        "ci95": [
+          15.587910433715605,
+          17.8270578910072
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 17.24607645419706,
+        "ci95": [
+          16.040077064077312,
+          18.514478111646277
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-promises-async",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 2739074.5,
+    "fixed_batch_median_ns": 2779627.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0380646406429508,
+        "ci95": [
+          0.9624784396995535,
+          1.1153781152002307
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9657138425574179,
+        "ci95": [
+          0.9072845658381268,
+          1.0255838827003532
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.05798420311169599,
+        "ci95": [
+          0.05394720965513516,
+          0.0622923905317531
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "methods-dynamic",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 14748375.0,
+    "fixed_batch_median_ns": 14193108.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9225377672847971,
+        "ci95": [
+          0.8660219971882445,
+          0.9704935359245682
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.010713887638251115,
+        "ci95": [
+          0.009793592096522964,
+          0.011701517637006989
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9263591216463382,
+        "ci95": [
+          0.8630817015312234,
+          0.9878436361334436
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "methods-dynamic",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 14142783.0,
+    "fixed_batch_median_ns": 15000322.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0295104844287417,
+        "ci95": [
+          0.958120875378466,
+          1.102709977904947
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9497623037011811,
+        "ci95": [
+          0.8935065729546957,
+          1.0069926960539535
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.01103005965257101,
+        "ci95": [
+          0.010275975464664808,
+          0.011826165477653368
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9536964280811052,
+        "ci95": [
+          0.8990569634910154,
+          1.0097427967810713
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "methods-dynamic",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 13548688.0,
+    "fixed_batch_median_ns": 13496151.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0839664623630412,
+        "ci95": [
+          1.0311729104145835,
+          1.1544018755804135
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.011613494881390178,
+        "ci95": [
+          0.010932394435203125,
+          0.012373269605234691
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0041422199687153,
+        "ci95": [
+          0.9595490336831398,
+          1.050149901313926
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "methods-dynamic",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 155740.5,
+    "fixed_batch_median_ns": 359383.5,
+    "outlier_batches": 2,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 93.33680114674372,
+        "ci95": [
+          85.52015152902567,
+          101.75641825530835
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 86.10672413542204,
+        "ci95": [
+          80.65224487792202,
+          91.57516683944704
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 86.4633971275764,
+        "ci95": [
+          81.08893058774878,
+          92.0274046186879
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "methods-dynamic",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 13666535.5,
+    "fixed_batch_median_ns": 13898207.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0794949567968697,
+        "ci95": [
+          1.011752338321275,
+          1.1600804904601068
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9958748672385825,
+        "ci95": [
+          0.9530595543746095,
+          1.0401861585772347
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.011565587673180408,
+        "ci95": [
+          0.010872119247456527,
+          0.012350068446331542
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-sync",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1691105.5,
+    "fixed_batch_median_ns": 1597493.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9309834167223475,
+        "ci95": [
+          0.8725089287614246,
+          0.9928348517512819
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.07928320998376773,
+        "ci95": [
+          0.07236524237504317,
+          0.0872892548202072
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9715188175905728,
+        "ci95": [
+          0.9067203792713117,
+          1.0380150766402663
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "exceptions-sync",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1682018.5,
+    "fixed_batch_median_ns": 1788198.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0115614845284218,
+        "ci95": [
+          0.954915826387682,
+          1.0737348151343487
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9417469670910001,
+        "ci95": [
+          0.8999893009378808,
+          0.9912072631669334
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.0801998415893587,
+        "ci95": [
+          0.07519994280125325,
+          0.08563492063132418
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9827510173692168,
+        "ci95": [
+          0.9405567673573547,
+          1.03045176993748
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      10,
+      10
+    ]
+  },
+  {
+    "workload": "exceptions-sync",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1549110.0,
+    "fixed_batch_median_ns": 1532286.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.074132988878185,
+        "ci95": [
+          1.0070838126605963,
+          1.1473349876106964
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.08516071130772122,
+        "ci95": [
+          0.07934680131336957,
+          0.09187475779703674
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0435404112899622,
+        "ci95": [
+          0.9856323482723036,
+          1.1052186252389216
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-sync",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 126339.5,
+    "fixed_batch_median_ns": 129424.5,
+    "outlier_batches": 2,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 12.613011004533467,
+        "ci95": [
+          11.463402667428117,
+          13.822827296197593
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 11.742504080157131,
+        "ci95": [
+          10.875704915426669,
+          12.606517901220085
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 12.253777537381236,
+        "ci95": [
+          11.547772114299354,
+          13.007403852654768
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "exceptions-sync",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1621857.0,
+    "fixed_batch_median_ns": 1605346.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0293161407620104,
+        "ci95": [
+          0.9607582731510116,
+          1.10296602132045
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 0.9582762576140773,
+        "ci95": [
+          0.9043949012528321,
+          1.0141215954188216
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.08160748772771591,
+        "ci95": [
+          0.07694536009849817,
+          0.08672326227183937
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "refresh-feedback",
+    "variant": "baseline",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1169976.0,
+    "fixed_batch_median_ns": 1150123.5,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.243265923222552,
+        "ci95": [
+          1.1348608932555437,
+          1.3668726861154796
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013793507455176065,
+        "ci95": [
+          0.012471118767343421,
+          0.015400963418257226
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.1662008954052547,
+        "ci95": [
+          1.0798934024257136,
+          1.260082421718001
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      0,
+      0
+    ]
+  },
+  {
+    "workload": "refresh-feedback",
+    "variant": "candidate",
+    "mode": "automatic",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1159004.0,
+    "fixed_batch_median_ns": 1104565.0,
+    "outlier_batches": 1,
+    "outlier_processes": 1,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 1.0093333366210329,
+        "ci95": [
+          0.9369772734525907,
+          1.0815600558129201
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.2548697425934474,
+        "ci95": [
+          1.1643706536383533,
+          1.3540524162198202
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.013922246903439952,
+        "ci95": [
+          0.012664539966347631,
+          0.01555648279187441
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.177085440929822,
+        "ci95": [
+          1.101389609889252,
+          1.2533245623287146
+        ]
+      }
+    },
+    "compilation_quiet_samples": 30,
+    "native_entry_range": [
+      0,
+      0
+    ]
+  },
+  {
+    "workload": "refresh-feedback",
+    "variant": "baseline",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1461330.5,
+    "fixed_batch_median_ns": 1382928.5,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.8043331529653724,
+        "ci95": [
+          0.7315791729248716,
+          0.8814271377509246
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.011094575341873136,
+        "ci95": [
+          0.010069494781036142,
+          0.01246039854243828
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 0.9380140431923492,
+        "ci95": [
+          0.8758328010130956,
+          1.000535538046782
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "refresh-feedback",
+    "variant": "baseline",
+    "mode": "bun",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 15947.5,
+    "fixed_batch_median_ns": 15988.0,
+    "outlier_batches": 3,
+    "outlier_processes": 2,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 72.49787650092915,
+        "ci95": [
+          65.08576090419051,
+          79.94855475528206
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 90.13413935960224,
+        "ci95": [
+          80.06366072842489,
+          99.12546137185015
+        ]
+      },
+      "baseline/bun": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 84.54708849036317,
+        "ci95": [
+          75.1214967866861,
+          93.04379972035225
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  },
+  {
+    "workload": "refresh-feedback",
+    "variant": "candidate",
+    "mode": "interpreter",
+    "protocol": "shared-js-multibatch-v3",
+    "median_ns": 1387461.0,
+    "fixed_batch_median_ns": 1419049.0,
+    "outlier_batches": 0,
+    "outlier_processes": 0,
+    "comparisons": {
+      "baseline/automatic": {
+        "speed": 0.8574851931086024,
+        "ci95": [
+          0.7930139739854966,
+          0.9252037800067934
+        ]
+      },
+      "baseline/interpreter": {
+        "speed": 1.066082120259835,
+        "ci95": [
+          1.000374678536984,
+          1.1421986529111114
+        ]
+      },
+      "baseline/bun": {
+        "speed": 0.011827728403846596,
+        "ci95": [
+          0.01077357940156929,
+          0.013283144495052574
+        ]
+      },
+      "candidate/interpreter": {
+        "speed": 1.0,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "compilation_quiet_samples": 0,
+    "native_entry_range": null
+  }
+]
