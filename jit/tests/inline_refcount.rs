@@ -96,8 +96,13 @@ fn run(mode: Mode, stress: bool, source: &str, expected: Option<&str>) -> String
     let mut rounds = 1;
     // Production tiering may legitimately demote an unprofitable function to
     // the interpreter, so only forced tiers must keep running native code.
+    // Under sanitizers, compiles take tens of seconds and stress GC keeps
+    // invalidating installed code, so one native round proves the path ran;
+    // the job is there to catch memory errors, not to measure tiering.
     let required_native_rounds = if matches!(mode, Mode::Automatic) {
         0
+    } else if cfg!(rquickjs_sanitizer) {
+        1
     } else {
         10
     };

@@ -360,6 +360,8 @@ jobs:
         # workspace (0.14.0 shipped without the vendored wasi-libc and shim).
         shell: bash
         run: |
+          # Cargo.lock is not committed; `cargo package` needs one.
+          cargo generate-lockfile
           cargo package -p quickjs-jit-sys --no-verify
           version=$(cargo pkgid -p quickjs-jit-sys | sed 's/.*[@#]//')
           dir="$RUNNER_TEMP/package-check"
