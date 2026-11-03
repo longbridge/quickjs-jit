@@ -1,0 +1,12 @@
+diff --git a/quickjs.c b/quickjs.c
+index 3fec178..133831f 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -48693,6 +48693,7 @@ static JSValue js_array_find(JSContext *ctx, JSValueConst this_val,
+             }
+         }
+         JS_FreeValue(ctx, val);
++        val = JS_UNDEFINED;
+         JS_FreeValue(ctx, index_val);
+     }
+     JS_FreeValue(ctx, obj);

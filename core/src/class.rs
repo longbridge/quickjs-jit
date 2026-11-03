@@ -556,6 +556,92 @@ mod test {
         });
     }
 
+    /// An interrupt inside the `find` family must not release an element
+    /// that the array still holds (quickjs-ng #1826).
+    #[test]
+    fn interrupt_inside_array_find_keeps_elements_alive() {
+        use std::{cell::Cell, rc::Rc, sync::atomic::AtomicUsize};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        pub struct Element;
+
+        impl Drop for Element {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl<'js> Trace<'js> for Element {
+            fn trace<'a>(&self, _tracer: Tracer<'a, 'js>) {}
+        }
+
+        unsafe impl<'js> JsLifetime<'js> for Element {
+            type Changed<'to> = Element;
+        }
+
+        impl<'js> JsClass<'js> for Element {
+            const NAME: &'static str = "Element";
+
+            type Mutable = Readable;
+
+            fn prototype(ctx: &crate::Ctx<'js>) -> crate::Result<Option<crate::Object<'js>>> {
+                Ok(Some(Object::new(ctx.clone())?))
+            }
+
+            fn constructor(
+                _ctx: &crate::Ctx<'js>,
+            ) -> crate::Result<Option<crate::value::Constructor<'js>>> {
+                Ok(None)
+            }
+        }
+
+        let rt = Runtime::new().unwrap();
+        let stopping = Rc::new(Cell::new(false));
+        let stop = stopping.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || stop.get())));
+        let ctx = Context::full(&rt).unwrap();
+        let methods = ["find", "findIndex", "findLast", "findLastIndex"];
+        ctx.with(|ctx| {
+            let kept = Object::new(ctx.clone()).unwrap();
+            for method in methods {
+                kept.set(method, Class::instance(ctx.clone(), Element).unwrap())
+                    .unwrap();
+            }
+            ctx.globals().set("kept", kept).unwrap();
+            ctx.eval::<(), _>(
+                "globalThis.items = Object.values(kept).map((e) => new Array(100000).fill(e));",
+            )
+            .unwrap();
+            let interrupted = |source: String| {
+                assert!(ctx.eval::<(), _>(source.as_str()).is_err(), "{source}");
+                drop(ctx.catch());
+            };
+            // Each iteration polls for interrupts twice: the method at its
+            // start, then the call of the callback. The counter of polls
+            // between two calls of the handler is even, so the handler stops
+            // either every method's poll or every call's. An interrupt
+            // resets the counter; after one, a call more before the method
+            // stops the other of the two.
+            stopping.set(true);
+            for (i, method) in methods.into_iter().enumerate() {
+                for prefix in ["", "(() => {})(), "] {
+                    interrupted("for (;;) {}".into());
+                    interrupted(format!("{prefix}items[{i}].{method}(() => false)"));
+                }
+            }
+            stopping.set(false);
+            ctx.eval::<(), _>("items = null;").unwrap();
+        });
+        // `kept` still holds every element. (Without the fix, a debug build
+        // of QuickJS aborts here on its own reference count assertion.)
+        rt.run_gc();
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 0);
+        ctx.with(|ctx| ctx.eval::<(), _>("kept = null;").unwrap());
+        rt.run_gc();
+        assert_eq!(DROPPED.load(Ordering::SeqCst), methods.len());
+    }
+
     #[derive(Clone, Copy)]
     pub struct Vec3 {
         x: f32,

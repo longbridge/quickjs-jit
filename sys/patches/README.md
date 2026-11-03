@@ -224,3 +224,11 @@ whose `length` grew (the same fix `0032` carried).
 `0034-portable-slot-none.patch` spells `JS_JIT_SLOT_NONE` as the literal
 `0xFFFFFFFFu`: MSVC's `UINT32_MAX` (`0xffffffffui32`) is not an expression
 bindgen evaluates, so bindings generated on Windows lost the constant.
+
+`0035-array-find-interrupt.patch` backports quickjs-ng #1826 (`e22ce4d`):
+`js_array_find` (`find`, `findIndex`, `findLast`, `findLastIndex`) released
+each iteration's element without clearing `val`, so an interrupt at the next
+iteration's `js_poll_interrupts` released that element a second time. An
+element only arrays held was then freed while they still held it, and the
+runtime crashed later. Drop the patch when the baseline moves to a quickjs-ng
+revision that contains #1826.
