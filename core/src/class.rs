@@ -279,13 +279,13 @@ impl<'js, C: JsClass<'js>> Class<'js, C> {
 
     /// Returns a reference to the underlying object contained in a cell.
     #[inline]
-    pub(crate) fn get_class_cell<'a>(&self) -> &'a ClassCell<JsCell<'js, C>> {
+    pub(crate) fn get_class_cell<'a>(&'a self) -> &'a ClassCell<JsCell<'js, C>> {
         unsafe { self.get_class_ptr().as_ref() }
     }
 
     /// Returns a reference to the underlying object contained in a cell.
     #[inline]
-    pub fn get_cell<'a>(&self) -> &'a JsCell<'js, C> {
+    pub fn get_cell<'a>(&'a self) -> &'a JsCell<'js, C> {
         &self.get_class_cell().data
     }
 
@@ -396,6 +396,13 @@ impl<'js> Object<'js> {
         let Some(x) = NonNull::new(unsafe {
             qjs::JS_GetOpaque2(self.0.ctx.as_ptr(), self.0.as_js_value(), id)
         }) else {
+            // `JS_GetOpaque2` throws a `TypeError` internally whenever the class id
+            // doesn't match, leaving it pending on the runtime even though a
+            // negative result here is an ordinary, expected outcome. Clear it so a
+            // failed `instance_of` can't be mistaken for a real exception by code
+            // that later checks `Ctx::has_exception`/`Ctx::catch` for something
+            // unrelated (e.g. a pending `Promise`).
+            self.ctx.catch();
             return false;
         };
 
@@ -549,6 +556,92 @@ mod test {
         });
     }
 
+    /// An interrupt inside the `find` family must not release an element
+    /// that the array still holds (quickjs-ng #1826).
+    #[test]
+    fn interrupt_inside_array_find_keeps_elements_alive() {
+        use std::{cell::Cell, rc::Rc, sync::atomic::AtomicUsize};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        pub struct Element;
+
+        impl Drop for Element {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl<'js> Trace<'js> for Element {
+            fn trace<'a>(&self, _tracer: Tracer<'a, 'js>) {}
+        }
+
+        unsafe impl<'js> JsLifetime<'js> for Element {
+            type Changed<'to> = Element;
+        }
+
+        impl<'js> JsClass<'js> for Element {
+            const NAME: &'static str = "Element";
+
+            type Mutable = Readable;
+
+            fn prototype(ctx: &crate::Ctx<'js>) -> crate::Result<Option<crate::Object<'js>>> {
+                Ok(Some(Object::new(ctx.clone())?))
+            }
+
+            fn constructor(
+                _ctx: &crate::Ctx<'js>,
+            ) -> crate::Result<Option<crate::value::Constructor<'js>>> {
+                Ok(None)
+            }
+        }
+
+        let rt = Runtime::new().unwrap();
+        let stopping = Rc::new(Cell::new(false));
+        let stop = stopping.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || stop.get())));
+        let ctx = Context::full(&rt).unwrap();
+        let methods = ["find", "findIndex", "findLast", "findLastIndex"];
+        ctx.with(|ctx| {
+            let kept = Object::new(ctx.clone()).unwrap();
+            for method in methods {
+                kept.set(method, Class::instance(ctx.clone(), Element).unwrap())
+                    .unwrap();
+            }
+            ctx.globals().set("kept", kept).unwrap();
+            ctx.eval::<(), _>(
+                "globalThis.items = Object.values(kept).map((e) => new Array(100000).fill(e));",
+            )
+            .unwrap();
+            let interrupted = |source: String| {
+                assert!(ctx.eval::<(), _>(source.as_str()).is_err(), "{source}");
+                drop(ctx.catch());
+            };
+            // Each iteration polls for interrupts twice: the method at its
+            // start, then the call of the callback. The counter of polls
+            // between two calls of the handler is even, so the handler stops
+            // either every method's poll or every call's. An interrupt
+            // resets the counter; after one, a call more before the method
+            // stops the other of the two.
+            stopping.set(true);
+            for (i, method) in methods.into_iter().enumerate() {
+                for prefix in ["", "(() => {})(), "] {
+                    interrupted("for (;;) {}".into());
+                    interrupted(format!("{prefix}items[{i}].{method}(() => false)"));
+                }
+            }
+            stopping.set(false);
+            ctx.eval::<(), _>("items = null;").unwrap();
+        });
+        // `kept` still holds every element. (Without the fix, a debug build
+        // of QuickJS aborts here on its own reference count assertion.)
+        rt.run_gc();
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 0);
+        ctx.with(|ctx| ctx.eval::<(), _>("kept = null;").unwrap());
+        rt.run_gc();
+        assert_eq!(DROPPED.load(Ordering::SeqCst), methods.len());
+    }
+
     #[derive(Clone, Copy)]
     pub struct Vec3 {
         x: f32,
@@ -700,6 +793,29 @@ mod test {
         test_with(|ctx| {
             let proto = Class::<X>::prototype(&ctx).unwrap().unwrap();
             assert_eq!(proto.get::<_, String>("foo").unwrap(), "bar")
+        })
+    }
+
+    #[test]
+    fn instance_of_non_class_object_does_not_leave_pending_exception() {
+        test_with(|ctx| {
+            // A plain object isn't backed by any Rust class, so the underlying
+            // class-id check inside `instance_of` genuinely fails here (as
+            // opposed to checking one Rust class against another, where the
+            // class ids match and only a later, exception-free v-table
+            // comparison tells the classes apart).
+            let plain = Object::new(ctx.clone()).unwrap();
+
+            assert!(!plain.instance_of::<Vec3>());
+
+            // A negative `instance_of` result is an ordinary outcome, not an
+            // error: it must not leave a pending exception on the runtime for
+            // unrelated code to trip over later.
+            assert!(!ctx.has_exception());
+
+            // The context must still be perfectly usable afterwards.
+            let sum: i32 = ctx.eval("1 + 1").unwrap();
+            assert_eq!(sum, 2);
         })
     }
 

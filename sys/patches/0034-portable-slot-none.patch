@@ -1,0 +1,13 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+index c7ae8bf..97abd7f 100644
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -31,7 +31,7 @@ extern "C" {
+ 
+ /* Helper slot numbers flatten arguments, locals, and the operand stack, in
+  * that order. JS_JIT_SLOT_NONE is accepted only as argv for argc == 0. */
+-#define JS_JIT_SLOT_NONE UINT32_MAX
++#define JS_JIT_SLOT_NONE 0xFFFFFFFFu /* UINT32_MAX, as a literal bindgen evaluates on MSVC too */
+ 
+ /* Native lowering may need an owned output distinct from every borrowed or
+  * consumed opcode input. QuickJS reserves these operand-tail slots in every

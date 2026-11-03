@@ -1,0 +1,92 @@
+diff --git a/quickjs.c b/quickjs.c
+index 920da63..3fec178 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2525,7 +2525,7 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
+ }
+ 
+ #ifdef CONFIG_JIT_ABI
+-#define QJSJIT_SOURCE_REVISION UINT64_C(0xfd0a0210b7be0095)
++#define QJSJIT_SOURCE_REVISION UINT64_C(0x0fdea21ff1090084)
+ #include "quickjs-jit-opcodes.generated.h"
+ #include "quickjs-jit-helpers.generated.h"
+ #define QJSJIT_OPCODE_FINGERPRINT QJSJIT_GENERATED_OPCODE_FINGERPRINT
+@@ -2821,21 +2821,18 @@ static void qjsjit_init_element_layout(JSJitElementLayout *out)
+ 
+ /* Generated code increments and decrements the reference count of every
+  * JS_VALUE_HAS_REF_COUNT payload in place and calls JS_JitHelperFree only
+- * for the last reference. Every such payload must start with the C int count;
+- * the value-layout fingerprint pins its offset and width. */
+-_Static_assert(offsetof(JSRefCountHeader, ref_count) == 0,
+-               "JIT inline refcount offset");
+-_Static_assert(sizeof(((JSRefCountHeader *)0)->ref_count) == sizeof(int32_t),
++ * for the last reference. Every such payload is a QuickJS allocation whose
++ * C int count lives in the allocator block header just before it (js_rc());
++ * the value-layout fingerprint pins its (negative) offset and width. */
++#define QJSJIT_REF_COUNT_OFFSET                                              \
++    ((int)offsetof(JSMallocBlockHeader, ref_count) -                         \
++     (int)offsetof(JSMallocBlockHeader, user_data))
++_Static_assert(QJSJIT_REF_COUNT_OFFSET == -4, "JIT inline refcount offset");
++_Static_assert(sizeof(((JSMallocBlockHeader *)0)->ref_count) == sizeof(int32_t),
+                "JIT inline refcount width");
+-_Static_assert(offsetof(JSGCObjectHeader, ref_count) == 0,
+-               "JIT inline GC refcount offset");
+ _Static_assert(offsetof(JSObject, header) == 0, "JIT inline object refcount");
+ _Static_assert(offsetof(JSFunctionBytecode, header) == 0,
+                "JIT inline bytecode refcount");
+-_Static_assert(offsetof(JSString, header) == 0, "JIT inline string refcount");
+-_Static_assert(offsetof(JSStringRope, header) == 0, "JIT inline rope refcount");
+-_Static_assert(offsetof(JSBigInt, header) == 0, "JIT inline BigInt refcount");
+-_Static_assert(offsetof(JSModuleDef, header) == 0, "JIT inline module refcount");
+ _Static_assert(JS_TAG_FIRST == JS_TAG_BIG_INT && JS_TAG_OBJECT == -1,
+                "JIT inline refcount tag interval");
+ 
+@@ -2849,8 +2846,8 @@ static uint64_t qjsjit_value_layout(void)
+ #else
+     hash = qjsjit_hash_u64(hash, 0);
+ #endif
+-    hash = qjsjit_hash_u64(hash, offsetof(JSRefCountHeader, ref_count));
+-    hash = qjsjit_hash_u64(hash, sizeof(((JSRefCountHeader *)0)->ref_count));
++    hash = qjsjit_hash_u64(hash, (uint64_t)(int64_t)QJSJIT_REF_COUNT_OFFSET);
++    hash = qjsjit_hash_u64(hash, sizeof(((JSMallocBlockHeader *)0)->ref_count));
+     return hash;
+ }
+ 
+@@ -7174,7 +7171,7 @@ static void qjsjit_remember_shape(JSContext *ctx, JSObject *receiver)
+     /* Charge atom storage conservatively, including atoms shared by entries.
+        Long guest property names must not escape the retention budget. */
+     for (i = 0; i < shape->prop_count; i++) {
+-        JSAtom atom = shape->prop[i].atom;
++        JSAtom atom = get_shape_prop(shape)[i].atom;
+         if (atom != JS_ATOM_NULL && !__JS_AtomIsTaggedInt(atom)) {
+             JSAtomStruct *str = ctx->rt->atom_array[atom];
+             bytes += sizeof(*str) + ((size_t)str->len << str->is_wide_char) +
+@@ -48965,8 +48962,8 @@ static int qjsjit_object_literal(JSContext *ctx, const uint32_t *atoms,
+             sh->prop_size < count)
+             continue;
+         for (i = 0; i < count; i++) {
+-            if (sh->prop[i].atom != atoms[i] ||
+-                sh->prop[i].flags != JS_PROP_C_W_E)
++            if (get_shape_prop(sh)[i].atom != atoms[i] ||
++                get_shape_prop(sh)[i].flags != JS_PROP_C_W_E)
+                 break;
+         }
+         if (i == count)
+@@ -48999,7 +48996,7 @@ static int qjsjit_object_literal(JSContext *ctx, const uint32_t *atoms,
+     p->prop = props;
+     for (i = 0; i < count; i++)
+         props[i].u.value = js_dup(values[i]);
+-    p->header.ref_count = 1;
++    JS_REF_COUNT(p) = 1;
+     add_gc_object(rt, &p->header, JS_GC_OBJ_TYPE_JS_OBJECT);
+     *out = JS_MKPTR(JS_TAG_OBJECT, p);
+     return JS_JIT_OBJECT_OK;
+@@ -49101,7 +49098,7 @@ static int qjsjit_array_push_one(JSContext *ctx, JSValueConst function,
+         !realm->std_array_prototype)
+         return JS_JIT_OBJECT_MISS;
+     if (JS_VALUE_GET_TAG(p->prop[0].u.value) != JS_TAG_INT ||
+-        !(p->shape->prop->flags & JS_PROP_WRITABLE))
++        !(get_shape_prop(p->shape)->flags & JS_PROP_WRITABLE))
+         return JS_JIT_OBJECT_MISS;
+     array_len = JS_VALUE_GET_INT(p->prop[0].u.value);
+     if (array_len != p->u.array.count || array_len >= (uint32_t)INT32_MAX)

@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 20d30b6..48bbb98 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -514,9 +514,23 @@
+@@ -591,9 +591,23 @@ enum {
     enough to call the interrupt callback often. */
  #define JS_INTERRUPT_COUNTER_INIT 10000
  
@@ -25,7 +26,7 @@ diff --git a/quickjs.c b/quickjs.c
      struct list_head link;
  
      uint16_t binary_object_count;
-@@ -1471,6 +1485,10 @@
+@@ -1555,6 +1569,10 @@ static void async_func_mark(JSRuntime *rt, JSAsyncFunctionState *s,
  static int JS_AddIntrinsicBasicObjects(JSContext *ctx);
  static void js_free_shape(JSRuntime *rt, JSShape *sh);
  static void js_free_shape_null(JSRuntime *rt, JSShape *sh);
@@ -36,7 +37,7 @@ diff --git a/quickjs.c b/quickjs.c
  static int js_shape_prepare_update(JSContext *ctx, JSObject *p,
                                     JSShapeProperty **pprs);
  static int init_shape_hash(JSRuntime *rt);
-@@ -2570,6 +2588,11 @@
+@@ -2926,6 +2944,11 @@ static void qjsjit_record_property_feedback(JSRuntime *rt,
      if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
          !shape_property || !property || qjsjit_ensure_function_identity(rt, b))
          return;
@@ -48,7 +49,7 @@ diff --git a/quickjs.c b/quickjs.c
      types[0] = JS_JIT_VALUE_OBJECT;
      types[1] = qjsjit_feedback_type(value);
      memset(&event, 0, sizeof(event));
-@@ -3074,6 +3097,13 @@
+@@ -3430,6 +3453,13 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
          qjsjit_discard_cached_entry(rt);
          rt->jit_backend_vtable = NULL;
          rt->jit_backend_opaque = NULL;
@@ -62,7 +63,7 @@ diff --git a/quickjs.c b/quickjs.c
          rt->jit_suspended = 0;
          if (old_vtable->runtime_detach)
              old_vtable->runtime_detach(old_opaque, rt);
-@@ -3660,6 +3690,10 @@
+@@ -4024,6 +4054,10 @@ static inline void set_value(JSContext *ctx, JSValue *pval, JSValue new_val)
  void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj)
  {
      assert(class_id < ctx->rt->class_count);
@@ -73,11 +74,10 @@ diff --git a/quickjs.c b/quickjs.c
      set_value(ctx, &ctx->class_proto[class_id], obj);
  }
  
-@@ -3737,6 +3771,16 @@
-     JS_MarkValue(rt, ctx->regexp_ctor, mark_func);
+@@ -4102,6 +4136,16 @@ static void JS_MarkContext(JSRuntime *rt, JSContext *ctx,
      JS_MarkValue(rt, ctx->function_ctor, mark_func);
      JS_MarkValue(rt, ctx->function_proto, mark_func);
-+
+ 
 +#ifdef CONFIG_JIT_ABI
 +    if (ctx->jit_shape_cache) {
 +        for (i = 0; i < QJSJIT_SHAPE_CACHE_SLOTS; i++) {
@@ -87,10 +87,11 @@ diff --git a/quickjs.c b/quickjs.c
 +        }
 +    }
 +#endif
- 
++
      if (ctx->array_shape)
          mark_func(rt, &ctx->array_shape->header);
-@@ -3821,6 +3865,9 @@
+ 
+@@ -4185,6 +4229,9 @@ void JS_FreeContext(JSContext *ctx)
      JS_FreeValue(ctx, ctx->function_ctor);
      JS_FreeValue(ctx, ctx->function_proto);
  
@@ -100,11 +101,10 @@ diff --git a/quickjs.c b/quickjs.c
      js_free_shape_null(ctx->rt, ctx->array_shape);
      js_free_shape_null(ctx->rt, ctx->arguments_shape);
      js_free_shape_null(ctx->rt, ctx->mapped_arguments_shape);
-@@ -6542,6 +6589,80 @@
-     if (sh)
+@@ -6917,6 +6964,80 @@ static void js_free_shape_null(JSRuntime *rt, JSShape *sh)
          js_free_shape(rt, sh);
  }
-+
+ 
 +#ifdef CONFIG_JIT_ABI
 +static void qjsjit_clear_shape_cache(JSContext *ctx)
 +{
@@ -178,6 +178,7 @@ diff --git a/quickjs.c b/quickjs.c
 +    cache->next = (cache->next + 1) % QJSJIT_SHAPE_CACHE_SLOTS;
 +}
 +#endif
- 
++
  /* make space to hold at least 'count' properties */
  static no_inline int resize_properties(JSContext *ctx, JSShape **psh,
+                                        JSObject *p, uint32_t count)

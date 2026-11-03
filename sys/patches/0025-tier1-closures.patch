@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index 03c9fd8..624c6a6 100644
 --- a/quickjs-jit-helpers.h
 +++ b/quickjs-jit-helpers.h
-@@ -66,6 +66,17 @@
+@@ -66,6 +66,17 @@ typedef enum JSJitCompareOp {
      JS_JIT_COMPARE_STRICT_NEQ = 7,
  } JSJitCompareOp;
  
@@ -19,7 +20,7 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
  /* id, table field, C adapter, signature, value arity, four ownership entries,
   * output ownership, behavioral flags */
  #define QJSJIT_HELPER_LIST(X)                                                \
-@@ -129,7 +140,18 @@
+@@ -129,7 +140,18 @@ typedef enum JSJitCompareOp {
        THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
      X(UNARY_ARITH_SLOW, unary_arith_slow, JS_JitHelperUnaryArithSlow,      \
        MAP_OUT_IN_OP, 2, OWNED, CONSUMED, NONE, NONE, OWNED,                 \
@@ -40,9 +41,10 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
  typedef enum JSJitHelperId {
  #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 6f717b1..8c8e448 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -276,7 +276,7 @@
+@@ -276,7 +276,7 @@ typedef struct JSJitExecFrame JSJitExecFrame;
   * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
   */
  #define QJSJIT_RUNTIME_API_MAJOR 1u
@@ -52,9 +54,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
      JSJitHelperStatus (*field)(JSJitExecFrame *frame)
 diff --git a/quickjs.c b/quickjs.c
+index c8e14e0..251282d 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -19983,6 +19983,167 @@
+@@ -20466,6 +20466,167 @@ JSJitHelperStatus JS_JitHelperGetGlobal(JSJitExecFrame *frame,
      return qjsjit_finish_output(frame, out);
  }
  

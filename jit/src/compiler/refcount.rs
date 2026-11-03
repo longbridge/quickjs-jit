@@ -187,6 +187,16 @@ mod tests {
 
     type Probe = unsafe extern "C" fn(*const u32, i64, *mut i32) -> i32;
 
+    /// A payload pointer whose reference count is `count`: the count sits
+    /// `REF_COUNT_OFFSET` bytes from the payload (before it, in QuickJS-NG
+    /// 0.16's allocator block header).
+    fn payload(count: &mut i32) -> *mut i32 {
+        (count as *mut i32)
+            .cast::<u8>()
+            .wrapping_offset(-(REF_COUNT_OFFSET as isize))
+            .cast()
+    }
+
     #[test]
     fn dup_increments_only_refcounted_payloads_outside_stress() {
         let code = compile(false);
@@ -196,7 +206,10 @@ mod tests {
         let flags = 0_u32;
         let mut count = 1_i32;
         for tag in [qjs::JS_TAG_OBJECT, qjs::JS_TAG_STRING, qjs::JS_TAG_BIG_INT] {
-            assert_eq!(unsafe { probe(&flags, i64::from(tag), &mut count) }, 1);
+            assert_eq!(
+                unsafe { probe(&flags, i64::from(tag), payload(&mut count)) },
+                1
+            );
         }
         assert_eq!(count, 4);
         for tag in [
@@ -205,11 +218,14 @@ mod tests {
             qjs::JS_TAG_FLOAT64,
             -10,
         ] {
-            assert_eq!(unsafe { probe(&flags, i64::from(tag), &mut count) }, 2);
+            assert_eq!(
+                unsafe { probe(&flags, i64::from(tag), payload(&mut count)) },
+                2
+            );
         }
         let stress = qjs::JS_JIT_FRAME_STRESS_GC;
         assert_eq!(
-            unsafe { probe(&stress, i64::from(qjs::JS_TAG_OBJECT), &mut count) },
+            unsafe { probe(&stress, i64::from(qjs::JS_TAG_OBJECT), payload(&mut count)) },
             0
         );
         assert_eq!(count, 4);
@@ -223,19 +239,19 @@ mod tests {
         let flags = 0_u32;
         let mut count = 3_i32;
         let object = i64::from(qjs::JS_TAG_OBJECT);
-        assert_eq!(unsafe { probe(&flags, object, &mut count) }, 1);
+        assert_eq!(unsafe { probe(&flags, object, payload(&mut count)) }, 1);
         assert_eq!(count, 2);
-        assert_eq!(unsafe { probe(&flags, object, &mut count) }, 1);
+        assert_eq!(unsafe { probe(&flags, object, payload(&mut count)) }, 1);
         assert_eq!(count, 1);
         // The last reference must reach JS_FreeValue untouched.
-        assert_eq!(unsafe { probe(&flags, object, &mut count) }, 0);
+        assert_eq!(unsafe { probe(&flags, object, payload(&mut count)) }, 0);
         assert_eq!(count, 1);
         count = 5;
         let stress = qjs::JS_JIT_FRAME_STRESS_GC;
-        assert_eq!(unsafe { probe(&stress, object, &mut count) }, 0);
+        assert_eq!(unsafe { probe(&stress, object, payload(&mut count)) }, 0);
         assert_eq!(count, 5);
         assert_eq!(
-            unsafe { probe(&flags, i64::from(qjs::JS_TAG_INT), &mut count) },
+            unsafe { probe(&flags, i64::from(qjs::JS_TAG_INT), payload(&mut count)) },
             2
         );
         assert_eq!(count, 5);

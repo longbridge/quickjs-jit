@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 545fb87..2ac330b 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -17,6 +17,6 @@ extern "C" {
+@@ -17,7 +17,7 @@ extern "C" {
  #endif
  
  #define QJSJIT_ABI_MAJOR 1u
@@ -9,7 +10,8 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
 +#define QJSJIT_ABI_MINOR 13u
  
  /* Frame flags are append-only. Stress collection is a test/debug contract:
-@@ -341,4 +341,29 @@ struct JSJitExecFrame {
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -341,6 +341,31 @@ struct JSJitExecFrame {
      JSValue *stack_capacity;
  };
  
@@ -39,17 +41,22 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
 +} JSJitElementLayout;
 +
  typedef struct JSJitABIInfo {
-@@ -363,4 +387,6 @@ typedef struct JSJitABIInfo {
+     uint32_t struct_size;
+     uint16_t major;
+@@ -363,6 +388,8 @@ typedef struct JSJitABIInfo {
      uint64_t exit_layout_fingerprint;
      uint64_t runtime_api_layout_fingerprint;
      uint64_t helper_table_fingerprint;
 +    uint64_t element_layout_fingerprint;
 +    JSJitElementLayout element_layout;
  } JSJitABIInfo;
+ 
+ typedef struct JSJitHelperCounters {
 diff --git a/quickjs.c b/quickjs.c
+index 08cf2bc..5888e37 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -2290,6 +2290,82 @@ static uint64_t qjsjit_abi_info_layout(void)
+@@ -2646,8 +2646,84 @@ static uint64_t qjsjit_abi_info_layout(void)
                                exit_layout_fingerprint);
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
                                 runtime_api_layout_fingerprint);
@@ -134,7 +141,9 @@ diff --git a/quickjs.c b/quickjs.c
 +    out->int32_array_class_id = JS_CLASS_INT32_ARRAY;
 +    out->float64_array_class_id = JS_CLASS_FLOAT64_ARRAY;
  }
-@@ -2842,5 +2916,7 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
+ 
+ static uint64_t qjsjit_value_layout(void)
+@@ -3198,6 +3274,8 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
      info.exit_layout_fingerprint = qjsjit_exit_layout();
      info.runtime_api_layout_fingerprint = qjsjit_runtime_api_layout();
      info.helper_table_fingerprint = QJSJIT_GENERATED_HELPER_FINGERPRINT;
@@ -142,7 +151,8 @@ diff --git a/quickjs.c b/quickjs.c
 +    qjsjit_init_element_layout(&info.element_layout);
  
      build_fingerprint = qjsjit_hash_u64(UINT64_C(0xcbf29ce484222325),
-@@ -2869,7 +2945,9 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
+                                         info.source_revision);
+@@ -3225,8 +3303,10 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
                                          info.exit_layout_fingerprint);
      build_fingerprint = qjsjit_hash_u64(
          build_fingerprint, info.runtime_api_layout_fingerprint);
@@ -153,3 +163,4 @@ diff --git a/quickjs.c b/quickjs.c
 +        build_fingerprint, info.element_layout_fingerprint);
  
      copy_size = caller_size;
+     if (copy_size > sizeof(info))

@@ -7,7 +7,7 @@ use rquickjs_core::qjs;
 pub const ABI_MAJOR: u16 = 1;
 pub const ABI_MINOR: u16 = 25;
 
-pub const SOURCE_REVISION: u64 = 0xfd0a_0210_b7be_0095;
+pub const SOURCE_REVISION: u64 = 0x0fde_a21f_f109_0084;
 pub const OPCODE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_OPCODE_FINGERPRINT;
 pub const HELPER_TABLE_FINGERPRINT: u64 = qjs::QJSJIT_GENERATED_HELPER_FINGERPRINT;
 const BUILD_FEATURE_FLAGS: u64 = 0x0000_0000_0000_0001;
@@ -970,11 +970,13 @@ fn element_layout_fingerprint() -> u64 {
     hash
 }
 
-/// Byte offset of `JSRefCountHeader::ref_count` in every payload addressed by
-/// a JSValue with `JS_VALUE_HAS_REF_COUNT`. Generated code updates the count
-/// in place; the linked QuickJS pins this value in its value-layout
-/// fingerprint (`0022-inline-refcount.patch`), so a mismatch fails closed.
-pub(crate) const REF_COUNT_OFFSET: i32 = 0;
+/// Byte offset, relative to every payload addressed by a JSValue with
+/// `JS_VALUE_HAS_REF_COUNT`, of its reference count: QuickJS-NG 0.16 keeps it
+/// in the allocator block header just before the payload (`js_rc()`).
+/// Generated code updates the count in place; the linked QuickJS pins this
+/// value in its value-layout fingerprint (`0022-inline-refcount.patch`,
+/// `0033-quickjs-ng-0.16.patch`), so a mismatch fails closed.
+pub(crate) const REF_COUNT_OFFSET: i32 = -4;
 /// Width in bytes of the C `int` reference count.
 pub(crate) const REF_COUNT_BYTES: u64 = 4;
 
@@ -983,7 +985,7 @@ fn value_layout_fingerprint() -> u64 {
     hash = hash_u64(hash, (qjs::JS_TAG_FIRST as i64) as u64);
     hash = hash_u64(hash, (qjs::JS_TAG_FLOAT64 as i64) as u64);
     hash = hash_u64(hash, u64::from(cfg!(target_pointer_width = "32")));
-    hash = hash_u64(hash, REF_COUNT_OFFSET as u64);
+    hash = hash_u64(hash, i64::from(REF_COUNT_OFFSET) as u64);
     hash_u64(hash, REF_COUNT_BYTES)
 }
 

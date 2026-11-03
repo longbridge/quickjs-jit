@@ -8,7 +8,12 @@ PUBLISH_CRATES := \
 	quickjs-jit-core \
 	quickjs-jit-macro \
 	quickjs-jit \
-	quickjs-jit-runtime
+	quickjs-jit-runtime \
+	quickjs-jit-stdlib
+
+.PHONY: publish-dry-run
+publish-dry-run:
+	$(CARGO) publish --dry-run $(foreach crate,$(PUBLISH_CRATES),-p $(crate))
 
 .PHONY: publish
 publish:

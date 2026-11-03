@@ -1,7 +1,85 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 2004887..6f717b1 100644
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@ extern "C" {
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 24u
++#define QJSJIT_ABI_MINOR 25u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -25,6 +25,9 @@ extern "C" {
+ #define JS_JIT_FUNCTION_STRICT (1U << 0)
+ #define JS_JIT_FRAME_STRESS_GC (1U << 1)
+ #define JS_JIT_FRAME_SIDE_PATH_HIT (1U << 2)
++/* ABI 1.25: set on an execution granted by entry_fast_grant. No
++ * native_enter preceded it, and a DONE exit reports no native_exit. */
++#define JS_JIT_FRAME_FAST_ENTRY (1U << 3)
+ 
+ /* Helper slot numbers flatten arguments, locals, and the operand stack, in
+  * that order. JS_JIT_SLOT_NONE is accepted only as argv for argc == 0. */
+@@ -472,6 +475,36 @@ typedef struct JSJitHelperCounters {
+     uint64_t free_count;
+ } JSJitHelperCounters;
+ 
++/* ABI 1.25 callback-free native entry. The backend owns the state, which must
++ * stay at a fixed address until runtime_detach returns. QuickJS reads epoch
++ * and updates the counters only on the runtime thread. */
++typedef struct JSJitFastEntryState {
++    uint32_t struct_size;
++    uint32_t reserved;
++    /* Backend-written. Zero disables fast entry. A nonzero value follows the
++     * entry_cache_epoch rules: it never repeats and changes before any
++     * granted handle becomes inadmissible for another call. */
++    uint64_t epoch;
++    uint64_t entries;           /* executions without native_enter */
++    uint64_t exits;             /* DONE exits without native_exit */
++    uint64_t optimized_entries; /* entries granted JS_JIT_FAST_ENTRY_OPTIMIZED */
++} JSJitFastEntryState;
++
++#define JS_JIT_FAST_ENTRY_OPTIMIZED (1U << 0)
++/* OR-ed into native_exit's exit_kind for a non-DONE exit of a fast
++ * execution: that exit has no matching native_enter. */
++#define JS_JIT_EXIT_FAST_UNPAIRED 0x80000000u
++/* Upper bound on one grant; QuickJS rejects larger budgets. */
++#define JS_JIT_FAST_ENTRY_MAX_BUDGET 65536u
++
++typedef struct JSJitFastEntryGrant {
++    uint32_t struct_size;
++    uint32_t budget; /* following executions that may skip the callbacks */
++    uint32_t flags;
++    uint32_t reserved;
++    JSJitFastEntryState *state;
++} JSJitFastEntryGrant;
++
+ typedef struct JSJitBackendVTable {
+     uint32_t struct_size;
+     uint32_t (*record_hot)(void *opaque, const JSJitHotEvent *event);
+@@ -499,6 +532,16 @@ typedef struct JSJitBackendVTable {
+      * recursion. native_enter/native_exit still run once per execution.
+      * The handle and pin must be immutable between executions. */
+     uint64_t (*entry_cache_epoch)(void *opaque);
++    /* Optional, requires entry_cache_epoch. Called after a DONE exit whose
++     * pc=0 handle QuickJS caches. A nonzero budget lets that many following
++     * calls of the cached handle (same id, generation and cache epoch) skip
++     * call feedback, record_hot, entry_cache_epoch, native_enter and
++     * native_exit while grant->state->epoch equals the cached epoch. Such
++     * executions carry JS_JIT_FRAME_FAST_ENTRY and are counted in the state;
++     * a non-DONE exit still calls native_exit, with JS_JIT_EXIT_FAST_UNPAIRED.
++     * Afterwards the next call takes the full callback path again. */
++    void (*entry_fast_grant)(void *opaque, uint64_t id, uint64_t generation,
++                             JSJitFastEntryGrant *grant);
+ } JSJitBackendVTable;
+ 
+ enum {
 diff --git a/quickjs.c b/quickjs.c
+index 1b0b750..c8e14e0 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -365,6 +365,10 @@
+@@ -433,6 +433,10 @@ struct JSRuntime {
      uint64_t jit_cached_entry_generation;
      uint64_t jit_cached_entry_epoch;
      bool jit_entry_cache_suppressed;
@@ -12,7 +90,7 @@ diff --git a/quickjs.c b/quickjs.c
      uint32_t jit_backend_active_depth;
      uint8_t jit_suspended;
      uint32_t jit_active_stack_map_count;
-@@ -2316,7 +2320,8 @@
+@@ -2672,7 +2676,8 @@ static uint64_t qjsjit_backend_vtable_layout(void)
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_enter);
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_exit);
      hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, record_feedback);
@@ -22,7 +100,7 @@ diff --git a/quickjs.c b/quickjs.c
  }
  
  static uint64_t qjsjit_abi_info_layout(void)
-@@ -3201,6 +3206,8 @@
+@@ -3557,6 +3562,8 @@ static void qjsjit_discard_cached_entry(JSRuntime *rt)
  {
      JSJitEntryHandle entry = rt->jit_cached_entry;
      memset(&rt->jit_cached_entry, 0, sizeof(rt->jit_cached_entry));
@@ -31,7 +109,7 @@ diff --git a/quickjs.c b/quickjs.c
      if (entry.pin) {
          bool was_suppressed = rt->jit_entry_cache_suppressed;
          rt->jit_entry_cache_suppressed = true;
-@@ -3229,6 +3236,7 @@
+@@ -3585,6 +3592,7 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
          old_vtable = rt->jit_backend_vtable;
          old_opaque = rt->jit_backend_opaque;
          qjsjit_discard_cached_entry(rt);
@@ -39,7 +117,7 @@ diff --git a/quickjs.c b/quickjs.c
          rt->jit_backend_vtable = NULL;
          rt->jit_backend_opaque = NULL;
          {
-@@ -3252,6 +3260,7 @@
+@@ -3608,6 +3616,7 @@ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
  
      rt->jit_backend_vtable = vtable;
      rt->jit_backend_opaque = opaque;
@@ -47,7 +125,7 @@ diff --git a/quickjs.c b/quickjs.c
      return JS_JIT_BACKEND_OK;
  }
  
-@@ -19127,7 +19136,8 @@
+@@ -19610,7 +19619,8 @@ static JSJitHelperStatus qjsjit_validate_helper_frame_state(
      JSObject *function;
      JSFunctionBytecode *b;
      uint32_t allowed_flags = JS_JIT_FUNCTION_STRICT |
@@ -57,7 +135,7 @@ diff --git a/quickjs.c b/quickjs.c
  
      if (!frame || !frame->rt || !frame->ctx)
          return qjsjit_reject_helper(frame, "invalid JIT helper frame");
-@@ -20203,6 +20213,54 @@
+@@ -20686,6 +20696,54 @@ static JSValue JS_CallInternalResume(JSContext *caller_ctx, JSValueConst func_ob
      JSValueConst this_obj, JSValueConst new_target, int argc,
      JSValueConst *argv, int flags, JSJitInlineState *resume);
  
@@ -112,7 +190,7 @@ diff --git a/quickjs.c b/quickjs.c
  static void qjsjit_inline_activate(JSRuntime *rt, JSJitExecFrame *view)
  {
      rt->jit_active_frame = view;
-@@ -20625,6 +20683,7 @@
+@@ -21108,6 +21166,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      size_t alloca_size;
  #ifdef CONFIG_JIT_ABI
      int jit_call_recorded = 0;
@@ -120,7 +198,7 @@ diff --git a/quickjs.c b/quickjs.c
      uint32_t jit_hot_kind = JS_JIT_HOT_CALL, jit_probe_budget = 1;
  #endif
  
-@@ -20789,7 +20848,11 @@
+@@ -21275,7 +21334,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #endif
  
  #ifdef CONFIG_JIT_ABI
@@ -133,7 +211,7 @@ diff --git a/quickjs.c b/quickjs.c
          uint32_t call_types[8];
          for (i = 0; i < argc; i++) {
              qjsjit_unpoison_slot(&arg_buf[i]);
-@@ -20878,11 +20941,32 @@
+@@ -21364,11 +21427,32 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
          const uint8_t *entry_pc = pc;
          JSValue *entry_sp = sp;
          uint32_t entry_pc_offset = (uint32_t)(pc - b->byte_code_buf);
@@ -167,7 +245,7 @@ diff --git a/quickjs.c b/quickjs.c
              entry_epoch = jit_vtable->entry_cache_epoch ?
                  jit_vtable->entry_cache_epoch(jit_opaque) : 0;
              if (entry_pc_offset == 0 && entry_epoch != 0 &&
-@@ -20891,10 +20975,13 @@
+@@ -21377,10 +21461,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  rt->jit_cached_entry_generation == entry_generation) {
                  entry = rt->jit_cached_entry;
                  memset(&rt->jit_cached_entry, 0, sizeof(rt->jit_cached_entry));
@@ -181,7 +259,7 @@ diff --git a/quickjs.c b/quickjs.c
          if (!entry.pin) {
              entry = jit_vtable->acquire_entry(jit_opaque, entry_function_id,
                                                entry_generation, entry_pc_offset);
-@@ -20959,9 +21046,15 @@
+@@ -21445,9 +21532,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              rt->jit_active_frame_cookie = frame.frame_cookie;
              rt->jit_active_stack_map_count = entry.stack_map_count;
              rt->jit_active_helper_abi_version = entry.helper_abi_version;
@@ -198,7 +276,7 @@ diff --git a/quickjs.c b/quickjs.c
              jit_exit = entry.entry(&frame);
              if (qjsjit_inline_abort_root(&frame)) {
                  qjsjit_reject_exit(ctx, &frame.result,
-@@ -20971,10 +21064,15 @@
+@@ -21457,10 +21550,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  jit_exit.resume_pc = frame.pc;
                  jit_exit.resume_stack_top = frame.stack_top;
              }
@@ -215,7 +293,7 @@ diff --git a/quickjs.c b/quickjs.c
              rt->jit_active_frame = previous_active_frame;
              rt->jit_active_frame_cookie = previous_frame_cookie;
              rt->jit_active_stack_map_count = previous_stack_map_count;
-@@ -20984,12 +21082,21 @@
+@@ -21470,12 +21568,21 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  b->jit_function_id == entry_function_id &&
                  b->jit_generation == entry_generation &&
                  jit_exit.kind == JS_JIT_EXIT_DONE &&
@@ -238,79 +316,3 @@ diff --git a/quickjs.c b/quickjs.c
              } else {
                  jit_vtable->release_entry(jit_opaque, entry);
              }
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
- #endif
- 
- #define QJSJIT_ABI_MAJOR 1u
--#define QJSJIT_ABI_MINOR 24u
-+#define QJSJIT_ABI_MINOR 25u
- 
- /* Frame flags are append-only. Stress collection is a test/debug contract:
-  * every helper performs an allocating cycle-GC point before and after its
-@@ -25,6 +25,9 @@
- #define JS_JIT_FUNCTION_STRICT (1U << 0)
- #define JS_JIT_FRAME_STRESS_GC (1U << 1)
- #define JS_JIT_FRAME_SIDE_PATH_HIT (1U << 2)
-+/* ABI 1.25: set on an execution granted by entry_fast_grant. No
-+ * native_enter preceded it, and a DONE exit reports no native_exit. */
-+#define JS_JIT_FRAME_FAST_ENTRY (1U << 3)
- 
- /* Helper slot numbers flatten arguments, locals, and the operand stack, in
-  * that order. JS_JIT_SLOT_NONE is accepted only as argv for argc == 0. */
-@@ -472,6 +475,36 @@
-     uint64_t free_count;
- } JSJitHelperCounters;
- 
-+/* ABI 1.25 callback-free native entry. The backend owns the state, which must
-+ * stay at a fixed address until runtime_detach returns. QuickJS reads epoch
-+ * and updates the counters only on the runtime thread. */
-+typedef struct JSJitFastEntryState {
-+    uint32_t struct_size;
-+    uint32_t reserved;
-+    /* Backend-written. Zero disables fast entry. A nonzero value follows the
-+     * entry_cache_epoch rules: it never repeats and changes before any
-+     * granted handle becomes inadmissible for another call. */
-+    uint64_t epoch;
-+    uint64_t entries;           /* executions without native_enter */
-+    uint64_t exits;             /* DONE exits without native_exit */
-+    uint64_t optimized_entries; /* entries granted JS_JIT_FAST_ENTRY_OPTIMIZED */
-+} JSJitFastEntryState;
-+
-+#define JS_JIT_FAST_ENTRY_OPTIMIZED (1U << 0)
-+/* OR-ed into native_exit's exit_kind for a non-DONE exit of a fast
-+ * execution: that exit has no matching native_enter. */
-+#define JS_JIT_EXIT_FAST_UNPAIRED 0x80000000u
-+/* Upper bound on one grant; QuickJS rejects larger budgets. */
-+#define JS_JIT_FAST_ENTRY_MAX_BUDGET 65536u
-+
-+typedef struct JSJitFastEntryGrant {
-+    uint32_t struct_size;
-+    uint32_t budget; /* following executions that may skip the callbacks */
-+    uint32_t flags;
-+    uint32_t reserved;
-+    JSJitFastEntryState *state;
-+} JSJitFastEntryGrant;
-+
- typedef struct JSJitBackendVTable {
-     uint32_t struct_size;
-     uint32_t (*record_hot)(void *opaque, const JSJitHotEvent *event);
-@@ -499,6 +532,16 @@
-      * recursion. native_enter/native_exit still run once per execution.
-      * The handle and pin must be immutable between executions. */
-     uint64_t (*entry_cache_epoch)(void *opaque);
-+    /* Optional, requires entry_cache_epoch. Called after a DONE exit whose
-+     * pc=0 handle QuickJS caches. A nonzero budget lets that many following
-+     * calls of the cached handle (same id, generation and cache epoch) skip
-+     * call feedback, record_hot, entry_cache_epoch, native_enter and
-+     * native_exit while grant->state->epoch equals the cached epoch. Such
-+     * executions carry JS_JIT_FRAME_FAST_ENTRY and are counted in the state;
-+     * a non-DONE exit still calls native_exit, with JS_JIT_EXIT_FAST_UNPAIRED.
-+     * Afterwards the next call takes the full callback path again. */
-+    void (*entry_fast_grant)(void *opaque, uint64_t id, uint64_t generation,
-+                             JSJitFastEntryGrant *grant);
- } JSJitBackendVTable;
- 
- enum {

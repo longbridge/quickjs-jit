@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 1f9e056..12439de 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -316,6 +316,20 @@
+@@ -384,6 +384,20 @@ struct JSRuntime {
  
      JSInterruptHandler *interrupt_handler;
      void *interrupt_opaque;
@@ -22,7 +23,7 @@ diff --git a/quickjs.c b/quickjs.c
  
      JSPromiseHook *promise_hook;
      void *promise_hook_opaque;
-@@ -9506,6 +9520,10 @@
+@@ -9932,6 +9946,10 @@ JSValue JS_ThrowOutOfMemory(JSContext *ctx)
  
  static JSValue JS_ThrowStackOverflow(JSContext *ctx)
  {
@@ -33,7 +34,7 @@ diff --git a/quickjs.c b/quickjs.c
      return JS_ThrowRangeError(ctx, "Maximum call stack size exceeded");
  }
  
-@@ -9591,6 +9609,13 @@
+@@ -10017,6 +10035,13 @@ static no_inline __exception int __js_poll_interrupts(JSContext *ctx)
  {
      JSRuntime *rt = ctx->rt;
      ctx->interrupt_counter = JS_INTERRUPT_COUNTER_INIT;
@@ -47,7 +48,7 @@ diff --git a/quickjs.c b/quickjs.c
      if (rt->interrupt_handler) {
          if (rt->interrupt_handler(rt, rt->interrupt_opaque)) {
              JS_ThrowInterrupted(ctx);
-@@ -68276,3 +68301,157 @@
+@@ -69755,3 +69780,157 @@ uintptr_t js_std_cmd(int cmd, ...) {
  #undef malloc
  #undef free
  #undef realloc

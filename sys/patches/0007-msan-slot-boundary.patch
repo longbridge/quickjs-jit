@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 5fa9d92..4fbd055 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -18804,27 +18804,44 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
+@@ -19288,6 +19288,20 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
      return JS_JIT_HELPER_OK;
  }
  
@@ -22,12 +23,7 @@ diff --git a/quickjs.c b/quickjs.c
  static bool qjsjit_resolve_slot(JSJitExecFrame *frame,
                                  JSFunctionBytecode *b, uint32_t slot,
                                  JSValue **value)
- {
-     uint32_t stack_count;
-     uint64_t local_base = b->arg_count;
-     uint64_t stack_base = local_base + b->var_count;
- 
-     if (slot == JS_JIT_SLOT_NONE)
+@@ -19300,16 +19314,19 @@ static bool qjsjit_resolve_slot(JSJitExecFrame *frame,
          return false;
      if ((uint64_t)slot < local_base) {
          *value = (JSValue *)frame->arg_buf + slot;
@@ -46,7 +42,9 @@ diff --git a/quickjs.c b/quickjs.c
 +    qjsjit_unpoison_slot(*value);
      return true;
  }
-@@ -19785,7 +19802,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+ 
+@@ -20271,8 +20288,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+     if (argc >= 0 && argc <= 8 && !rt->jit_suspended && rt->jit_backend_vtable &&
          rt->jit_backend_vtable->record_feedback) {
          uint32_t call_types[8];
 -        for (i = 0; i < argc; i++)

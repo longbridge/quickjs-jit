@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 60ef6a4..e50057a 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -20811,10 +20811,12 @@
+@@ -21298,10 +21298,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  if (unlikely(JS_IsException(ret_val)))
                      goto exception;
  #ifdef CONFIG_JIT_ABI
@@ -18,7 +19,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (opcode == OP_tail_call)
                      goto done;
-@@ -20854,9 +20856,11 @@
+@@ -21341,9 +21343,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  if (unlikely(JS_IsException(ret_val)))
                      goto exception;
  #ifdef CONFIG_JIT_ABI
@@ -33,7 +34,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (opcode == OP_tail_call_method)
                      goto done;
-@@ -22002,9 +22006,11 @@
+@@ -22489,9 +22493,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                  goto get_field_slow_path;
                              val = js_dup(pr->u.value);
  #ifdef CONFIG_JIT_ABI
@@ -48,7 +49,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                              break;
                          }
-@@ -22061,9 +22067,11 @@
+@@ -22548,9 +22554,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                  goto get_field2_slow_path;
                              val = js_dup(pr->u.value);
  #ifdef CONFIG_JIT_ABI
@@ -63,7 +64,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                              break;
                          }
-@@ -22114,10 +22122,12 @@
+@@ -22601,10 +22609,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                          /* fast path */
                          set_value(ctx, &pr->u.value, sp[-1]);
  #ifdef CONFIG_JIT_ABI

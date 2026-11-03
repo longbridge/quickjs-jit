@@ -1,7 +1,8 @@
 diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+index 2a92fe6..254e385 100644
 --- a/quickjs-jit-helpers.h
 +++ b/quickjs-jit-helpers.h
-@@ -114,6 +114,9 @@
+@@ -114,7 +114,10 @@ typedef enum JSJitCompareOp {
        CONSUMED, NONE, NONE, OWNED,                                         \
        THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
      X(GET_GLOBAL, get_global, JS_JitHelperGetGlobal, MAP_OUT_INDEX, 1, OWNED, \
@@ -12,10 +13,12 @@ diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
 +      THROWING | ALLOCATING | REENTRANT)
  
  typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
 diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 383b400..5a95232 100644
 --- a/quickjs-jit.h
 +++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
+@@ -17,7 +17,7 @@ extern "C" {
  #endif
  
  #define QJSJIT_ABI_MAJOR 1u
@@ -24,7 +27,7 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  
  /* Frame flags are append-only. Stress collection is a test/debug contract:
   * every helper performs an allocating cycle-GC point before and after its
-@@ -216,7 +216,7 @@
+@@ -216,7 +216,7 @@ typedef struct JSJitExecFrame JSJitExecFrame;
   * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
   */
  #define QJSJIT_RUNTIME_API_MAJOR 1u
@@ -34,9 +37,10 @@ diff --git a/quickjs-jit.h b/quickjs-jit.h
  #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
      JSJitHelperStatus (*field)(JSJitExecFrame *frame)
 diff --git a/quickjs.c b/quickjs.c
+index 40b0db5..a2ee162 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -19548,6 +19548,51 @@
+@@ -20032,6 +20032,51 @@ JSJitHelperStatus JS_JitHelperGetGlobal(JSJitExecFrame *frame,
      *out = result;
      return qjsjit_finish_output(frame, out);
  }

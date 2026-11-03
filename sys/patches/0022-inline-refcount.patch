@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 74c8113..1b0b750 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -2442,6 +2442,26 @@
+@@ -2798,6 +2798,26 @@ static void qjsjit_init_element_layout(JSJitElementLayout *out)
      out->float64_array_class_id = JS_CLASS_FLOAT64_ARRAY;
  }
  
@@ -28,7 +29,7 @@ diff --git a/quickjs.c b/quickjs.c
  static uint64_t qjsjit_value_layout(void)
  {
      uint64_t hash = qjsjit_layout_start(sizeof(JSValue), _Alignof(JSValue));
-@@ -2452,6 +2472,8 @@
+@@ -2808,6 +2828,8 @@ static uint64_t qjsjit_value_layout(void)
  #else
      hash = qjsjit_hash_u64(hash, 0);
  #endif

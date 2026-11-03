@@ -1,7 +1,92 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+index 8229362..c93aa81 100644
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@ extern "C" {
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 21u
++#define QJSJIT_ABI_MINOR 22u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -481,6 +481,70 @@ int JS_JitSnapshotFunction(JSContext *ctx, JSValueConst function,
+ void JS_JitFreeSnapshot(JSJitFunctionSnapshot *snapshot);
+ int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function);
+ 
++/* Versioned runtime-thread inline activation API. Enter requires the complete
++ * pending CALL stack in caller storage, including its function/receiver owners.
++ * CALL_METHOD uses [receiver, function, arguments...], CALL omits receiver.
++ * Unsupported call kinds/targets or exhausted quotas return GUARD_MISS without
++ * changing caller storage, polling or setting an exception. Invalid state is uncatchable.
++ * Enter includes the ordinary call-entry interrupt poll in the caller realm.
++ * Recheck speculative target/type/heap assumptions after Enter's reentrant
++ * checkpoint and before inline effects; a mismatch resumes the new view at PC0.
++ * A rejected interrupt leaves caller PC/SP/operands unchanged and no callee;
++ * publish the decoded call continuation as exception PC before unwinding.
++ * Every successful Enter must be consumed by Leave or Resume before native exit.
++ * Views and their slots stay at stable addresses until consumed. */
++#define QJSJIT_INLINE_RECOVERY_VERSION 1u
++#define JS_JIT_INLINE_CALL 0u
++#define JS_JIT_INLINE_CALL_METHOD 1u
++#define JS_JIT_INLINE_RESUME_INSTRUCTION 0u
++#define JS_JIT_INLINE_RESUME_EXCEPTION 1u
++#define JS_JIT_INLINE_MAX_DEPTH 16u
++#define JS_JIT_INLINE_MAX_BYTES (1024u * 1024u)
++JS_EXTERN JSJitHelperStatus JS_JitInlineEnter(
++    JSJitExecFrame *caller, uint32_t stack_map_id, uint32_t call_pc,
++    uint32_t continuation_pc, uint32_t call_kind, uint32_t argc,
++    JSJitExecFrame **callee);
++/* Leave duplicates the named callee slot before cleanup and transfers the
++ * result into the caller's pending CALL range. All other owners are consumed.
++ * On success caller PC is its next instruction and stack depth changes by
++ * -argc (CALL) or -argc-1 (CALL_METHOD). */
++JS_EXTERN JSJitHelperStatus JS_JitInlineLeave(JSJitExecFrame *callee,
++                                             uint32_t result_slot);
++/* Resume completes every inline ancestor in the interpreter at the exact
++ * instruction/exception state. The root physical frame is left at its pending
++ * call continuation, with one result owner on success or original call operands
++ * on exception. Native code MUST immediately return DEOPT/EXCEPTION respectively
++ * using this root PC/SP and an exact post-call map, never a pre-call replay map.
++ * No artifact/frame pointers survive the pinned call that performs Resume. */
++JS_EXTERN JSJitHelperStatus JS_JitInlineResume(JSJitExecFrame *callee,
++    uint32_t resume_pc, uint32_t resume_kind);
++/* Nonallocating, nonpolling checkpoint of the currently active root or shadow
++ * frame. A valid retired generation (including an inline ancestor) returns
++ * GUARD_MISS without exception: resume the exact post-effect instruction, never
++ * replay an earlier call. Use after every reentrant/finalizing operation,
++ * including Leave on its surviving caller; a consumed callee is not a handle.
++ * DUP/FREE alone accept a retired trusted shadow generation to finish ownership
++ * moves for an already-successful opcode. Check after this commit plumbing,
++ * before another bytecode effect; other helpers and Leave remain strict.
++ * Malformed frame identity is an uncatchable invariant exception. */
++JS_EXTERN JSJitHelperStatus JS_JitInlineCheck(JSJitExecFrame *frame);
++typedef struct JSJitInlineAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t max_depth;
++    uint32_t max_bytes;
++    uint32_t effects; /* conservative JS_JIT_HELPER_* flags for all operations */
++    uint32_t reserved;
++    JSJitHelperStatus (*enter)(JSJitExecFrame *, uint32_t, uint32_t,
++                              uint32_t, uint32_t, uint32_t, JSJitExecFrame **);
++    JSJitHelperStatus (*leave)(JSJitExecFrame *, uint32_t);
++    JSJitHelperStatus (*resume)(JSJitExecFrame *, uint32_t, uint32_t);
++    JSJitHelperStatus (*check)(JSJitExecFrame *);
++} JSJitInlineAPI;
++/* NULL for an unsupported version. Resolve native call addresses through this
++ * table only after validating the main JIT ABI, table size/version and effects. */
++JS_EXTERN const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/quickjs.c b/quickjs.c
+index 52a7104..d36c24e 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -376,6 +376,9 @@
+@@ -444,6 +444,9 @@ struct JSRuntime {
      uint64_t jit_next_frame_cookie;
      uint64_t jit_active_frame_cookie;
      JSJitExecFrame *jit_active_frame;
@@ -11,8 +96,8 @@ diff --git a/quickjs.c b/quickjs.c
      uint64_t jit_helper_dup_count;
      uint64_t jit_helper_free_count;
  #ifdef CONFIG_JIT_TEST_SUPPORT
-@@ -419,6 +422,25 @@
-     JSValue *cur_sp;
+@@ -484,6 +487,25 @@ typedef struct JSStackFrame {
+     struct JSGCObjectHeader *cur_gc_obj;
  } JSStackFrame;
  
 +#ifdef CONFIG_JIT_ABI
@@ -37,7 +122,7 @@ diff --git a/quickjs.c b/quickjs.c
  typedef enum {
      JS_GC_OBJ_TYPE_JS_OBJECT,
      JS_GC_OBJ_TYPE_FUNCTION_BYTECODE,
-@@ -18937,9 +18959,17 @@
+@@ -19420,9 +19442,17 @@ static JSJitHelperStatus qjsjit_reject_helper(JSJitExecFrame *frame,
      return JS_JIT_HELPER_EXCEPTION;
  }
  
@@ -57,7 +142,7 @@ diff --git a/quickjs.c b/quickjs.c
  {
      JSRuntime *rt;
      JSContext *ctx;
-@@ -18975,7 +19005,8 @@
+@@ -19458,7 +19488,8 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
          return qjsjit_reject_helper(frame, "invalid JIT helper entry");
      if (has_stack_map && stack_map_id >= frame->entry.stack_map_count)
          return qjsjit_reject_helper(frame, "invalid JIT helper stack map");
@@ -67,7 +152,7 @@ diff --git a/quickjs.c b/quickjs.c
          return qjsjit_reject_helper(frame, "invalid JIT helper state");
  
      sf = rt->current_stack_frame;
-@@ -18988,7 +19019,13 @@
+@@ -19471,7 +19502,13 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
      if (!b || b->realm != ctx || b->jit_function_id == 0 ||
          b->jit_generation == 0 ||
          frame->function_id != b->jit_function_id ||
@@ -82,7 +167,7 @@ diff --git a/quickjs.c b/quickjs.c
          frame->bytecode_start != b->byte_code_buf ||
          frame->arg_buf != (JSValueConst *)sf->arg_buf ||
          frame->var_buf != sf->var_buf ||
-@@ -19011,6 +19048,14 @@
+@@ -19494,6 +19531,14 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
      return JS_JIT_HELPER_OK;
  }
  
@@ -97,7 +182,7 @@ diff --git a/quickjs.c b/quickjs.c
  static void qjsjit_unpoison_slot(JSValue *value)
  {
  #if defined(__has_feature)
-@@ -19192,7 +19237,8 @@
+@@ -19675,7 +19720,8 @@ JSJitHelperStatus JS_JitHelperDup(JSJitExecFrame *frame,
      JSStackFrame *sf;
      JSValue *out, *in;
  
@@ -107,7 +192,7 @@ diff --git a/quickjs.c b/quickjs.c
          return JS_JIT_HELPER_EXCEPTION;
      qjsjit_count_helper(frame, JS_JIT_HELPER_DUP);
      if (!qjsjit_resolve_slot(frame, b, output, &out) ||
-@@ -19215,7 +19261,8 @@
+@@ -19698,7 +19744,8 @@ JSJitHelperStatus JS_JitHelperFree(JSJitExecFrame *frame,
      JSValue *in;
      JSJitHelperStatus status;
  
@@ -117,7 +202,7 @@ diff --git a/quickjs.c b/quickjs.c
          return JS_JIT_HELPER_EXCEPTION;
      qjsjit_count_helper(frame, JS_JIT_HELPER_FREE);
      if (!qjsjit_resolve_slot(frame, b, input, &in))
-@@ -19999,10 +20046,354 @@
+@@ -20482,10 +20529,354 @@ JSJitHelperStatus JS_JitHelperUnaryArithSlow(JSJitExecFrame *frame,
  
  #endif
  
@@ -472,7 +557,7 @@ diff --git a/quickjs.c b/quickjs.c
  {
      JSRuntime *rt = caller_ctx->rt;
      JSContext *ctx;
-@@ -20044,6 +20435,34 @@
+@@ -20527,6 +20918,34 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #define BREAK           SWITCH(pc)
  #endif
  
@@ -507,7 +592,7 @@ diff --git a/quickjs.c b/quickjs.c
      if (js_poll_interrupts(caller_ctx))
          return JS_EXCEPTION;
      if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT)) {
-@@ -20326,6 +20745,14 @@
+@@ -20812,6 +21231,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  jit_vtable->native_enter(jit_opaque, entry_function_id,
                                           entry_generation, entry_pc_offset);
              jit_exit = entry.entry(&frame);
@@ -522,7 +607,7 @@ diff --git a/quickjs.c b/quickjs.c
              if (jit_vtable->native_exit)
                  jit_vtable->native_exit(jit_opaque, entry_function_id,
                                          entry_generation, entry_pc_offset,
-@@ -23504,6 +23931,10 @@
+@@ -24076,6 +24503,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              JS_FreeValue(ctx, *pval);
          }
      }
@@ -533,86 +618,3 @@ diff --git a/quickjs.c b/quickjs.c
      rt->current_stack_frame = sf->prev_frame;
      return ret_val;
  }
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
- #endif
- 
- #define QJSJIT_ABI_MAJOR 1u
--#define QJSJIT_ABI_MINOR 21u
-+#define QJSJIT_ABI_MINOR 22u
- 
- /* Frame flags are append-only. Stress collection is a test/debug contract:
-  * every helper performs an allocating cycle-GC point before and after its
-@@ -481,6 +481,70 @@
- void JS_JitFreeSnapshot(JSJitFunctionSnapshot *snapshot);
- int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function);
- 
-+/* Versioned runtime-thread inline activation API. Enter requires the complete
-+ * pending CALL stack in caller storage, including its function/receiver owners.
-+ * CALL_METHOD uses [receiver, function, arguments...], CALL omits receiver.
-+ * Unsupported call kinds/targets or exhausted quotas return GUARD_MISS without
-+ * changing caller storage, polling or setting an exception. Invalid state is uncatchable.
-+ * Enter includes the ordinary call-entry interrupt poll in the caller realm.
-+ * Recheck speculative target/type/heap assumptions after Enter's reentrant
-+ * checkpoint and before inline effects; a mismatch resumes the new view at PC0.
-+ * A rejected interrupt leaves caller PC/SP/operands unchanged and no callee;
-+ * publish the decoded call continuation as exception PC before unwinding.
-+ * Every successful Enter must be consumed by Leave or Resume before native exit.
-+ * Views and their slots stay at stable addresses until consumed. */
-+#define QJSJIT_INLINE_RECOVERY_VERSION 1u
-+#define JS_JIT_INLINE_CALL 0u
-+#define JS_JIT_INLINE_CALL_METHOD 1u
-+#define JS_JIT_INLINE_RESUME_INSTRUCTION 0u
-+#define JS_JIT_INLINE_RESUME_EXCEPTION 1u
-+#define JS_JIT_INLINE_MAX_DEPTH 16u
-+#define JS_JIT_INLINE_MAX_BYTES (1024u * 1024u)
-+JS_EXTERN JSJitHelperStatus JS_JitInlineEnter(
-+    JSJitExecFrame *caller, uint32_t stack_map_id, uint32_t call_pc,
-+    uint32_t continuation_pc, uint32_t call_kind, uint32_t argc,
-+    JSJitExecFrame **callee);
-+/* Leave duplicates the named callee slot before cleanup and transfers the
-+ * result into the caller's pending CALL range. All other owners are consumed.
-+ * On success caller PC is its next instruction and stack depth changes by
-+ * -argc (CALL) or -argc-1 (CALL_METHOD). */
-+JS_EXTERN JSJitHelperStatus JS_JitInlineLeave(JSJitExecFrame *callee,
-+                                             uint32_t result_slot);
-+/* Resume completes every inline ancestor in the interpreter at the exact
-+ * instruction/exception state. The root physical frame is left at its pending
-+ * call continuation, with one result owner on success or original call operands
-+ * on exception. Native code MUST immediately return DEOPT/EXCEPTION respectively
-+ * using this root PC/SP and an exact post-call map, never a pre-call replay map.
-+ * No artifact/frame pointers survive the pinned call that performs Resume. */
-+JS_EXTERN JSJitHelperStatus JS_JitInlineResume(JSJitExecFrame *callee,
-+    uint32_t resume_pc, uint32_t resume_kind);
-+/* Nonallocating, nonpolling checkpoint of the currently active root or shadow
-+ * frame. A valid retired generation (including an inline ancestor) returns
-+ * GUARD_MISS without exception: resume the exact post-effect instruction, never
-+ * replay an earlier call. Use after every reentrant/finalizing operation,
-+ * including Leave on its surviving caller; a consumed callee is not a handle.
-+ * DUP/FREE alone accept a retired trusted shadow generation to finish ownership
-+ * moves for an already-successful opcode. Check after this commit plumbing,
-+ * before another bytecode effect; other helpers and Leave remain strict.
-+ * Malformed frame identity is an uncatchable invariant exception. */
-+JS_EXTERN JSJitHelperStatus JS_JitInlineCheck(JSJitExecFrame *frame);
-+typedef struct JSJitInlineAPI {
-+    uint32_t struct_size;
-+    uint32_t version;
-+    uint32_t max_depth;
-+    uint32_t max_bytes;
-+    uint32_t effects; /* conservative JS_JIT_HELPER_* flags for all operations */
-+    uint32_t reserved;
-+    JSJitHelperStatus (*enter)(JSJitExecFrame *, uint32_t, uint32_t,
-+                              uint32_t, uint32_t, uint32_t, JSJitExecFrame **);
-+    JSJitHelperStatus (*leave)(JSJitExecFrame *, uint32_t);
-+    JSJitHelperStatus (*resume)(JSJitExecFrame *, uint32_t, uint32_t);
-+    JSJitHelperStatus (*check)(JSJitExecFrame *);
-+} JSJitInlineAPI;
-+/* NULL for an unsupported version. Resolve native call addresses through this
-+ * table only after validating the main JIT ABI, table size/version and effects. */
-+JS_EXTERN const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version);
-+
- #ifdef __cplusplus
- }
- #endif

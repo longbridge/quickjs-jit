@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 8c5f27d..74c8113 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -379,6 +379,11 @@
+@@ -447,6 +447,11 @@ struct JSRuntime {
      struct JSJitInlineState *jit_inline_top;
      size_t jit_inline_bytes;
      uint32_t jit_inline_depth;
@@ -13,7 +14,7 @@ diff --git a/quickjs.c b/quickjs.c
      uint64_t jit_helper_dup_count;
      uint64_t jit_helper_free_count;
  #ifdef CONFIG_JIT_TEST_SUPPORT
-@@ -437,6 +442,7 @@
+@@ -502,6 +507,7 @@ typedef struct JSJitInlineState {
      uint32_t value_count, argc, argument_slots;
      uint32_t call_base, call_operands, continuation_pc;
      uint64_t function_id, generation;
@@ -21,7 +22,7 @@ diff --git a/quickjs.c b/quickjs.c
      bool resumed_exception, values_consumed;
  } JSJitInlineState;
  #endif
-@@ -890,6 +896,10 @@
+@@ -966,6 +972,10 @@ typedef struct JSFunctionBytecode {
      uint64_t jit_generation;
      uint8_t jit_feedback_disabled;
      int jit_validated_pc_offset; /* known instruction boundary, initially zero */
@@ -32,7 +33,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  } JSFunctionBytecode;
  
-@@ -3501,6 +3511,10 @@
+@@ -3857,6 +3867,10 @@ void JS_FreeRuntime(JSRuntime *rt)
      JS_FreeValueRT(rt, rt->current_exception);
  #ifdef CONFIG_JIT_ABI
      JS_FreeValueRT(rt, rt->jit_uncatchable_exception);
@@ -43,7 +44,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
  
      list_for_each_safe(el, el1, &rt->job_list) {
-@@ -8463,6 +8477,12 @@
+@@ -8862,6 +8876,12 @@ static void compute_bytecode_size(JSFunctionBytecode *b, JSMemoryUsage_helper *h
      if (b->byte_code_buf) {
          hp->js_func_code_size += b->byte_code_len;
      }
@@ -56,7 +57,7 @@ diff --git a/quickjs.c b/quickjs.c
      memory_used_count++;
      js_func_size += b->source_len + 1;
      if (b->pc2line_len) {
-@@ -18926,16 +18946,13 @@
+@@ -19409,16 +19429,13 @@ static void qjsjit_clear_scratch(JSContext *ctx, JSValue *stack_base,
          *stack_top = scratch;
  }
  
@@ -75,7 +76,7 @@ diff --git a/quickjs.c b/quickjs.c
      /* Published bytecode instruction lengths are immutable. Reuse only a
         proven boundary at or before this query; backward branches rescan. */
      if (value - start >= (uintptr_t)b->jit_validated_pc_offset)
-@@ -18959,6 +18976,61 @@
+@@ -19442,6 +19459,61 @@ static bool qjsjit_valid_pc(JSFunctionBytecode *b, const uint8_t *pc,
      return allow_end && pc == b->byte_code_buf + b->byte_code_len;
  }
  
@@ -137,7 +138,7 @@ diff --git a/quickjs.c b/quickjs.c
  static bool qjsjit_is_uncatchable_sentinel(JSRuntime *rt, JSValueConst value)
  {
      return JS_VALUE_GET_TAG(value) == JS_TAG_OBJECT &&
-@@ -19003,8 +19075,10 @@
+@@ -19486,8 +19558,10 @@ static void qjsjit_reject_exit(JSContext *ctx, JSValue *result,
   * a forged identity/cookie/map/index can never read, duplicate or free the
   * value used by a caller to detect accidental touching.
   */
@@ -150,7 +151,7 @@ diff --git a/quickjs.c b/quickjs.c
  {
      JSValue result = JS_UNDEFINED;
  
-@@ -19059,8 +19133,10 @@
+@@ -19542,8 +19616,10 @@ static JSJitHelperStatus qjsjit_validate_helper_frame_state(
          return qjsjit_reject_helper(frame, "invalid JIT helper entry");
      if (has_stack_map && stack_map_id >= frame->entry.stack_map_count)
          return qjsjit_reject_helper(frame, "invalid JIT helper stack map");
@@ -162,7 +163,7 @@ diff --git a/quickjs.c b/quickjs.c
          return qjsjit_reject_helper(frame, "invalid JIT helper state");
  
      sf = rt->current_stack_frame;
-@@ -20113,6 +20189,72 @@
+@@ -20596,6 +20672,72 @@ static void qjsjit_inline_activate(JSRuntime *rt, JSJitExecFrame *view)
      rt->jit_active_helper_abi_version = view ? view->entry.helper_abi_version : 0;
  }
  
@@ -235,7 +236,7 @@ diff --git a/quickjs.c b/quickjs.c
  /* Free only runtime-owned storage, never a pointer supplied in the mutable
   * public view. Interpreter completion has already consumed its local range. */
  static void qjsjit_inline_destroy(JSRuntime *rt, JSJitInlineState *state)
-@@ -20132,7 +20274,7 @@
+@@ -20615,7 +20757,7 @@ static void qjsjit_inline_destroy(JSRuntime *rt, JSJitInlineState *state)
      JS_FreeValueRT(rt, state->sf.cur_func);
      JS_FreeValueRT(rt, state->this_value);
      JS_FreeValueRT(rt, state->new_target);
@@ -244,7 +245,7 @@ diff --git a/quickjs.c b/quickjs.c
  }
  
  /* Native code must never leave a live shadow frame behind. Reject without
-@@ -20172,10 +20314,10 @@
+@@ -20655,10 +20797,10 @@ JSJitHelperStatus JS_JitInlineEnter(JSJitExecFrame *caller,
      rt = caller->rt;
      if (call_kind > JS_JIT_INLINE_CALL_METHOD || argc > UINT16_MAX)
          return JS_JIT_HELPER_GUARD_MISS;
@@ -257,7 +258,7 @@ diff --git a/quickjs.c b/quickjs.c
          caller->pc != caller_b->byte_code_buf + call_pc)
          return qjsjit_reject_helper(caller, "invalid inline call PC");
      opcode = caller_b->byte_code_buf[call_pc];
-@@ -20224,7 +20366,7 @@
+@@ -20707,7 +20849,7 @@ JSJitHelperStatus JS_JitInlineEnter(JSJitExecFrame *caller,
          return JS_JIT_HELPER_GUARD_MISS;
      /* Unlike js_malloc(ctx), this does not manufacture an OOM exception for
       * an optional optimization. Quota/allocation failure is pre-effect miss. */
@@ -266,7 +267,7 @@ diff --git a/quickjs.c b/quickjs.c
      if (!state)
          return JS_JIT_HELPER_GUARD_MISS;
      /* Every decline happens before this exactly-once entry checkpoint: a
-@@ -20306,7 +20448,7 @@
+@@ -20789,7 +20931,7 @@ JSJitHelperStatus JS_JitInlineEnter(JSJitExecFrame *caller,
  poll_failed:
      rt->jit_inline_depth--;
      rt->jit_inline_bytes -= bytes;
@@ -275,7 +276,7 @@ diff --git a/quickjs.c b/quickjs.c
      return JS_JIT_HELPER_EXCEPTION;
  }
  
-@@ -39998,6 +40140,10 @@
+@@ -40818,6 +40960,10 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
      JS_FreeAtomRT(rt, b->filename);
      js_free_rt(rt, b->pc2line_buf);
      js_free_rt(rt, b->source);
@@ -285,4 +286,4 @@ diff --git a/quickjs.c b/quickjs.c
 +#endif
  
      remove_gc_object(&b->header);
-     if (rt->gc_phase == JS_GC_PHASE_REMOVE_CYCLES && b->header.ref_count != 0) {
+     if (rt->gc_phase == JS_GC_PHASE_REMOVE_CYCLES && JS_REF_COUNT(b) != 0) {

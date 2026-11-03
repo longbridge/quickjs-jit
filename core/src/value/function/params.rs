@@ -2,8 +2,8 @@ use crate::{
     function::{Exhaustive, Flat, FuncArg, Opt, Rest, This},
     qjs, Ctx, FromJs, Result, Value,
 };
-use alloc::vec::Vec;
-use core::slice;
+use alloc::{borrow::Cow, vec::Vec};
+use core::{mem::size_of, slice};
 
 /// A struct which contains the values a callback is called with.
 ///
@@ -12,7 +12,7 @@ pub struct Params<'a, 'js> {
     ctx: Ctx<'js>,
     function: qjs::JSValue,
     this: qjs::JSValue,
-    args: &'a [qjs::JSValue],
+    args: Cow<'a, [qjs::JSValue]>,
     is_constructor: bool,
 }
 
@@ -24,25 +24,42 @@ impl<'a, 'js> Params<'a, 'js> {
         this: qjs::JSValue,
         argc: qjs::c_int,
         argv: *mut qjs::JSValue,
-        _flags: qjs::c_int,
+        flags: qjs::c_int,
     ) -> Self {
-        let args = if argv.is_null() {
+        let args: Cow<'a, [qjs::JSValue]> = if argv.is_null() {
             assert_eq!(
                 argc, 0,
                 "got a null pointer from quickjs for a non-zero number of args"
             );
-            [].as_slice()
+            Cow::Borrowed(&[])
         } else {
             let argc = usize::try_from(argc).expect("invalid argument number");
-            slice::from_raw_parts(argv, argc)
+            if argv.is_aligned() {
+                Cow::Borrowed(slice::from_raw_parts(argv, argc))
+            } else {
+                // QuickJS only guarantees four-byte alignment here on 32-bit MSVC.
+                let bytes = argv.cast::<u8>();
+                Cow::Owned(
+                    (0..argc)
+                        .map(|index| {
+                            bytes
+                                .add(index * size_of::<qjs::JSValue>())
+                                .cast::<qjs::JSValue>()
+                                .read_unaligned()
+                        })
+                        .collect(),
+                )
+            }
         };
+
+        let is_constructor = (flags & qjs::JS_CALL_FLAG_CONSTRUCTOR as qjs::c_int) != 0;
 
         Self {
             ctx: Ctx::from_ptr(ctx),
             function,
             this,
             args,
-            is_constructor: false,
+            is_constructor,
         }
     }
 
@@ -380,3 +397,74 @@ impl_from_params!(A, B, C, D);
 impl_from_params!(A, B, C, D, E);
 impl_from_params!(A, B, C, D, E, F);
 impl_from_params!(A, B, C, D, E, F, G);
+
+#[cfg(test)]
+mod tests {
+    use crate::{function::IntoJsFunc, Function, IntoJs};
+
+    use super::*;
+    use core::mem::{align_of, size_of};
+
+    #[test]
+    fn misaligned_ffi_arguments_are_read_safely() {
+        crate::test_with(|ctx| {
+            let values = [
+                qjs::JS_MKVAL(qjs::JS_TAG_INT, 17),
+                qjs::JS_MKVAL(qjs::JS_TAG_INT, 42),
+            ];
+            let mut storage = vec![0_u8; size_of_val(&values) + 2 * align_of::<qjs::JSValue>()];
+            let offset = storage.as_ptr().align_offset(align_of::<qjs::JSValue>())
+                + align_of::<qjs::JSValue>() / 2;
+            let argv = unsafe { storage.as_mut_ptr().add(offset).cast::<qjs::JSValue>() };
+
+            for (index, value) in values.into_iter().enumerate() {
+                unsafe {
+                    storage
+                        .as_mut_ptr()
+                        .add(offset + index * size_of::<qjs::JSValue>())
+                        .cast::<qjs::JSValue>()
+                        .write_unaligned(value);
+                }
+            }
+
+            assert!(!argv.is_aligned());
+            let params = unsafe {
+                Params::from_ffi_class(
+                    ctx.as_ptr(),
+                    qjs::JS_UNDEFINED,
+                    qjs::JS_UNDEFINED,
+                    values.len() as _,
+                    argv,
+                    0,
+                )
+            };
+
+            assert_eq!(unsafe { qjs::JS_VALUE_GET_INT(params.args[0]) }, 17);
+            assert_eq!(unsafe { qjs::JS_VALUE_GET_INT(params.args[1]) }, 42);
+        });
+    }
+
+    #[test]
+    fn is_constructor() {
+        crate::test_with(|ctx| {
+            struct ReturnIsConstructor;
+            impl<'js> IntoJsFunc<'js, ()> for ReturnIsConstructor {
+                fn param_requirements() -> ParamRequirement {
+                    ParamRequirement::any()
+                }
+                fn call<'a>(&self, params: Params<'a, 'js>) -> Result<Value<'js>> {
+                    params.is_constructor().into_js(params.ctx())
+                }
+            }
+            let f = Function::new(ctx, ReturnIsConstructor)
+                .unwrap()
+                .with_constructor(true);
+            assert!(!f.call::<(), bool>(()).unwrap());
+            assert!(f
+                .as_constructor()
+                .unwrap()
+                .construct::<(), bool>(())
+                .unwrap());
+        });
+    }
+}

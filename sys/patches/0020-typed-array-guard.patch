@@ -1,7 +1,63 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+index d693311..2004887 100644
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@ extern "C" {
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 23u
++#define QJSJIT_ABI_MINOR 24u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -96,6 +96,41 @@ typedef enum JSJitArrayMode {
+     JS_JIT_ARRAY_MODE_FLOAT64 = 3,
+ } JSJitArrayMode;
+ 
++/* Versioned, read-only continuing-path guard for typed-array loads and
++ * length reads. effects == 0 promises no allocation, throw, finalization or
++ * reentry. Feedback may select a candidate but must never replace this live
++ * validation. A miss leaves the metadata payload zeroed. */
++#define QJSJIT_ARRAY_API_VERSION 1u
++#define JS_JIT_ARRAY_QUERY_LENGTH (1U << 0)
++
++typedef enum JSJitArrayQueryStatus {
++    JS_JIT_ARRAY_QUERY_INVALID = -1,
++    JS_JIT_ARRAY_QUERY_MISS = 0,
++    JS_JIT_ARRAY_QUERY_OK = 1,
++} JSJitArrayQueryStatus;
++
++typedef struct JSJitArrayMetadata {
++    uint32_t struct_size;
++    uint32_t mode;
++    uint32_t count;
++    uint32_t reserved;
++    void *data;
++} JSJitArrayMetadata;
++
++typedef int JSJitArrayQueryFunc(JSContext *ctx, const JSValue *receiver,
++                                uint32_t expected_mode, uint32_t flags,
++                                JSJitArrayMetadata *out);
++
++typedef struct JSJitArrayAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t effects;
++    uint32_t reserved;
++    JSJitArrayQueryFunc *query;
++} JSJitArrayAPI;
++
++JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
++
+ #define JS_JIT_FEEDBACK_ARRAY_STORE (1U << 6)
+ #define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
+ #define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)
 diff --git a/quickjs.c b/quickjs.c
+index 6bf0923..8c5f27d 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -62127,6 +62127,124 @@
+@@ -63507,6 +63507,124 @@ static JSValue js_typed_array_get_length(JSContext *ctx, JSValueConst this_val)
      return js_int32(p->u.array.count);
  }
  
@@ -126,57 +182,3 @@ diff --git a/quickjs.c b/quickjs.c
  static JSValue js_typed_array_get_buffer(JSContext *ctx, JSValueConst this_val)
  {
      JSObject *p;
-diff --git a/quickjs-jit.h b/quickjs-jit.h
---- a/quickjs-jit.h
-+++ b/quickjs-jit.h
-@@ -17,7 +17,7 @@
- #endif
- 
- #define QJSJIT_ABI_MAJOR 1u
--#define QJSJIT_ABI_MINOR 23u
-+#define QJSJIT_ABI_MINOR 24u
- 
- /* Frame flags are append-only. Stress collection is a test/debug contract:
-  * every helper performs an allocating cycle-GC point before and after its
-@@ -96,6 +96,41 @@
-     JS_JIT_ARRAY_MODE_FLOAT64 = 3,
- } JSJitArrayMode;
- 
-+/* Versioned, read-only continuing-path guard for typed-array loads and
-+ * length reads. effects == 0 promises no allocation, throw, finalization or
-+ * reentry. Feedback may select a candidate but must never replace this live
-+ * validation. A miss leaves the metadata payload zeroed. */
-+#define QJSJIT_ARRAY_API_VERSION 1u
-+#define JS_JIT_ARRAY_QUERY_LENGTH (1U << 0)
-+
-+typedef enum JSJitArrayQueryStatus {
-+    JS_JIT_ARRAY_QUERY_INVALID = -1,
-+    JS_JIT_ARRAY_QUERY_MISS = 0,
-+    JS_JIT_ARRAY_QUERY_OK = 1,
-+} JSJitArrayQueryStatus;
-+
-+typedef struct JSJitArrayMetadata {
-+    uint32_t struct_size;
-+    uint32_t mode;
-+    uint32_t count;
-+    uint32_t reserved;
-+    void *data;
-+} JSJitArrayMetadata;
-+
-+typedef int JSJitArrayQueryFunc(JSContext *ctx, const JSValue *receiver,
-+                                uint32_t expected_mode, uint32_t flags,
-+                                JSJitArrayMetadata *out);
-+
-+typedef struct JSJitArrayAPI {
-+    uint32_t struct_size;
-+    uint32_t version;
-+    uint32_t effects;
-+    uint32_t reserved;
-+    JSJitArrayQueryFunc *query;
-+} JSJitArrayAPI;
-+
-+JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
-+
- #define JS_JIT_FEEDBACK_ARRAY_STORE (1U << 6)
- #define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
- #define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)

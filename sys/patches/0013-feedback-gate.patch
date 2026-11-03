@@ -1,7 +1,8 @@
 diff --git a/quickjs.c b/quickjs.c
+index 48bbb98..cfc8a94 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -2441,6 +2441,14 @@
+@@ -2797,6 +2797,14 @@ static uint32_t qjsjit_feedback_type(JSValueConst value)
      }
  }
  
@@ -16,7 +17,7 @@ diff --git a/quickjs.c b/quickjs.c
  static void qjsjit_record_feedback(JSRuntime *rt, JSFunctionBytecode *b,
                                     uint32_t kind, uint32_t pc,
                                     uint32_t slot, const uint32_t *types,
-@@ -2473,7 +2481,10 @@
+@@ -2829,7 +2837,10 @@ static void qjsjit_record_binary_feedback(JSRuntime *rt, JSFunctionBytecode *b,
                                            JSValueConst result)
  {
      uint32_t types[3], flags = 0;
@@ -28,7 +29,7 @@ diff --git a/quickjs.c b/quickjs.c
      types[0] = lhs_type;
      types[1] = rhs_type;
      types[2] = qjsjit_feedback_type(result);
-@@ -22497,13 +22508,14 @@
+@@ -23019,13 +23030,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              {
                  JSValue op1, op2;
  #ifdef CONFIG_JIT_ABI
@@ -46,7 +47,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
                      int64_t r;
-@@ -22526,9 +22538,10 @@
+@@ -23060,9 +23072,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      sp--;
                  }
  #ifdef CONFIG_JIT_ABI
@@ -60,7 +61,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
              }
              BREAK;
-@@ -22579,13 +22592,14 @@
+@@ -23113,13 +23126,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              {
                  JSValue op1, op2;
  #ifdef CONFIG_JIT_ABI
@@ -78,7 +79,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
                      int64_t r;
-@@ -22608,9 +22622,10 @@
+@@ -23153,9 +23167,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      sp--;
                  }
  #ifdef CONFIG_JIT_ABI
@@ -92,7 +93,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
              }
              BREAK;
-@@ -22619,13 +22634,14 @@
+@@ -23164,13 +23179,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                  JSValue op1, op2;
                  double d;
  #ifdef CONFIG_JIT_ABI
@@ -110,7 +111,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
                      int32_t v1, v2;
-@@ -22658,9 +22674,10 @@
+@@ -23214,9 +23230,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      sp--;
                  }
  #ifdef CONFIG_JIT_ABI
@@ -124,7 +125,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
              }
              BREAK;
-@@ -22668,13 +22685,14 @@
+@@ -23224,13 +23241,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              {
                  JSValue op1, op2;
  #ifdef CONFIG_JIT_ABI
@@ -142,7 +143,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
                  if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
                      int v1, v2;
-@@ -22689,9 +22707,10 @@
+@@ -23262,9 +23280,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                      sp--;
                  }
  #ifdef CONFIG_JIT_ABI
@@ -156,7 +157,7 @@ diff --git a/quickjs.c b/quickjs.c
  #endif
              }
              BREAK;
-@@ -23042,14 +23061,18 @@
+@@ -23615,14 +23634,18 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
              BREAK;
  
  #ifdef CONFIG_JIT_ABI

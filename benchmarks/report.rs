@@ -525,7 +525,7 @@ fn paired_ratio_ci(
         .zip(&candidate.samples)
         .filter_map(|(b, c)| {
             let (b, c) = (field(b), field(c));
-            (b > 0 && c > 0).then(|| b as f64 / c as f64)
+            (b > 0 && c > 0).then_some(b as f64 / c as f64)
         })
         .collect::<Vec<_>>();
     if ratios.is_empty() {
