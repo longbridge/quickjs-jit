@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `find`, `findIndex`, `findLast` and `findLastIndex` no longer release an element twice when
+  the interrupt handler stops them, which freed elements the array still held and crashed the
+  runtime later (backport of quickjs-ng #1826).
+
 ## quickjs-jit 0.14.1 - 2026-10-20
 
 ### Fixed

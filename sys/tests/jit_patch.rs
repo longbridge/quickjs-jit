@@ -67,6 +67,7 @@ fn copy_patches(destination: &std::path::Path) {
         "0032-object-fast-paths.patch",
         "0033-quickjs-ng-0.16.patch",
         "0034-portable-slot-none.patch",
+        "0035-array-find-interrupt.patch",
     ] {
         fs::copy(source.join(patch), destination.join(patch)).unwrap();
     }
