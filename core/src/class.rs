@@ -560,7 +560,7 @@ mod test {
     /// that the array still holds (quickjs-ng #1826).
     #[test]
     fn interrupt_inside_array_find_keeps_elements_alive() {
-        use std::{cell::Cell, rc::Rc, sync::atomic::AtomicUsize};
+        use std::sync::atomic::AtomicUsize;
 
         static DROPPED: AtomicUsize = AtomicUsize::new(0);
 
@@ -597,9 +597,9 @@ mod test {
         }
 
         let rt = Runtime::new().unwrap();
-        let stopping = Rc::new(Cell::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
         let stop = stopping.clone();
-        rt.set_interrupt_handler(Some(Box::new(move || stop.get())));
+        rt.set_interrupt_handler(Some(Box::new(move || stop.load(Ordering::Relaxed))));
         let ctx = Context::full(&rt).unwrap();
         let methods = ["find", "findIndex", "findLast", "findLastIndex"];
         ctx.with(|ctx| {
@@ -623,14 +623,14 @@ mod test {
             // either every method's poll or every call's. An interrupt
             // resets the counter; after one, a call more before the method
             // stops the other of the two.
-            stopping.set(true);
+            stopping.store(true, Ordering::Relaxed);
             for (i, method) in methods.into_iter().enumerate() {
                 for prefix in ["", "(() => {})(), "] {
                     interrupted("for (;;) {}".into());
                     interrupted(format!("{prefix}items[{i}].{method}(() => false)"));
                 }
             }
-            stopping.set(false);
+            stopping.store(false, Ordering::Relaxed);
             ctx.eval::<(), _>("items = null;").unwrap();
         });
         // `kept` still holds every element. (Without the fix, a debug build
