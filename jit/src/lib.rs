@@ -2807,26 +2807,41 @@ impl ProductionBackend {
             let refreshes = candidates
                 .into_iter()
                 .filter_map(|key| {
+                    let installed = matches!(
+                        self.coordinator.tier_state(key, runtime::Tier::Baseline),
+                        runtime::CompileState::Installed(_)
+                    );
+                    if !baseline_only && !installed {
+                        return None;
+                    }
                     let snapshot = self
                         .optimizing_snapshots
                         .get(&key)
                         .or_else(|| self.tier2_sources.get(&key))?;
-                    let feedback = self
-                        .feedback
-                        .snapshot(self.clock.max(1))
-                        .with_properties(self.shape_feedback.snapshot(key));
+                    // Property admission does not need the global call tables.
+                    let feedback = if baseline_only {
+                        self.feedback.snapshot(self.clock.max(1))
+                    } else {
+                        runtime::FeedbackSnapshot::empty(self.clock.max(1))
+                    }
+                    .with_properties(self.shape_feedback.snapshot(key));
                     let call_ready = baseline_only
                         && self
                             .coordinator
                             .baseline_direct_refresh_ready(key, &feedback);
                     let property_ready = !self.baseline_property_refreshed.contains(&key)
                         && compiler::baseline::has_baseline_property_sites(snapshot, &feedback)
-                        && matches!(
-                            self.coordinator.tier_state(key, runtime::Tier::Baseline),
-                            runtime::CompileState::Installed(_)
-                        );
-                    (call_ready || property_ready)
-                        .then(|| (key, snapshot.clone(), feedback, property_ready))
+                        && installed;
+                    (call_ready || property_ready).then(|| {
+                        let feedback = if baseline_only {
+                            feedback
+                        } else {
+                            self.feedback
+                                .snapshot(self.clock.max(1))
+                                .with_properties(self.shape_feedback.snapshot(key))
+                        };
+                        (key, snapshot.clone(), feedback, property_ready)
+                    })
                 })
                 .collect::<Vec<_>>();
             for (key, snapshot, feedback, property_ready) in refreshes {
@@ -4714,6 +4729,57 @@ mod production_environment_tests {
         assert!(!backend
             .execution_profiles
             .contains_key(&FunctionKey::new(99, 1)));
+        backend.runtime_detach();
+    }
+
+    #[test]
+    fn cold_refresh_candidates_do_not_clone_unrelated_call_feedback() {
+        use rquickjs_core::{qjs, runtime::JitBackend};
+        let mut backend = ProductionBackend::new(
+            1,
+            &abi::AbiInfo::linked().unwrap(),
+            JitConfig::default(),
+            Arc::new(Mutex::new(JitMetrics::default())),
+        )
+        .unwrap();
+        let snapshot = bytecode::CompileSnapshot::from_untrusted_bytecode(
+            vec![qjs::QJS_JIT_OP_OBJECT, bytecode::opcode::RETURN],
+            0,
+            0,
+            0,
+            0,
+        )
+        .verify(bytecode::VerifyLimits::default())
+        .unwrap();
+        assert!(!ir::optimized_vocabulary_admits(&snapshot));
+        assert!(!settles_untranslatable_candidate(&snapshot));
+        for id in 10..20 {
+            backend
+                .optimizing_snapshots
+                .insert(runtime::FunctionKey::new(id, 1), snapshot.clone());
+        }
+        let types = [qjs::JSJitValueType_JS_JIT_VALUE_INT32; 4];
+        let mut event = call_event(&types, true);
+        for pc in 0..10 {
+            event.pc = pc;
+            backend.record_feedback(&event);
+        }
+        backend.maintenance();
+        let mut allocations = Vec::new();
+        for end in [20, 200] {
+            for pc in 10..end {
+                event.pc = pc;
+                backend.record_feedback(&event);
+            }
+            ALLOCATIONS.with(|count| count.set(Some(0)));
+            backend.maintenance();
+            allocations.push(ALLOCATIONS.with(|count| count.replace(None).unwrap()));
+        }
+        eprintln!("refresh allocations with 20/200 unrelated signatures: {allocations:?}");
+        assert_eq!(
+            allocations[0], allocations[1],
+            "unrelated signatures must not add refresh allocations"
+        );
         backend.runtime_detach();
     }
 

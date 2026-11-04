@@ -77,6 +77,8 @@ cover quickjs-jit since 0.12.11; the merged upstream changes are listed under rq
 
 ### Fixed
 
+- Avoid copying global JIT feedback for automatic baseline refresh candidates
+  that cannot be queued.
 - Benchmark forced Tier 2 direct calls only after the required caller/callee
   publications settle; reject compilation during the timed batch and refresh
   stale local workload checksums.

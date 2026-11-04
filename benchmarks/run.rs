@@ -286,6 +286,13 @@ const WORKLOADS: &[Workload] = &[
         designated: false,
         file: "exceptions-sync.js",
     },
+    Workload {
+        name: "refresh-feedback",
+        suite: "rquickjs-jit matrix",
+        group: "call-heavy",
+        designated: false,
+        file: "refresh-feedback.js",
+    },
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1570,6 +1577,7 @@ mod tests {
             "int32array-traversal.js",
             "float64array-traversal.js",
             "typed-convert-traversal.js",
+            "refresh-feedback.js",
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
