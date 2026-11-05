@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `quickjs-jit-sys` checks at compile time that the bindings declare `size_t` as wide as
+  `usize`, so bindings with the wrong width for the target (such as a Linux file reused for
+  Windows, where `size_t` must be 64-bit) fail the build instead of corrupting memory.
+
 ## quickjs-jit 0.14.2 - 2026-11-03
 
 ### Fixed
