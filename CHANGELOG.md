@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `quickjs-jit-sys` keeps the user's `CFLAGS` on Windows and wasi targets. The build script
+  wrote its own flags (`/std:c11`, `--sysroot=...`) into the `CFLAGS` environment variable,
+  which replaced whatever the user had set there; it now hands them to `cc` directly, so a
+  user `CFLAGS` reaches the compiler on every target.
+
 ## quickjs-jit 0.14.2 - 2026-11-03
 
 ### Fixed
