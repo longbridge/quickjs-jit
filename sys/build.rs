@@ -63,8 +63,17 @@ fn hash_u64(mut hash: u64, mut value: u64) -> u64 {
 }
 
 #[cfg(feature = "jit-abi")]
-fn preprocess(expansion_source: &Path, src_dir: &Path, description: &str) -> String {
-    let compiler = cc::Build::new().get_compiler();
+fn preprocess(
+    expansion_source: &Path,
+    src_dir: &Path,
+    target_cflags: &[String],
+    description: &str,
+) -> String {
+    let mut build = cc::Build::new();
+    for flag in target_cflags {
+        build.flag(flag);
+    }
+    let compiler = build.get_compiler();
     // `cc::Tool` carries the Visual Studio environment discovered by `cc`
     // (notably INCLUDE, LIB, PATH and LIBPATH).  Reconstructing a Command from
     // only its executable and arguments drops that environment, so cl.exe
@@ -96,7 +105,7 @@ fn preprocess(expansion_source: &Path, src_dir: &Path, description: &str) -> Str
 }
 
 #[cfg(feature = "jit-abi")]
-fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
+fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path, target_cflags: &[String]) {
     let expansion_source = out_dir.join("quickjs-jit-opcode-expand.c");
     fs::write(
         &expansion_source,
@@ -109,7 +118,7 @@ fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
     )
     .expect("write QuickJS opcode expansion source");
 
-    let expanded = preprocess(&expansion_source, src_dir, "opcode");
+    let expanded = preprocess(&expansion_source, src_dir, target_cflags, "opcode");
 
     let formats: Vec<String> = macro_invocations(&expanded, "QJSJIT_FORMAT")
         .map(|format| format.trim().to_owned())
@@ -180,7 +189,7 @@ fn generate_jit_opcode_metadata(src_dir: &Path, out_dir: &Path) {
 }
 
 #[cfg(feature = "jit-abi")]
-fn generate_jit_helper_metadata(src_dir: &Path, out_dir: &Path) {
+fn generate_jit_helper_metadata(src_dir: &Path, out_dir: &Path, target_cflags: &[String]) {
     let expansion_source = out_dir.join("quickjs-jit-helper-expand.c");
     fs::write(
         &expansion_source,
@@ -197,7 +206,7 @@ QJSJIT_HELPER_LIST(QJSJIT_EMIT)
 "#,
     )
     .expect("write QuickJS helper expansion source");
-    let expanded = preprocess(&expansion_source, src_dir, "helper");
+    let expanded = preprocess(&expansion_source, src_dir, target_cflags, "helper");
 
     let ownership = |value: &str| match value.trim() {
         "NONE" => 0,
@@ -498,14 +507,25 @@ fn main() {
 
     let mut bindgen_cflags = vec![];
 
+    // Flags this target needs on every C compiler run: the QuickJS build and
+    // the jit-abi preprocessor runs. They go through `cc::Build::flag` rather
+    // than into the `CFLAGS` environment variable, so the user's `CFLAGS`
+    // (and `CFLAGS_<target>`, `TARGET_CFLAGS`) still reach the compiler; cc
+    // appends those after these, so they can also override them.
+    let mut target_cflags: Vec<String> = vec![];
+
     if target_os == "windows" {
         if target_env == "msvc" {
-            env::set_var(
-                "CFLAGS",
-                "/DWIN32_LEAN_AND_MEAN /std:c11 /experimental:c11atomics",
+            target_cflags.extend(
+                [
+                    "/DWIN32_LEAN_AND_MEAN",
+                    "/std:c11",
+                    "/experimental:c11atomics",
+                ]
+                .map(String::from),
             );
         } else {
-            env::set_var("CFLAGS", "-DWIN32_LEAN_AND_MEAN -std=c11");
+            target_cflags.extend(["-DWIN32_LEAN_AND_MEAN", "-std=c11"].map(String::from));
         }
     }
 
@@ -560,15 +580,19 @@ fn main() {
             "--sysroot={}",
             wasi_sdk_path.join("share/wasi-sysroot").display()
         );
-        env::set_var("CFLAGS", &sysroot);
+        target_cflags.push(sysroot.clone());
         bindgen_cflags.push(sysroot);
     }
 
-    #[cfg(feature = "jit-abi")]
-    generate_jit_opcode_metadata(out_dir, out_dir);
+    for flag in &target_cflags {
+        builder.flag(flag);
+    }
 
     #[cfg(feature = "jit-abi")]
-    generate_jit_helper_metadata(out_dir, out_dir);
+    generate_jit_opcode_metadata(out_dir, out_dir, &target_cflags);
+
+    #[cfg(feature = "jit-abi")]
+    generate_jit_helper_metadata(out_dir, out_dir, &target_cflags);
 
     // generating bindings
     bindgen(
