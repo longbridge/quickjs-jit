@@ -526,9 +526,7 @@ fn main() {
 
     if is_wasm_unknown {
         println!("cargo:rerun-if-changed=vendor/wasi-libc/include");
-        let vendor_include = Path::new("vendor/wasi-libc/include")
-            .canonicalize()
-            .expect("vendor/wasi-libc/include is missing; run scripts/vendor-wasm-libc.sh");
+        let vendor_include = vendor_dir("vendor/wasi-libc/include");
         let flag = format!("-isystem{}", vendor_include.display());
         builder.flag(&flag);
         bindgen_cflags.push(flag);
@@ -601,12 +599,26 @@ fn main() {
     // Emitted after `compile` so `-lquickjs` precedes `-lc` on the link line.
     if is_wasm_unknown {
         println!("cargo:rerun-if-changed=vendor/wasi-libc/lib/libc.a");
-        let vendor_lib = Path::new("vendor/wasi-libc/lib")
-            .canonicalize()
-            .expect("vendor/wasi-libc/lib is missing; run scripts/vendor-wasm-libc.sh");
+        let vendor_lib = vendor_dir("vendor/wasi-libc/lib");
         println!("cargo:rustc-link-search=native={}", vendor_lib.display());
         println!("cargo:rustc-link-lib=static=c");
     }
+}
+
+/// Absolute path of a directory inside this crate.
+///
+/// Not `canonicalize`: on Windows that returns a verbatim `\\?\C:\...` path,
+/// and clang, given `-isystem\\?\C:\...`, finds `stdlib.h` but not the
+/// `bits/alltypes.h` it includes, because a verbatim path takes no `/`.
+fn vendor_dir(relative: &str) -> PathBuf {
+    let dir = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join(relative);
+    if !dir.is_dir() {
+        panic!(
+            "{} is missing; run scripts/vendor-wasm-libc.sh",
+            dir.display()
+        );
+    }
+    dir
 }
 
 fn feature_to_cargo(name: impl AsRef<str>) -> String {
