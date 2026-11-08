@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `quickjs-jit-sys` builds for `wasm32-unknown-unknown` on Windows hosts. The build script
+  gave clang the vendored wasi-libc include directory as a verbatim `\\?\C:\...` path, where
+  the nested `#include <bits/alltypes.h>` could not be found; it now passes a plain absolute
+  path, for the include and the link-search directory alike.
+
 ## quickjs-jit 0.14.2 - 2026-11-03
 
 ### Fixed
