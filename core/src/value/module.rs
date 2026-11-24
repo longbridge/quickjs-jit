@@ -629,6 +629,46 @@ mod test {
     }
 
     #[test]
+    fn retirement_under_a_memory_limit_keeps_lazy_namespace_exports() {
+        for headroom in (0..1024).step_by(16) {
+            test_with(|ctx| {
+                for (name, source) in [
+                    ("retired:inner", "export const word = \'kept\';"),
+                    ("retired:outer", "export * as inner from \'retired:inner\';"),
+                    (
+                        "retired:holder",
+                        "import * as outer from \'retired:outer\'; globalThis.outer = outer;",
+                    ),
+                ] {
+                    Module::evaluate(ctx.clone(), name, source)
+                        .unwrap()
+                        .finish::<()>()
+                        .unwrap();
+                }
+
+                let freed = unsafe {
+                    let rt = qjs::JS_GetRuntime(ctx.as_ptr());
+                    qjs::JS_RunGC(rt);
+                    let mut usage = core::mem::zeroed();
+                    qjs::JS_ComputeMemoryUsage(rt, &mut usage);
+                    qjs::JS_SetMemoryLimit(rt, (usage.malloc_size + headroom) as _);
+                    let freed = qjs::JS_FreeRetiredModules(
+                        ctx.as_ptr(),
+                        Some(is_retired),
+                        core::ptr::null_mut(),
+                        2,
+                    );
+                    qjs::JS_SetMemoryLimit(rt, usize::MAX as _);
+                    freed
+                };
+                let word: std::string::String = ctx.eval("globalThis.outer.inner.word").unwrap();
+                assert_eq!(word, "kept", "memory limit headroom {headroom}");
+                assert_eq!(freed + free_retired_modules(&ctx), 3);
+            })
+        }
+    }
+
+    #[test]
     fn from_rust_def() {
         test_with(|ctx| {
             Module::declare_def::<RustModule, _>(ctx, "rust_mod").unwrap();

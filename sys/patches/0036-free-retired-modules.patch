@@ -1,7 +1,7 @@
 diff --git a/quickjs.c b/quickjs.c
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -35061,6 +35061,157 @@ static void js_free_module_def(JSContext *ctx, JSModuleDef *m)
+@@ -35061,6 +35061,185 @@ static void js_free_module_def(JSContext *ctx, JSModuleDef *m)
      js_free(ctx, m);
  }
  
@@ -53,12 +53,39 @@ diff --git a/quickjs.c b/quickjs.c
 +    return count;
 +}
 +
++static int js_materialize_module_ns_property(JSContext *ctx, JSModuleDef *m,
++                                             JSAtom atom)
++{
++    JSShapeProperty *prs;
++    JSProperty *pr;
++    JSValue value;
++
++    prs = find_own_property(&pr, JS_VALUE_GET_OBJ(m->module_ns), atom);
++    if (!prs || (prs->flags & JS_PROP_TMASK) != JS_PROP_AUTOINIT)
++        return 0;
++    if (js_autoinit_get_id(pr) == JS_AUTOINIT_ID_MODULE_NS) {
++        value = JS_GetModuleNamespace(ctx, pr->u.init.opaque);
++        if (JS_IsException(value)) {
++            JS_FreeValue(ctx, JS_GetException(ctx));
++            return -1;
++        }
++        JS_FreeValue(ctx, value);
++    }
++    value = JS_GetProperty(ctx, m->module_ns, atom);
++    if (JS_IsException(value)) {
++        JS_FreeValue(ctx, JS_GetException(ctx));
++        return -1;
++    }
++    JS_FreeValue(ctx, value);
++    return 0;
++}
++
 +static int js_materialize_module_ns(JSContext *ctx, JSModuleDef *m)
 +{
 +    JSShape *sh;
 +    JSShapeProperty *prs;
 +    JSAtom *atoms;
-+    int i, count;
++    int i, count, ret;
 +
 +    count = js_module_ns_autoinit_count(m);
 +    if (count == 0)
@@ -72,15 +99,16 @@ diff --git a/quickjs.c b/quickjs.c
 +        if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT)
 +            atoms[count++] = JS_DupAtom(ctx, prs->atom);
 +    }
++    ret = 0;
 +    for(i = 0; i < count; i++) {
-+        JSValue value = JS_GetProperty(ctx, m->module_ns, atoms[i]);
-+        if (JS_IsException(value))
-+            JS_FreeValue(ctx, JS_GetException(ctx));
-+        JS_FreeValue(ctx, value);
++        if (ret == 0 && js_materialize_module_ns_property(ctx, m, atoms[i]) < 0)
++            ret = -1;
 +        JS_FreeAtom(ctx, atoms[i]);
 +    }
 +    js_free(ctx, atoms);
-+    return js_module_ns_autoinit_count(m) == 0 ? 0 : -1;
++    if (ret == 0 && js_module_ns_autoinit_count(m) != 0)
++        ret = -1;
++    return ret;
 +}
 +
 +static int js_module_ns_created_count(JSModuleDef **modules, int count)
