@@ -605,6 +605,30 @@ mod test {
     }
 
     #[test]
+    fn retired_namespace_chains_stay_readable_after_their_modules_are_freed() {
+        test_with(|ctx| {
+            for (name, source) in [
+                ("retired:leaf", "export const word = 'deep';"),
+                ("retired:middle", "export * as leaf from 'retired:leaf';"),
+                ("retired:top", "export * as middle from 'retired:middle';"),
+                (
+                    "retired:holder",
+                    "import * as top from 'retired:top'; globalThis.top = top;",
+                ),
+            ] {
+                Module::evaluate(ctx.clone(), name, source)
+                    .unwrap()
+                    .finish::<()>()
+                    .unwrap();
+            }
+
+            assert_eq!(free_retired_modules(&ctx), 4);
+            let word: std::string::String = ctx.eval("globalThis.top.middle.leaf.word").unwrap();
+            assert_eq!(word, "deep");
+        })
+    }
+
+    #[test]
     fn from_rust_def() {
         test_with(|ctx| {
             Module::declare_def::<RustModule, _>(ctx, "rust_mod").unwrap();

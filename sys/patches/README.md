@@ -242,7 +242,10 @@ that are safe to free: linked or evaluated, with no pending async evaluation,
 no references beyond the `owned_references` the caller knows about, and no
 surviving module that imports, awaits or uses them as its cycle root. Before
 freeing, it resolves the lazy `export * as name` properties of their
-namespaces, so no namespace keeps a pointer to a freed module. Functions of a
+namespaces, so no namespace keeps a pointer to a freed module. Resolving one
+property can create the namespace of another selected module, so it repeats
+until no new namespace appears. If a property cannot be resolved, for example
+because an allocation fails, it frees nothing and returns 0. Functions of a
 freed module keep working because their closures hold reference-counted
 variables; `import.meta` in one throws the existing "not supported in this
 context" TypeError.
