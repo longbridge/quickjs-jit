@@ -561,6 +561,113 @@ mod test {
         }
     }
 
+    unsafe extern "C" fn is_retired(
+        name: *const core::ffi::c_char,
+        _opaque: *mut core::ffi::c_void,
+    ) -> bool {
+        unsafe { core::ffi::CStr::from_ptr(name) }
+            .to_bytes()
+            .starts_with(b"retired:")
+    }
+
+    fn free_retired_modules(ctx: &Ctx<'_>) -> usize {
+        unsafe {
+            qjs::JS_RunGC(qjs::JS_GetRuntime(ctx.as_ptr()));
+            qjs::JS_FreeRetiredModules(ctx.as_ptr(), Some(is_retired), core::ptr::null_mut(), 2)
+        }
+    }
+
+    #[test]
+    fn retired_modules_are_freed_unless_a_live_module_imports_them() {
+        test_with(|ctx| {
+            for (name, source) in [
+                ("retired:dep", "export const word = 'kept';"),
+                (
+                    "retired:old",
+                    "import { word } from 'retired:dep'; globalThis.caption = () => word;",
+                ),
+                (
+                    "live:keeper",
+                    "import { word } from 'retired:dep'; export { word };",
+                ),
+            ] {
+                Module::evaluate(ctx.clone(), name, source)
+                    .unwrap()
+                    .finish::<()>()
+                    .unwrap();
+            }
+
+            assert_eq!(free_retired_modules(&ctx), 1);
+            let caption: Function = ctx.globals().get("caption").unwrap();
+            assert_eq!(caption.call::<_, std::string::String>(()).unwrap(), "kept");
+            assert_eq!(free_retired_modules(&ctx), 0);
+        })
+    }
+
+    #[test]
+    fn retired_namespace_chains_stay_readable_after_their_modules_are_freed() {
+        test_with(|ctx| {
+            for (name, source) in [
+                ("retired:leaf", "export const word = 'deep';"),
+                ("retired:middle", "export * as leaf from 'retired:leaf';"),
+                ("retired:top", "export * as middle from 'retired:middle';"),
+                (
+                    "retired:holder",
+                    "import * as top from 'retired:top'; globalThis.top = top;",
+                ),
+            ] {
+                Module::evaluate(ctx.clone(), name, source)
+                    .unwrap()
+                    .finish::<()>()
+                    .unwrap();
+            }
+
+            assert_eq!(free_retired_modules(&ctx), 4);
+            let word: std::string::String = ctx.eval("globalThis.top.middle.leaf.word").unwrap();
+            assert_eq!(word, "deep");
+        })
+    }
+
+    #[test]
+    fn retirement_under_a_memory_limit_keeps_lazy_namespace_exports() {
+        for headroom in (0..1024).step_by(16) {
+            test_with(|ctx| {
+                for (name, source) in [
+                    ("retired:inner", "export const word = \'kept\';"),
+                    ("retired:outer", "export * as inner from \'retired:inner\';"),
+                    (
+                        "retired:holder",
+                        "import * as outer from \'retired:outer\'; globalThis.outer = outer;",
+                    ),
+                ] {
+                    Module::evaluate(ctx.clone(), name, source)
+                        .unwrap()
+                        .finish::<()>()
+                        .unwrap();
+                }
+
+                let freed = unsafe {
+                    let rt = qjs::JS_GetRuntime(ctx.as_ptr());
+                    qjs::JS_RunGC(rt);
+                    let mut usage = core::mem::zeroed();
+                    qjs::JS_ComputeMemoryUsage(rt, &mut usage);
+                    qjs::JS_SetMemoryLimit(rt, (usage.malloc_size + headroom) as _);
+                    let freed = qjs::JS_FreeRetiredModules(
+                        ctx.as_ptr(),
+                        Some(is_retired),
+                        core::ptr::null_mut(),
+                        2,
+                    );
+                    qjs::JS_SetMemoryLimit(rt, usize::MAX as _);
+                    freed
+                };
+                let word: std::string::String = ctx.eval("globalThis.outer.inner.word").unwrap();
+                assert_eq!(word, "kept", "memory limit headroom {headroom}");
+                assert_eq!(freed + free_retired_modules(&ctx), 3);
+            })
+        }
+    }
+
     #[test]
     fn from_rust_def() {
         test_with(|ctx| {

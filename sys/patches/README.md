@@ -232,3 +232,23 @@ iteration's `js_poll_interrupts` released that element a second time. An
 element only arrays held was then freed while they still held it, and the
 runtime crashed later. Drop the patch when the baseline moves to a quickjs-ng
 revision that contains #1826.
+
+`0036-free-retired-modules.patch` adds `JS_FreeRetiredModules`. QuickJS keeps
+every loaded module on the context's list until the context is freed, so an
+embedder that reloads code under new module names (a hot reload that tags
+each revision) keeps every old module graph alive for good. The function asks
+a caller predicate about each module name and frees the modules it selects
+that are safe to free: linked or evaluated, with no pending async evaluation,
+no references beyond the `owned_references` the caller knows about, and no
+surviving module that imports, awaits or uses them as its cycle root. Before
+freeing, it resolves the lazy `export * as name` properties of their
+namespaces, so no namespace keeps a pointer to a freed module. Resolving one
+property can create the namespace of another selected module, so it repeats
+until no new namespace appears. It creates the target namespace before it reads
+such a property, because QuickJS replaces a lazy property whose initializer
+fails with `undefined`. If a namespace or property cannot be resolved, for
+example because an allocation fails, the lazy export stays in place and the
+function frees nothing and returns 0. Functions of a
+freed module keep working because their closures hold reference-counted
+variables; `import.meta` in one throws the existing "not supported in this
+context" TypeError.
