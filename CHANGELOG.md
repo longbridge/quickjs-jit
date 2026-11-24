@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `quickjs-jit-sys` exports `JS_FreeRetiredModules`, which frees evaluated modules a host names as
+  retired once nothing else references them, so hosts that reload code under new module names
+  no longer keep every old generation until the context is freed.
+
 ## quickjs-jit 0.14.2 - 2026-11-03
 
 ### Fixed

@@ -1644,6 +1644,19 @@ unsafe extern "C" {
     pub fn JS_GetModuleNamespace(ctx: *mut JSContext, m: *mut JSModuleDef) -> JSValue;
 }
 unsafe extern "C" {
+    pub fn JS_FreeRetiredModules(
+        ctx: *mut JSContext,
+        is_retired: ::core::option::Option<
+            unsafe extern "C" fn(
+                module_name: *const ::core::ffi::c_char,
+                opaque: *mut ::core::ffi::c_void,
+            ) -> bool,
+        >,
+        opaque: *mut ::core::ffi::c_void,
+        owned_references: ::core::ffi::c_int,
+    ) -> usize;
+}
+unsafe extern "C" {
     pub fn JS_SetModulePrivateValue(
         ctx: *mut JSContext,
         m: *mut JSModuleDef,

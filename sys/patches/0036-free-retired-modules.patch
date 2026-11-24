@@ -1,0 +1,149 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -35061,6 +35061,131 @@ static void js_free_module_def(JSContext *ctx, JSModuleDef *m)
+     js_free(ctx, m);
+ }
+ 
++static bool js_module_list_contains(JSModuleDef **modules, int count,
++                                    JSModuleDef *m)
++{
++    int i;
++    for(i = 0; i < count; i++) {
++        if (modules[i] == m)
++            return true;
++    }
++    return false;
++}
++
++static bool js_module_list_remove(JSModuleDef **modules, int *count,
++                                  JSModuleDef *m)
++{
++    int i;
++    for(i = 0; i < *count; i++) {
++        if (modules[i] == m) {
++            modules[i] = modules[--(*count)];
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool js_module_is_retirable(JSModuleDef *m, int owned_references)
++{
++    return JS_REF_COUNT(m) <= owned_references && !m->async_evaluation &&
++        (m->status == JS_MODULE_STATUS_UNLINKED ||
++         m->status == JS_MODULE_STATUS_LINKED ||
++         m->status == JS_MODULE_STATUS_EVALUATED);
++}
++
++static void js_materialize_module_ns(JSContext *ctx, JSModuleDef *m)
++{
++    JSObject *p;
++    JSShape *sh;
++    JSShapeProperty *prs;
++    JSAtom *atoms;
++    int i, count;
++
++    if (JS_VALUE_GET_TAG(m->module_ns) != JS_TAG_OBJECT)
++        return;
++    p = JS_VALUE_GET_OBJ(m->module_ns);
++    sh = p->shape;
++    count = 0;
++    for(i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
++        if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT)
++            count++;
++    }
++    if (count == 0)
++        return;
++    atoms = js_malloc(ctx, sizeof(atoms[0]) * count);
++    if (!atoms)
++        return;
++    count = 0;
++    for(i = 0, prs = get_shape_prop(sh); i < sh->prop_count; i++, prs++) {
++        if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT)
++            atoms[count++] = JS_DupAtom(ctx, prs->atom);
++    }
++    for(i = 0; i < count; i++) {
++        JSValue value = JS_GetProperty(ctx, m->module_ns, atoms[i]);
++        if (JS_IsException(value))
++            JS_FreeValue(ctx, JS_GetException(ctx));
++        JS_FreeValue(ctx, value);
++        JS_FreeAtom(ctx, atoms[i]);
++    }
++    js_free(ctx, atoms);
++}
++
++size_t JS_FreeRetiredModules(JSContext *ctx,
++                             bool (*is_retired)(const char *module_name,
++                                                void *opaque),
++                             void *opaque, int owned_references)
++{
++    struct list_head *el;
++    JSModuleDef **candidates = NULL;
++    int count = 0, size = 0, i;
++    bool changed;
++
++    list_for_each(el, &ctx->loaded_modules) {
++        JSModuleDef *m = list_entry(el, JSModuleDef, link);
++        const char *name;
++        bool retired;
++
++        if (!js_module_is_retirable(m, owned_references))
++            continue;
++        name = JS_AtomToCString(ctx, m->module_name);
++        if (!name)
++            continue;
++        retired = is_retired(name, opaque);
++        JS_FreeCString(ctx, name);
++        if (!retired)
++            continue;
++        if (js_resize_array(ctx, (void **)&candidates, sizeof(candidates[0]),
++                            &size, count + 1)) {
++            js_free(ctx, candidates);
++            return 0;
++        }
++        candidates[count++] = m;
++    }
++
++    do {
++        changed = false;
++        list_for_each(el, &ctx->loaded_modules) {
++            JSModuleDef *m = list_entry(el, JSModuleDef, link);
++            if (js_module_list_contains(candidates, count, m))
++                continue;
++            for(i = 0; i < m->req_module_entries_count; i++)
++                changed |= js_module_list_remove(candidates, &count,
++                                                 m->req_module_entries[i].module);
++            for(i = 0; i < m->async_parent_modules_count; i++)
++                changed |= js_module_list_remove(candidates, &count,
++                                                 m->async_parent_modules[i]);
++            changed |= js_module_list_remove(candidates, &count, m->cycle_root);
++        }
++    } while (changed);
++
++    for(i = 0; i < count; i++)
++        js_materialize_module_ns(ctx, candidates[i]);
++    for(i = 0; i < count; i++)
++        js_free_module_def(ctx, candidates[i]);
++    js_free(ctx, candidates);
++    return count;
++}
++
+ #ifndef QJS_DISABLE_PARSER
+ 
+ static int add_req_module_entry(JSContext *ctx, JSModuleDef *m,
+diff --git a/quickjs.h b/quickjs.h
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -1228,6 +1228,10 @@ JS_EXTERN void JS_SetModuleNormalizeFunc2(JSRuntime *rt,
+ JS_EXTERN JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m);
+ JS_EXTERN JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m);
+ JS_EXTERN JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m);
++JS_EXTERN size_t JS_FreeRetiredModules(JSContext *ctx,
++                                       bool (*is_retired)(const char *module_name,
++                                                          void *opaque),
++                                       void *opaque, int owned_references);
+ 
+ /* associate a JSValue to a C module */
+ JS_EXTERN int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val);

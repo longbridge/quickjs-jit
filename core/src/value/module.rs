@@ -561,6 +561,49 @@ mod test {
         }
     }
 
+    unsafe extern "C" fn is_retired(
+        name: *const core::ffi::c_char,
+        _opaque: *mut core::ffi::c_void,
+    ) -> bool {
+        unsafe { core::ffi::CStr::from_ptr(name) }
+            .to_bytes()
+            .starts_with(b"retired:")
+    }
+
+    fn free_retired_modules(ctx: &Ctx<'_>) -> usize {
+        unsafe {
+            qjs::JS_RunGC(qjs::JS_GetRuntime(ctx.as_ptr()));
+            qjs::JS_FreeRetiredModules(ctx.as_ptr(), Some(is_retired), core::ptr::null_mut(), 2)
+        }
+    }
+
+    #[test]
+    fn retired_modules_are_freed_unless_a_live_module_imports_them() {
+        test_with(|ctx| {
+            for (name, source) in [
+                ("retired:dep", "export const word = 'kept';"),
+                (
+                    "retired:old",
+                    "import { word } from 'retired:dep'; globalThis.caption = () => word;",
+                ),
+                (
+                    "live:keeper",
+                    "import { word } from 'retired:dep'; export { word };",
+                ),
+            ] {
+                Module::evaluate(ctx.clone(), name, source)
+                    .unwrap()
+                    .finish::<()>()
+                    .unwrap();
+            }
+
+            assert_eq!(free_retired_modules(&ctx), 1);
+            let caption: Function = ctx.globals().get("caption").unwrap();
+            assert_eq!(caption.call::<_, std::string::String>(()).unwrap(), "kept");
+            assert_eq!(free_retired_modules(&ctx), 0);
+        })
+    }
+
     #[test]
     fn from_rust_def() {
         test_with(|ctx| {
